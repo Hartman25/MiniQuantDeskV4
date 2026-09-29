@@ -123,7 +123,24 @@ fn malformed_activity(id: &str) -> AlpacaFeeActivity {
 /// Fixed test broker/account identity -- every fetcher below targets the
 /// same account unless a test explicitly constructs a distinct one (B6
 /// correction: multi-account scoping proof).
-const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id-primary";
+const TEST_PROVIDER_ACCOUNT_ID: &str = "test-acct-primary";
+/// The canonical economic-account key rows/cursors are scoped by
+/// (`{broker}:{provider_account_id}`) -- never a credential id.
+const TEST_BROKER_ACCOUNT_ID: &str = "alpaca:test-acct-primary";
+
+fn authority(provider_account_id: &str, mode: &str) -> mqk_db::BrokerAccountAuthority {
+    mqk_db::BrokerAccountAuthority::new("alpaca", provider_account_id, mode).unwrap()
+}
+
+/// Register a provider account (as the ingestion caller does after the
+/// provider endpoint proves it) and return its economic-account key.
+async fn register(pool: &PgPool, provider_account_id: &str) -> String {
+    let a = authority(provider_account_id, "paper");
+    mqk_db::verify_or_register_broker_account_authority(pool, &a, Utc::now())
+        .await
+        .expect("authority registration");
+    a.key()
+}
 
 /// Always returns the same fixed batch, regardless of `after_id`.
 struct FixedFetcher(Vec<AlpacaFeeActivity>);
@@ -137,8 +154,8 @@ impl CryptoFeeActivityFetcher for FixedFetcher {
         Ok(self.0.clone())
     }
 
-    fn broker_account_id(&self) -> String {
-        TEST_BROKER_ACCOUNT_ID.to_string()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        Ok(authority(TEST_PROVIDER_ACCOUNT_ID, "paper"))
     }
 }
 
@@ -164,15 +181,16 @@ impl CryptoFeeActivityFetcher for AssertingFetcher {
         Ok(self.activities.clone())
     }
 
-    fn broker_account_id(&self) -> String {
-        TEST_BROKER_ACCOUNT_ID.to_string()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        Ok(authority(TEST_PROVIDER_ACCOUNT_ID, "paper"))
     }
 }
 
 /// A fetcher bound to an explicit, caller-chosen broker account -- used by
 /// the B6 multi-account isolation proof (G06/G07).
 struct AccountScopedFetcher {
-    broker_account_id: String,
+    provider_account_id: String,
+    mode: String,
     activities: Vec<AlpacaFeeActivity>,
 }
 
@@ -185,8 +203,8 @@ impl CryptoFeeActivityFetcher for AccountScopedFetcher {
         Ok(self.activities.clone())
     }
 
-    fn broker_account_id(&self) -> String {
-        self.broker_account_id.clone()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        Ok(authority(&self.provider_account_id, &self.mode))
     }
 }
 
@@ -448,7 +466,8 @@ async fn g06_two_accounts_sharing_an_activity_id_never_collide() {
     let shared_activity_id = format!("{engine_id}::shared");
 
     let fetcher_a = AccountScopedFetcher {
-        broker_account_id: "account-A".to_string(),
+        provider_account_id: "acct-a".to_string(),
+        mode: "paper".to_string(),
         activities: vec![cash_fee_activity(&shared_activity_id, "BTCUSD", "-0.01")],
     };
     let outcome_a = ingest_crypto_fee_activities_once(
@@ -464,7 +483,8 @@ async fn g06_two_accounts_sharing_an_activity_id_never_collide() {
     assert_eq!(outcome_a.newly_inserted, 1);
 
     let fetcher_b = AccountScopedFetcher {
-        broker_account_id: "account-B".to_string(),
+        provider_account_id: "acct-b".to_string(),
+        mode: "paper".to_string(),
         activities: vec![cash_fee_activity(&shared_activity_id, "BTCUSD", "-0.02")],
     };
     let outcome_b = ingest_crypto_fee_activities_once(
@@ -483,11 +503,11 @@ async fn g06_two_accounts_sharing_an_activity_id_never_collide() {
          of account A's identically-numbered activity"
     );
 
-    let stored_a = mqk_db::fetch_crypto_fee_activity(&pool, "account-A", &shared_activity_id)
+    let stored_a = mqk_db::fetch_crypto_fee_activity(&pool, "alpaca:acct-a", &shared_activity_id)
         .await
         .expect("fetch must succeed")
         .expect("account A's row must exist");
-    let stored_b = mqk_db::fetch_crypto_fee_activity(&pool, "account-B", &shared_activity_id)
+    let stored_b = mqk_db::fetch_crypto_fee_activity(&pool, "alpaca:acct-b", &shared_activity_id)
         .await
         .expect("fetch must succeed")
         .expect("account B's row must exist");
@@ -509,7 +529,8 @@ async fn g07_cursor_for_one_account_never_advances_or_gates_another() {
     let b1 = format!("{engine_id}::b-act");
 
     let fetcher_a = AccountScopedFetcher {
-        broker_account_id: "account-A".to_string(),
+        provider_account_id: "acct-a".to_string(),
+        mode: "paper".to_string(),
         activities: vec![cash_fee_activity(&a1, "BTCUSD", "-0.01")],
     };
     ingest_crypto_fee_activities_once(&pool, &fetcher_a, &engine_id, "PAPER", "CFEE", Utc::now())
@@ -518,36 +539,52 @@ async fn g07_cursor_for_one_account_never_advances_or_gates_another() {
 
     // Account B has never ingested anything under this engine_id/mode: its
     // cursor must read None, never account A's watermark.
-    let cursor_b_before =
-        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-B", &engine_id, "PAPER", "CFEE")
-            .await
-            .expect("cursor fetch must succeed");
+    let cursor_b_before = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        "alpaca:acct-b",
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(
         cursor_b_before, None,
         "G07: account B's cursor must never read account A's watermark"
     );
 
     let fetcher_b = AccountScopedFetcher {
-        broker_account_id: "account-B".to_string(),
+        provider_account_id: "acct-b".to_string(),
+        mode: "paper".to_string(),
         activities: vec![cash_fee_activity(&b1, "ETHUSD", "-0.03")],
     };
     ingest_crypto_fee_activities_once(&pool, &fetcher_b, &engine_id, "PAPER", "CFEE", Utc::now())
         .await
         .expect("account B ingest must succeed");
 
-    let cursor_a =
-        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-A", &engine_id, "PAPER", "CFEE")
-            .await
-            .expect("cursor fetch must succeed");
+    let cursor_a = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        "alpaca:acct-a",
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(
         cursor_a,
         Some(a1),
         "G07: account A's cursor must be unaffected by account B's later ingest"
     );
-    let cursor_b_after =
-        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-B", &engine_id, "PAPER", "CFEE")
-            .await
-            .expect("cursor fetch must succeed");
+    let cursor_b_after = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        "alpaca:acct-b",
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(cursor_b_after, Some(b1));
 }
 
@@ -558,10 +595,12 @@ async fn g08_mismatched_scope_in_a_batch_refuses_atomically_before_any_write() {
     let engine_id = test_engine_id("g08");
     let good_id = format!("{engine_id}::good");
     let mismatched_id = format!("{engine_id}::mismatched");
+    let key_a = register(&pool, "acct-a").await;
+    let key_b = register(&pool, "acct-b").await;
 
     let good = mqk_db::NewCryptoFeeActivity {
         activity_id: good_id.clone(),
-        broker_account_id: "account-A".to_string(),
+        broker_account_id: key_a.clone(),
         engine_id: engine_id.clone(),
         mode: "PAPER".to_string(),
         activity_type: "CFEE".to_string(),
@@ -575,7 +614,7 @@ async fn g08_mismatched_scope_in_a_batch_refuses_atomically_before_any_write() {
     // than the batch's requested scope.
     let mismatched = mqk_db::NewCryptoFeeActivity {
         activity_id: mismatched_id.clone(),
-        broker_account_id: "account-B".to_string(),
+        broker_account_id: key_b.clone(),
         engine_id: engine_id.clone(),
         mode: "PAPER".to_string(),
         activity_type: "CFEE".to_string(),
@@ -588,7 +627,7 @@ async fn g08_mismatched_scope_in_a_batch_refuses_atomically_before_any_write() {
 
     let result = mqk_db::ingest_crypto_fee_activity_batch(
         &pool,
-        "account-A",
+        &key_a,
         &engine_id,
         "PAPER",
         "CFEE",
@@ -602,7 +641,7 @@ async fn g08_mismatched_scope_in_a_batch_refuses_atomically_before_any_write() {
         "G08: a batch containing any row outside the requested scope must refuse atomically"
     );
 
-    let stored_good = mqk_db::fetch_crypto_fee_activity(&pool, "account-A", &good_id)
+    let stored_good = mqk_db::fetch_crypto_fee_activity(&pool, "alpaca:acct-a", &good_id)
         .await
         .expect("fetch must succeed");
     assert!(
@@ -610,12 +649,144 @@ async fn g08_mismatched_scope_in_a_batch_refuses_atomically_before_any_write() {
         "G08: the in-scope row must NOT be partially ingested when a later row in the same \
          batch is out of scope -- the whole batch is one atomic unit"
     );
-    let cursor =
-        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-A", &engine_id, "PAPER", "CFEE")
-            .await
-            .expect("cursor fetch must succeed");
+    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        "alpaca:acct-a",
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(
         cursor, None,
         "G08: the cursor must never advance when the batch was refused"
     );
+}
+
+// ---------------------------------------------------------------------------
+// B6 final correction: provider account id is the economic identity; the
+// credential never is (0088)
+// ---------------------------------------------------------------------------
+
+/// A credential is not part of the fetcher contract at all: two fetchers that
+/// differ only in the credential they would authenticate with (same provider
+/// account) present the SAME authority, so the second ingest resumes from the
+/// first's cursor and re-fetched activity is a dedup no-op -- rotation never
+/// manufactures a new economic account.
+#[tokio::test]
+async fn g09_same_provider_account_under_a_rotated_credential_is_one_economic_account() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("g09");
+    let a1 = format!("{engine_id}::act");
+    let provider = format!("acct-rot-{}", Uuid::new_v4().simple());
+
+    let before_rotation = AccountScopedFetcher {
+        provider_account_id: provider.clone(),
+        mode: "paper".to_string(),
+        activities: vec![cash_fee_activity(&a1, "BTCUSD", "-0.01")],
+    };
+    let first = ingest_crypto_fee_activities_once(
+        &pool,
+        &before_rotation,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+        Utc::now(),
+    )
+    .await
+    .expect("first ingest");
+    assert_eq!(first.newly_inserted, 1);
+
+    // Post-rotation fetcher: same provider account, re-fetching the same range.
+    let after_rotation = AccountScopedFetcher {
+        provider_account_id: provider.clone(),
+        mode: "paper".to_string(),
+        activities: vec![cash_fee_activity(&a1, "BTCUSD", "-0.01")],
+    };
+    let second = ingest_crypto_fee_activities_once(
+        &pool,
+        &after_rotation,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+        Utc::now(),
+    )
+    .await
+    .expect("second ingest");
+    assert_eq!(
+        second.newly_inserted, 0,
+        "G09: same economic account => dedup"
+    );
+    assert_eq!(second.already_existed, 1);
+
+    let key = authority(&provider, "paper").key();
+    assert_eq!(key, format!("alpaca:{provider}"));
+    let cursor =
+        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, &key, &engine_id, "PAPER", "CFEE")
+            .await
+            .unwrap();
+    assert_eq!(cursor, Some(a1));
+}
+
+#[tokio::test]
+async fn g10_deployment_mode_mismatch_refuses_before_any_write() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("g10");
+    let a1 = format!("{engine_id}::act");
+    let provider = format!("acct-live-{}", Uuid::new_v4().simple());
+
+    // The account is verified as live-capital; the caller asks for PAPER.
+    let fetcher = AccountScopedFetcher {
+        provider_account_id: provider.clone(),
+        mode: "live-capital".to_string(),
+        activities: vec![cash_fee_activity(&a1, "BTCUSD", "-0.01")],
+    };
+    let err =
+        ingest_crypto_fee_activities_once(&pool, &fetcher, &engine_id, "PAPER", "CFEE", Utc::now())
+            .await
+            .expect_err("mode mismatch must refuse");
+    assert!(err.to_string().contains("deployment mode"), "{err}");
+
+    let key = authority(&provider, "live-capital").key();
+    assert!(mqk_db::fetch_crypto_fee_activity(&pool, &key, &a1)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(mqk_db::fetch_broker_account_authority(&pool, &key)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn g11_unavailable_account_authority_fails_closed_without_touching_the_db() {
+    struct NoAuthority;
+    impl CryptoFeeActivityFetcher for NoAuthority {
+        fn fetch_fee_activities_since(
+            &self,
+            _t: &str,
+            _a: Option<&str>,
+        ) -> Result<Vec<AlpacaFeeActivity>, String> {
+            panic!("G11: must not fetch activity before the account is established");
+        }
+        fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+            Err("GET /v2/account unavailable".to_string())
+        }
+    }
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let err = ingest_crypto_fee_activities_once(
+        &pool,
+        &NoAuthority,
+        &test_engine_id("g11"),
+        "PAPER",
+        "CFEE",
+        Utc::now(),
+    )
+    .await
+    .expect_err("no authority => refuse");
+    assert!(err.to_string().contains("authority unavailable"), "{err}");
 }

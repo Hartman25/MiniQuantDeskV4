@@ -3136,7 +3136,32 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
     // identity; vacuously Clear per symbol when no lifecycle evidence
     // exists at all (every equity/crypto symbol today).
     if let Some(fetcher) = st.option_lifecycle_activity_fetcher.as_ref() {
-        let broker_account_id = fetcher.broker_account_id();
+        let broker_account_id = match fetcher.broker_account_authority() {
+            Ok(authority) => authority.key(),
+            Err(err) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(AdoptBrokerPositionBaselineResponse {
+                        truth_state: "active".to_string(),
+                        accepted: false,
+                        decision: format!(
+                            "refused: provider account authority is not established,                              options-lifecycle pending-gate cannot be evaluated: {err}"
+                        ),
+                        baseline_position_count: 0,
+                        baseline_order_count: 0,
+                        snapshot_captured_at,
+                        audit_event_id: None,
+                        gate: Some("repair.option_lifecycle_pending".to_string()),
+                        reconcile_refreshed: false,
+                        reconcile_status_after: String::new(),
+                        reconcile_mismatched_positions: 0,
+                        reconcile_mismatched_orders: 0,
+                        reconcile_mismatched_fills: 0,
+                    }),
+                )
+                    .into_response();
+            }
+        };
         for symbol in broker_reconcile.positions.keys() {
             match crate::state::option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate(
                 db,

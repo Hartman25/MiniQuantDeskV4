@@ -536,6 +536,12 @@
       "path": "0087_option_lifecycle_applied_broker_account_scope.sql",
       "status": "applied",
       "intent": "V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01 D2 correction: add broker_account_id to sys_option_lifecycle_applied and widen its PRIMARY KEY to (broker_account_id, lifecycle_activity_id), mirroring 0085/0086 exactly -- closes the gap where two distinct broker accounts whose lifecycle activity ids collided would share one applied-marker row, letting one account's applied effect silently gate the other's genuinely distinct lifecycle event as AlreadyApplied. Idempotent (existence-guarded); ADD COLUMN ... NOT NULL carries no DEFAULT (safe: no production caller has ever driven this table). Does not modify 0084/0086."
+    },
+    {
+      "id": "0088",
+      "path": "0088_broker_account_authority.sql",
+      "status": "applied",
+      "intent": "V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02 B6/D1/D2 account authority: broker_account_id in the fee/lifecycle tables (0085-0087) was populated from the Alpaca APCA-API-KEY-ID, which is a credential, not an economic account (a key rotation would manufacture a new account). Adds sys_broker_account_authority (authority_key = broker:provider_account_id from the authenticated GET /v2/account id, plus deployment_mode) and NOT VALID foreign keys from every account-scoped table's broker_account_id to it: new/updated rows must reference a registered authority, pre-0088 rows (credential-keyed) are retained as legacy-unverified and can never satisfy an authoritative scoped read/cursor/apply; nothing is inferred from the API key. Idempotent (existence-guarded). Does not modify 0083-0087."
     }
   ]
 }

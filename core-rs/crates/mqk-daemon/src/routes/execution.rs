@@ -330,7 +330,21 @@ pub(crate) async fn execution_order_submit(
     // seam). No `option_lifecycle_activity_fetcher` configured means no
     // Alpaca account is connected -- vacuously Clear.
     if let Some(fetcher) = st.option_lifecycle_activity_fetcher.as_ref() {
-        let broker_account_id = fetcher.broker_account_id();
+        let broker_account_id = match fetcher.broker_account_authority() {
+            Ok(authority) => authority.key(),
+            Err(err) => {
+                return manual_order_submit_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    false,
+                    "unavailable",
+                    validated.client_request_id,
+                    Some(active_run_id),
+                    vec![format!(
+                        "execution order submit unavailable: provider account authority is not                          established, options-lifecycle pending-gate cannot be evaluated: {err}"
+                    )],
+                );
+            }
+        };
         match crate::state::option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate(
             db,
             &broker_account_id,

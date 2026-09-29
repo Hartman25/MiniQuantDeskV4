@@ -39,7 +39,7 @@ use mqk_db::option_lifecycle_activity::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id";
+const TEST_BROKER_ACCOUNT_ID: &str = "alpaca:test-acct";
 
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
@@ -59,6 +59,14 @@ async fn require_pool(url: &str) -> anyhow::Result<PgPool> {
         .connect(url)
         .await?;
     mqk_db::migrate(&pool).await?;
+    for provider in ["test-acct", "acct-a", "acct-b"] {
+        mqk_db::verify_or_register_broker_account_authority(
+            &pool,
+            &mqk_db::BrokerAccountAuthority::new("alpaca", provider, "paper")?,
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
     Ok(pool)
 }
 

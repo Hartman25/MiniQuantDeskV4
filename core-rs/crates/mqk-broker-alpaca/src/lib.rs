@@ -69,10 +69,11 @@ use crate::mleg::{
 };
 use crate::normalize::normalize_trade_update;
 use crate::types::{
-    AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFeeActivity, AlpacaFetchCursor,
-    AlpacaMlegSubmitResponse, AlpacaOpenOrderRaw, AlpacaOrder, AlpacaOrderActivity,
-    AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody, AlpacaReplaceResponse, AlpacaSubmitBody,
-    AlpacaSubmitResponse, AlpacaTradeUpdate, AlpacaTradeUpdatesResume,
+    AlpacaAccountIdentityRaw, AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFeeActivity,
+    AlpacaFetchCursor, AlpacaMlegSubmitResponse, AlpacaOpenOrderRaw, AlpacaOrder,
+    AlpacaOrderActivity, AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody,
+    AlpacaReplaceResponse, AlpacaSubmitBody, AlpacaSubmitResponse, AlpacaTradeUpdate,
+    AlpacaTradeUpdatesResume,
 };
 pub use fee_attribution::{normalize_fee_activity, FeeAttributionRecord, FeeNormalizeError};
 pub use inbound::{
@@ -278,15 +279,25 @@ impl AlpacaBrokerAdapter {
         self
     }
 
-    /// B6/D1 correction: the authenticated account's own durable identity --
-    /// the trimmed `APCA-API-KEY-ID` (never the secret key). Alpaca scopes
-    /// activity ids and account state to one account; this is the natural
-    /// raw identity a caller uses to scope any durable fee/lifecycle
-    /// evidence or cursor by "which broker account", mirroring
-    /// `mqk-broker-ibkr::identity::IbkrDeploymentIdentity::account_id`'s
-    /// role for that adapter.
-    pub fn account_identity(&self) -> &str {
-        &self.cfg.api_key_id
+    /// The authenticated Alpaca trading account's own provider account id
+    /// (`id` of `GET /v2/account`), never the API key id: a credential
+    /// rotation on the same account must not manufacture a new economic
+    /// account. A missing/blank/non-UUID-shaped `id` fails closed -- no
+    /// identity is ever derived from the credential.
+    pub fn fetch_provider_account_id(&self) -> Result<String, BrokerError> {
+        let raw: AlpacaAccountIdentityRaw = self.get("/v2/account")?;
+        let id = raw.id.as_deref().map(str::trim).unwrap_or_default();
+        if id.is_empty()
+            || id.len() > 128
+            || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err(BrokerError::Reject {
+                code: "account_id_unavailable".to_string(),
+                detail: "GET /v2/account did not return a usable account id; refusing to derive                          an account identity from the API credential"
+                    .to_string(),
+            });
+        }
+        Ok(id.to_ascii_lowercase())
     }
 
     /// D2/B4: the Crypto capability flag as configured (not the same as
@@ -1799,6 +1810,106 @@ mod fetch_fee_activities_since_tests {
             .fetch_fee_activities_since("CFEE", Some("prior-activity-id"))
             .expect("fee activity fetch must succeed");
         mock.assert_hits(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B6: provider account identity is GET /v2/account `id`, never the API key id
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod provider_account_identity_tests {
+    use super::*;
+    use httpmock::prelude::*;
+
+    const ACCOUNT_UUID: &str = "e6fe16f3-64a4-4921-8928-cadf02f92f98";
+
+    fn adapter_with_key(base_url: String, key_id: &str) -> AlpacaBrokerAdapter {
+        AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url,
+            api_key_id: key_id.to_string(),
+            api_secret_key: "test-secret".to_string(),
+            crypto_capability_enabled: false,
+            options_mleg_capability_enabled: false,
+        })
+    }
+
+    fn mock_account(server: &MockServer, body: serde_json::Value) {
+        server.mock(|when, then| {
+            when.method(GET).path("/v2/account");
+            then.status(200).json_body(body);
+        });
+    }
+
+    #[test]
+    fn rotated_credential_on_the_same_account_yields_the_same_identity() {
+        let server = MockServer::start();
+        mock_account(
+            &server,
+            serde_json::json!({"id": ACCOUNT_UUID, "account_number": "010203ABCD", "status": "ACTIVE"}),
+        );
+        let before = adapter_with_key(server.base_url(), "PK-KEY-BEFORE-ROTATION")
+            .fetch_provider_account_id()
+            .unwrap();
+        let after = adapter_with_key(server.base_url(), "PK-KEY-AFTER-ROTATION")
+            .fetch_provider_account_id()
+            .unwrap();
+        assert_eq!(before, ACCOUNT_UUID);
+        assert_eq!(before, after);
+        assert_ne!(
+            before, "PK-KEY-BEFORE-ROTATION",
+            "identity is never the key id"
+        );
+    }
+
+    #[test]
+    fn two_provider_accounts_yield_two_identities() {
+        let a = MockServer::start();
+        let b = MockServer::start();
+        mock_account(&a, serde_json::json!({"id": ACCOUNT_UUID}));
+        mock_account(
+            &b,
+            serde_json::json!({"id": "9feee08f-22d2-4804-89c1-bf01166aad52"}),
+        );
+        let same_key = "PK-SAME-KEY-TEXT";
+        assert_ne!(
+            adapter_with_key(a.base_url(), same_key)
+                .fetch_provider_account_id()
+                .unwrap(),
+            adapter_with_key(b.base_url(), same_key)
+                .fetch_provider_account_id()
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn missing_blank_or_malformed_account_id_fails_closed_never_falls_back_to_the_key() {
+        for body in [
+            serde_json::json!({"account_number": "010203ABCD"}),
+            serde_json::json!({"id": ""}),
+            serde_json::json!({"id": "   "}),
+            serde_json::json!({"id": null}),
+            serde_json::json!({"id": "has space"}),
+            serde_json::json!({"id": "colon:injected"}),
+        ] {
+            let server = MockServer::start();
+            mock_account(&server, body.clone());
+            let err = adapter_with_key(server.base_url(), "PK-SOME-KEY")
+                .fetch_provider_account_id()
+                .expect_err(&format!("{body} must refuse"));
+            assert!(matches!(err, BrokerError::Reject { .. }), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn transport_failure_is_an_error_not_an_identity() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/v2/account");
+            then.status(500);
+        });
+        assert!(adapter_with_key(server.base_url(), "PK-SOME-KEY")
+            .fetch_provider_account_id()
+            .is_err());
     }
 }
 

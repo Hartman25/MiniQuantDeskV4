@@ -73,6 +73,7 @@ pub mod alert_acks;
 pub mod arm_state;
 pub mod audit;
 pub mod autonomous_daily_operation;
+pub mod broker_account_authority;
 pub mod broker_baseline;
 pub mod crypto_fee_activity;
 pub mod dynamic_selection_evidence;
@@ -101,6 +102,7 @@ pub use alert_acks::*;
 pub use arm_state::*;
 pub use audit::*;
 pub use autonomous_daily_operation::*;
+pub use broker_account_authority::*;
 pub use broker_baseline::*;
 pub use crypto_fee_activity::*;
 // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 7C Part 1: durable

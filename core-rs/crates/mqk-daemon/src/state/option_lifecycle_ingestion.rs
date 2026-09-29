@@ -117,7 +117,23 @@ pub async fn ingest_option_lifecycle_activities_once(
     activity_type: &str,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<OptionLifecycleIngestionBatchOutcome> {
-    let broker_account_id = fetcher.broker_account_id();
+    let authority = fetcher.broker_account_authority().map_err(|e| {
+        anyhow::anyhow!(
+            "ingest_option_lifecycle_activities_once: account authority unavailable: {e}"
+        )
+    })?;
+    if !mode.eq_ignore_ascii_case(authority.deployment_mode()) {
+        anyhow::bail!(
+            "ingest_option_lifecycle_activities_once: refused -- requested mode {mode:?} does              not match the account's verified deployment mode {:?}",
+            authority.deployment_mode()
+        );
+    }
+    mqk_db::verify_or_register_broker_account_authority(pool, &authority, now_utc)
+        .await
+        .context(
+            "ingest_option_lifecycle_activities_once: account authority registration failed",
+        )?;
+    let broker_account_id = authority.key();
     let parsed_activity_type = match activity_type {
         "OPEXC" => OptionLifecycleActivityType::Exercise,
         "OPASN" => OptionLifecycleActivityType::Assignment,

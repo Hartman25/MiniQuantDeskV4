@@ -926,9 +926,19 @@ impl mqk_daemon::state::OptionLifecycleActivityFetcher for FakeOptionLifecycleAc
         unreachable!("Gate 7b never fetches from Alpaca; it only evaluates durable DB evidence")
     }
 
-    fn broker_account_id(&self) -> String {
-        self.0.clone()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        mqk_db::BrokerAccountAuthority::new("alpaca", &self.0, "paper").map_err(|e| e.to_string())
     }
+}
+
+/// Register a provider account (as the ingestion caller would) and return its
+/// economic-account key (`alpaca:{provider_account_id}`).
+async fn register_d3_account(pool: &sqlx::PgPool, provider_id: &str) -> String {
+    let a = mqk_db::BrokerAccountAuthority::new("alpaca", provider_id, "paper").unwrap();
+    mqk_db::verify_or_register_broker_account_authority(pool, &a, Utc::now())
+        .await
+        .expect("authority registration");
+    a.key()
 }
 
 async fn seed_pending_opexc(
@@ -983,14 +993,15 @@ async fn decision_blocked_by_unresolved_option_lifecycle_evidence() {
         .await
         .expect("persist arm state");
 
-    let broker_account_id = unique_id("d3-acct");
+    let provider_id = unique_id("d3-acct");
+    let broker_account_id = register_d3_account(&pool, &provider_id).await;
     let mut st_inner = state::AppState::new_with_db_and_operator_auth(
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     );
     st_inner.instrument_registry_path = common::canonical_equity_registry_path();
     st_inner.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
-        FakeOptionLifecycleActivityFetcher(broker_account_id.clone()),
+        FakeOptionLifecycleActivityFetcher(provider_id.clone()),
     ));
     let st = Arc::new(st_inner);
     let run_id = seed_active_run(&st).await;
@@ -1056,14 +1067,15 @@ async fn decision_unaffected_symbol_proceeds_despite_fetcher_configured() {
         .await
         .expect("persist arm state");
 
-    let broker_account_id = unique_id("d3-acct");
+    let provider_id = unique_id("d3-acct");
+    let broker_account_id = register_d3_account(&pool, &provider_id).await;
     let mut st_inner = state::AppState::new_with_db_and_operator_auth(
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     );
     st_inner.instrument_registry_path = common::canonical_equity_registry_path();
     st_inner.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
-        FakeOptionLifecycleActivityFetcher(broker_account_id.clone()),
+        FakeOptionLifecycleActivityFetcher(provider_id.clone()),
     ));
     let st = Arc::new(st_inner);
     let run_id = seed_active_run(&st).await;
@@ -1110,14 +1122,15 @@ async fn decision_unblocked_after_d2_applies_the_blocking_activity() {
         .await
         .expect("persist arm state");
 
-    let broker_account_id = unique_id("d3-acct");
+    let provider_id = unique_id("d3-acct");
+    let broker_account_id = register_d3_account(&pool, &provider_id).await;
     let mut st_inner = state::AppState::new_with_db_and_operator_auth(
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     );
     st_inner.instrument_registry_path = common::canonical_equity_registry_path();
     st_inner.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
-        FakeOptionLifecycleActivityFetcher(broker_account_id.clone()),
+        FakeOptionLifecycleActivityFetcher(provider_id.clone()),
     ));
     let st = Arc::new(st_inner);
     let run_id = seed_active_run(&st).await;

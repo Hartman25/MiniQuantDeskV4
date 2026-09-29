@@ -31,7 +31,9 @@ use mqk_daemon::state::OptionLifecycleActivityFetcher;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id-primary";
+const TEST_PROVIDER_ACCOUNT_ID: &str = "test-acct-primary";
+/// Economic-account key (`{broker}:{provider_account_id}`), never a credential.
+const TEST_BROKER_ACCOUNT_ID: &str = "alpaca:test-acct-primary";
 
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
@@ -120,8 +122,9 @@ impl OptionLifecycleActivityFetcher for FixedFetcher {
         Ok(self.activities.clone())
     }
 
-    fn broker_account_id(&self) -> String {
-        self.broker_account_id.clone()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        mqk_db::BrokerAccountAuthority::new("alpaca", &self.broker_account_id, "paper")
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -146,8 +149,9 @@ impl OptionLifecycleActivityFetcher for AssertingFetcher {
         Ok(self.activities.clone())
     }
 
-    fn broker_account_id(&self) -> String {
-        self.broker_account_id.clone()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        mqk_db::BrokerAccountAuthority::new("alpaca", &self.broker_account_id, "paper")
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -157,7 +161,7 @@ async fn l01_empty_fetch_is_pure_noop() {
     let pool = require_pool(&url).await.expect("pool");
     let engine_id = test_engine_id("l01");
     let fetcher = FixedFetcher {
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        broker_account_id: TEST_PROVIDER_ACCOUNT_ID.to_string(),
         activities: vec![],
     };
 
@@ -197,7 +201,7 @@ async fn l02_fresh_opexc_batch_ingests_and_advances_cursor() {
     let a1 = format!("{engine_id}::act1");
 
     let fetcher = FixedFetcher {
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        broker_account_id: TEST_PROVIDER_ACCOUNT_ID.to_string(),
         activities: vec![opexc_activity(&a1, "AAPL260619C00200000", "-2")],
     };
 
@@ -246,7 +250,7 @@ async fn l03_second_call_reads_persisted_cursor_and_threads_it_as_after_id() {
     let a2 = format!("{engine_id}::second");
 
     let first_fetcher = FixedFetcher {
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        broker_account_id: TEST_PROVIDER_ACCOUNT_ID.to_string(),
         activities: vec![opexc_activity(&a1, "AAPL260619C00200000", "-1")],
     };
     ingest_option_lifecycle_activities_once(
@@ -261,7 +265,7 @@ async fn l03_second_call_reads_persisted_cursor_and_threads_it_as_after_id() {
     .expect("first ingest must succeed");
 
     let second_fetcher = AssertingFetcher {
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        broker_account_id: TEST_PROVIDER_ACCOUNT_ID.to_string(),
         expected_after_id: Some(a1.clone()),
         activities: vec![opexc_activity(&a2, "AAPL260619C00200000", "-1")],
     };
@@ -287,7 +291,7 @@ async fn l04_normalize_failure_fails_closed_before_any_db_write() {
     let bad_id = format!("{engine_id}::bad");
 
     let fetcher = FixedFetcher {
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        broker_account_id: TEST_PROVIDER_ACCOUNT_ID.to_string(),
         activities: vec![
             opexc_activity(&good_id, "AAPL260619C00200000", "-1"),
             malformed_missing_symbol(&bad_id),
@@ -343,7 +347,7 @@ async fn l05_opexc_then_optrd_sharing_the_identical_id_both_persist_through_the_
     let shared_id = format!("{engine_id}::shared");
 
     let opexc_fetcher = FixedFetcher {
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        broker_account_id: TEST_PROVIDER_ACCOUNT_ID.to_string(),
         activities: vec![opexc_activity(&shared_id, "AAPL260619C00200000", "-2")],
     };
     let opexc_outcome = ingest_option_lifecycle_activities_once(
@@ -359,7 +363,7 @@ async fn l05_opexc_then_optrd_sharing_the_identical_id_both_persist_through_the_
     assert_eq!(opexc_outcome.newly_inserted, 1);
 
     let optrd_fetcher = FixedFetcher {
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        broker_account_id: TEST_PROVIDER_ACCOUNT_ID.to_string(),
         activities: vec![optrd_activity(
             &shared_id, "AAPL", "200", "200.00", "-40000",
         )],
@@ -400,7 +404,7 @@ async fn l06_two_accounts_sharing_an_activity_id_never_collide_through_the_real_
     let shared_id = format!("{engine_id}::shared");
 
     let fetcher_a = FixedFetcher {
-        broker_account_id: "account-A".to_string(),
+        broker_account_id: "acct-a".to_string(),
         activities: vec![opexc_activity(&shared_id, "AAPL260619C00200000", "-1")],
     };
     let outcome_a = ingest_option_lifecycle_activities_once(
@@ -416,7 +420,7 @@ async fn l06_two_accounts_sharing_an_activity_id_never_collide_through_the_real_
     assert_eq!(outcome_a.newly_inserted, 1);
 
     let fetcher_b = FixedFetcher {
-        broker_account_id: "account-B".to_string(),
+        broker_account_id: "acct-b".to_string(),
         activities: vec![opexc_activity(&shared_id, "AAPL260619C00200000", "-1")],
     };
     let outcome_b = ingest_option_lifecycle_activities_once(

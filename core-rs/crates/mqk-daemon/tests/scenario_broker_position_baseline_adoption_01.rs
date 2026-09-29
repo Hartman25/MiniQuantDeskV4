@@ -1038,8 +1038,8 @@ impl mqk_daemon::state::OptionLifecycleActivityFetcher
         unreachable!("adoption's Gate 4b never fetches from Alpaca")
     }
 
-    fn broker_account_id(&self) -> String {
-        self.0.clone()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        mqk_db::BrokerAccountAuthority::new("alpaca", &self.0, "paper").map_err(|e| e.to_string())
     }
 }
 
@@ -1058,7 +1058,12 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
     mqk_db::migrate(&db).await.expect("migration failed");
     let _ = mqk_db::clear_broker_position_baseline(&db).await;
 
-    let broker_account_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
+    let provider_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
+    let authority = mqk_db::BrokerAccountAuthority::new("alpaca", &provider_id, "paper").unwrap();
+    mqk_db::verify_or_register_broker_account_authority(&db, &authority, chrono::Utc::now())
+        .await
+        .expect("authority registration");
+    let broker_account_id = authority.key();
 
     // Seed unresolved lifecycle evidence for the exact "AAPL" symbol the
     // snapshot below reports a position in.
@@ -1089,7 +1094,7 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
     );
     *st.broker_snapshot.write().await = Some(fake_broker_snapshot_with_position());
     st.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
-        FakeOptionLifecycleActivityFetcherForBaseline(broker_account_id),
+        FakeOptionLifecycleActivityFetcherForBaseline(provider_id),
     ));
     let st = Arc::new(st);
 
@@ -1131,7 +1136,12 @@ async fn d3_baseline02_unaffected_positions_adopt_normally() {
     mqk_db::migrate(&db).await.expect("migration failed");
     let _ = mqk_db::clear_broker_position_baseline(&db).await;
 
-    let broker_account_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
+    let provider_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
+    let authority = mqk_db::BrokerAccountAuthority::new("alpaca", &provider_id, "paper").unwrap();
+    mqk_db::verify_or_register_broker_account_authority(&db, &authority, chrono::Utc::now())
+        .await
+        .expect("authority registration");
+    let broker_account_id = authority.key();
 
     let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
         db.clone(),
@@ -1140,7 +1150,7 @@ async fn d3_baseline02_unaffected_positions_adopt_normally() {
     );
     *st.broker_snapshot.write().await = Some(fake_broker_snapshot_with_position());
     st.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
-        FakeOptionLifecycleActivityFetcherForBaseline(broker_account_id),
+        FakeOptionLifecycleActivityFetcherForBaseline(provider_id),
     ));
     let st = Arc::new(st);
 

@@ -1238,11 +1238,13 @@ pub trait CryptoFeeActivityFetcher: Send + Sync {
         after_id: Option<&str>,
     ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String>;
 
-    /// B6 correction: the authenticated broker account this fetcher targets
-    /// (Alpaca's own `APCA-API-KEY-ID`) -- durable account provenance the
-    /// caller must scope fee evidence and cursor authority by, never merely
-    /// `engine_id`/`mode`.
-    fn broker_account_id(&self) -> String;
+    /// The provider account this fetcher is authenticated against, proven by
+    /// the provider's own account endpoint (never the API credential id).
+    /// Callers scope fee evidence and cursor authority by its
+    /// [`mqk_db::BrokerAccountAuthority::key`]. `Err` (endpoint unavailable,
+    /// malformed) means no account identity is established: callers fail
+    /// closed.
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String>;
 }
 
 /// D1 correction (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): injectable
@@ -1269,10 +1271,10 @@ pub trait OptionLifecycleActivityFetcher: Send + Sync {
         after_id: Option<&str>,
     ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String>;
 
-    /// The authenticated broker account this fetcher targets (Alpaca's own
-    /// `APCA-API-KEY-ID`) -- durable account provenance the caller must
-    /// scope lifecycle evidence and cursor authority by.
-    fn broker_account_id(&self) -> String;
+    /// The provider account this fetcher is authenticated against, proven by
+    /// the provider's own account endpoint (never the API credential id).
+    /// `Err` means no account identity is established: callers fail closed.
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String>;
 }
 
 /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Injectable on-demand broker snapshot fetcher.

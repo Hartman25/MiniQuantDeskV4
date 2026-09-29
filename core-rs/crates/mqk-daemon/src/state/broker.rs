@@ -341,11 +341,53 @@ pub(super) fn build_fill_activity_fetcher_from_env(
 // crypto fee-activity fetcher
 // ---------------------------------------------------------------------------
 
+/// Provider-account authority for one Alpaca credential set: resolved from the
+/// authenticated `GET /v2/account` id (never the API key id), cached after the
+/// first success for the process lifetime (an account id does not change under
+/// a fixed credential), and never cached on failure.
+struct AlpacaAccountAuthoritySource {
+    deployment_mode: DeploymentMode,
+    cached: std::sync::Mutex<Option<mqk_db::BrokerAccountAuthority>>,
+}
+
+impl AlpacaAccountAuthoritySource {
+    fn new(deployment_mode: DeploymentMode) -> Self {
+        Self {
+            deployment_mode,
+            cached: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn resolve(
+        &self,
+        adapter: &AlpacaBrokerAdapter,
+    ) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        let mut guard = self
+            .cached
+            .lock()
+            .map_err(|_| "alpaca account authority cache poisoned".to_string())?;
+        if let Some(authority) = guard.as_ref() {
+            return Ok(authority.clone());
+        }
+        let provider_account_id = adapter
+            .fetch_provider_account_id()
+            .map_err(|e| e.to_string())?;
+        let authority = mqk_db::BrokerAccountAuthority::new(
+            "alpaca",
+            &provider_account_id,
+            self.deployment_mode.as_api_label(),
+        )
+        .map_err(|e| e.to_string())?;
+        *guard = Some(authority.clone());
+        Ok(authority)
+    }
+}
+
 /// Thin newtype wrapping `AlpacaBrokerAdapter` that implements
 /// `CryptoFeeActivityFetcher`. Only the read-only day-end fee-activity fetch
 /// path is reachable through this type. Order submission, cancel, replace,
 /// and `fetch_events` are not exposed.
-struct AlpacaCryptoFeeActivityFetcher(AlpacaBrokerAdapter);
+struct AlpacaCryptoFeeActivityFetcher(AlpacaBrokerAdapter, AlpacaAccountAuthoritySource);
 
 impl CryptoFeeActivityFetcher for AlpacaCryptoFeeActivityFetcher {
     fn fetch_fee_activities_since(
@@ -358,8 +400,8 @@ impl CryptoFeeActivityFetcher for AlpacaCryptoFeeActivityFetcher {
             .map_err(|e| e.to_string())
     }
 
-    fn broker_account_id(&self) -> String {
-        self.0.account_identity().to_string()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        self.1.resolve(&self.0)
     }
 }
 
@@ -411,6 +453,7 @@ pub(super) fn build_crypto_fee_activity_fetcher_from_env(
             crypto_capability_enabled: false,
             options_mleg_capability_enabled: false,
         }),
+        AlpacaAccountAuthoritySource::new(deployment_mode),
     )))
 }
 
@@ -423,7 +466,7 @@ pub(super) fn build_crypto_fee_activity_fetcher_from_env(
 /// `OptionLifecycleActivityFetcher`. Only the read-only options-lifecycle
 /// account-activity fetch path is reachable through this type. Order
 /// submission, cancel, replace, and `fetch_events` are not exposed.
-struct AlpacaOptionLifecycleActivityFetcher(AlpacaBrokerAdapter);
+struct AlpacaOptionLifecycleActivityFetcher(AlpacaBrokerAdapter, AlpacaAccountAuthoritySource);
 
 impl OptionLifecycleActivityFetcher for AlpacaOptionLifecycleActivityFetcher {
     fn fetch_option_lifecycle_activities_since(
@@ -436,8 +479,8 @@ impl OptionLifecycleActivityFetcher for AlpacaOptionLifecycleActivityFetcher {
             .map_err(|e| e.to_string())
     }
 
-    fn broker_account_id(&self) -> String {
-        self.0.account_identity().to_string()
+    fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+        self.1.resolve(&self.0)
     }
 }
 
@@ -489,6 +532,7 @@ pub(super) fn build_option_lifecycle_activity_fetcher_from_env(
             crypto_capability_enabled: false,
             options_mleg_capability_enabled: false,
         }),
+        AlpacaAccountAuthoritySource::new(deployment_mode),
     )))
 }
 

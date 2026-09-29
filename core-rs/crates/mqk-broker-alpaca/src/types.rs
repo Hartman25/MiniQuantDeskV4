@@ -436,6 +436,15 @@ pub struct AlpacaFeeActivity {
 // GET /v2/account, GET /v2/positions, GET /v2/orders?status=open
 // ---------------------------------------------------------------------------
 
+/// Identity-only view of `GET /v2/account`: the provider's own account id.
+/// Every other account field is ignored by this type.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaAccountIdentityRaw {
+    /// Alpaca's account UUID (`id`), the provider account identity.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 /// Raw Alpaca account response from `GET /v2/account`.
 ///
 /// Used by `fetch_broker_snapshot` to populate the `BrokerAccount` field.

@@ -45,7 +45,7 @@ use mqk_db::option_lifecycle_activity::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id";
+const TEST_BROKER_ACCOUNT_ID: &str = "alpaca:test-acct";
 
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
@@ -65,6 +65,14 @@ async fn require_pool(url: &str) -> anyhow::Result<PgPool> {
         .connect(url)
         .await?;
     mqk_db::migrate(&pool).await?;
+    for provider in ["test-acct", "acct-a", "acct-b"] {
+        mqk_db::verify_or_register_broker_account_authority(
+            &pool,
+            &mqk_db::BrokerAccountAuthority::new("alpaca", provider, "paper")?,
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
     Ok(pool)
 }
 
@@ -551,7 +559,7 @@ async fn h09_two_broker_accounts_sharing_an_activity_id_never_collide_or_share_a
 
     let account_a = lifecycle_activity(
         &shared_activity_id,
-        "account-A",
+        "alpaca:acct-a",
         &engine_id,
         OptionLifecycleActivityType::Exercise,
         "AAPL260619C00200000",
@@ -565,7 +573,7 @@ async fn h09_two_broker_accounts_sharing_an_activity_id_never_collide_or_share_a
 
     let account_b = lifecycle_activity(
         &shared_activity_id,
-        "account-B",
+        "alpaca:acct-b",
         &engine_id,
         OptionLifecycleActivityType::Exercise,
         "AAPL260619C00200000",
@@ -585,7 +593,7 @@ async fn h09_two_broker_accounts_sharing_an_activity_id_never_collide_or_share_a
     // Advance only account A's cursor.
     ingest_option_lifecycle_activity_batch(
         &pool,
-        "account-A",
+        "alpaca:acct-a",
         &engine_id,
         "PAPER",
         OptionLifecycleActivityType::Exercise,
@@ -598,7 +606,7 @@ async fn h09_two_broker_accounts_sharing_an_activity_id_never_collide_or_share_a
 
     let cursor_b = fetch_option_lifecycle_ingestion_cursor(
         &pool,
-        "account-B",
+        "alpaca:acct-b",
         &engine_id,
         "PAPER",
         OptionLifecycleActivityType::Exercise,

@@ -123,7 +123,19 @@ pub async fn ingest_crypto_fee_activities_once(
     activity_type: &str,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<CryptoFeeIngestionBatchOutcome> {
-    let broker_account_id = fetcher.broker_account_id();
+    let authority = fetcher.broker_account_authority().map_err(|e| {
+        anyhow::anyhow!("ingest_crypto_fee_activities_once: account authority unavailable: {e}")
+    })?;
+    if !mode.eq_ignore_ascii_case(authority.deployment_mode()) {
+        anyhow::bail!(
+            "ingest_crypto_fee_activities_once: refused -- requested mode {mode:?} does not              match the account's verified deployment mode {:?}",
+            authority.deployment_mode()
+        );
+    }
+    mqk_db::verify_or_register_broker_account_authority(pool, &authority, now_utc)
+        .await
+        .context("ingest_crypto_fee_activities_once: account authority registration failed")?;
+    let broker_account_id = authority.key();
 
     let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(
         pool,

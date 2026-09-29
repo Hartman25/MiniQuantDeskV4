@@ -56,6 +56,14 @@ async fn require_pool(url: &str) -> anyhow::Result<PgPool> {
         .connect(url)
         .await?;
     mqk_db::migrate(&pool).await?;
+    for provider in ["test-acct", "acct-a", "acct-b"] {
+        mqk_db::verify_or_register_broker_account_authority(
+            &pool,
+            &mqk_db::BrokerAccountAuthority::new("alpaca", provider, "paper")?,
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
     Ok(pool)
 }
 
@@ -69,7 +77,7 @@ fn test_engine_id(label: &str) -> String {
 /// Fixed test broker/account identity for every single-account test below;
 /// B6's own multi-account isolation proof lives in
 /// scenario_crypto_fee_activity_ingestion_caller_01.rs (G06-G08).
-const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id";
+const TEST_BROKER_ACCOUNT_ID: &str = "alpaca:test-acct";
 
 fn cash_fee(activity_id: &str, engine_id: &str, fee_micros: i64) -> NewCryptoFeeActivity {
     NewCryptoFeeActivity {
