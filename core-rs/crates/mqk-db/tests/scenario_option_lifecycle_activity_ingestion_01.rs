@@ -17,11 +17,9 @@
 //! |      | no price, and refuses an OPEXC row carrying a price; the symbol-shape |
 //! |      | CHECK refuses an OPEXC row with no option_symbol and an OPTRD row     |
 //! |      | with no underlying_symbol_raw                                         |
-//! | H06  | find_paired_trade_activity finds an OPTRD sharing the SAME             |
-//! |      | activity_id as an OPEXC/OPASN row, and returns None when no pairing   |
-//! |      | exists yet                                                            |
-//! | H07  | insert_applied_option_lifecycle_effect_if_new is idempotent on        |
-//! |      | lifecycle_activity_id -- a second apply attempt is a checked no-op    |
+//! | H06  | list_option_lifecycle_activities returns EVERY OPTRD row of the        |
+//! |      | account in a stable order (the candidate set correlation needs --      |
+//! |      | never a same-id LIMIT 1 pick), scoped to the account                   |
 //! | H08  | D1 correction: an OPEXC and its paired OPTRD sharing the IDENTICAL    |
 //! |      | activity_id coexist as two distinct rows (the confirmed 0084          |
 //! |      | collision this migration closes)                                      |
@@ -35,11 +33,9 @@
 
 use chrono::Utc;
 use mqk_db::option_lifecycle_activity::{
-    fetch_applied_option_lifecycle_effect, fetch_option_lifecycle_activity,
-    fetch_option_lifecycle_ingestion_cursor, find_paired_trade_activity,
-    ingest_option_lifecycle_activity_batch, insert_applied_option_lifecycle_effect_if_new,
-    insert_option_lifecycle_activity_if_new, AppliedOptionLifecycleEffect,
-    InsertAppliedOptionLifecycleEffectOutcome, InsertOptionLifecycleActivityOutcome,
+    fetch_option_lifecycle_activity, fetch_option_lifecycle_ingestion_cursor,
+    ingest_option_lifecycle_activity_batch, insert_option_lifecycle_activity_if_new,
+    list_option_lifecycle_activities, InsertOptionLifecycleActivityOutcome,
     NewOptionLifecycleActivity, OptionLifecycleActivityType, OptionLifecycleIngestionBatchOutcome,
 };
 use sqlx::PgPool;
@@ -380,105 +376,55 @@ async fn h05_shape_check_constraints_enforced() {
 }
 
 #[tokio::test]
-async fn h06_paired_trade_lookup_finds_match_and_returns_none_when_absent() {
+async fn h06_every_optrd_of_the_account_is_listed_in_a_stable_order() {
     let url = require_db_url();
     let pool = require_pool(&url).await.expect("pool");
     let engine_id = test_engine_id("h06");
-    let activity_id = format!("{engine_id}::shared");
+    let a1 = format!("{engine_id}::a");
+    let a2 = format!("{engine_id}::b");
 
-    let opexc = lifecycle_activity(
-        &activity_id,
-        TEST_BROKER_ACCOUNT_ID,
-        &engine_id,
-        OptionLifecycleActivityType::Exercise,
-        "AAPL260619C00200000",
-        "2026-06-19",
-        "-2",
-    );
-    insert_option_lifecycle_activity_if_new(&pool, &opexc)
-        .await
-        .unwrap();
-
-    // No paired OPTRD ingested yet -- must be None, never fabricated.
-    let before = find_paired_trade_activity(&pool, TEST_BROKER_ACCOUNT_ID, &activity_id)
-        .await
-        .expect("lookup must succeed");
-    assert_eq!(
-        before, None,
-        "H06: no paired trade evidence exists yet; must be None"
-    );
-
-    let optrd = paired_trade_activity(
-        &activity_id,
-        TEST_BROKER_ACCOUNT_ID,
-        &engine_id,
-        "AAPL",
-        "2026-06-19",
-        "200",
-        "200.00",
-    );
-    insert_option_lifecycle_activity_if_new(&pool, &optrd)
-        .await
-        .unwrap();
-
-    let after = find_paired_trade_activity(&pool, TEST_BROKER_ACCOUNT_ID, &activity_id)
-        .await
-        .expect("lookup must succeed")
-        .expect("paired trade must now be found");
-    assert_eq!(after.price_raw.as_deref(), Some("200.00"));
-    assert_eq!(after.qty_raw, "200");
-    assert_eq!(after.underlying_symbol_raw.as_deref(), Some("AAPL"));
-}
-
-#[tokio::test]
-async fn h07_applied_effect_insert_is_idempotent_on_lifecycle_activity_id() {
-    let url = require_db_url();
-    let pool = require_pool(&url).await.expect("pool");
-    let engine_id = test_engine_id("h07");
-    let lifecycle_activity_id = format!("{engine_id}::opexc");
-
-    let effect = AppliedOptionLifecycleEffect {
-        lifecycle_activity_id: lifecycle_activity_id.clone(),
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
-        engine_id: engine_id.clone(),
-        mode: "PAPER".to_string(),
-        option_symbol: "AAPL260619C00200000".to_string(),
-        underlying_symbol: Some("AAPL".to_string()),
-        option_contracts_removed_raw: "2".to_string(),
-        underlying_shares_delivered_raw: Some("200".to_string()),
-        cash_effect_micros: Some(40_000_000_000),
-        applied_at_utc: Utc::now(),
-    };
-
-    let first = insert_applied_option_lifecycle_effect_if_new(&pool, &effect)
-        .await
-        .expect("first apply must succeed");
-    assert_eq!(first, InsertAppliedOptionLifecycleEffectOutcome::Applied);
-
-    // Re-attempt with a DIFFERENT cash_effect_micros -- if idempotency were
-    // broken, this would silently overwrite the original applied evidence.
-    let mut replay_effect = effect.clone();
-    replay_effect.cash_effect_micros = Some(999);
-    let second = insert_applied_option_lifecycle_effect_if_new(&pool, &replay_effect)
-        .await
-        .expect("second apply must not error");
-    assert_eq!(
-        second,
-        InsertAppliedOptionLifecycleEffectOutcome::AlreadyApplied
-    );
-
-    let stored = fetch_applied_option_lifecycle_effect(
+    // No trade ingested yet for this account scope -- nothing is fabricated.
+    let before = list_option_lifecycle_activities(
         &pool,
         TEST_BROKER_ACCOUNT_ID,
-        &lifecycle_activity_id,
+        OptionLifecycleActivityType::PairedTrade,
     )
     .await
-    .expect("fetch must succeed")
-    .expect("row must exist");
+    .expect("list must succeed");
+    assert!(!before.iter().any(|r| r.engine_id == engine_id));
+
+    // Two trades on the same date, inserted out of id order.
+    for id in [&a2, &a1] {
+        insert_option_lifecycle_activity_if_new(
+            &pool,
+            &paired_trade_activity(
+                id,
+                TEST_BROKER_ACCOUNT_ID,
+                &engine_id,
+                "AAPL",
+                "2026-06-19",
+                "200",
+                "200.00",
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let listed: Vec<String> = list_option_lifecycle_activities(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        OptionLifecycleActivityType::PairedTrade,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .filter(|r| r.engine_id == engine_id)
+    .map(|r| r.activity_id)
+    .collect();
     assert_eq!(
-        stored.cash_effect_micros,
-        Some(40_000_000_000),
-        "H07: the ORIGINAL applied effect must survive; a duplicate apply must never overwrite it"
+        listed,
+        vec![a1, a2],
+        "H06: every trade, ordered by (date, id) -- never a first-row pick"
     );
 }
 

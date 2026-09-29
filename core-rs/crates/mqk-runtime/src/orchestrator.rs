@@ -67,7 +67,7 @@ use mqk_execution::{
     BrokerAdapter, BrokerError, BrokerEvent, BrokerGateway, BrokerOrderMap, IntegrityGate,
     ReconcileGate, RiskGate,
 };
-use mqk_portfolio::{apply_entry, LedgerEntry, PortfolioState};
+use mqk_portfolio::{apply_entry, LedgerEntry, LifecycleAdjustment, PortfolioState};
 
 mod apply;
 mod cancel;
@@ -123,6 +123,10 @@ where
     order_map: BrokerOrderMap,
     oms_orders: BTreeMap<String, OmsOrder>,
     portfolio: PortfolioState,
+    /// D2: `economic_apply_id`s of options-lifecycle adjustments already
+    /// applied to `portfolio` (replayed at recovery or absorbed between
+    /// ticks). Guarantees an adjustment reaches the ledger at most once.
+    applied_lifecycle_adjustments: std::collections::BTreeSet<String>,
     run_id: Uuid,
     dispatcher_id: String,
     /// A2: opaque broker adapter identifier used to scope the cursor in DB.
@@ -582,6 +586,7 @@ where
             order_map,
             oms_orders,
             portfolio,
+            applied_lifecycle_adjustments: std::collections::BTreeSet::new(),
             run_id,
             dispatcher_id: dispatcher_id.clone(),
             adapter_id: adapter_id.into(),
@@ -1647,6 +1652,41 @@ where
     /// Immutable view of the current portfolio state.
     pub fn portfolio(&self) -> &PortfolioState {
         &self.portfolio
+    }
+
+    /// D2: record that these lifecycle adjustments were already applied to the
+    /// portfolio handed to [`Self::new`] (the recovery replay), so they are never
+    /// applied a second time.
+    pub fn seed_applied_lifecycle_adjustments(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.applied_lifecycle_adjustments.extend(ids);
+    }
+
+    /// D2: the `economic_apply_id`s already applied to this orchestrator's
+    /// ledger (replayed at recovery or absorbed between ticks).
+    pub fn applied_lifecycle_adjustment_ids(&self) -> &std::collections::BTreeSet<String> {
+        &self.applied_lifecycle_adjustments
+    }
+
+    /// D2: absorb one durable, broker-evidenced options lifecycle adjustment
+    /// (exercise / assignment / expiration) into the canonical ledger.
+    ///
+    /// Called BETWEEN ticks by the owning loop -- never from inside a tick
+    /// phase -- so the tick's phase ordering is untouched. It is not a fill and
+    /// creates no order or broker event; it replays the journal row whose
+    /// deterministic `economic_apply_id` gates it. Returns `true` when newly
+    /// applied, `false` for an id already applied (zero mutation).
+    pub fn apply_lifecycle_adjustment(&mut self, adjustment: LifecycleAdjustment) -> bool {
+        if !self
+            .applied_lifecycle_adjustments
+            .insert(adjustment.economic_apply_id.clone())
+        {
+            return false;
+        }
+        apply_entry(
+            &mut self.portfolio,
+            LedgerEntry::LifecycleAdjustment(adjustment),
+        );
+        true
     }
     /// Immutable view of the current OMS order map.
     pub fn oms_orders(&self) -> &BTreeMap<String, OmsOrder> {

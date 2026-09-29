@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::types::{
-    CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, QtyMicros, Side,
+    CashEntry, Fill, LedgerEntry, LifecycleAdjustment, Lot, PortfolioState, PositionState,
+    QtyMicros, Side,
 };
 
 /// `qty_raw` (QtyMicros raw units, 1e-6 scale) * `price_micros` (1e-6 scale),
@@ -33,8 +34,102 @@ pub fn apply_entry(pf: &mut PortfolioState, entry: LedgerEntry) {
     match &entry {
         LedgerEntry::Fill(f) => apply_fill(pf, f),
         LedgerEntry::Cash(c) => apply_cash(pf, c),
+        LedgerEntry::LifecycleAdjustment(a) => apply_lifecycle_adjustment(pf, a),
     }
     pf.ledger.push(entry);
+}
+
+/// Apply one options lifecycle adjustment (exercise/assignment/expiration).
+///
+/// - Option: removes contracts toward flat FIFO (negative delta removes long
+///   lots, positive removes short lots); saturates at flat, never crossing into
+///   the opposite side, no realized P&L, no cash.
+/// - Underlying: opens/reduces lots through the ordinary FIFO at the strike
+///   basis, with NO cash movement of its own.
+/// - Cash: exactly the provider-signed `cash_delta_micros`.
+pub fn apply_lifecycle_adjustment(pf: &mut PortfolioState, adj: &LifecycleAdjustment) {
+    apply_lifecycle_adjustment_core(
+        &mut pf.cash_micros,
+        &mut pf.realized_pnl_micros,
+        &mut pf.positions,
+        adj,
+    );
+}
+
+fn apply_lifecycle_adjustment_core(
+    cash_micros: &mut i64,
+    realized_pnl_micros: &mut i64,
+    positions: &mut BTreeMap<String, PositionState>,
+    adj: &LifecycleAdjustment,
+) {
+    // 1. option position removal (no P&L, no cash).
+    if let Some(pos) = positions.get_mut(&adj.option_symbol) {
+        remove_lots_toward_flat(pos, adj.option_qty_delta);
+        if pos.is_flat() {
+            positions.remove(&adj.option_symbol);
+        }
+    }
+
+    // 2. underlying delivery at the strike basis (lots only).
+    if let Some(u) = &adj.underlying {
+        let pos = positions
+            .entry(u.symbol.clone())
+            .or_insert_with(|| PositionState::new(u.symbol.clone()));
+        if u.qty_delta.is_positive() {
+            buy_fifo(pos, realized_pnl_micros, u.qty_delta, u.basis_price_micros);
+        } else if u.qty_delta.is_negative() {
+            let qty = u.qty_delta.checked_abs().expect(
+                "underlying delta magnitude must be representable as its own absolute value",
+            );
+            sell_fifo(pos, realized_pnl_micros, qty, u.basis_price_micros);
+        }
+        if pos.is_flat() {
+            positions.remove(&u.symbol);
+        }
+    }
+
+    // 3. the provider's own signed cash.
+    *cash_micros = cash_micros.saturating_add(adj.cash_delta_micros);
+}
+
+/// Remove `delta`'s magnitude of lots FIFO from the side `delta` names
+/// (negative: long lots, positive: short lots), stopping at flat.
+fn remove_lots_toward_flat(pos: &mut PositionState, delta: QtyMicros) {
+    let remove_long = delta.is_negative();
+    let mut remaining = delta
+        .checked_abs()
+        .expect("lifecycle delta magnitude must be representable as its own absolute value");
+    let mut i = 0usize;
+    while remaining.is_positive() && i < pos.lots.len() {
+        let matches_side = if remove_long {
+            pos.lots[i].is_long()
+        } else {
+            pos.lots[i].is_short()
+        };
+        if !matches_side {
+            i += 1;
+            continue;
+        }
+        let take = pos.lots[i].abs_qty().min(remaining);
+        let left = pos.lots[i]
+            .abs_qty()
+            .checked_sub(take)
+            .expect("take is bounded by abs_qty(), so this subtraction cannot underflow");
+        remaining = remaining
+            .checked_sub(take)
+            .expect("take is bounded by remaining (via .min()), so this cannot underflow");
+        if left.is_zero() {
+            pos.lots.remove(i);
+        } else {
+            pos.lots[i].qty_signed = if remove_long {
+                left
+            } else {
+                left.checked_neg()
+                    .expect("remaining lot magnitude must be representable as its own negation")
+            };
+            i += 1;
+        }
+    }
 }
 
 /// Apply a cash entry: just affects cash.
@@ -209,6 +304,9 @@ pub fn recompute_from_ledger(
         match entry {
             LedgerEntry::Cash(c) => {
                 cash = cash.saturating_add(c.amount_micros);
+            }
+            LedgerEntry::LifecycleAdjustment(a) => {
+                apply_lifecycle_adjustment_core(&mut cash, &mut realized, &mut positions, a);
             }
             LedgerEntry::Fill(f) => {
                 // cash move

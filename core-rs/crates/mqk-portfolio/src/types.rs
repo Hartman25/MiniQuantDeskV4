@@ -135,11 +135,45 @@ impl CashEntry {
     }
 }
 
-/// Ledger entry types. PATCH 06 uses Fill and cash adjustments.
+/// The underlying-share half of a lifecycle adjustment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnderlyingAdjustment {
+    pub symbol: String,
+    /// Signed share delta (+ received, - delivered), from provider evidence.
+    pub qty_delta: QtyMicros,
+    /// Cost/proceeds basis of the delivered lot: the option's strike. Lots only
+    /// -- it never moves cash (the provider's signed cash is carried
+    /// separately in [`LifecycleAdjustment::cash_delta_micros`]).
+    pub basis_price_micros: i64,
+}
+
+/// The signed economic effect of ONE broker-evidenced options lifecycle event
+/// (exercise / assignment / expiration). Deliberately not a [`Fill`]: it never
+/// fabricates a trade price, and the cash is the provider's own signed
+/// `net_amount`, never `qty * price` re-derived to force consistency.
+///
+/// `economic_apply_id` is the deterministic identity of the durable journal row
+/// this entry replays; the same id must never be applied twice to one ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleAdjustment {
+    pub economic_apply_id: String,
+    pub option_symbol: String,
+    /// Signed change to the option position: negative removes long contracts,
+    /// positive removes short contracts. Never crosses through flat.
+    pub option_qty_delta: QtyMicros,
+    /// `None` for an expiration (no delivery).
+    pub underlying: Option<UnderlyingAdjustment>,
+    /// Provider-signed cash effect; 0 for an expiration.
+    pub cash_delta_micros: i64,
+}
+
+/// Ledger entry types. PATCH 06 uses Fill and cash adjustments; options
+/// lifecycle events are their own variant (never a synthetic fill).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerEntry {
     Fill(Fill),
     Cash(CashEntry),
+    LifecycleAdjustment(LifecycleAdjustment),
 }
 
 /// A FIFO lot. qty_signed carries direction:

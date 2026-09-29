@@ -54,6 +54,11 @@ pub enum LedgerError {
     EmptySymbol,
     /// The sequence number supplied is not strictly greater than the last.
     OutOfOrderSeqNo { supplied: u64, last: u64 },
+    /// A lifecycle adjustment failed validation (blank identity/symbol, zero
+    /// option or underlying delta, non-positive basis).
+    InvalidLifecycleAdjustment(&'static str),
+    /// This `economic_apply_id` has already been appended to this ledger.
+    DuplicateLifecycleAdjustment { economic_apply_id: String },
 }
 
 impl std::fmt::Display for LedgerError {
@@ -78,6 +83,13 @@ impl std::fmt::Display for LedgerError {
             Self::OutOfOrderSeqNo { supplied, last } => write!(
                 f,
                 "ledger invariant: seq_no {supplied} is not > last {last}"
+            ),
+            Self::InvalidLifecycleAdjustment(why) => {
+                write!(f, "ledger invariant: invalid lifecycle adjustment: {why}")
+            }
+            Self::DuplicateLifecycleAdjustment { economic_apply_id } => write!(
+                f,
+                "ledger invariant: lifecycle adjustment {economic_apply_id} already applied"
             ),
         }
     }
@@ -198,6 +210,43 @@ impl Ledger {
         let entry = CashEntry::new(amount_micros, reason);
         self.state.cash_micros = self.state.cash_micros.saturating_add(amount_micros);
         self.state.ledger.push(LedgerEntry::Cash(entry));
+        Ok(())
+    }
+
+    /// Append one options lifecycle adjustment (exercise / assignment /
+    /// expiration): removes the option position toward flat, delivers the
+    /// underlying at the strike basis and applies the provider-signed cash.
+    /// Idempotent by `economic_apply_id`: a repeat is refused, never applied
+    /// twice. The ledger is **not** mutated on error.
+    pub fn append_lifecycle_adjustment(
+        &mut self,
+        adj: crate::types::LifecycleAdjustment,
+    ) -> Result<(), LedgerError> {
+        if adj.economic_apply_id.trim().is_empty() || adj.option_symbol.trim().is_empty() {
+            return Err(LedgerError::InvalidLifecycleAdjustment(
+                "economic_apply_id and option_symbol must not be blank",
+            ));
+        }
+        if adj.option_qty_delta.is_zero() {
+            return Err(LedgerError::InvalidLifecycleAdjustment(
+                "option quantity delta must be non-zero",
+            ));
+        }
+        if let Some(u) = &adj.underlying {
+            if u.symbol.trim().is_empty() || u.qty_delta.is_zero() || u.basis_price_micros <= 0 {
+                return Err(LedgerError::InvalidLifecycleAdjustment(
+                    "underlying delivery needs a symbol, a non-zero quantity and a positive basis",
+                ));
+            }
+        }
+        if self.state.ledger.iter().any(|e| {
+            matches!(e, LedgerEntry::LifecycleAdjustment(a) if a.economic_apply_id == adj.economic_apply_id)
+        }) {
+            return Err(LedgerError::DuplicateLifecycleAdjustment {
+                economic_apply_id: adj.economic_apply_id,
+            });
+        }
+        crate::accounting::apply_entry(&mut self.state, LedgerEntry::LifecycleAdjustment(adj));
         Ok(())
     }
 

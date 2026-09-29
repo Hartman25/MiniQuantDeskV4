@@ -1,427 +1,349 @@
-//! D3 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION): the
-//! fail-closed pending-lifecycle gate.
-//! `mqk_daemon::state::option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate`
-//! must report `Pending` for any option symbol with unresolved D1 evidence,
-//! `Clear` once D2 has applied it, must be scoped to exactly the symbol
-//! asked about, and must be restart-safe (derived from durable DB state
-//! only, not in-memory).
+//! D3 (V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02): the options-lifecycle
+//! pending gate over the persisted state machine.
 //!
-//! # Coverage
+//! | Test | Claim                                                                     |
+//! |------|---------------------------------------------------------------------------|
+//! | G01  | The gate is CLOSED at every state except RECONCILED -- in particular at   |
+//! |      | APPLIED_AWAITING_BROKER: an applied marker alone never clears it          |
+//! | G02  | Both the option contract AND its underlying are fenced; an unrelated       |
+//! |      | symbol, another account and another execution domain are not               |
+//! | G03  | Only RECONCILED clears the gate                                            |
+//! | G04  | The state is durable: a fresh connection (restart) sees the same fence     |
+//! | G05  | The whole-account fence covers an option that vanished from a snapshot     |
 //!
-//! | Test | Claim                                                               |
-//! |------|-----------------------------------------------------------------------|
-//! | K01  | A symbol with an unresolved OPEXC (no paired OPTRD yet) is Pending    |
-//! | K02  | A symbol with no lifecycle activity at all is Clear                   |
-//! | K03  | A resolved (applied) OPEXP is Clear, not Pending                       |
-//! | K04  | Two DIFFERENT option symbols: one Pending, one Clear -- unrelated     |
-//! |      | symbols are unaffected by each other's state                          |
-//! | K05  | Applying the blocking activity via D2 clears K01's Pending symbol     |
-//! |      | to Clear -- complete evidence resolves it                             |
-//! | K06  | The gate answer survives a fresh pool connection against the same     |
-//! |      | committed DB state -- restart-safety, since the state is DB-derived   |
-//!
-//! # Proof boundary
-//!
-//! DB-backed (port 5434 test Postgres). Load-bearing institutional proof --
-//! must fail hard if `MQK_DATABASE_URL` is absent, not skip.
+//! DB-backed (port 5434 test Postgres); mock provider only; fresh account per
+//! test.
+
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use mqk_daemon::state::option_lifecycle_apply::{
-    apply_option_lifecycle_activity, OptionContractTerms,
+use mqk_broker_alpaca::types::AlpacaOptionLifecycleActivity;
+use mqk_daemon::state::option_lifecycle_apply::apply_ready_lifecycle_events;
+use mqk_daemon::state::option_lifecycle_cycle::{
+    run_option_lifecycle_cycle, OPTION_LIFECYCLE_ENGINE_ID,
 };
 use mqk_daemon::state::option_lifecycle_pending_gate::{
-    evaluate_option_lifecycle_pending_gate, OptionLifecycleGateStatus,
+    check_account_fence, check_symbol_fence, evaluate_option_lifecycle_pending_gate,
+    GateCheckError, OptionLifecycleGateStatus,
 };
-use mqk_db::option_lifecycle_activity::{
-    insert_option_lifecycle_activity_if_new, NewOptionLifecycleActivity,
-    OptionLifecycleActivityType,
-};
+use mqk_daemon::state::OptionLifecycleActivityFetcher;
+use mqk_db::option_lifecycle_activity::OptionLifecycleActivityType;
+use mqk_db::{mark_lifecycle_event_reconciled, BrokerAccountAuthority, LifecycleEventState};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const TEST_BROKER_ACCOUNT_ID: &str = "alpaca:test-acct";
+const CALL: &str = "AAPL230721C00150000";
+const SPY_CALL: &str = "SPY230721C00450000";
 
-fn require_db_url() -> String {
-    match std::env::var(mqk_db::ENV_DB_URL) {
+async fn require_pool() -> PgPool {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) if !v.trim().is_empty() => v,
-        _ => panic!(
-            "PROOF: MQK_DATABASE_URL is not set. \
-             This is a load-bearing proof test and cannot be skipped. \
-             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
-        ),
-    }
-}
-
-async fn require_pool(url: &str) -> anyhow::Result<PgPool> {
+        _ => panic!("PROOF: MQK_DATABASE_URL is not set; load-bearing proof cannot be skipped"),
+    };
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(8)
         .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(url)
-        .await?;
-    mqk_db::migrate(&pool).await?;
-    for provider in ["test-acct", "acct-a", "acct-b"] {
-        mqk_db::verify_or_register_broker_account_authority(
-            &pool,
-            &mqk_db::BrokerAccountAuthority::new("alpaca", provider, "paper")?,
-            chrono::Utc::now(),
-        )
-        .await?;
-    }
-    Ok(pool)
+        .connect(&url)
+        .await
+        .expect("connect");
+    mqk_db::migrate(&pool).await.expect("migrate");
+    pool
 }
 
-fn unique_option_symbol(label: &str) -> String {
-    format!(
-        "test-pending-gate-{}-{}::AAPL260619C00200000",
-        label,
-        Uuid::new_v4()
+fn fresh_authority(label: &str) -> BrokerAccountAuthority {
+    BrokerAccountAuthority::new(
+        "alpaca",
+        &format!("g-{label}-{}", Uuid::new_v4().simple()),
+        "paper",
     )
+    .unwrap()
 }
 
-fn lifecycle_activity(
-    activity_id: &str,
-    engine_id: &str,
-    activity_type: OptionLifecycleActivityType,
-    option_symbol: &str,
-    activity_date: &str,
-    qty_raw: &str,
-) -> NewOptionLifecycleActivity {
-    NewOptionLifecycleActivity {
-        activity_id: activity_id.to_string(),
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
-        engine_id: engine_id.to_string(),
-        mode: "PAPER".to_string(),
-        activity_type,
-        option_symbol: Some(option_symbol.to_string()),
-        underlying_symbol_raw: None,
-        activity_date: activity_date.to_string(),
-        qty_raw: qty_raw.to_string(),
-        price_raw: None,
-        net_amount_raw: "0".to_string(),
-        ingested_at_utc: Utc::now(),
-        provenance: Default::default(),
-        state_seed: None,
+fn act(
+    id: &str,
+    ty: &str,
+    symbol: &str,
+    qty: &str,
+    price: Option<&str>,
+    net: &str,
+) -> AlpacaOptionLifecycleActivity {
+    AlpacaOptionLifecycleActivity {
+        id: id.to_string(),
+        activity_type: ty.to_string(),
+        date: Some("2023-07-21".to_string()),
+        net_amount: net.to_string(),
+        description: None,
+        symbol: Some(symbol.to_string()),
+        qty: Some(qty.to_string()),
+        price: price.map(str::to_string),
+        status: Some("executed".to_string()),
+        group_id: None,
+        ref_id: None,
     }
 }
 
-/// The paired OPTRD row must share `activity_id` with its OPEXC/OPASN
-/// sibling (D1: the shared id is the real correlation evidence).
-fn paired_trade_activity(
-    activity_id: &str,
-    engine_id: &str,
-    underlying_symbol_raw: &str,
-    activity_date: &str,
-    qty_raw: &str,
-    price_raw: &str,
-    net_amount_raw: &str,
-) -> NewOptionLifecycleActivity {
-    NewOptionLifecycleActivity {
-        activity_id: activity_id.to_string(),
-        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
-        engine_id: engine_id.to_string(),
-        mode: "PAPER".to_string(),
-        activity_type: OptionLifecycleActivityType::PairedTrade,
-        option_symbol: None,
-        underlying_symbol_raw: Some(underlying_symbol_raw.to_string()),
-        activity_date: activity_date.to_string(),
-        qty_raw: qty_raw.to_string(),
-        price_raw: Some(price_raw.to_string()),
-        net_amount_raw: net_amount_raw.to_string(),
-        ingested_at_utc: Utc::now(),
-        provenance: Default::default(),
-        state_seed: None,
+struct MockFetcher {
+    authority: BrokerAccountAuthority,
+    rows: Mutex<Vec<AlpacaOptionLifecycleActivity>>,
+}
+
+impl OptionLifecycleActivityFetcher for MockFetcher {
+    fn fetch_option_lifecycle_activities_since(
+        &self,
+        activity_type: &str,
+        after_id: Option<&str>,
+    ) -> Result<Vec<AlpacaOptionLifecycleActivity>, String> {
+        let of_type: Vec<_> = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.activity_type == activity_type)
+            .cloned()
+            .collect();
+        Ok(match after_id {
+            None => of_type,
+            Some(a) => match of_type.iter().position(|r| r.id == a) {
+                Some(i) => of_type[i + 1..].to_vec(),
+                None => of_type,
+            },
+        })
+    }
+
+    fn broker_account_authority(&self) -> Result<BrokerAccountAuthority, String> {
+        Ok(self.authority.clone())
+    }
+}
+
+fn mock(
+    authority: BrokerAccountAuthority,
+    rows: Vec<AlpacaOptionLifecycleActivity>,
+) -> Arc<MockFetcher> {
+    Arc::new(MockFetcher {
+        authority,
+        rows: Mutex::new(rows),
+    })
+}
+
+async fn cycle(pool: &PgPool, f: &MockFetcher) {
+    run_option_lifecycle_cycle(pool, f, OPTION_LIFECYCLE_ENGINE_ID, Utc::now())
+        .await
+        .expect("cycle");
+}
+
+async fn gate(pool: &PgPool, key: &str, symbol: &str) -> OptionLifecycleGateStatus {
+    evaluate_option_lifecycle_pending_gate(pool, key, symbol)
+        .await
+        .expect("gate")
+}
+
+fn blocked_state(s: &OptionLifecycleGateStatus) -> Option<LifecycleEventState> {
+    match s {
+        OptionLifecycleGateStatus::Pending { state, .. } => Some(*state),
+        OptionLifecycleGateStatus::Clear => None,
     }
 }
 
 #[tokio::test]
-async fn k01_unresolved_exercise_is_pending() {
-    let url = require_db_url();
-    let pool = require_pool(&url).await.expect("pool");
-    let engine_id = format!("k01-{}", Uuid::new_v4());
-    let option_symbol = unique_option_symbol("k01");
-    let activity_id = format!("{engine_id}::opexc");
+async fn g01_closed_at_every_state_until_reconciled_including_applied() {
+    let pool = require_pool().await;
+    let auth = fresh_authority("g01");
+    let key = auth.key();
 
-    let a = lifecycle_activity(
-        &activity_id,
-        &engine_id,
-        OptionLifecycleActivityType::Exercise,
-        &option_symbol,
-        "2026-06-19",
-        "-1",
+    // PENDING_EVIDENCE: lifecycle row ingested, no trade yet.
+    let f = mock(
+        auth.clone(),
+        vec![act("L1", "OPEXC", CALL, "-2", None, "0")],
     );
-    insert_option_lifecycle_activity_if_new(&pool, &a)
+    cycle(&pool, &f).await;
+    assert_eq!(
+        blocked_state(&gate(&pool, &key, CALL).await),
+        Some(LifecycleEventState::PendingEvidence)
+    );
+
+    // READY_TO_APPLY.
+    *f.rows.lock().unwrap() = vec![
+        act("L1", "OPEXC", CALL, "-2", None, "0"),
+        act("L1", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
+    ];
+    cycle(&pool, &f).await;
+    assert_eq!(
+        blocked_state(&gate(&pool, &key, CALL).await),
+        Some(LifecycleEventState::ReadyToApply)
+    );
+
+    // APPLIED_AWAITING_BROKER: the economic adjustment is durably applied and
+    // the applied marker exists -- the gate must STILL be closed.
+    assert_eq!(
+        apply_ready_lifecycle_events(&pool, &key, Utc::now())
+            .await
+            .unwrap()
+            .applied,
+        1
+    );
+    assert_eq!(
+        blocked_state(&gate(&pool, &key, CALL).await),
+        Some(LifecycleEventState::AppliedAwaitingBroker),
+        "G01: an applied marker alone must never clear the gate"
+    );
+    assert_eq!(
+        blocked_state(&gate(&pool, &key, "AAPL").await),
+        Some(LifecycleEventState::AppliedAwaitingBroker),
+        "G01: the underlying stays fenced too"
+    );
+}
+
+#[tokio::test]
+async fn g01b_pending_ambiguous_keeps_the_gate_closed() {
+    let pool = require_pool().await;
+    let auth = fresh_authority("g01b");
+    let key = auth.key();
+    let f = mock(
+        auth,
+        vec![
+            act("L1", "OPEXC", CALL, "-2", None, "0"),
+            act("T1", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
+            act("T2", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
+        ],
+    );
+    cycle(&pool, &f).await;
+    assert_eq!(
+        blocked_state(&gate(&pool, &key, CALL).await),
+        Some(LifecycleEventState::PendingAmbiguous)
+    );
+}
+
+#[tokio::test]
+async fn g02_option_and_underlying_are_fenced_and_nothing_else_is() {
+    let pool = require_pool().await;
+    let auth = fresh_authority("g02");
+    let key = auth.key();
+    let other = fresh_authority("g02-other");
+    let f = mock(auth, vec![act("L1", "OPEXC", SPY_CALL, "-1", None, "0")]);
+    cycle(&pool, &f).await;
+
+    assert!(
+        gate(&pool, &key, SPY_CALL).await.must_fail_closed(),
+        "the option"
+    );
+    assert!(
+        gate(&pool, &key, "SPY").await.must_fail_closed(),
+        "its underlying"
+    );
+    for unrelated in ["AAPL", "MSFT", "BTC/USD", CALL] {
+        assert!(
+            !gate(&pool, &key, unrelated).await.must_fail_closed(),
+            "{unrelated} must not be fenced by a SPY option event"
+        );
+    }
+    assert!(
+        !gate(&pool, &other.key(), "SPY").await.must_fail_closed(),
+        "another account is unaffected"
+    );
+    // Another execution domain is unaffected.
+    let crypto = mqk_db::find_fencing_lifecycle_event(&pool, &key, "crypto_24_7", "SPY")
         .await
         .unwrap();
+    assert!(crypto.is_none());
+}
 
-    let status =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+#[tokio::test]
+async fn g03_only_reconciled_clears_the_gate() {
+    use OptionLifecycleActivityType::Exercise;
+    let pool = require_pool().await;
+    let auth = fresh_authority("g03");
+    let key = auth.key();
+    let f = mock(
+        auth,
+        vec![
+            act("L1", "OPEXC", CALL, "-2", None, "0"),
+            act("L1", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
+        ],
+    );
+    cycle(&pool, &f).await;
+    apply_ready_lifecycle_events(&pool, &key, Utc::now())
+        .await
+        .unwrap();
+    assert!(gate(&pool, &key, CALL).await.must_fail_closed());
+
+    assert!(
+        mark_lifecycle_event_reconciled(&pool, &key, "L1", Exercise, Utc::now())
             .await
-            .expect("gate must not error");
+            .unwrap()
+    );
+    assert_eq!(
+        gate(&pool, &key, CALL).await,
+        OptionLifecycleGateStatus::Clear
+    );
+    assert_eq!(
+        gate(&pool, &key, "AAPL").await,
+        OptionLifecycleGateStatus::Clear
+    );
+}
 
-    assert!(status.must_fail_closed());
-    match status {
-        OptionLifecycleGateStatus::Pending {
-            blocking_activity_id,
-            blocking_activity_type,
-        } => {
-            assert_eq!(blocking_activity_id, activity_id);
-            assert_eq!(
-                blocking_activity_type,
-                OptionLifecycleActivityType::Exercise
-            );
+#[tokio::test]
+async fn g04_the_fence_is_durable_across_a_restart() {
+    let pool = require_pool().await;
+    let auth = fresh_authority("g04");
+    let key = auth.key();
+    let f = mock(auth, vec![act("L1", "OPEXC", CALL, "-2", None, "0")]);
+    cycle(&pool, &f).await;
+    drop(pool);
+
+    // A brand-new pool == a restarted process reading only durable state.
+    let restarted = require_pool().await;
+    assert!(gate(&restarted, &key, CALL).await.must_fail_closed());
+    assert!(gate(&restarted, &key, "AAPL").await.must_fail_closed());
+}
+
+#[tokio::test]
+async fn g05_the_account_fence_and_the_fetcher_helpers_fail_closed() {
+    let pool = require_pool().await;
+    let auth = fresh_authority("g05");
+    let f = mock(auth, vec![act("L1", "OPEXP", CALL, "-1", None, "0")]);
+    cycle(&pool, &f).await;
+    let fetcher: Arc<dyn OptionLifecycleActivityFetcher> = f.clone();
+
+    // Whole-account fence: an option that has vanished from a broker snapshot
+    // cannot bypass it because ANY unreconciled event blocks adoption.
+    let account = check_account_fence(&pool, Some(&fetcher)).await.unwrap();
+    assert!(account.must_fail_closed());
+    assert!(check_symbol_fence(&pool, Some(&fetcher), "AAPL")
+        .await
+        .unwrap()
+        .must_fail_closed());
+    assert!(!check_symbol_fence(&pool, Some(&fetcher), "MSFT")
+        .await
+        .unwrap()
+        .must_fail_closed());
+
+    // No fetcher = no Alpaca account = vacuously clear.
+    assert_eq!(
+        check_account_fence(&pool, None).await.unwrap(),
+        OptionLifecycleGateStatus::Clear
+    );
+
+    // Unavailable authority is a refusal to evaluate, never a silent Clear.
+    struct NoAuthority;
+    impl OptionLifecycleActivityFetcher for NoAuthority {
+        fn fetch_option_lifecycle_activities_since(
+            &self,
+            _t: &str,
+            _a: Option<&str>,
+        ) -> Result<Vec<AlpacaOptionLifecycleActivity>, String> {
+            unreachable!()
         }
-        other => panic!("K01: expected Pending, got {other:?}"),
+        fn broker_account_authority(&self) -> Result<BrokerAccountAuthority, String> {
+            Err("account endpoint down".to_string())
+        }
     }
-}
-
-#[tokio::test]
-async fn k02_symbol_with_no_activity_is_clear() {
-    let url = require_db_url();
-    let pool = require_pool(&url).await.expect("pool");
-    let option_symbol = unique_option_symbol("k02");
-
-    let status =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
-            .await
-            .expect("gate must not error");
-
-    assert_eq!(status, OptionLifecycleGateStatus::Clear);
-    assert!(!status.must_fail_closed());
-}
-
-#[tokio::test]
-async fn k03_applied_expiration_is_clear_not_pending() {
-    let url = require_db_url();
-    let pool = require_pool(&url).await.expect("pool");
-    let engine_id = format!("k03-{}", Uuid::new_v4());
-    let option_symbol = unique_option_symbol("k03");
-    let activity_id = format!("{engine_id}::opexp");
-
-    let a = lifecycle_activity(
-        &activity_id,
-        &engine_id,
-        OptionLifecycleActivityType::Expiration,
-        &option_symbol,
-        "2026-06-19",
-        "-1",
-    );
-    insert_option_lifecycle_activity_if_new(&pool, &a)
-        .await
-        .unwrap();
-
-    let terms = OptionContractTerms {
-        strike_micros: 200_000_000,
-        multiplier: 100,
-        is_call: true,
-        underlying_symbol: "AAPL".to_string(),
-    };
-    apply_option_lifecycle_activity(
-        &pool,
-        TEST_BROKER_ACCOUNT_ID,
-        &engine_id,
-        "PAPER",
-        &activity_id,
-        OptionLifecycleActivityType::Expiration,
-        &terms,
-        Utc::now(),
-    )
-    .await
-    .expect("apply must not error");
-
-    let status =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
-            .await
-            .expect("gate must not error");
-
-    assert_eq!(
-        status,
-        OptionLifecycleGateStatus::Clear,
-        "K03: expiration already applied by D2 -- gate must report Clear"
-    );
-}
-
-#[tokio::test]
-async fn k04_unrelated_symbols_do_not_affect_each_other() {
-    let url = require_db_url();
-    let pool = require_pool(&url).await.expect("pool");
-    let engine_id = format!("k04-{}", Uuid::new_v4());
-    let pending_symbol = unique_option_symbol("k04-pending");
-    let clear_symbol = unique_option_symbol("k04-clear");
-    let activity_id = format!("{engine_id}::opexc");
-
-    let a = lifecycle_activity(
-        &activity_id,
-        &engine_id,
-        OptionLifecycleActivityType::Exercise,
-        &pending_symbol,
-        "2026-06-19",
-        "-1",
-    );
-    insert_option_lifecycle_activity_if_new(&pool, &a)
-        .await
-        .unwrap();
-
-    let pending_status =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &pending_symbol)
-            .await
-            .expect("gate must not error");
-    let clear_status =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &clear_symbol)
-            .await
-            .expect("gate must not error");
-
-    assert!(
-        pending_status.must_fail_closed(),
-        "K04: the symbol with unresolved evidence must fail closed"
-    );
-    assert!(
-        !clear_status.must_fail_closed(),
-        "K04: an unrelated symbol with zero activity of its own must remain Clear -- \
-         one symbol's pending state must never leak into another's"
-    );
-}
-
-#[tokio::test]
-async fn k05_applying_the_blocking_activity_clears_the_gate() {
-    let url = require_db_url();
-    let pool = require_pool(&url).await.expect("pool");
-    let engine_id = format!("k05-{}", Uuid::new_v4());
-    let option_symbol = unique_option_symbol("k05");
-    let activity_id = format!("{engine_id}::opexc");
-
-    let a = lifecycle_activity(
-        &activity_id,
-        &engine_id,
-        OptionLifecycleActivityType::Exercise,
-        &option_symbol,
-        "2026-06-19",
-        "-1",
-    );
-    insert_option_lifecycle_activity_if_new(&pool, &a)
-        .await
-        .unwrap();
-
-    let before =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
-            .await
-            .expect("gate must not error");
-    assert!(
-        before.must_fail_closed(),
-        "K05: precondition -- must start Pending before evidence completes"
-    );
-
-    // No paired OPTRD ingested -- D2 itself must remain Pending, and the
-    // gate must therefore remain Pending too (evidence is genuinely
-    // incomplete, not merely unattempted).
-    let terms = OptionContractTerms {
-        strike_micros: 200_000_000,
-        multiplier: 100,
-        is_call: true,
-        underlying_symbol: "AAPL".to_string(),
-    };
-    let outcome = apply_option_lifecycle_activity(
-        &pool,
-        TEST_BROKER_ACCOUNT_ID,
-        &engine_id,
-        "PAPER",
-        &activity_id,
-        OptionLifecycleActivityType::Exercise,
-        &terms,
-        Utc::now(),
-    )
-    .await
-    .expect("apply must not error");
+    let broken: Arc<dyn OptionLifecycleActivityFetcher> = Arc::new(NoAuthority);
     assert!(matches!(
-        outcome,
-        mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Pending { .. }
+        check_symbol_fence(&pool, Some(&broken), "AAPL").await,
+        Err(GateCheckError::AuthorityUnavailable(_))
     ));
-
-    let still_pending =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
-            .await
-            .expect("gate must not error");
-    assert!(
-        still_pending.must_fail_closed(),
-        "K05: an apply attempt that itself resolves to Pending (missing OPTRD) \
-         must not clear the gate -- no synthetic evidence"
-    );
-
-    // Now ingest the paired OPTRD (SAME activity_id -- the real
-    // provider-documented correlation evidence) and apply again -- genuine
-    // completion.
-    let trade = paired_trade_activity(
-        &activity_id,
-        &engine_id,
-        "AAPL",
-        "2026-06-19",
-        "100",
-        "200.00",
-        "-20000",
-    );
-    insert_option_lifecycle_activity_if_new(&pool, &trade)
-        .await
-        .unwrap();
-
-    let outcome = apply_option_lifecycle_activity(
-        &pool,
-        TEST_BROKER_ACCOUNT_ID,
-        &engine_id,
-        "PAPER",
-        &activity_id,
-        OptionLifecycleActivityType::Exercise,
-        &terms,
-        Utc::now(),
-    )
-    .await
-    .expect("apply must not error");
     assert!(matches!(
-        outcome,
-        mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Applied(_)
+        check_account_fence(&pool, Some(&broken)).await,
+        Err(GateCheckError::AuthorityUnavailable(_))
     ));
-
-    let after =
-        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
-            .await
-            .expect("gate must not error");
-    assert_eq!(
-        after,
-        OptionLifecycleGateStatus::Clear,
-        "K05: complete evidence + broker agreement (matching OPTRD) must clear the gate"
-    );
-}
-
-#[tokio::test]
-async fn k06_gate_answer_survives_a_fresh_pool_restart_simulation() {
-    let url = require_db_url();
-    let pool_a = require_pool(&url).await.expect("pool a");
-    let engine_id = format!("k06-{}", Uuid::new_v4());
-    let option_symbol = unique_option_symbol("k06");
-    let activity_id = format!("{engine_id}::opexc");
-
-    let a = lifecycle_activity(
-        &activity_id,
-        &engine_id,
-        OptionLifecycleActivityType::Exercise,
-        &option_symbol,
-        "2026-06-19",
-        "-1",
-    );
-    insert_option_lifecycle_activity_if_new(&pool_a, &a)
-        .await
-        .unwrap();
-    pool_a.close().await;
-
-    // A brand new pool/connection, as a fresh process would open on
-    // restart -- no in-memory state is shared with pool_a.
-    let pool_b = require_pool(&url).await.expect("pool b");
-    let status =
-        evaluate_option_lifecycle_pending_gate(&pool_b, TEST_BROKER_ACCOUNT_ID, &option_symbol)
-            .await
-            .expect("gate must not error");
-
-    assert!(
-        status.must_fail_closed(),
-        "K06: pending state must be visible to a completely fresh connection -- \
-         it is derived from committed DB rows, not process memory"
-    );
 }

@@ -941,39 +941,61 @@ async fn register_d3_account(pool: &sqlx::PgPool, provider_id: &str) -> String {
     a.key()
 }
 
-async fn seed_pending_opexc(
+async fn seed_pending_lifecycle(
     pool: &sqlx::PgPool,
     broker_account_id: &str,
-    option_symbol: &str,
+    underlying: &str,
     engine_id: &str,
+    ty: mqk_db::option_lifecycle_activity::OptionLifecycleActivityType,
 ) -> String {
     use mqk_db::option_lifecycle_activity::{
         insert_option_lifecycle_activity_if_new, NewOptionLifecycleActivity,
-        OptionLifecycleActivityType,
     };
     let activity_id = unique_id("d3-opexc");
+    // Exactly what the ingestion transaction writes for a lifecycle row: the
+    // raw row (a real OCC contract) plus its PENDING_EVIDENCE state row, with
+    // the underlying proven from the contract.
     insert_option_lifecycle_activity_if_new(
         pool,
         &NewOptionLifecycleActivity {
             activity_id: activity_id.clone(),
             broker_account_id: broker_account_id.to_string(),
             engine_id: engine_id.to_string(),
-            mode: "PAPER".to_string(),
-            activity_type: OptionLifecycleActivityType::Exercise,
-            option_symbol: Some(option_symbol.to_string()),
+            mode: "paper".to_string(),
+            activity_type: ty,
+            option_symbol: Some(format!("{underlying}230721C00150000")),
             underlying_symbol_raw: None,
-            activity_date: "2026-06-19".to_string(),
+            activity_date: "2023-07-21".to_string(),
             qty_raw: "-1".to_string(),
             price_raw: None,
             net_amount_raw: "0".to_string(),
             ingested_at_utc: Utc::now(),
             provenance: Default::default(),
-            state_seed: None,
+            state_seed: Some(mqk_db::LifecycleStateSeed {
+                execution_domain: "equity_nyse".to_string(),
+                underlying_symbol: Some(underlying.to_string()),
+            }),
         },
     )
     .await
-    .expect("seed_pending_opexc: insert failed");
+    .expect("seed_pending_lifecycle: insert failed");
     activity_id
+}
+
+async fn seed_pending_opexc(
+    pool: &sqlx::PgPool,
+    broker_account_id: &str,
+    underlying: &str,
+    engine_id: &str,
+) -> String {
+    seed_pending_lifecycle(
+        pool,
+        broker_account_id,
+        underlying,
+        engine_id,
+        mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
+    )
+    .await
 }
 
 /// D3 / Gate 7b: a decision for a symbol with unresolved D1 lifecycle
@@ -1137,86 +1159,85 @@ async fn decision_unblocked_after_d2_applies_the_blocking_activity() {
     let st = Arc::new(st_inner);
     let run_id = seed_active_run(&st).await;
 
-    let activity_id = seed_pending_opexc(&pool, &broker_account_id, "AAPL", "mqk-daemon").await;
+    let activity_id = seed_pending_lifecycle(
+        &pool,
+        &broker_account_id,
+        "AAPL",
+        "mqk-daemon",
+        mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Expiration,
+    )
+    .await;
 
     // Precondition: blocked.
     let blocked =
         submit_internal_strategy_decision(&st, make_decision(&unique_id("dec"), &sid)).await;
     assert_eq!(blocked.disposition, "rejected");
 
-    // Expiration needs no paired trade -- apply it directly (D2).
-    let applied = mqk_daemon::state::option_lifecycle_apply::apply_option_lifecycle_activity(
-        &pool,
-        &broker_account_id,
-        "mqk-daemon",
-        "PAPER",
-        &activity_id,
-        mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
-        &mqk_daemon::state::option_lifecycle_apply::OptionContractTerms {
-            strike_micros: 200_000_000,
-            multiplier: 100,
-            is_call: true,
-            underlying_symbol: "AAPL".to_string(),
-        },
-        Utc::now(),
-    )
-    .await;
-    // No paired OPTRD was seeded, so D2 itself stays Pending -- the gate
-    // must therefore ALSO remain Pending (never falsely cleared by an
-    // incomplete apply attempt). Assert that precondition explicitly,
-    // then seed the paired trade and re-apply to genuinely resolve it.
-    assert!(matches!(
-        applied,
-        Ok(mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Pending { .. })
-    ));
-
-    use mqk_db::option_lifecycle_activity::{
-        insert_option_lifecycle_activity_if_new, NewOptionLifecycleActivity,
-        OptionLifecycleActivityType,
+    // Drive the event through the real state machine. The gate must stay
+    // CLOSED while it is READY and while it is APPLIED_AWAITING_BROKER (an
+    // applied marker exists!), and clear only at RECONCILED.
+    use mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Expiration;
+    use mqk_db::{
+        apply_lifecycle_adjustment_tx, mark_lifecycle_event_reconciled,
+        record_lifecycle_evaluation, CorrelationBasis, LifecycleEvaluation, LifecycleEventState,
+        NewLifecycleAdjustment,
     };
-    insert_option_lifecycle_activity_if_new(
-        &pool,
-        &NewOptionLifecycleActivity {
-            activity_id: activity_id.clone(),
-            broker_account_id: broker_account_id.clone(),
-            engine_id: "mqk-daemon".to_string(),
-            mode: "PAPER".to_string(),
-            activity_type: OptionLifecycleActivityType::PairedTrade,
-            option_symbol: None,
-            underlying_symbol_raw: Some("AAPL".to_string()),
-            activity_date: "2026-06-19".to_string(),
-            qty_raw: "100".to_string(),
-            price_raw: Some("200.00".to_string()),
-            net_amount_raw: "-20000".to_string(),
-            ingested_at_utc: Utc::now(),
-            provenance: Default::default(),
-            state_seed: None,
-        },
-    )
-    .await
-    .expect("seed paired trade failed");
-
-    let applied = mqk_daemon::state::option_lifecycle_apply::apply_option_lifecycle_activity(
+    assert!(record_lifecycle_evaluation(
         &pool,
         &broker_account_id,
-        "mqk-daemon",
-        "PAPER",
         &activity_id,
-        OptionLifecycleActivityType::Exercise,
-        &mqk_daemon::state::option_lifecycle_apply::OptionContractTerms {
-            strike_micros: 200_000_000,
-            multiplier: 100,
-            is_call: true,
-            underlying_symbol: "AAPL".to_string(),
+        Expiration,
+        &LifecycleEvaluation {
+            state: LifecycleEventState::ReadyToApply,
+            reason: "test".to_string(),
+            underlying_symbol: Some("AAPL".to_string()),
+            correlated_optrd_activity_id: None,
+            correlation_basis: Some(CorrelationBasis::NotRequired),
         },
         Utc::now(),
     )
     .await
-    .expect("apply must not error");
-    assert!(matches!(
-        applied,
-        mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Applied(_)
-    ));
+    .expect("evaluation"));
+    let ready =
+        submit_internal_strategy_decision(&st, make_decision(&unique_id("dec"), &sid)).await;
+    assert_eq!(
+        ready.disposition, "rejected",
+        "READY_TO_APPLY keeps the gate closed"
+    );
+
+    apply_lifecycle_adjustment_tx(
+        &pool,
+        &NewLifecycleAdjustment {
+            broker_account_id: broker_account_id.clone(),
+            execution_domain: "equity_nyse".to_string(),
+            lifecycle_activity_id: activity_id.clone(),
+            lifecycle_activity_type: Expiration,
+            option_symbol: "AAPL230721C00150000".to_string(),
+            underlying_symbol: "AAPL".to_string(),
+            option_qty_delta_micros: -1_000_000,
+            underlying: None,
+            correlation_basis: CorrelationBasis::NotRequired,
+            applied_at_utc: Utc::now(),
+        },
+    )
+    .await
+    .expect("apply");
+    let applied =
+        submit_internal_strategy_decision(&st, make_decision(&unique_id("dec"), &sid)).await;
+    assert_eq!(
+        applied.disposition, "rejected",
+        "APPLIED_AWAITING_BROKER keeps the gate closed: an applied marker alone never clears it"
+    );
+
+    assert!(mark_lifecycle_event_reconciled(
+        &pool,
+        &broker_account_id,
+        &activity_id,
+        Expiration,
+        Utc::now()
+    )
+    .await
+    .expect("reconcile"));
 
     // Postcondition: a NEW decision for the same symbol is no longer
     // refused for the options-lifecycle reason.

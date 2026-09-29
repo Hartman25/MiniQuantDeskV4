@@ -132,6 +132,56 @@ fn lifecycle_facts(
     }
 }
 
+/// The provider-signed settlement evidence of a verified `OPTRD` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementEvidence {
+    /// Signed share delta (+ received, - delivered).
+    pub underlying_qty_delta_micros: i64,
+    /// Provider-signed `net_amount`, exactly as reported.
+    pub cash_delta_micros: i64,
+}
+
+/// A lifecycle event whose every fact has been verified, with the signed
+/// economics apply consumes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSettlement {
+    pub contract: OptionContractIdentity,
+    /// The lifecycle row's own signed contract delta.
+    pub option_qty_delta_micros: i64,
+    /// `Some` for exercise/assignment, `None` for expiration.
+    pub settlement: Option<SettlementEvidence>,
+}
+
+/// The single verification of a lifecycle event against its settlement trade,
+/// used by correlation (to filter candidates) and by apply (to re-verify
+/// before any economic mutation). An expiration takes no trade (`optrd` must
+/// be `None`); an exercise/assignment requires one that satisfies every fact.
+pub fn verify_lifecycle_settlement(
+    lifecycle: &NewOptionLifecycleActivity,
+    optrd: Option<&NewOptionLifecycleActivity>,
+) -> Result<VerifiedSettlement, String> {
+    let (contract, contracts_micros) = lifecycle_facts(lifecycle).map_err(|(_, reason)| reason)?;
+    match (lifecycle.activity_type, optrd) {
+        (OptionLifecycleActivityType::Expiration, None) => Ok(VerifiedSettlement {
+            contract,
+            option_qty_delta_micros: contracts_micros,
+            settlement: None,
+        }),
+        (OptionLifecycleActivityType::Expiration, Some(_)) => {
+            Err("an expiration must not carry a settlement trade".to_string())
+        }
+        (_, None) => Err("exercise/assignment requires its settlement trade".to_string()),
+        (_, Some(o)) => {
+            let settlement = optrd_satisfies_facts(lifecycle, &contract, contracts_micros, o)?;
+            Ok(VerifiedSettlement {
+                contract,
+                option_qty_delta_micros: contracts_micros,
+                settlement: Some(settlement),
+            })
+        }
+    }
+}
+
 /// Every economic fact an `OPTRD` row must satisfy against the lifecycle
 /// event. `Err` carries the first violated fact (diagnostic only).
 pub fn optrd_satisfies_facts(
@@ -139,7 +189,7 @@ pub fn optrd_satisfies_facts(
     contract: &OptionContractIdentity,
     contracts_signed_micros: i64,
     optrd: &NewOptionLifecycleActivity,
-) -> Result<(), String> {
+) -> Result<SettlementEvidence, String> {
     if optrd.activity_type != OptionLifecycleActivityType::PairedTrade {
         return Err("not an OPTRD row".to_string());
     }
@@ -187,7 +237,10 @@ pub fn optrd_satisfies_facts(
     if i128::from(net) != expected_net {
         return Err("OPTRD net_amount is not the signed strike cash".to_string());
     }
-    Ok(())
+    Ok(SettlementEvidence {
+        underlying_qty_delta_micros: shares,
+        cash_delta_micros: net,
+    })
 }
 
 /// Correlate one lifecycle event.

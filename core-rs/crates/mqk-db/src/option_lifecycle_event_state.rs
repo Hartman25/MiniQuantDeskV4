@@ -294,3 +294,70 @@ pub async fn record_lifecycle_evaluation(
     .context("record_lifecycle_evaluation failed")?;
     Ok(result.rows_affected() == 1)
 }
+
+/// The oldest lifecycle event of `(account, domain)` that has not reached
+/// `RECONCILED` and fences `symbol` -- as the event's option contract OR as
+/// its proven underlying. (One representative row for the operator message;
+/// this is a fence test, not a pairing.)
+pub async fn find_fencing_lifecycle_event(
+    pool: &PgPool,
+    broker_account_id: &str,
+    execution_domain: &str,
+    symbol: &str,
+) -> Result<Option<OptionLifecycleEventStateRow>> {
+    let q = format!(
+        "select {STATE_COLUMNS} from sys_option_lifecycle_event_state          where broker_account_id = $1 and execution_domain = $2 and state <> 'RECONCILED'            and (option_symbol = $3 or underlying_symbol = $3)          order by created_at_utc asc, lifecycle_activity_id asc, lifecycle_activity_type asc          limit 1"
+    );
+    let row: Option<StateRow> = sqlx::query_as(&q)
+        .bind(broker_account_id)
+        .bind(execution_domain)
+        .bind(symbol)
+        .fetch_optional(pool)
+        .await
+        .context("find_fencing_lifecycle_event failed")?;
+    row.map(row_to_state).transpose()
+}
+
+/// Any unreconciled lifecycle event of `(account, domain)` -- the whole-account
+/// fence for operations that overwrite local truth for every symbol at once.
+pub async fn find_any_unreconciled_lifecycle_event(
+    pool: &PgPool,
+    broker_account_id: &str,
+    execution_domain: &str,
+) -> Result<Option<OptionLifecycleEventStateRow>> {
+    let q = format!(
+        "select {STATE_COLUMNS} from sys_option_lifecycle_event_state          where broker_account_id = $1 and execution_domain = $2 and state <> 'RECONCILED'          order by created_at_utc asc, lifecycle_activity_id asc, lifecycle_activity_type asc          limit 1"
+    );
+    let row: Option<StateRow> = sqlx::query_as(&q)
+        .bind(broker_account_id)
+        .bind(execution_domain)
+        .fetch_optional(pool)
+        .await
+        .context("find_any_unreconciled_lifecycle_event failed")?;
+    row.map(row_to_state).transpose()
+}
+
+/// Every `APPLIED_AWAITING_BROKER` event of accounts registered under
+/// `deployment_mode` in `execution_domain` -- the set a reconcile pass tries to
+/// move to `RECONCILED`.
+pub async fn list_awaiting_broker_lifecycle_events(
+    pool: &PgPool,
+    execution_domain: &str,
+    deployment_mode: &str,
+) -> Result<Vec<OptionLifecycleEventStateRow>> {
+    let cols = STATE_COLUMNS
+        .split(", ")
+        .map(|c| format!("s.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let q = format!(
+        "select {cols} from sys_option_lifecycle_event_state s          join sys_broker_account_authority a on a.authority_key = s.broker_account_id          where s.execution_domain = $1 and a.deployment_mode = $2            and s.state = 'APPLIED_AWAITING_BROKER'          order by s.created_at_utc asc, s.lifecycle_activity_id asc, s.lifecycle_activity_type asc"
+    );
+    let rows: Vec<StateRow> = sqlx::query_as(&q)
+        .bind(execution_domain)
+        .bind(deployment_mode)
+        .fetch_all(pool)
+        .await
+        .context("list_awaiting_broker_lifecycle_events failed")?;
+    rows.into_iter().map(row_to_state).collect()
+}

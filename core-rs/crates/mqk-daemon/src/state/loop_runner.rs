@@ -336,6 +336,39 @@ async fn persist_tick_failure_diagnostic(
 // spawn_execution_loop
 // ---------------------------------------------------------------------------
 
+/// D2: apply every journal entry the orchestrator's ledger has not yet
+/// absorbed, in journal order. The full unsubsumed list is read each time (a
+/// handful of rows) and deduplicated by `economic_apply_id` inside the
+/// orchestrator -- a `journal_seq` watermark would be unsafe because identity
+/// values are allocated before commit, so a lower seq can become visible after
+/// a higher one.
+async fn absorb_lifecycle_adjustments(
+    pool: &sqlx::PgPool,
+    state: &Arc<AppState>,
+    orchestrator: &mut DaemonOrchestrator,
+) -> anyhow::Result<()> {
+    let entries = mqk_db::list_unsubsumed_lifecycle_journal(
+        pool,
+        super::option_lifecycle_ingestion::OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
+        state.deployment_mode().as_api_label(),
+    )
+    .await?;
+    for entry in entries {
+        if orchestrator
+            .applied_lifecycle_adjustment_ids()
+            .contains(&entry.economic_apply_id)
+        {
+            continue;
+        }
+        let adjustment = super::option_lifecycle_ledger::journal_entry_to_ledger_adjustment(&entry)
+            .map_err(|e| {
+                anyhow::anyhow!("journal entry {} untranslatable: {e}", entry.journal_seq)
+            })?;
+        orchestrator.apply_lifecycle_adjustment(adjustment);
+    }
+    Ok(())
+}
+
 pub(super) fn spawn_execution_loop(
     state: Arc<AppState>,
     mut orchestrator: DaemonOrchestrator,
@@ -480,6 +513,8 @@ pub(super) fn spawn_execution_loop(
         // anywhere else. No selector/plan-builder/promotion/evidence call
         // occurs anywhere in this loop.
         let mut dispatch_authority = dispatch_authority;
+        // D2: true only for an EquityNyse run (see `enable_lifecycle_absorb`).
+        let lifecycle_absorb = state_arc.take_lifecycle_absorb(run_id);
         loop {
             tokio::select! {
                 changed = stop_rx.changed() => {
@@ -697,6 +732,23 @@ pub(super) fn spawn_execution_loop(
                         };
                         drop_outside_async_context(orchestrator);
                         return exit;
+                    }
+
+                    // D2: absorb newly applied options-lifecycle adjustments into
+                    // the canonical ledger BETWEEN ticks (never inside a tick
+                    // phase). Failure is non-fatal: the affected option and its
+                    // underlying stay fenced by the lifecycle gate until the
+                    // broker-agreement step proves the absorbed state.
+                    if let (true, Some(pool)) = (lifecycle_absorb, db.as_ref()) {
+                        if let Err(err) =
+                            absorb_lifecycle_adjustments(pool, &state_arc, &mut orchestrator).await
+                        {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                error = %err,
+                                "option_lifecycle_absorb_failed: will retry next tick"
+                            );
+                        }
                     }
 
                     if let Err(err) = orchestrator.tick().await {

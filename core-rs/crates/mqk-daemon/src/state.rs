@@ -34,6 +34,7 @@ pub mod option_lifecycle_correlation;
 pub mod option_lifecycle_cycle;
 pub(crate) mod option_lifecycle_decimal;
 pub mod option_lifecycle_ingestion;
+pub mod option_lifecycle_ledger;
 pub mod option_lifecycle_pending_gate;
 pub mod option_lifecycle_poll;
 pub use option_lifecycle_poll::spawn_option_lifecycle_poll_task;
@@ -1032,6 +1033,11 @@ pub struct AppState {
     /// Nothing schedules this automatically; no HTTP route is wired by
     /// this patch.
     pub option_lifecycle_activity_fetcher: Option<Arc<dyn OptionLifecycleActivityFetcher>>,
+    /// D2: runs that absorb options-lifecycle journal entries into their
+    /// orchestrator's ledger. Present only for an EquityNyse run (options
+    /// settle into the equity domain); set by the orchestrator build after the
+    /// recovery replay, consumed once by the loop.
+    lifecycle_absorb_runs: Arc<std::sync::Mutex<std::collections::BTreeSet<Uuid>>>,
     /// BROKER-POSITION-BASELINE-ADOPTION-01: Adopted broker position baseline.
     ///
     /// Operator-confirmed local truth snapshot used by the reconcile tick as
@@ -1909,6 +1915,24 @@ impl AppState {
         self.option_lifecycle_activity_fetcher = Some(fetcher);
     }
 
+    /// D2: mark a run as absorbing options-lifecycle journal entries (EquityNyse
+    /// runs only, after their recovery replay).
+    pub(crate) fn enable_lifecycle_absorb(&self, run_id: Uuid) {
+        self.lifecycle_absorb_runs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(run_id);
+    }
+
+    /// D2: consume a run's absorb flag (`false` = this run does not absorb
+    /// lifecycle adjustments).
+    pub(crate) fn take_lifecycle_absorb(&self, run_id: Uuid) -> bool {
+        self.lifecycle_absorb_runs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&run_id)
+    }
+
     /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Test helper — inject an on-demand
     /// broker snapshot fetcher.
     ///
@@ -2322,6 +2346,7 @@ impl AppState {
             ws_gap_fill_fetcher,
             crypto_fee_activity_fetcher,
             option_lifecycle_activity_fetcher,
+            lifecycle_absorb_runs: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
             broker_baseline: Arc::new(RwLock::new(None)),
             snapshot_fetcher,
             asset_shortable_preflight_fetcher,

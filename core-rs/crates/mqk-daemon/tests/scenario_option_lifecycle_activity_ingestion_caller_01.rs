@@ -390,10 +390,11 @@ async fn l05_opexc_then_optrd_sharing_the_identical_id_both_persist_through_the_
          never dropped as a false duplicate through the real production caller"
     );
 
-    let paired = mqk_db::option_lifecycle_activity::find_paired_trade_activity(
+    let paired = mqk_db::option_lifecycle_activity::fetch_option_lifecycle_activity(
         &pool,
         TEST_BROKER_ACCOUNT_ID,
         &shared_id,
+        mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::PairedTrade,
     )
     .await
     .expect("lookup must succeed")

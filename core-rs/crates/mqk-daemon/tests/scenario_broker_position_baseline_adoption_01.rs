@@ -1075,7 +1075,7 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
             engine_id: "mqk-daemon".to_string(),
             mode: "PAPER".to_string(),
             activity_type: mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
-            option_symbol: Some("AAPL".to_string()),
+            option_symbol: Some("AAPL230721C00150000".to_string()),
             underlying_symbol_raw: None,
             activity_date: "2026-06-19".to_string(),
             qty_raw: "-1".to_string(),
@@ -1083,7 +1083,10 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
             net_amount_raw: "0".to_string(),
             ingested_at_utc: chrono::Utc::now(),
             provenance: Default::default(),
-            state_seed: None,
+            state_seed: Some(mqk_db::LifecycleStateSeed {
+                execution_domain: "equity_nyse".to_string(),
+                underlying_symbol: Some("AAPL".to_string()),
+            }),
         },
     )
     .await

@@ -256,6 +256,29 @@ impl AppState {
             seed_portfolio_from_baseline(&mut portfolio, &baseline);
         }
 
+        // D2: replay durable options-lifecycle adjustments (exercise /
+        // assignment / expiration) into the canonical ledger on top of the
+        // baseline + fills. Options settle into the equity domain, so only an
+        // EquityNyse run replays; the journal never feeds another domain's
+        // ledger. A journal row that cannot be translated fails the whole
+        // start closed -- a portfolio that silently omitted real economic
+        // evidence must never trade.
+        let lifecycle_replay = if matches!(domain, super::ExecutionDomain::EquityNyse) {
+            let replay = super::option_lifecycle_ledger::replay_lifecycle_journal_into_portfolio(
+                &db,
+                self.deployment_mode().as_api_label(),
+                &mut portfolio,
+            )
+            .await
+            .map_err(|err| {
+                RuntimeLifecycleError::internal("option lifecycle journal replay failed", err)
+            })?;
+            self.enable_lifecycle_absorb(run_id);
+            replay
+        } else {
+            super::option_lifecycle_ledger::LifecycleReplay::default()
+        };
+
         {
             let mut sides_lock = self.local_order_sides.write().await;
             *sides_lock = recovered_sides.clone();
@@ -542,6 +565,8 @@ impl AppState {
             Box::new(local_snapshot_provider),
             Box::new(broker_snapshot_provider),
         );
+
+        orch.seed_applied_lifecycle_adjustments(lifecycle_replay.applied_ids);
 
         // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01 /
         // PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01: wire the terminal-fill

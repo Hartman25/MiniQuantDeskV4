@@ -1,77 +1,168 @@
-//! D3 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION): the
-//! fail-closed gate a future options execution/reconcile caller must
-//! consult before treating broker truth as ground truth for an option
-//! symbol whose lifecycle evidence is not yet complete.
+//! D3: the options-lifecycle pending gate over the persisted lifecycle state
+//! machine.
 //!
-//! Invariant: a broker position change for an option/underlying observed
-//! before its `OPEXC`/`OPASN`/`OPEXP` lifecycle evidence has been fully
-//! applied (D2) must never be treated as a normal fill or used to
-//! overwrite a local snapshot. The affected option becomes
-//! lifecycle-pending; execution touching it fails closed. Unrelated
-//! symbols/domains are unaffected -- this module never inspects or reports
-//! on any symbol other than the one the caller asks about.
+//! A lifecycle event fences BOTH its option contract and its underlying until
+//! it is `RECONCILED` -- i.e. until the durable economic adjustment has been
+//! applied (D2) AND a fresh authenticated broker snapshot agreed with the
+//! resulting positions. `PENDING_EVIDENCE`, `PENDING_AMBIGUOUS`,
+//! `READY_TO_APPLY` and `APPLIED_AWAITING_BROKER` all keep the gate closed; an
+//! "applied marker exists" is never enough. Scope is exactly
+//! `(provider account, execution domain)` x `{option symbol, underlying}`: an
+//! event on a SPY option never fences AAPL, BTC/USD, another domain or another
+//! account.
 //!
-//! Read-only by construction: [`evaluate_option_lifecycle_pending_gate`]
-//! makes no write of any kind. Restart-safe by construction: the answer is
-//! derived entirely from the two durable D1/D2 tables via
-//! [`find_unresolved_option_lifecycle_activity`] -- there is no separate
-//! mutable "pending" flag to lose across a restart; a fresh process reading
-//! the same committed DB state gets the same answer. Complete evidence
-//! (D2's `apply_option_lifecycle_activity` succeeding) is exactly what
-//! clears it, since that is what removes the row this query looks for.
+//! Read-only: makes no write. Restart-safe: the answer is the durable state
+//! row, there is no in-memory pending flag to lose.
 //!
-//! No production caller wired in this patch -- Alpaca options capability
-//! does not exist in this codebase yet, mirroring D1/D2's own scope.
+//! Every economic admission seam consults this gate through
+//! [`check_symbol_fence`]: the internal strategy decision path, the manual
+//! operator order route and the external strategy-signal route. Whole-account
+//! baseline adoption (which overwrites local truth for every symbol at once)
+//! uses [`check_account_fence`]. Risk-reducing flatten and order cancels are
+//! deliberately NOT gated: they reduce exposure and must remain available while
+//! evidence is unresolved.
+
+use std::sync::Arc;
 
 use sqlx::PgPool;
 
-use mqk_db::option_lifecycle_activity::{
-    find_unresolved_option_lifecycle_activity, OptionLifecycleActivityType,
+use mqk_db::{
+    find_any_unreconciled_lifecycle_event, find_fencing_lifecycle_event, LifecycleEventState,
+    OptionLifecycleEventStateRow,
 };
+
+use super::option_lifecycle_ingestion::OPTION_LIFECYCLE_EXECUTION_DOMAIN;
+use super::OptionLifecycleActivityFetcher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OptionLifecycleGateStatus {
-    /// No unresolved `OPEXC`/`OPASN`/`OPEXP` evidence exists for this
-    /// symbol -- broker truth may be trusted.
+    /// No unreconciled lifecycle event fences this scope.
     Clear,
-    /// At least one lifecycle activity for this symbol has not yet had its
-    /// effect applied. The caller MUST fail closed: no synthetic fill, no
-    /// snapshot overwrite, no execution that depends on this symbol's
-    /// resolved state.
+    /// At least one lifecycle event has not reached `RECONCILED`. The caller
+    /// MUST fail closed.
     Pending {
         blocking_activity_id: String,
-        blocking_activity_type: OptionLifecycleActivityType,
+        state: LifecycleEventState,
+        option_symbol: String,
+        underlying_symbol: Option<String>,
     },
 }
 
 impl OptionLifecycleGateStatus {
-    /// Fail-closed helper for a future execution-dispatch caller: true iff
-    /// this symbol's lifecycle state is unresolved and execution touching
-    /// it must therefore be refused.
+    /// True iff the scope is fenced and economic action must be refused.
     pub fn must_fail_closed(&self) -> bool {
         matches!(self, Self::Pending { .. })
     }
+
+    fn from_row(row: Option<OptionLifecycleEventStateRow>) -> Self {
+        match row {
+            None => Self::Clear,
+            Some(r) => Self::Pending {
+                blocking_activity_id: r.lifecycle_activity_id,
+                state: r.state,
+                option_symbol: r.option_symbol,
+                underlying_symbol: r.underlying_symbol,
+            },
+        }
+    }
+
+    /// Operator-facing explanation of a `Pending` gate.
+    pub fn explanation(&self) -> String {
+        match self {
+            Self::Clear => "clear".to_string(),
+            Self::Pending {
+                blocking_activity_id,
+                state,
+                option_symbol,
+                underlying_symbol,
+            } => format!(
+                "unresolved options-lifecycle event {blocking_activity_id} on {option_symbol} \
+                 (underlying {}) is {}; the gate clears only at RECONCILED",
+                underlying_symbol.as_deref().unwrap_or("unproven"),
+                state.as_str()
+            ),
+        }
+    }
 }
 
-/// Evaluate the D3 gate for one option symbol, scoped to
-/// `broker_account_id` (D1 correction: a symbol's lifecycle-pending state
-/// under one broker account must never be conflated with another
-/// account's evidence). Read-only: makes no mutation of any kind, and
-/// never inspects any symbol/account other than the ones given --
-/// callers evaluating other symbols or accounts are structurally
-/// unaffected by this symbol's state.
+/// Evaluate the gate for one symbol under `broker_account_id` (the canonical
+/// authority key). Fences the symbol when it is a pending event's option
+/// contract OR its underlying.
 pub async fn evaluate_option_lifecycle_pending_gate(
     pool: &PgPool,
     broker_account_id: &str,
-    option_symbol: &str,
+    symbol: &str,
 ) -> anyhow::Result<OptionLifecycleGateStatus> {
-    match find_unresolved_option_lifecycle_activity(pool, broker_account_id, option_symbol).await? {
-        Some((blocking_activity_id, blocking_activity_type)) => {
-            Ok(OptionLifecycleGateStatus::Pending {
-                blocking_activity_id,
-                blocking_activity_type,
-            })
+    let row = find_fencing_lifecycle_event(
+        pool,
+        broker_account_id,
+        OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
+        symbol.trim(),
+    )
+    .await?;
+    Ok(OptionLifecycleGateStatus::from_row(row))
+}
+
+/// Failure to evaluate the gate at all. Callers refuse (fail closed) on both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateCheckError {
+    /// The provider account could not be established (authenticated account
+    /// endpoint unavailable): pending evidence for it cannot be looked up.
+    AuthorityUnavailable(String),
+    Database(String),
+}
+
+impl std::fmt::Display for GateCheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthorityUnavailable(e) => write!(
+                f,
+                "provider account authority is not established, options-lifecycle gate cannot be \
+                 evaluated: {e}"
+            ),
+            Self::Database(e) => write!(f, "options-lifecycle gate query failed: {e}"),
         }
-        None => Ok(OptionLifecycleGateStatus::Clear),
     }
+}
+
+/// The shared per-symbol check used by every economic admission seam. A
+/// deployment with no lifecycle fetcher has no Alpaca account and therefore no
+/// lifecycle evidence: vacuously `Clear`.
+pub async fn check_symbol_fence(
+    pool: &PgPool,
+    fetcher: Option<&Arc<dyn OptionLifecycleActivityFetcher>>,
+    symbol: &str,
+) -> Result<OptionLifecycleGateStatus, GateCheckError> {
+    let Some(fetcher) = fetcher else {
+        return Ok(OptionLifecycleGateStatus::Clear);
+    };
+    let authority = fetcher
+        .broker_account_authority()
+        .map_err(GateCheckError::AuthorityUnavailable)?;
+    evaluate_option_lifecycle_pending_gate(pool, &authority.key(), symbol)
+        .await
+        .map_err(|e| GateCheckError::Database(e.to_string()))
+}
+
+/// Whole-account variant for operations that overwrite local truth for every
+/// symbol at once (baseline adoption): fenced by ANY unreconciled event, so an
+/// option that vanished from a broker snapshot can never bypass the gate.
+pub async fn check_account_fence(
+    pool: &PgPool,
+    fetcher: Option<&Arc<dyn OptionLifecycleActivityFetcher>>,
+) -> Result<OptionLifecycleGateStatus, GateCheckError> {
+    let Some(fetcher) = fetcher else {
+        return Ok(OptionLifecycleGateStatus::Clear);
+    };
+    let authority = fetcher
+        .broker_account_authority()
+        .map_err(GateCheckError::AuthorityUnavailable)?;
+    let row = find_any_unreconciled_lifecycle_event(
+        pool,
+        &authority.key(),
+        OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
+    )
+    .await
+    .map_err(|e| GateCheckError::Database(e.to_string()))?;
+    Ok(OptionLifecycleGateStatus::from_row(row))
 }

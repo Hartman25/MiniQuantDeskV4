@@ -93,6 +93,38 @@ fn invariant_check_passes_after_apply_entry() {
     check_capital_invariants(&pf).unwrap();
 }
 #[test]
+fn invariant_check_passes_after_a_lifecycle_adjustment_and_dedup_is_by_apply_id() {
+    use mqk_portfolio::{Fill, LedgerEntry, LifecycleAdjustment, Side, UnderlyingAdjustment};
+    let mut pf = PortfolioState::new(1_000_000_000_000_i64);
+    apply_entry(
+        &mut pf,
+        LedgerEntry::Fill(Fill::new(
+            "AAPL230721C00150000",
+            Side::Buy,
+            QtyMicros::from_whole_units(2).unwrap(),
+            5_000_000,
+            0,
+        )),
+    );
+    apply_entry(
+        &mut pf,
+        LedgerEntry::LifecycleAdjustment(LifecycleAdjustment {
+            economic_apply_id: "apply-1".to_string(),
+            option_symbol: "AAPL230721C00150000".to_string(),
+            option_qty_delta: QtyMicros::from_whole_units(-2).unwrap(),
+            underlying: Some(UnderlyingAdjustment {
+                symbol: "AAPL".to_string(),
+                qty_delta: QtyMicros::from_whole_units(200).unwrap(),
+                basis_price_micros: 150_000_000,
+            }),
+            cash_delta_micros: -30_000_000_000,
+        }),
+    );
+    // The per-tick capital invariant (ledger recompute == derived state) must
+    // hold for a ledger that contains a lifecycle adjustment.
+    check_capital_invariants(&pf).unwrap();
+}
+#[test]
 fn broker_event_accessors() {
     use mqk_execution::Side;
     let ev = BrokerEvent::Fill {

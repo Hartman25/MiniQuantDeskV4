@@ -26,7 +26,7 @@ fn total_fees(state: &PortfolioState) -> i64 {
         .iter()
         .filter_map(|e| match e {
             LedgerEntry::Fill(f) => Some(f.fee_micros),
-            LedgerEntry::Cash(_) => None,
+            LedgerEntry::Cash(_) | LedgerEntry::LifecycleAdjustment(_) => None,
         })
         .fold(0i64, |acc, fee| acc.saturating_add(fee))
 }

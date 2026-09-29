@@ -11,30 +11,26 @@
 //! reported separately via a same-day paired `OPTRD` trade activity. This
 //! module stores each raw activity type as its own evidence row -- pairing
 //! an `OPEXC`/`OPASN` row with its `OPTRD` row and applying the resulting
-//! effect is D2's separate, idempotent accounting step
-//! ([`insert_applied_option_lifecycle_effect_if_new`]).
+//! effect are separate steps (`option_lifecycle_correlation` in the daemon,
+//! then [`crate::option_lifecycle_journal::apply_lifecycle_adjustment_tx`]).
 //!
 //! `activity_id` (Alpaca's own id) is the natural idempotency key -- an
 //! activity must never be applied to the ledger twice.
 //!
-//! # D1 correction: shared id, broker/account provenance (migration 0086)
+//! # Account provenance and shape (migrations 0086, 0088, 0089)
 //!
-//! Alpaca reports an `OPEXC`/`OPASN` activity and its paired `OPTRD` trade
-//! under the IDENTICAL `id` value (re-verified live against Alpaca's
-//! current docs). `activity_id` alone can therefore never be a PRIMARY KEY
-//! for this table -- migration 0086 widens it to `(broker_account_id,
-//! activity_id, activity_type)`, so the two rows of a pair coexist,
-//! disambiguated by type, and adds `broker_account_id` (the authenticated
-//! Alpaca `APCA-API-KEY-ID`) so two distinct accounts can never collide.
-//! That shared id is also the correct provider-documented correlation
-//! evidence between a lifecycle activity and its paired trade --
-//! [`find_paired_trade_activity`] now looks it up directly instead of the
-//! superseded, unsafe `(option_symbol, activity_date)` lookup. `symbol`
-//! means different things per activity type (the OCC option contract for
-//! `OPEXC`/`OPASN`/`OPEXP`; the underlying ticker for `OPTRD`) -- `
-//! option_symbol`/`underlying_symbol_raw` are now two separate,
-//! CHECK-enforced mutually exclusive columns rather than one column
-//! conflating both meanings.
+//! `activity_id` alone is unique only within one provider account and a
+//! lifecycle row may coexist with an `OPTRD` row under the same id, so the
+//! primary key is `(broker_account_id, activity_id, activity_type)` and
+//! `broker_account_id` is the canonical provider-account authority key
+//! (`alpaca:{provider_account_id}`, migration 0088 -- never the API key id).
+//! `symbol` means different things per activity type (the OCC option contract
+//! for `OPEXC`/`OPASN`/`OPEXP`; the underlying ticker for `OPTRD`), stored in
+//! two CHECK-exclusive columns. Provider correlation/provenance fields are
+//! kept verbatim (migration 0089). Pairing a lifecycle row with its `OPTRD` is
+//! NOT a same-id lookup here: it is the daemon's evidence-based
+//! `option_lifecycle_correlation`, and the economic application lives in
+//! `option_lifecycle_journal`.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -426,36 +422,6 @@ pub async fn fetch_option_lifecycle_activity(
     row.map(row_to_activity).transpose()
 }
 
-/// D2's pairing lookup: find the `OPTRD` row (if any) sharing the SAME
-/// `activity_id` as a given `OPEXC`/`OPASN` row -- the provider-documented
-/// correlation evidence (Alpaca reports both halves of a pair under one
-/// identical id). Returns `Ok(None)` when no paired trade has been
-/// ingested yet -- the caller's resolution must remain `Pending`, never
-/// assume one will arrive or fabricate a value. Deterministic and
-/// unambiguous by construction: the ledger's own PRIMARY KEY guarantees at
-/// most one `(broker_account_id, activity_id, 'OPTRD')` row can ever
-/// exist, so this is never a "pick one of several plausible matches"
-/// lookup.
-pub async fn find_paired_trade_activity(
-    pool: &PgPool,
-    broker_account_id: &str,
-    activity_id: &str,
-) -> Result<Option<NewOptionLifecycleActivity>> {
-    let query = format!(
-        "select {OPTION_LIFECYCLE_ACTIVITY_COLUMNS}
-           from sys_option_lifecycle_activity_ledger
-          where broker_account_id = $1 and activity_id = $2 and activity_type = 'OPTRD'"
-    );
-    let row: Option<OptionLifecycleActivityRow> = sqlx::query_as(&query)
-        .bind(broker_account_id)
-        .bind(activity_id)
-        .fetch_optional(pool)
-        .await
-        .context("find_paired_trade_activity failed")?;
-
-    row.map(row_to_activity).transpose()
-}
-
 /// Every raw row of one activity type for one account, in a stable order
 /// (`activity_date`, `activity_id`). Bounded by what a single account's
 /// option events produce; used by correlation, which needs the whole
@@ -478,190 +444,4 @@ pub async fn list_option_lifecycle_activities(
         .await
         .context("list_option_lifecycle_activities failed")?;
     rows.into_iter().map(row_to_activity).collect()
-}
-
-// ---------------------------------------------------------------------------
-// D2: idempotent-apply marker
-// ---------------------------------------------------------------------------
-
-/// One durably-applied `PairedLifecycleEffect` (mirrors
-/// `mqk_portfolio::option_lifecycle::PairedLifecycleEffect`'s shape without
-/// this crate depending on `mqk-portfolio` -- the caller translates).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppliedOptionLifecycleEffect {
-    pub lifecycle_activity_id: String,
-    /// D2 correction: the authenticated Alpaca account's own
-    /// `APCA-API-KEY-ID`. Part of this table's PRIMARY KEY as of migration
-    /// 0087 -- two accounts whose lifecycle activity ids collided must
-    /// never share one applied-marker row.
-    pub broker_account_id: String,
-    pub engine_id: String,
-    pub mode: String,
-    pub option_symbol: String,
-    pub underlying_symbol: Option<String>,
-    pub option_contracts_removed_raw: String,
-    pub underlying_shares_delivered_raw: Option<String>,
-    pub cash_effect_micros: Option<i64>,
-    pub applied_at_utc: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InsertAppliedOptionLifecycleEffectOutcome {
-    /// Genuinely new -- this lifecycle_activity_id had never been applied.
-    Applied,
-    /// Already applied; zero mutation. The caller must not apply this
-    /// effect's economic consequence a second time.
-    AlreadyApplied,
-}
-
-/// Durably record that `effect` has been applied, deduplicated on
-/// `(broker_account_id, lifecycle_activity_id)`. Safe to call with the
-/// same id any number of times -- only the first call ever mutates the
-/// table.
-pub async fn insert_applied_option_lifecycle_effect_if_new(
-    pool: &PgPool,
-    effect: &AppliedOptionLifecycleEffect,
-) -> Result<InsertAppliedOptionLifecycleEffectOutcome> {
-    let result = sqlx::query(
-        r#"
-        insert into sys_option_lifecycle_applied (
-            lifecycle_activity_id, broker_account_id, engine_id, mode, option_symbol,
-            underlying_symbol, option_contracts_removed_raw,
-            underlying_shares_delivered_raw, cash_effect_micros, applied_at_utc
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        on conflict (broker_account_id, lifecycle_activity_id) do nothing
-        "#,
-    )
-    .bind(&effect.lifecycle_activity_id)
-    .bind(&effect.broker_account_id)
-    .bind(&effect.engine_id)
-    .bind(&effect.mode)
-    .bind(&effect.option_symbol)
-    .bind(&effect.underlying_symbol)
-    .bind(&effect.option_contracts_removed_raw)
-    .bind(&effect.underlying_shares_delivered_raw)
-    .bind(effect.cash_effect_micros)
-    .bind(effect.applied_at_utc)
-    .execute(pool)
-    .await
-    .context("insert_applied_option_lifecycle_effect_if_new failed")?;
-
-    Ok(if result.rows_affected() == 1 {
-        InsertAppliedOptionLifecycleEffectOutcome::Applied
-    } else {
-        InsertAppliedOptionLifecycleEffectOutcome::AlreadyApplied
-    })
-}
-
-type AppliedOptionLifecycleEffectRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<i64>,
-    DateTime<Utc>,
-);
-
-/// Read back whether `(broker_account_id, lifecycle_activity_id)` has
-/// already been applied, for test/audit verification and for D3's
-/// pending-lifecycle gate.
-pub async fn fetch_applied_option_lifecycle_effect(
-    pool: &PgPool,
-    broker_account_id: &str,
-    lifecycle_activity_id: &str,
-) -> Result<Option<AppliedOptionLifecycleEffect>> {
-    let row: Option<AppliedOptionLifecycleEffectRow> = sqlx::query_as(
-        r#"
-        select lifecycle_activity_id, broker_account_id, engine_id, mode, option_symbol,
-               underlying_symbol, option_contracts_removed_raw,
-               underlying_shares_delivered_raw, cash_effect_micros, applied_at_utc
-          from sys_option_lifecycle_applied
-         where broker_account_id = $1 and lifecycle_activity_id = $2
-        "#,
-    )
-    .bind(broker_account_id)
-    .bind(lifecycle_activity_id)
-    .fetch_optional(pool)
-    .await
-    .context("fetch_applied_option_lifecycle_effect failed")?;
-
-    Ok(row.map(
-        |(
-            lifecycle_activity_id,
-            broker_account_id,
-            engine_id,
-            mode,
-            option_symbol,
-            underlying_symbol,
-            option_contracts_removed_raw,
-            underlying_shares_delivered_raw,
-            cash_effect_micros,
-            applied_at_utc,
-        )| AppliedOptionLifecycleEffect {
-            lifecycle_activity_id,
-            broker_account_id,
-            engine_id,
-            mode,
-            option_symbol,
-            underlying_symbol,
-            option_contracts_removed_raw,
-            underlying_shares_delivered_raw,
-            cash_effect_micros,
-            applied_at_utc,
-        },
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// D3: pending-lifecycle gate query
-// ---------------------------------------------------------------------------
-
-/// D3's pending-lifecycle gate: does `option_symbol` (scoped to
-/// `broker_account_id`) have any `OPEXC`/`OPASN`/`OPEXP` activity durably
-/// ingested by D1 that has not yet had a matching `PairedLifecycleEffect`
-/// applied by D2? Purely derived from the two existing D1/D2 tables via a
-/// LEFT JOIN -- no separate mutable state, so the answer is restart-safe by
-/// construction: it reflects only what is already committed.
-///
-/// Returns the oldest such unresolved activity, if any. A caller with a
-/// non-`None` result must treat `option_symbol` (and its underlying) as
-/// lifecycle-pending: never synthesize a fill from a broker position change
-/// for it, never overwrite its local snapshot from broker truth, and refuse
-/// (fail closed) any execution that depends on its resolved state -- until
-/// this returns `None` again, i.e. until D2 has genuinely applied the
-/// matching effect.
-pub async fn find_unresolved_option_lifecycle_activity(
-    pool: &PgPool,
-    broker_account_id: &str,
-    option_symbol: &str,
-) -> Result<Option<(String, OptionLifecycleActivityType)>> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        r#"
-        select l.activity_id, l.activity_type
-          from sys_option_lifecycle_activity_ledger l
-          left join sys_option_lifecycle_applied a
-            on a.broker_account_id = l.broker_account_id
-           and a.lifecycle_activity_id = l.activity_id
-         where l.broker_account_id = $1
-           and l.option_symbol = $2
-           and l.activity_type in ('OPEXC', 'OPASN', 'OPEXP')
-           and a.lifecycle_activity_id is null
-         order by l.ingested_at_utc asc
-         limit 1
-        "#,
-    )
-    .bind(broker_account_id)
-    .bind(option_symbol)
-    .fetch_optional(pool)
-    .await
-    .context("find_unresolved_option_lifecycle_activity failed")?;
-
-    row.map(|(activity_id, activity_type_raw)| {
-        OptionLifecycleActivityType::parse(&activity_type_raw).map(|t| (activity_id, t))
-    })
-    .transpose()
 }
