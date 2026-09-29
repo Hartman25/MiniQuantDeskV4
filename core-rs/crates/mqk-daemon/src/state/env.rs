@@ -74,6 +74,9 @@ pub(crate) fn operator_auth_mode_from_env() -> OperatorAuthMode {
 // Runtime selection
 // ---------------------------------------------------------------------------
 
+/// Test-only convenience: production always resolves the Crypto TIF policy
+/// through [`runtime_selection_from_env`].
+#[cfg(test)]
 pub(crate) fn runtime_selection_from_env_values(
     mode: Option<&str>,
     adapter_id: Option<&str>,
