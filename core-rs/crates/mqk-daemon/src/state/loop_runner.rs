@@ -336,6 +336,34 @@ async fn persist_tick_failure_diagnostic(
 // spawn_execution_loop
 // ---------------------------------------------------------------------------
 
+/// D3: attempt `APPLIED_AWAITING_BROKER -> RECONCILED` against the freshest
+/// authenticated broker snapshot and the orchestrator's (absorbed) ledger.
+async fn reconcile_lifecycle_against_broker(
+    pool: &sqlx::PgPool,
+    state: &Arc<AppState>,
+    broker_snapshot_cache: &Arc<tokio::sync::RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
+    orchestrator: &DaemonOrchestrator,
+) -> anyhow::Result<()> {
+    let Some(snapshot) = broker_snapshot_cache.read().await.clone() else {
+        return Ok(());
+    };
+    let broker = super::reconcile_broker_snapshot_from_schema(&snapshot)
+        .map_err(|e| anyhow::anyhow!("broker snapshot conversion failed: {e}"))?;
+    let local =
+        super::option_lifecycle_reconcile::local_position_quantities(orchestrator.portfolio());
+    super::option_lifecycle_reconcile::reconcile_awaiting_lifecycle_events(
+        pool,
+        state.deployment_mode().as_api_label(),
+        orchestrator.applied_lifecycle_adjustment_ids(),
+        &local,
+        &broker.positions,
+        snapshot.captured_at_utc,
+        Utc::now(),
+    )
+    .await?;
+    Ok(())
+}
+
 /// D2: apply every journal entry the orchestrator's ledger has not yet
 /// absorbed, in journal order. The full unsubsumed list is read each time (a
 /// handful of rows) and deduplicated by `economic_apply_id` inside the
@@ -515,6 +543,7 @@ pub(super) fn spawn_execution_loop(
         let mut dispatch_authority = dispatch_authority;
         // D2: true only for an EquityNyse run (see `enable_lifecycle_absorb`).
         let lifecycle_absorb = state_arc.take_lifecycle_absorb(run_id);
+        let mut lifecycle_reconcile_ticks: u32 = 0;
         loop {
             tokio::select! {
                 changed = stop_rx.changed() => {
@@ -748,6 +777,28 @@ pub(super) fn spawn_execution_loop(
                                 error = %err,
                                 "option_lifecycle_absorb_failed: will retry next tick"
                             );
+                        }
+                    }
+
+                    // D3: every 5th tick, try to move applied lifecycle events to
+                    // RECONCILED against a fresh authenticated broker snapshot.
+                    lifecycle_reconcile_ticks = lifecycle_reconcile_ticks.wrapping_add(1);
+                    if lifecycle_absorb && lifecycle_reconcile_ticks % 5 == 0 {
+                        if let Some(pool) = db.as_ref() {
+                            if let Err(err) = reconcile_lifecycle_against_broker(
+                                pool,
+                                &state_arc,
+                                &broker_snapshot_cache,
+                                &orchestrator,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    run_id = %run_id,
+                                    error = %err,
+                                    "option_lifecycle_reconcile_failed: will retry"
+                                );
+                            }
                         }
                     }
 

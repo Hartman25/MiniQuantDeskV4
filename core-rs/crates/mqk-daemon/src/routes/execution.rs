@@ -329,58 +329,37 @@ pub(crate) async fn execution_order_submit(
     // is a second real economic-order-admission surface, not the same
     // seam). No `option_lifecycle_activity_fetcher` configured means no
     // Alpaca account is connected -- vacuously Clear.
-    if let Some(fetcher) = st.option_lifecycle_activity_fetcher.as_ref() {
-        let broker_account_id = match fetcher.broker_account_authority() {
-            Ok(authority) => authority.key(),
-            Err(err) => {
-                return manual_order_submit_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    false,
-                    "unavailable",
-                    validated.client_request_id,
-                    Some(active_run_id),
-                    vec![format!(
-                        "execution order submit unavailable: provider account authority is not                          established, options-lifecycle pending-gate cannot be evaluated: {err}"
-                    )],
-                );
-            }
-        };
-        match crate::state::option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate(
-            db,
-            &broker_account_id,
-            &validated.symbol,
-        )
-        .await
-        {
-            Ok(status) if status.must_fail_closed() => {
-                return manual_order_submit_response(
-                    StatusCode::CONFLICT,
-                    false,
-                    "rejected",
-                    validated.client_request_id,
-                    Some(active_run_id),
-                    vec![format!(
-                        "execution order submit refused: symbol '{}' has an unresolved \
-                         options-lifecycle event ({status:?}); no economic action may proceed \
-                         until D2 durably applies the matching effect",
-                        validated.symbol
-                    )],
-                );
-            }
-            Ok(_) => {}
-            Err(err) => {
-                return manual_order_submit_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    false,
-                    "unavailable",
-                    validated.client_request_id,
-                    Some(active_run_id),
-                    vec![format!(
-                        "execution order submit unavailable: options-lifecycle pending-gate \
-                         check failed: {err}"
-                    )],
-                );
-            }
+    match crate::state::option_lifecycle_pending_gate::check_symbol_fence(
+        db,
+        st.option_lifecycle_activity_fetcher.as_ref(),
+        &validated.symbol,
+    )
+    .await
+    {
+        Ok(status) if status.must_fail_closed() => {
+            return manual_order_submit_response(
+                StatusCode::CONFLICT,
+                false,
+                "rejected",
+                validated.client_request_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order submit refused: symbol '{}': {}",
+                    validated.symbol,
+                    status.explanation()
+                )],
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            return manual_order_submit_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                validated.client_request_id,
+                Some(active_run_id),
+                vec![format!("execution order submit unavailable: {err}")],
+            );
         }
     }
 

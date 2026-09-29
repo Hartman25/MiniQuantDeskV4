@@ -1126,6 +1126,89 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
     let _ = mqk_db::clear_broker_position_baseline(&db).await;
 }
 
+/// D3-BASELINE-03: the option (and its underlying) are ABSENT from the broker
+/// snapshot, so a per-position gate would pass; the whole-account fence refuses.
+#[tokio::test(flavor = "multi_thread")]
+async fn d3_baseline03_an_option_absent_from_the_snapshot_still_refuses_adoption() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("d3_baseline03: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let provider_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
+    let authority = mqk_db::BrokerAccountAuthority::new("alpaca", &provider_id, "paper").unwrap();
+    mqk_db::verify_or_register_broker_account_authority(&db, &authority, chrono::Utc::now())
+        .await
+        .expect("authority registration");
+    let broker_account_id = authority.key();
+
+    // Unresolved lifecycle evidence for an MSFT option that is ABSENT from the
+    // broker snapshot (which reports only AAPL): an expiry/exercise makes the
+    // option vanish, so a per-position check would see nothing. The
+    // whole-account fence must still refuse.
+    mqk_db::option_lifecycle_activity::insert_option_lifecycle_activity_if_new(
+        &db,
+        &mqk_db::option_lifecycle_activity::NewOptionLifecycleActivity {
+            activity_id: format!("d3-baseline-opexc-{}", uuid::Uuid::new_v4()),
+            broker_account_id: broker_account_id.clone(),
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            activity_type: mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
+            option_symbol: Some("MSFT230721C00300000".to_string()),
+            underlying_symbol_raw: None,
+            activity_date: "2026-06-19".to_string(),
+            qty_raw: "-1".to_string(),
+            price_raw: None,
+            net_amount_raw: "0".to_string(),
+            ingested_at_utc: chrono::Utc::now(),
+            provenance: Default::default(),
+            state_seed: Some(mqk_db::LifecycleStateSeed {
+                execution_domain: "equity_nyse".to_string(),
+                underlying_symbol: Some("MSFT".to_string()),
+            }),
+        },
+    )
+    .await
+    .expect("seed pending lifecycle activity failed");
+
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    *st.broker_snapshot.write().await = Some(fake_broker_snapshot_with_position());
+    st.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
+        FakeOptionLifecycleActivityFetcherForBaseline(provider_id),
+    ));
+    let st = Arc::new(st);
+
+    let router = paper_alpaca_router_from_state(Arc::clone(&st));
+    let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "adoption must refuse when a position has unresolved lifecycle evidence: {json}"
+    );
+    assert_eq!(json["accepted"], false, "{json}");
+    assert_eq!(json["gate"], "repair.option_lifecycle_pending", "{json}");
+
+    // No baseline row must have been written -- the whole adoption refused.
+    let row = mqk_db::load_broker_position_baseline(&db)
+        .await
+        .expect("load failed");
+    assert!(
+        row.is_none(),
+        "D3-BASELINE-03: no baseline row must be written when adoption is refused"
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
 /// D3-BASELINE-02: positions with zero lifecycle evidence (every real
 /// equity/crypto symbol today) adopt normally even with the fetcher
 /// configured -- the gate is a genuine no-op when nothing is pending, not
@@ -1146,7 +1229,7 @@ async fn d3_baseline02_unaffected_positions_adopt_normally() {
     mqk_db::verify_or_register_broker_account_authority(&db, &authority, chrono::Utc::now())
         .await
         .expect("authority registration");
-    let broker_account_id = authority.key();
+    let _broker_account_id = authority.key();
 
     let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
         db.clone(),

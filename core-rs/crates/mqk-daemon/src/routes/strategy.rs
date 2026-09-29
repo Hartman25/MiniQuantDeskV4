@@ -805,6 +805,55 @@ pub(crate) async fn strategy_signal(
         );
     }
 
+    // Gate 1k (D3): options-lifecycle fence. An unreconciled lifecycle event
+    // fences its option contract AND its underlying for every economic entry
+    // seam, including this external one. Evaluated only when a DB is present
+    // (Gate 2 refuses the DB-less case); a fence that cannot be evaluated
+    // fails closed.
+    if let Some(db) = st.db.as_ref() {
+        match crate::state::option_lifecycle_pending_gate::check_symbol_fence(
+            db,
+            st.option_lifecycle_activity_fetcher.as_ref(),
+            &validated.symbol,
+        )
+        .await
+        {
+            Ok(status) if status.must_fail_closed() => {
+                return refused_signal_response(
+                    StatusCode::CONFLICT,
+                    "gate_1k_option_lifecycle",
+                    "rejected",
+                    RefusedSignalArgs {
+                        signal_id: validated.signal_id,
+                        strategy_id: validated.strategy_id,
+                        symbol: validated.symbol.clone(),
+                        active_run_id: None,
+                        blockers: vec![format!(
+                            "strategy signal refused: symbol '{}': {}",
+                            validated.symbol,
+                            status.explanation()
+                        )],
+                    },
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return refused_signal_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "gate_1k_option_lifecycle",
+                    "unavailable",
+                    RefusedSignalArgs {
+                        signal_id: validated.signal_id,
+                        strategy_id: validated.strategy_id,
+                        symbol: validated.symbol.clone(),
+                        active_run_id: None,
+                        blockers: vec![format!("strategy signal unavailable: {err}")],
+                    },
+                );
+            }
+        }
+    }
+
     // Gate 1b: WS continuity must be Live for Alpaca signal ingestion (PT-DAY-02).
     //
     // A GapDetected or ColdStartUnproven state means broker event delivery is
@@ -981,7 +1030,9 @@ pub(crate) async fn strategy_signal(
         );
     }
 
-    let _lifecycle = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
+    let _lifecycle = st
+        .lifecycle_guard(crate::state::ExecutionDomain::EquityNyse)
+        .await;
 
     // Gate 2: DB must be present.
     let Some(db) = st.db.as_ref() else {
@@ -1144,7 +1195,10 @@ pub(crate) async fn strategy_signal(
     }
 
     // Gates 4+5: active run must exist and be in running state.
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return refused_signal_response(
@@ -1524,6 +1578,17 @@ fn validate_strategy_signal(
                 ac.trim()
             ));
         }
+    }
+
+    // D3: an omitted asset_class implies Equity ONLY for a symbol that cannot be
+    // an option contract. A standard OCC contract symbol is never implied to be
+    // Equity by omission (explicit `option` stays disabled on this path).
+    if body.asset_class.is_none() && mqk_execution::OptionContractIdentity::parse(&symbol).is_ok() {
+        blockers.push(format!(
+            "symbol '{symbol}' is an OCC option contract but no asset_class was supplied: an \
+             option contract is never implied to be Equity (explicit option is not supported \
+             on this execution path)"
+        ));
     }
 
     let side = body.side.trim().to_ascii_lowercase();

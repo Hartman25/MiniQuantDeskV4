@@ -37,6 +37,7 @@ pub mod option_lifecycle_ingestion;
 pub mod option_lifecycle_ledger;
 pub mod option_lifecycle_pending_gate;
 pub mod option_lifecycle_poll;
+pub mod option_lifecycle_reconcile;
 pub use option_lifecycle_poll::spawn_option_lifecycle_poll_task;
 mod orchestrator_build;
 mod paper_portfolio_accounting;
