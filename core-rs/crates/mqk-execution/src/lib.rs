@@ -7,6 +7,7 @@ pub mod broker_error;
 mod engine;
 pub mod gateway;
 mod id_map;
+pub mod option_contract;
 pub mod option_strategy_permission;
 mod order_router;
 mod prices;
@@ -41,6 +42,9 @@ pub use types::{
 // M8 (V4 frozen asset matrix): frozen options-permission-set structural
 // classifier. Model-only, like the V2 scaffold above — no execution, OMS,
 // or broker path constructs or submits an options order from this today.
+pub use option_contract::{
+    OptionContractIdentity, OptionContractParseError, OptionRight, STANDARD_OPTION_MULTIPLIER,
+};
 pub use option_strategy_permission::{
     classify_option_strategy_structure, OptionLegSide, OptionStrategyRefusal,
     OptionStrategyStructure, ProposedOptionLeg, ProposedOptionStrategy,

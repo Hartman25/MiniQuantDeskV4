@@ -690,7 +690,7 @@ mod tests {
             &self,
             _activity_type: &str,
             _after_id: Option<&str>,
-        ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+        ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOptionLifecycleActivity>, String> {
             unreachable!("the order-submit gate never fetches from Alpaca")
         }
 
@@ -745,6 +745,8 @@ mod tests {
                     price_raw: None,
                     net_amount_raw: "0".to_string(),
                     ingested_at_utc: chrono::Utc::now(),
+                    provenance: Default::default(),
+                    state_seed: None,
                 },
             )
             .await

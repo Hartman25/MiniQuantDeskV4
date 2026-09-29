@@ -70,8 +70,8 @@ use crate::mleg::{
 use crate::normalize::normalize_trade_update;
 use crate::types::{
     AlpacaAccountIdentityRaw, AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFeeActivity,
-    AlpacaFetchCursor, AlpacaMlegSubmitResponse, AlpacaOpenOrderRaw, AlpacaOrder,
-    AlpacaOrderActivity, AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody,
+    AlpacaFetchCursor, AlpacaMlegSubmitResponse, AlpacaOpenOrderRaw, AlpacaOptionLifecycleActivity,
+    AlpacaOrder, AlpacaOrderActivity, AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody,
     AlpacaReplaceResponse, AlpacaSubmitBody, AlpacaSubmitResponse, AlpacaTradeUpdate,
     AlpacaTradeUpdatesResume,
 };
@@ -712,14 +712,12 @@ impl AlpacaBrokerAdapter {
     ///
     /// Mirrors [`Self::fetch_fee_activities_since`]'s pagination and
     /// no-progress-guard shape exactly, against the same generic
-    /// `GET /v2/account/activities/{type}` endpoint. Reuses
-    /// [`AlpacaFeeActivity`] as the raw wire shape -- the endpoint's JSON
-    /// envelope (`id`/`activity_type`/`date`/`net_amount`/`description`/
-    /// `symbol`/`qty`/`price`/`status`) is identical across activity types;
-    /// only the per-type semantics of `symbol`/`qty`/`price`/`net_amount`
-    /// differ, which [`option_lifecycle_normalize::normalize_option_lifecycle_activity`]
-    /// interprets. Returns raw records only -- no normalization, no ledger
-    /// application (this crate does not own portfolio/ledger state).
+    /// `GET /v2/account/activities/{type}` endpoint, deserialized into the
+    /// dedicated [`AlpacaOptionLifecycleActivity`] (never the fee shape); the
+    /// per-type semantics of `symbol`/`qty`/`price`/`net_amount` are
+    /// interpreted by [`option_lifecycle_normalize::normalize_option_lifecycle_activity`].
+    /// Returns raw records only -- no normalization, no ledger application
+    /// (this crate does not own portfolio/ledger state).
     ///
     /// `activity_type` must be one of
     /// [`option_lifecycle_normalize::ALPACA_OPTION_LIFECYCLE_ACTIVITY_TYPES`];
@@ -729,9 +727,9 @@ impl AlpacaBrokerAdapter {
         &self,
         activity_type: &str,
         after_id: Option<&str>,
-    ) -> Result<Vec<AlpacaFeeActivity>, BrokerError> {
+    ) -> Result<Vec<AlpacaOptionLifecycleActivity>, BrokerError> {
         let mut current_page_token: Option<String> = after_id.map(str::to_owned);
-        let mut all_activities: Vec<AlpacaFeeActivity> = Vec::new();
+        let mut all_activities: Vec<AlpacaOptionLifecycleActivity> = Vec::new();
 
         loop {
             let mut path = format!(
@@ -742,7 +740,7 @@ impl AlpacaBrokerAdapter {
                 path.push_str(token);
             }
 
-            let activities: Vec<AlpacaFeeActivity> = self.get(&path)?;
+            let activities: Vec<AlpacaOptionLifecycleActivity> = self.get(&path)?;
             let page_len = activities.len();
             let prev_page_token = current_page_token.clone();
 

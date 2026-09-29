@@ -102,6 +102,8 @@ fn lifecycle_activity(
         price_raw: None,
         net_amount_raw: "0".to_string(),
         ingested_at_utc: Utc::now(),
+        provenance: Default::default(),
+        state_seed: None,
     }
 }
 
@@ -130,6 +132,8 @@ fn paired_trade_activity(
         price_raw: Some(price_raw.to_string()),
         net_amount_raw: "0".to_string(),
         ingested_at_utc: Utc::now(),
+        provenance: Default::default(),
+        state_seed: None,
     }
 }
 

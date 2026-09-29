@@ -922,7 +922,7 @@ impl mqk_daemon::state::OptionLifecycleActivityFetcher for FakeOptionLifecycleAc
         &self,
         _activity_type: &str,
         _after_id: Option<&str>,
-    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOptionLifecycleActivity>, String> {
         unreachable!("Gate 7b never fetches from Alpaca; it only evaluates durable DB evidence")
     }
 
@@ -967,6 +967,8 @@ async fn seed_pending_opexc(
             price_raw: None,
             net_amount_raw: "0".to_string(),
             ingested_at_utc: Utc::now(),
+            provenance: Default::default(),
+            state_seed: None,
         },
     )
     .await
@@ -1187,6 +1189,8 @@ async fn decision_unblocked_after_d2_applies_the_blocking_activity() {
             price_raw: Some("200.00".to_string()),
             net_amount_raw: "-20000".to_string(),
             ingested_at_utc: Utc::now(),
+            provenance: Default::default(),
+            state_seed: None,
         },
     )
     .await

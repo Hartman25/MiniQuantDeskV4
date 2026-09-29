@@ -30,8 +30,13 @@ pub mod market_calendar;
 pub mod market_data_latest_bar;
 mod multi_symbol_config;
 pub mod option_lifecycle_apply;
+pub mod option_lifecycle_correlation;
+pub mod option_lifecycle_cycle;
+pub(crate) mod option_lifecycle_decimal;
 pub mod option_lifecycle_ingestion;
 pub mod option_lifecycle_pending_gate;
+pub mod option_lifecycle_poll;
+pub use option_lifecycle_poll::spawn_option_lifecycle_poll_task;
 mod orchestrator_build;
 mod paper_portfolio_accounting;
 mod per_symbol_bar_window;
@@ -1269,7 +1274,7 @@ pub trait OptionLifecycleActivityFetcher: Send + Sync {
         &self,
         activity_type: &str,
         after_id: Option<&str>,
-    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String>;
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOptionLifecycleActivity>, String>;
 
     /// The provider account this fetcher is authenticated against, proven by
     /// the provider's own account endpoint (never the API credential id).

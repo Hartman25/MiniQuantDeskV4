@@ -40,6 +40,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::option_lifecycle_event_state::{insert_pending_state_row_tx, LifecycleStateSeed};
+
 /// The four raw activity type this table can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionLifecycleActivityType {
@@ -61,6 +63,11 @@ impl OptionLifecycleActivityType {
         }
     }
 
+    /// Parse the provider activity-type string (`OPEXC`/`OPASN`/`OPEXP`/`OPTRD`).
+    pub fn parse_public(raw: &str) -> Result<Self> {
+        Self::parse(raw)
+    }
+
     fn parse(raw: &str) -> Result<Self> {
         match raw {
             "OPEXC" => Ok(Self::Exercise),
@@ -72,6 +79,19 @@ impl OptionLifecycleActivityType {
             )),
         }
     }
+}
+
+/// Provider-supplied fields preserved verbatim next to the normalized
+/// columns (migration 0089). Every field is optional: absence is stored as
+/// NULL, never invented.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OptionLifecycleRawProvenance {
+    pub group_id: Option<String>,
+    pub ref_id: Option<String>,
+    pub status: Option<String>,
+    pub description: Option<String>,
+    /// The exact parsed provider record.
+    pub raw_json: Option<serde_json::Value>,
 }
 
 /// One durable row to insert.
@@ -110,6 +130,12 @@ pub struct NewOptionLifecycleActivity {
     /// D2 never has to manufacture a cash effect.
     pub net_amount_raw: String,
     pub ingested_at_utc: DateTime<Utc>,
+    /// Provider correlation/provenance fields (0089).
+    pub provenance: OptionLifecycleRawProvenance,
+    /// For `OPEXC`/`OPASN`/`OPEXP` rows: creates the lifecycle event's
+    /// `PENDING_EVIDENCE` state row in the same transaction. `None` for
+    /// `OPTRD` (which has no lifecycle state of its own).
+    pub state_seed: Option<LifecycleStateSeed>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,13 +150,36 @@ pub async fn insert_option_lifecycle_activity_if_new(
     pool: &PgPool,
     activity: &NewOptionLifecycleActivity,
 ) -> Result<InsertOptionLifecycleActivityOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("insert_option_lifecycle_activity_if_new: begin tx failed")?;
+    let inserted = insert_activity_and_seed_tx(&mut tx, activity).await?;
+    tx.commit()
+        .await
+        .context("insert_option_lifecycle_activity_if_new: commit failed")?;
+    Ok(if inserted {
+        InsertOptionLifecycleActivityOutcome::Inserted
+    } else {
+        InsertOptionLifecycleActivityOutcome::AlreadyExists
+    })
+}
+
+/// Insert the raw row and (for a lifecycle row with a state seed) its
+/// `PENDING_EVIDENCE` state row, inside the caller's transaction. Returns
+/// whether the raw row was new.
+async fn insert_activity_and_seed_tx(
+    conn: &mut sqlx::PgConnection,
+    activity: &NewOptionLifecycleActivity,
+) -> Result<bool> {
     let result = sqlx::query(
         r#"
         insert into sys_option_lifecycle_activity_ledger (
             activity_id, broker_account_id, engine_id, mode, activity_type,
             option_symbol, underlying_symbol_raw, activity_date, qty_raw,
-            price_raw, net_amount_raw, ingested_at_utc
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            price_raw, net_amount_raw, ingested_at_utc,
+            provider_group_id, provider_ref_id, provider_status, description_raw, raw_json
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         on conflict (broker_account_id, activity_id, activity_type) do nothing
         "#,
     )
@@ -146,15 +195,28 @@ pub async fn insert_option_lifecycle_activity_if_new(
     .bind(&activity.price_raw)
     .bind(&activity.net_amount_raw)
     .bind(activity.ingested_at_utc)
-    .execute(pool)
+    .bind(&activity.provenance.group_id)
+    .bind(&activity.provenance.ref_id)
+    .bind(&activity.provenance.status)
+    .bind(&activity.provenance.description)
+    .bind(&activity.provenance.raw_json)
+    .execute(&mut *conn)
     .await
-    .context("insert_option_lifecycle_activity_if_new failed")?;
+    .context("insert_activity_and_seed_tx: raw insert failed")?;
 
-    Ok(if result.rows_affected() == 1 {
-        InsertOptionLifecycleActivityOutcome::Inserted
-    } else {
-        InsertOptionLifecycleActivityOutcome::AlreadyExists
-    })
+    if let (Some(seed), Some(option_symbol)) = (&activity.state_seed, &activity.option_symbol) {
+        insert_pending_state_row_tx(
+            &mut *conn,
+            &activity.broker_account_id,
+            &activity.activity_id,
+            activity.activity_type,
+            option_symbol,
+            seed,
+            activity.ingested_at_utc,
+        )
+        .await?;
+    }
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn fetch_option_lifecycle_ingestion_cursor(
@@ -247,33 +309,7 @@ pub async fn ingest_option_lifecycle_activity_batch(
     let mut already_existed = 0usize;
 
     for activity in batch {
-        let result = sqlx::query(
-            r#"
-            insert into sys_option_lifecycle_activity_ledger (
-                activity_id, broker_account_id, engine_id, mode, activity_type,
-                option_symbol, underlying_symbol_raw, activity_date, qty_raw,
-                price_raw, net_amount_raw, ingested_at_utc
-            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            on conflict (broker_account_id, activity_id, activity_type) do nothing
-            "#,
-        )
-        .bind(&activity.activity_id)
-        .bind(&activity.broker_account_id)
-        .bind(&activity.engine_id)
-        .bind(&activity.mode)
-        .bind(activity.activity_type.as_str())
-        .bind(&activity.option_symbol)
-        .bind(&activity.underlying_symbol_raw)
-        .bind(&activity.activity_date)
-        .bind(&activity.qty_raw)
-        .bind(&activity.price_raw)
-        .bind(&activity.net_amount_raw)
-        .bind(activity.ingested_at_utc)
-        .execute(&mut *tx)
-        .await
-        .context("ingest_option_lifecycle_activity_batch: activity insert failed")?;
-
-        if result.rows_affected() == 1 {
+        if insert_activity_and_seed_tx(&mut tx, activity).await? {
             newly_inserted += 1;
         } else {
             already_existed += 1;
@@ -310,55 +346,56 @@ pub async fn ingest_option_lifecycle_activity_batch(
     })
 }
 
-type OptionLifecycleActivityRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-    String,
-    Option<String>,
-    String,
-    DateTime<Utc>,
-);
+#[derive(sqlx::FromRow)]
+struct OptionLifecycleActivityRow {
+    activity_id: String,
+    broker_account_id: String,
+    engine_id: String,
+    mode: String,
+    activity_type: String,
+    option_symbol: Option<String>,
+    underlying_symbol_raw: Option<String>,
+    activity_date: String,
+    qty_raw: String,
+    price_raw: Option<String>,
+    net_amount_raw: String,
+    ingested_at_utc: DateTime<Utc>,
+    provider_group_id: Option<String>,
+    provider_ref_id: Option<String>,
+    provider_status: Option<String>,
+    description_raw: Option<String>,
+    raw_json: Option<serde_json::Value>,
+}
 
 fn row_to_activity(row: OptionLifecycleActivityRow) -> Result<NewOptionLifecycleActivity> {
-    let (
-        activity_id,
-        broker_account_id,
-        engine_id,
-        mode,
-        activity_type,
-        option_symbol,
-        underlying_symbol_raw,
-        activity_date,
-        qty_raw,
-        price_raw,
-        net_amount_raw,
-        ingested_at_utc,
-    ) = row;
     Ok(NewOptionLifecycleActivity {
-        activity_id,
-        broker_account_id,
-        engine_id,
-        mode,
-        activity_type: OptionLifecycleActivityType::parse(&activity_type)?,
-        option_symbol,
-        underlying_symbol_raw,
-        activity_date,
-        qty_raw,
-        price_raw,
-        net_amount_raw,
-        ingested_at_utc,
+        activity_id: row.activity_id,
+        broker_account_id: row.broker_account_id,
+        engine_id: row.engine_id,
+        mode: row.mode,
+        activity_type: OptionLifecycleActivityType::parse(&row.activity_type)?,
+        option_symbol: row.option_symbol,
+        underlying_symbol_raw: row.underlying_symbol_raw,
+        activity_date: row.activity_date,
+        qty_raw: row.qty_raw,
+        price_raw: row.price_raw,
+        net_amount_raw: row.net_amount_raw,
+        ingested_at_utc: row.ingested_at_utc,
+        provenance: OptionLifecycleRawProvenance {
+            group_id: row.provider_group_id,
+            ref_id: row.provider_ref_id,
+            status: row.provider_status,
+            description: row.description_raw,
+            raw_json: row.raw_json,
+        },
+        state_seed: None,
     })
 }
 
 const OPTION_LIFECYCLE_ACTIVITY_COLUMNS: &str = "activity_id, broker_account_id, engine_id, \
      mode, activity_type, option_symbol, underlying_symbol_raw, activity_date, qty_raw, \
-     price_raw, net_amount_raw, ingested_at_utc";
+     price_raw, net_amount_raw, ingested_at_utc, provider_group_id, provider_ref_id, \
+     provider_status, description_raw, raw_json";
 
 /// Read back one durably-ingested activity row, for test/audit
 /// verification and for D2's pairing lookup.
@@ -417,6 +454,30 @@ pub async fn find_paired_trade_activity(
         .context("find_paired_trade_activity failed")?;
 
     row.map(row_to_activity).transpose()
+}
+
+/// Every raw row of one activity type for one account, in a stable order
+/// (`activity_date`, `activity_id`). Bounded by what a single account's
+/// option events produce; used by correlation, which needs the whole
+/// candidate set (never a `LIMIT 1` pick).
+pub async fn list_option_lifecycle_activities(
+    pool: &PgPool,
+    broker_account_id: &str,
+    activity_type: OptionLifecycleActivityType,
+) -> Result<Vec<NewOptionLifecycleActivity>> {
+    let query = format!(
+        "select {OPTION_LIFECYCLE_ACTIVITY_COLUMNS}
+           from sys_option_lifecycle_activity_ledger
+          where broker_account_id = $1 and activity_type = $2
+          order by activity_date asc, activity_id asc"
+    );
+    let rows: Vec<OptionLifecycleActivityRow> = sqlx::query_as(&query)
+        .bind(broker_account_id)
+        .bind(activity_type.as_str())
+        .fetch_all(pool)
+        .await
+        .context("list_option_lifecycle_activities failed")?;
+    rows.into_iter().map(row_to_activity).collect()
 }
 
 // ---------------------------------------------------------------------------

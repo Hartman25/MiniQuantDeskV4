@@ -1034,7 +1034,7 @@ impl mqk_daemon::state::OptionLifecycleActivityFetcher
         &self,
         _activity_type: &str,
         _after_id: Option<&str>,
-    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOptionLifecycleActivity>, String> {
         unreachable!("adoption's Gate 4b never fetches from Alpaca")
     }
 
@@ -1082,6 +1082,8 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
             price_raw: None,
             net_amount_raw: "0".to_string(),
             ingested_at_utc: chrono::Utc::now(),
+            provenance: Default::default(),
+            state_seed: None,
         },
     )
     .await

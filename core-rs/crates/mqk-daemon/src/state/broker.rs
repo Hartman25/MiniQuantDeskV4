@@ -473,7 +473,7 @@ impl OptionLifecycleActivityFetcher for AlpacaOptionLifecycleActivityFetcher {
         &self,
         activity_type: &str,
         after_id: Option<&str>,
-    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOptionLifecycleActivity>, String> {
         self.0
             .fetch_option_lifecycle_activities_since(activity_type, after_id)
             .map_err(|e| e.to_string())

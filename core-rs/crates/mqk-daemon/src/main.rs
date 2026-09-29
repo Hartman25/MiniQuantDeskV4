@@ -145,6 +145,13 @@ async fn main() -> anyhow::Result<()> {
     let completed_bar_task_outcome =
         state::spawn_autonomous_completed_bar_driver_task(Arc::clone(&shared)).await;
 
+    // D1: options-lifecycle activity polling (read-only account-activity GETs).
+    // Default OFF: starts only when MQK_OPTION_LIFECYCLE_POLL_INTERVAL_SECS is a
+    // positive integer and a DB + Alpaca lifecycle fetcher are configured. Never
+    // submits an order and activates no execution capability.
+    let _option_lifecycle_poll_handle =
+        state::spawn_option_lifecycle_poll_task(Arc::clone(&shared));
+
     // BOOT-VALID-01: Explicit startup task outcome log.
     //
     // For paper+alpaca all three autonomous tasks must start.  If the WS

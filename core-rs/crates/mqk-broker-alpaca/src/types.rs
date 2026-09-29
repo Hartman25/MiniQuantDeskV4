@@ -432,6 +432,52 @@ pub struct AlpacaFeeActivity {
     pub status: Option<String>,
 }
 // ---------------------------------------------------------------------------
+// D1: options-lifecycle account activities (OPEXC / OPASN / OPEXP / OPTRD) —
+// GET /v2/account/activities/{type}
+// ---------------------------------------------------------------------------
+
+/// Raw Alpaca options-lifecycle account activity from the REST activities
+/// surface MQD consumes (`GET /v2/account/activities/{OPEXC|OPASN|OPEXP|OPTRD}`).
+///
+/// A dedicated type, NOT [`AlpacaFeeActivity`]: the per-type semantics of
+/// `symbol` (OCC option contract for OPEXC/OPASN/OPEXP; underlying ticker for
+/// OPTRD), `qty` (signed change to the option position vs signed shares) and
+/// `net_amount` (always `"0"` vs the signed strike cash) differ, and the REST
+/// surface carries no account id -- the provider account is established
+/// separately from the authenticated `GET /v2/account` (never from this row).
+///
+/// `group_id`/`ref_id` are OPTIONAL correlation identifiers: Alpaca's newer
+/// Activity-event surface documents them (`ref_id`, `details.group_id`), the
+/// REST activities examples do not. They are captured verbatim when the
+/// provider supplies them and never invented; the two surfaces' semantics are
+/// not merged here.
+///
+/// Serialize is derived so the exact parsed record can be persisted verbatim
+/// as raw provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlpacaOptionLifecycleActivity {
+    pub id: String,
+    pub activity_type: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    pub net_amount: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    pub qty: Option<String>,
+    #[serde(default)]
+    pub price: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub ref_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot fetch wire types — AP-03
 // GET /v2/account, GET /v2/positions, GET /v2/orders?status=open
 // ---------------------------------------------------------------------------

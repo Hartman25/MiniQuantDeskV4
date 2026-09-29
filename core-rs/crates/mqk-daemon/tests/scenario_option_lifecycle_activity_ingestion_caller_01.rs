@@ -25,7 +25,7 @@
 //! every fetcher here is a fake `OptionLifecycleActivityFetcher`.
 
 use chrono::Utc;
-use mqk_broker_alpaca::types::AlpacaFeeActivity;
+use mqk_broker_alpaca::types::AlpacaOptionLifecycleActivity;
 use mqk_daemon::state::option_lifecycle_ingestion::ingest_option_lifecycle_activities_once;
 use mqk_daemon::state::OptionLifecycleActivityFetcher;
 use sqlx::PgPool;
@@ -60,8 +60,8 @@ fn test_engine_id(label: &str) -> String {
     format!("test-option-lifecycle-caller-{}-{}", label, Uuid::new_v4())
 }
 
-fn opexc_activity(id: &str, option_symbol: &str, qty: &str) -> AlpacaFeeActivity {
-    AlpacaFeeActivity {
+fn opexc_activity(id: &str, option_symbol: &str, qty: &str) -> AlpacaOptionLifecycleActivity {
+    AlpacaOptionLifecycleActivity {
         id: id.to_string(),
         activity_type: "OPEXC".to_string(),
         date: Some("2026-06-19".to_string()),
@@ -71,6 +71,8 @@ fn opexc_activity(id: &str, option_symbol: &str, qty: &str) -> AlpacaFeeActivity
         qty: Some(qty.to_string()),
         price: None,
         status: Some("executed".to_string()),
+        group_id: None,
+        ref_id: None,
     }
 }
 
@@ -80,8 +82,8 @@ fn optrd_activity(
     qty: &str,
     price: &str,
     net_amount: &str,
-) -> AlpacaFeeActivity {
-    AlpacaFeeActivity {
+) -> AlpacaOptionLifecycleActivity {
+    AlpacaOptionLifecycleActivity {
         id: id.to_string(),
         activity_type: "OPTRD".to_string(),
         date: Some("2026-06-19".to_string()),
@@ -91,11 +93,13 @@ fn optrd_activity(
         qty: Some(qty.to_string()),
         price: Some(price.to_string()),
         status: Some("executed".to_string()),
+        group_id: None,
+        ref_id: None,
     }
 }
 
-fn malformed_missing_symbol(id: &str) -> AlpacaFeeActivity {
-    AlpacaFeeActivity {
+fn malformed_missing_symbol(id: &str) -> AlpacaOptionLifecycleActivity {
+    AlpacaOptionLifecycleActivity {
         id: id.to_string(),
         activity_type: "OPEXC".to_string(),
         date: Some("2026-06-19".to_string()),
@@ -105,12 +109,14 @@ fn malformed_missing_symbol(id: &str) -> AlpacaFeeActivity {
         qty: Some("-1".to_string()),
         price: None,
         status: Some("executed".to_string()),
+        group_id: None,
+        ref_id: None,
     }
 }
 
 struct FixedFetcher {
     broker_account_id: String,
-    activities: Vec<AlpacaFeeActivity>,
+    activities: Vec<AlpacaOptionLifecycleActivity>,
 }
 
 impl OptionLifecycleActivityFetcher for FixedFetcher {
@@ -118,7 +124,7 @@ impl OptionLifecycleActivityFetcher for FixedFetcher {
         &self,
         _activity_type: &str,
         _after_id: Option<&str>,
-    ) -> Result<Vec<AlpacaFeeActivity>, String> {
+    ) -> Result<Vec<AlpacaOptionLifecycleActivity>, String> {
         Ok(self.activities.clone())
     }
 
@@ -131,7 +137,7 @@ impl OptionLifecycleActivityFetcher for FixedFetcher {
 struct AssertingFetcher {
     broker_account_id: String,
     expected_after_id: Option<String>,
-    activities: Vec<AlpacaFeeActivity>,
+    activities: Vec<AlpacaOptionLifecycleActivity>,
 }
 
 impl OptionLifecycleActivityFetcher for AssertingFetcher {
@@ -139,7 +145,7 @@ impl OptionLifecycleActivityFetcher for AssertingFetcher {
         &self,
         _activity_type: &str,
         after_id: Option<&str>,
-    ) -> Result<Vec<AlpacaFeeActivity>, String> {
+    ) -> Result<Vec<AlpacaOptionLifecycleActivity>, String> {
         assert_eq!(
             after_id,
             self.expected_after_id.as_deref(),
