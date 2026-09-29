@@ -783,7 +783,7 @@ pub(super) fn spawn_execution_loop(
                     // D3: every 5th tick, try to move applied lifecycle events to
                     // RECONCILED against a fresh authenticated broker snapshot.
                     lifecycle_reconcile_ticks = lifecycle_reconcile_ticks.wrapping_add(1);
-                    if lifecycle_absorb && lifecycle_reconcile_ticks % 5 == 0 {
+                    if lifecycle_absorb && matches!(lifecycle_reconcile_ticks % 5, 0) {
                         if let Some(pool) = db.as_ref() {
                             if let Err(err) = reconcile_lifecycle_against_broker(
                                 pool,

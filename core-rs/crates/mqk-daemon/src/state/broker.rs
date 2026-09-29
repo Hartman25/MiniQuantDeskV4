@@ -492,8 +492,9 @@ impl OptionLifecycleActivityFetcher for AlpacaOptionLifecycleActivityFetcher {
 /// fail-closed shape as `build_crypto_fee_activity_fetcher_from_env`. This
 /// fetches read-only account-activity history (never an order); Alpaca
 /// options trading capability does not exist in this codebase yet, so this
-/// fetcher exists independently of any such flag. Nothing in the daemon
-/// calls it automatically.
+/// fetcher exists independently of any such flag. It is driven only by the
+/// default-off `option_lifecycle_poll` task (`MQK_OPTION_LIFECYCLE_POLL_INTERVAL_SECS`)
+/// and reads through the order-admission fences.
 pub(super) fn build_option_lifecycle_activity_fetcher_from_env(
     broker_kind: Option<BrokerKind>,
     deployment_mode: DeploymentMode,

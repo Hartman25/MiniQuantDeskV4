@@ -5,10 +5,10 @@
 //!
 //! ```text
 //! PENDING_EVIDENCE <-> PENDING_AMBIGUOUS <-> READY_TO_APPLY
-//!                                                 |  (apply tx only)
-//!                                        APPLIED_AWAITING_BROKER
-//!                                                 |  (broker agreement only)
-//!                                             RECONCILED   (terminal)
+//! |  (apply tx only)
+//! APPLIED_AWAITING_BROKER
+//! |  (broker agreement only)
+//! RECONCILED   (terminal)
 //! ```
 //!
 //! Only `RECONCILED` clears the pending gate. The database trigger from 0089
@@ -306,7 +306,7 @@ pub async fn find_fencing_lifecycle_event(
     symbol: &str,
 ) -> Result<Option<OptionLifecycleEventStateRow>> {
     let q = format!(
-        "select {STATE_COLUMNS} from sys_option_lifecycle_event_state          where broker_account_id = $1 and execution_domain = $2 and state <> 'RECONCILED'            and (option_symbol = $3 or underlying_symbol = $3)          order by created_at_utc asc, lifecycle_activity_id asc, lifecycle_activity_type asc          limit 1"
+        "select {STATE_COLUMNS} from sys_option_lifecycle_event_state where broker_account_id = $1 and execution_domain = $2 and state <> 'RECONCILED' and (option_symbol = $3 or underlying_symbol = $3) order by created_at_utc asc, lifecycle_activity_id asc, lifecycle_activity_type asc limit 1"
     );
     let row: Option<StateRow> = sqlx::query_as(&q)
         .bind(broker_account_id)
@@ -326,7 +326,7 @@ pub async fn find_any_unreconciled_lifecycle_event(
     execution_domain: &str,
 ) -> Result<Option<OptionLifecycleEventStateRow>> {
     let q = format!(
-        "select {STATE_COLUMNS} from sys_option_lifecycle_event_state          where broker_account_id = $1 and execution_domain = $2 and state <> 'RECONCILED'          order by created_at_utc asc, lifecycle_activity_id asc, lifecycle_activity_type asc          limit 1"
+        "select {STATE_COLUMNS} from sys_option_lifecycle_event_state where broker_account_id = $1 and execution_domain = $2 and state <> 'RECONCILED' order by created_at_utc asc, lifecycle_activity_id asc, lifecycle_activity_type asc limit 1"
     );
     let row: Option<StateRow> = sqlx::query_as(&q)
         .bind(broker_account_id)
@@ -351,7 +351,7 @@ pub async fn list_awaiting_broker_lifecycle_events(
         .collect::<Vec<_>>()
         .join(", ");
     let q = format!(
-        "select {cols} from sys_option_lifecycle_event_state s          join sys_broker_account_authority a on a.authority_key = s.broker_account_id          where s.execution_domain = $1 and a.deployment_mode = $2            and s.state = 'APPLIED_AWAITING_BROKER'          order by s.created_at_utc asc, s.lifecycle_activity_id asc, s.lifecycle_activity_type asc"
+        "select {cols} from sys_option_lifecycle_event_state s join sys_broker_account_authority a on a.authority_key = s.broker_account_id where s.execution_domain = $1 and a.deployment_mode = $2 and s.state = 'APPLIED_AWAITING_BROKER' order by s.created_at_utc asc, s.lifecycle_activity_id asc, s.lifecycle_activity_type asc"
     );
     let rows: Vec<StateRow> = sqlx::query_as(&q)
         .bind(execution_domain)

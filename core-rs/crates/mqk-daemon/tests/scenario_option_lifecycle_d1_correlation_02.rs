@@ -60,12 +60,10 @@ async fn require_pool() -> PgPool {
 }
 
 fn fresh_authority(label: &str) -> BrokerAccountAuthority {
-    BrokerAccountAuthority::new(
-        "alpaca",
-        &format!("d1-{label}-{}", Uuid::new_v4().simple()),
-        "paper",
-    )
-    .unwrap()
+    // Unique deployment-mode label: journal rows are replayed per mode, so a
+    // shared "paper" label would leak into unrelated runs on the shared test DB.
+    let u = Uuid::new_v4().simple().to_string();
+    BrokerAccountAuthority::new("alpaca", &format!("d1-{label}-{u}"), &format!("m{u}")).unwrap()
 }
 
 #[allow(clippy::too_many_arguments)]

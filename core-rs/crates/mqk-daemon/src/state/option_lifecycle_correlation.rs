@@ -623,7 +623,7 @@ mod tests {
         assert!(matches!(
             correlate_lifecycle_event(
                 &lifecycle("X1", Exercise, CALL, "2", None),
-                &[t.clone()],
+                std::slice::from_ref(&t),
                 &none()
             ),
             CorrelationOutcome::PendingEvidence { .. }
@@ -632,7 +632,7 @@ mod tests {
         assert!(matches!(
             correlate_lifecycle_event(
                 &lifecycle("X1", Exercise, CALL, "-1.5", None),
-                &[t.clone()],
+                std::slice::from_ref(&t),
                 &none()
             ),
             CorrelationOutcome::PendingEvidence { .. }
@@ -641,14 +641,14 @@ mod tests {
         let mut l = lifecycle("X1", Exercise, CALL, "-2", None);
         l.provenance.status = Some("canceled".to_string());
         assert!(matches!(
-            correlate_lifecycle_event(&l, &[t.clone()], &none()),
+            correlate_lifecycle_event(&l, std::slice::from_ref(&t), &none()),
             CorrelationOutcome::PendingEvidence { .. }
         ));
         // Lifecycle row carrying cash.
         let mut l = lifecycle("X1", Exercise, CALL, "-2", None);
         l.net_amount_raw = "5".to_string();
         assert!(matches!(
-            correlate_lifecycle_event(&l, &[t.clone()], &none()),
+            correlate_lifecycle_event(&l, std::slice::from_ref(&t), &none()),
             CorrelationOutcome::PendingEvidence { .. }
         ));
         // Overflowing quantity is refused, not wrapped.

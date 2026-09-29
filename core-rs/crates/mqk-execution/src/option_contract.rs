@@ -65,7 +65,12 @@ fn days_in_month(year: u16, month: u8) -> u8 {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
         2 => {
-            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            let leap = match (year % 4, year % 100, year % 400) {
+                (_, _, 0) => true,
+                (_, 0, _) => false,
+                (0, _, _) => true,
+                _ => false,
+            };
             if leap {
                 29
             } else {

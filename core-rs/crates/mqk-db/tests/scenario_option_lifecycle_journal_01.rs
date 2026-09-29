@@ -65,6 +65,7 @@ async fn account(pool: &PgPool, label: &str) -> BrokerAccountAuthority {
     a
 }
 
+#[allow(clippy::too_many_arguments)]
 fn raw(
     key: &str,
     id: &str,

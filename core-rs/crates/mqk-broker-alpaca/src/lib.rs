@@ -2722,7 +2722,7 @@ mod mleg_vertical_spread_tests {
             when.method(POST)
                 .path("/v2/orders")
                 .json_body_partial(r#"{"order_class": "mleg", "client_order_id": "test-co-1"}"#)
-                .json_body_partial(&format!(
+                .json_body_partial(format!(
                     r#"{{"legs": [
                         {{"symbol": "{LONG}", "side": "buy", "position_intent": "buy_to_open", "ratio_qty": "1"}},
                         {{"symbol": "{SHORT}", "side": "sell", "position_intent": "sell_to_open", "ratio_qty": "1"}}
@@ -2748,7 +2748,7 @@ mod mleg_vertical_spread_tests {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/v2/orders")
-                .json_body_partial(&format!(
+                .json_body_partial(format!(
                     r#"{{"legs": [
                     {{"symbol": "{LONG}", "side": "sell", "position_intent": "sell_to_close"}},
                     {{"symbol": "{SHORT}", "side": "buy", "position_intent": "buy_to_close"}}

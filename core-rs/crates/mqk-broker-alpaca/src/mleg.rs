@@ -303,11 +303,11 @@ fn is_nonzero_decimal(raw: &str) -> bool {
     let mut parts = body.splitn(2, '.');
     let int = parts.next().unwrap_or("");
     let frac = parts.next();
-    let digits_ok = !int.is_empty()
-        && int.chars().all(|c| c.is_ascii_digit())
-        && frac.map_or(true, |f| {
-            !f.is_empty() && f.len() <= 9 && f.chars().all(|c| c.is_ascii_digit())
-        });
+    let frac_ok = match frac {
+        None => true,
+        Some(f) => !f.is_empty() && f.len() <= 9 && f.chars().all(|c| c.is_ascii_digit()),
+    };
+    let digits_ok = !int.is_empty() && int.chars().all(|c| c.is_ascii_digit()) && frac_ok;
     digits_ok && body.chars().any(|c| c.is_ascii_digit() && c != '0')
 }
 

@@ -29,8 +29,8 @@ pub const ACCOUNT_SCOPED_TABLES: [&str; 5] = [
     "sys_option_lifecycle_applied",
 ];
 
-/// Typed provider-account identity: `broker` + the provider's own account id
-/// + the deployment mode the account was verified under. Constructed only
+/// Typed provider-account identity: `broker`, the provider's own account id and
+/// the deployment mode the account was verified under. Constructed only
 /// through [`BrokerAccountAuthority::new`], which canonicalizes and validates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BrokerAccountAuthority {
