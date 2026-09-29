@@ -1191,6 +1191,8 @@ Crypto time-in-force is no longer an open operator decision. Because the generic
 
 ## M5-M8 Independent-Review Correction Controller (`V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01`, 2026-09-28)
 
+> **Superseded in part by the final section of this file (`V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`) and ledger §G8.** The "CORRECTED_PROVEN" rows below for B5/B6/D1/D2/D3/D5 and any "LOCALLY COMPLETE" wording are withdrawn where they differ.
+
 Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G7. Starting HEAD `b50dc0ba` (this section's own G6 baseline); ending HEAD `6cdd0d9b`; seven local commits, not pushed. Independent review of the row above found six confirmed defects (B5, B6, D1, D2, D3, D5); this controller closes all six plus one further gap D3's own second sweep exposed.
 
 ```text
@@ -1206,3 +1208,24 @@ M6/M7/M8 milestone exit gates (real Paper/Live/IBKR proof)                    OP
 Independent re-verification this session (not merely re-assertion): `asset_risk_policy::option_policy()` confirmed still `Disabled`; `resolve_order_instrument_context` confirmed still refuses every non-equity/crypto `asset_class` — no option order-construction path exists anywhere for D3's new admission gate to have created live risk against. Zero repo consumers of D5's `SubmitVerticalSpreadRequest`/`submit_vertical_spread` outside `mqk-broker-alpaca` itself. Migrations 0083/0084 not edited; 0085/0086/0087 are additive only. Second adversarial sweep across all six corrected seams found one further gap (D3's own gate was reachable through the manual operator order-submit route, unwired) — closed in `6cdd0d9b` — and no other ordinary deterministic defect.
 
 **Acceptance boundary:** `cargo check`/`cargo clippy -- -D warnings` clean on `mqk-db`, `mqk-daemon`, `mqk-broker-alpaca`; every directly affected scenario suite green against disposable Postgres on port 5434 (B5 decision tests, B6 ingestion + caller tests, D1 ingestion + caller tests including the shared-id/cross-account proofs, D2 apply tests including all four signed directions, D3 pending-gate + the three production-wiring integration suites, D5 mleg tests); every stated negative/mutation control proven RED-then-GREEN. Full `cargo test --workspace` NOT RUN (resource bounded). GitHub CI NOT VERIFIED (no push). Zero Paper/Live orders; zero broker/provider network calls. M6/M7/M8 remain operationally incomplete. **Next: independent review of `b50dc0ba`..`6cdd0d9b` only, then an explicit operator push decision.**
+
+## M5-M8 Final Exception Correction (`V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`, 2026-09-28)
+
+Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G8. Starting HEAD `26bd9c12`; ten local code commits (`9eafefd8`..`02b9a638`) plus this docs commit, not pushed.
+
+```
+B5 Crypto TIF authority upstream of decision.rs (typed policy seam; decision.rs validates only)      CLOSED_PROVEN (9eafefd8, dfd3f7ea)
+B6 economic account identity = Alpaca provider account id; legacy rows quarantined (migration 0088)   CLOSED_PROVEN (a5c3a92f, 52e1d666)
+D1 dedicated lifecycle provider type, evidence correlation, default-off polling caller (0089)         CLOSED_PROVEN (e3d35e04); mock provider only
+D2 atomic signed lifecycle economics in the canonical ledger (option+underlying+cash; journal 0090)   CLOSED_PROVEN (be2c7493)
+D3 lifecycle state machine; gate clears only at RECONCILED; option and underlying fenced             CLOSED_PROVEN (98cb99b4)
+D5 verified vertical == contracts sent; response authenticated; capability default off               CLOSED_PROVEN (050b0800)
+G  confirmed Crypto cash fees reach the canonical ledger; asset-denominated fees => cost PARTIAL      CLOSED_PROVEN (0ac4baa6)
+second sweep: clippy -D warnings, test-mode isolation                                                 CLOSED (02b9a638)
+M6/M7/M8 operational exit gates (real Alpaca crypto/options Paper, IBKR Gateway, controlled Live)     NOT COMPLETE - OPERATOR_VALIDATION_REQUIRED
+crypto capability / mleg capability flags                                                             DEFAULT OFF (operator decision)
+ML                                                                                                    PLANNED / NOT AUTHORIZED
+b1c_c14 ignored DB test (stale promotion fixture, unrelated to this controller)                       OPEN (own patch)
+```
+
+Not performed: `cargo test --workspace`, GitHub CI, any Paper/Live session or order, any real broker/IBKR call, push. No milestone is claimed `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`. Next: independent review of `26bd9c12`..HEAD, then an explicit operator push decision.

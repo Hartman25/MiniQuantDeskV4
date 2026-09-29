@@ -6,6 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -13. M5-M8 Final Exception Correction (2026-09-28, `V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`)
+
+Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G8 and the final section of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `26bd9c12`; ten local code commits (`9eafefd8`..`02b9a638`) plus the docs commit; NOT pushed. Supersedes §-12 and §-11 where they differ.
+
+- Closes B5 (Crypto TIF authority upstream of `decision.rs`), B6 (economic account identity = Alpaca provider account id, legacy rows quarantined, migration 0088), D1 (dedicated lifecycle model, evidence correlation, default-off polling caller, 0089), D2 (atomic signed lifecycle economics in the canonical ledger, 0090), D3 (state machine; gate clears only at RECONCILED after broker agreement), D5 (verified vertical is exactly what is sent; response authenticated) and the fee economic-consumer gap.
+- M6/M7/M8 operational exit gates are NOT complete. Not performed: `cargo test --workspace`, CI, any Paper/Live session, real broker/IBKR call, push. Crypto and mleg capability flags default off. ML is PLANNED / NOT AUTHORIZED.
+- Open, unrelated: `b1c_c14` (ignored DB test) has a stale promotion fixture. Use a fresh disposable DB for daemon lifecycle-matrix tests; the long-lived `mqk_test` holds residual `paper`-mode journal rows.
+- Next: independent review of `26bd9c12`..HEAD, then an explicit operator push decision.
+
+---
+
 ## -12. M5-M8 Independent-Review Correction Controller (2026-09-28, `V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01`)
 
 Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G7 and the section of the same name at the end of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `b50dc0ba`; ending HEAD `6cdd0d9b`; seven local commits, NOT pushed. This is the independent review of `48bed899`..`e5fea9d5` (§-11 below) that §-11 itself called for — not a new expansion, a correction of six confirmed defects in that exact range.
