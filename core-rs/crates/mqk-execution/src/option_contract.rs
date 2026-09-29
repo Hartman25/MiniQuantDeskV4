@@ -14,18 +14,13 @@
 /// Shares per standard US equity-option contract.
 pub const STANDARD_OPTION_MULTIPLIER: i64 = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum OptionRight {
-    Call,
-    Put,
-}
+/// The repo's existing option right type.
+pub use mqk_schemas::OptionRight;
 
-impl OptionRight {
-    fn occ_char(self) -> char {
-        match self {
-            Self::Call => 'C',
-            Self::Put => 'P',
-        }
+fn occ_char(right: OptionRight) -> char {
+    match right {
+        OptionRight::Call => 'C',
+        OptionRight::Put => 'P',
     }
 }
 
@@ -54,7 +49,7 @@ impl std::error::Error for OptionContractParseError {}
 /// Parsed, validated option contract identity. Fields are private so a value
 /// exists only if it came from [`OptionContractIdentity::parse`] or
 /// [`OptionContractIdentity::new`], both of which validate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OptionContractIdentity {
     underlying: String,
     expiration_year: u16,
@@ -196,7 +191,7 @@ impl OptionContractIdentity {
             self.expiration_year % 100,
             self.expiration_month,
             self.expiration_day,
-            self.right.occ_char(),
+            occ_char(self.right),
             self.strike_thousandths
         )
     }

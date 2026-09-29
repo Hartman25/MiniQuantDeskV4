@@ -233,6 +233,10 @@ pub struct AlpacaMlegLegResponse {
     pub symbol: String,
     pub side: String,
     pub status: String,
+    /// Echoed `position_intent`, when the provider returns it; authenticated
+    /// against the submitted intent if present, never assumed.
+    #[serde(default)]
+    pub position_intent: Option<String>,
 }
 /// Raw Alpaca multi-leg order submission response body from
 /// `POST /v2/orders`. `legs` is populated immediately -- no separate

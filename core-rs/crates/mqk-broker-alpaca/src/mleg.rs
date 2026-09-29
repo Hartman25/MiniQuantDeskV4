@@ -1,48 +1,38 @@
-//! D5 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION):
-//! multi-leg (mleg) vertical-spread order construction and response
-//! normalization.
+//! D5: multi-leg (mleg) vertical-spread order construction and response
+//! authentication.
 //!
-//! Pure domain <-> wire translation, mirroring `normalize.rs`'s role for
-//! the inbound lane: [`build_mleg_submit_body`] constructs exactly ONE
-//! Alpaca `order_class=mleg` request body carrying both legs of a
-//! single-ratio vertical spread -- this crate never submits a leg as its
-//! own independent order. [`normalize_mleg_submit_response`] verifies the
-//! broker's response actually carries exactly two legs matching the two
-//! legs requested (by option symbol) before returning normalized parent +
-//! leg identity; any other shape is a refusal, never silently narrowed or
-//! reordered by position.
+//! One authority: the typed, parsed [`VerifiedVertical`] (two
+//! [`OptionContractIdentity`]s proven to form a frozen call/put vertical) is
+//! BOTH what is verified and what is sent. The wire symbols are derived from
+//! the identities' canonical OCC form; there is no independent free-form symbol
+//! path, so "verified strategy A, submitted contracts B" is unrepresentable.
 //!
-//! No HTTP, no capability-flag check, no `BrokerError` here -- those live
-//! at the `AlpacaBrokerAdapter` boundary in `lib.rs`, exactly as
-//! `normalize_trade_update` stays free of both concerns for the inbound
-//! lane.
+//! The parent action is typed ([`VerticalAction`]); each leg's `side` and
+//! `position_intent` are DERIVED from it and never caller-supplied, so an
+//! inconsistent side/intent pair cannot be constructed:
 //!
-//! # D5 correction: proving a frozen vertical before HTTP
+//! | action | long leg             | short leg             |
+//! |--------|----------------------|-----------------------|
+//! | Open   | buy / buy_to_open    | sell / sell_to_open   |
+//! | Close  | sell / sell_to_close | buy / buy_to_close    |
 //!
-//! [`SubmitVerticalSpreadRequest`] alone -- two arbitrary
-//! [`VerticalSpreadLeg`] symbols -- never proved same underlying/
-//! expiration/right, distinct strikes, or one long+one short before this
-//! crate's own review found `AlpacaBrokerAdapter::submit_vertical_spread`
-//! serializing and POSTing it directly. [`build_verified_vertical_spread_request`]
-//! is now the one sanctioned way to build a request for submission: it
-//! re-derives the frozen structure itself via
-//! `mqk_execution::option_strategy_permission::classify_option_strategy_structure`
-//! (never trusts a pre-built [`mqk_execution::option_strategy_permission::OptionStrategyStructure`]
-//! value, which a caller could otherwise hand-construct bypassing the
-//! classifier's own checks, since its fields are public), accepts only the
-//! two frozen vertical shapes (`CallVerticalSpread`/`PutVerticalSpread` --
-//! every other classified/refused shape is refused here too), and checks
-//! the two legs' position intents form one supported open/close
-//! combination. Its `Result::Ok` is a [`VerifiedVerticalSpreadSubmission`]
-//! -- a newtype whose inner request is only ever constructed through this
-//! function -- and `AlpacaBrokerAdapter::submit_vertical_spread` now
-//! accepts only that type, so the compiler (not caller discipline) rules
-//! out ever reaching HTTP with an unverified request.
+//! [`build_mleg_submit_body`] emits exactly ONE `order_class=mleg` body with
+//! both legs; [`normalize_mleg_submit_response`] authenticates the provider's
+//! answer (parent id, echoed `client_order_id`, `order_class`, parent `qty`,
+//! exactly two legs matching the submitted contracts and sides) before
+//! returning anything. Any disagreement is a refusal the adapter surfaces as
+//! `AmbiguousSubmit` (the order may be live in an unproven shape).
+//!
+//! No HTTP, no capability-flag check, no `BrokerError` here -- those live at
+//! the `AlpacaBrokerAdapter` boundary in `lib.rs`.
 
 use crate::types::{AlpacaMlegLegBody, AlpacaMlegSubmitBody, AlpacaMlegSubmitResponse};
 use mqk_execution::option_strategy_permission::{
-    classify_option_strategy_structure, OptionStrategyStructure, ProposedOptionStrategy,
+    classify_option_strategy_structure, OptionLegSide, OptionStrategyRefusal,
+    OptionStrategyStructure, ProposedOptionLeg, ProposedOptionStrategy,
 };
+use mqk_execution::{OptionContractIdentity, OptionRight};
+use mqk_schemas::QtyMicros;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlegSide {
@@ -59,11 +49,8 @@ impl MlegSide {
     }
 }
 
-/// Per Alpaca's official POST /v2/orders reference (verified 2026-09-28):
-/// each mleg leg carries its own `position_intent`, distinct from the
-/// parent order's `side`/`qty` -- opening a long leg and closing an
-/// existing short leg are structurally different intents even when both
-/// happen to be `MlegSide::Buy`.
+/// Per Alpaca's POST /v2/orders reference, each mleg leg carries its own
+/// `position_intent`, distinct from the parent order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlegPositionIntent {
     BuyToOpen,
@@ -83,68 +70,169 @@ impl MlegPositionIntent {
     }
 }
 
-/// One leg of a proposed vertical-spread submission. `option_symbol` is
-/// already resolved to Alpaca's OCC-style contract symbol by the caller --
-/// this crate does not parse or construct option symbols itself, mirroring
-/// `option_lifecycle_apply`'s own documented boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerticalSpreadLeg {
-    pub option_symbol: String,
+/// Typed parent action of a vertical spread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalAction {
+    /// Open both legs together.
+    OpenVertical,
+    /// Close both existing legs together.
+    CloseVertical,
+}
+
+/// Wire side + position intent of one leg, derived from the action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegWire {
     pub side: MlegSide,
     pub position_intent: MlegPositionIntent,
 }
 
-/// A proposed two-leg vertical spread, ready to submit as one `mleg`
-/// order. `long_leg`/`short_leg` are two named fields, never a `Vec` that
-/// could hold a variable leg count -- mirrors
-/// `option_strategy_permission::CallVerticalSpread`'s own structural
-/// guarantee (D4, already correct/proven).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubmitVerticalSpreadRequest {
-    pub client_order_id: String,
-    /// Units of the overall spread strategy, as a decimal string (e.g.
-    /// `"1"`).
-    pub qty: String,
-    /// Net spread price, as a decimal string.
-    pub limit_price: String,
-    pub time_in_force: String,
-    pub long_leg: VerticalSpreadLeg,
-    pub short_leg: VerticalSpreadLeg,
-}
-
-/// Construct the single request body for both legs. Always exactly two
-/// entries in `legs`, each at `ratio_qty = "1"` (a single-ratio vertical:
-/// one long contract paired with one short contract per spread unit) --
-/// never split into two separate submissions.
-pub fn build_mleg_submit_body(req: &SubmitVerticalSpreadRequest) -> AlpacaMlegSubmitBody {
-    let leg_body = |leg: &VerticalSpreadLeg| AlpacaMlegLegBody {
-        symbol: leg.option_symbol.clone(),
-        side: leg.side.as_str().to_string(),
-        position_intent: leg.position_intent.as_str().to_string(),
-        ratio_qty: "1".to_string(),
-    };
-    AlpacaMlegSubmitBody {
-        order_class: "mleg".to_string(),
-        qty: req.qty.clone(),
-        order_type: "limit".to_string(),
-        time_in_force: req.time_in_force.clone(),
-        limit_price: req.limit_price.clone(),
-        legs: vec![leg_body(&req.long_leg), leg_body(&req.short_leg)],
-        client_order_id: req.client_order_id.clone(),
+impl VerticalAction {
+    /// `(long leg, short leg)` wire semantics.
+    pub fn leg_wire(self) -> (LegWire, LegWire) {
+        match self {
+            Self::OpenVertical => (
+                LegWire {
+                    side: MlegSide::Buy,
+                    position_intent: MlegPositionIntent::BuyToOpen,
+                },
+                LegWire {
+                    side: MlegSide::Sell,
+                    position_intent: MlegPositionIntent::SellToOpen,
+                },
+            ),
+            Self::CloseVertical => (
+                LegWire {
+                    side: MlegSide::Sell,
+                    position_intent: MlegPositionIntent::SellToClose,
+                },
+                LegWire {
+                    side: MlegSide::Buy,
+                    position_intent: MlegPositionIntent::BuyToClose,
+                },
+            ),
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// D5 correction: prove a frozen vertical before HTTP
-// ---------------------------------------------------------------------------
+/// Closed-vocabulary refusal for constructing a vertical / request. Every
+/// non-frozen or malformed shape refuses here, before any request -- let alone
+/// HTTP body -- exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerticalSpreadBuildRefusal {
+    /// A supplied symbol is not a canonical standard OCC contract.
+    UnparseableContract { symbol: String, reason: String },
+    /// The two contracts do not share one underlying.
+    MismatchedUnderlying { long: String, short: String },
+    /// The frozen classifier refused the leg pair (mismatched expiry/right,
+    /// equal strikes, ...).
+    NotAFrozenStructure(OptionStrategyRefusal),
+    /// The classifier accepted a non-vertical structure.
+    NotAVerticalSpread { structure_code: &'static str },
+    /// Quantity, price, time-in-force or client id is not acceptable.
+    InvalidOrderField { field: &'static str, detail: String },
+}
 
-/// A [`SubmitVerticalSpreadRequest`] that has been proven, by
-/// [`build_verified_vertical_spread_request`], to be one of the two frozen
-/// vertical-spread shapes. The inner request is private -- constructible
-/// only through that one function -- so `AlpacaBrokerAdapter::
-/// submit_vertical_spread` accepting this type (rather than
-/// [`SubmitVerticalSpreadRequest`] directly) is a compile-time guarantee,
-/// not merely a caller-discipline convention.
+/// Two contracts proven to form one frozen call/put vertical: same underlying,
+/// same expiration, same right, distinct strikes, one long + one short role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedVertical {
+    long: OptionContractIdentity,
+    short: OptionContractIdentity,
+}
+
+fn proposed_leg(side: OptionLegSide, c: &OptionContractIdentity) -> ProposedOptionLeg {
+    let (y, m, d) = c.expiration();
+    ProposedOptionLeg {
+        side,
+        right: c.right(),
+        strike_micros: c.strike_micros(),
+        expiry_yyyymmdd: format!("{y:04}{m:02}{d:02}"),
+        qty: QtyMicros::new(1_000_000),
+        multiplier: c.multiplier() as i32,
+    }
+}
+
+impl VerifiedVertical {
+    /// Prove `long`/`short` are a frozen vertical. Re-derives the structure
+    /// through the frozen classifier; never trusts a pre-built structure.
+    pub fn new(
+        long: OptionContractIdentity,
+        short: OptionContractIdentity,
+    ) -> Result<Self, VerticalSpreadBuildRefusal> {
+        if long.underlying() != short.underlying() {
+            return Err(VerticalSpreadBuildRefusal::MismatchedUnderlying {
+                long: long.underlying().to_string(),
+                short: short.underlying().to_string(),
+            });
+        }
+        let proposed = ProposedOptionStrategy {
+            underlying: long.underlying().to_string(),
+            legs: vec![
+                proposed_leg(OptionLegSide::Long, &long),
+                proposed_leg(OptionLegSide::Short, &short),
+            ],
+            covering_share_qty: None,
+            cash_secured_collateral_micros: None,
+        };
+        let structure = classify_option_strategy_structure(&proposed)
+            .map_err(VerticalSpreadBuildRefusal::NotAFrozenStructure)?;
+        match structure {
+            OptionStrategyStructure::CallVerticalSpread { .. }
+            | OptionStrategyStructure::PutVerticalSpread { .. } => Ok(Self { long, short }),
+            other => Err(VerticalSpreadBuildRefusal::NotAVerticalSpread {
+                structure_code: other.structure_code(),
+            }),
+        }
+    }
+
+    /// Parse two canonical OCC symbols and prove them. The symbols must be
+    /// EXACTLY the canonical form of the parsed identities (no case folding,
+    /// padding or whitespace), so what is verified is what is sent.
+    pub fn from_occ_symbols(
+        long_symbol: &str,
+        short_symbol: &str,
+    ) -> Result<Self, VerticalSpreadBuildRefusal> {
+        let parse = |s: &str| {
+            OptionContractIdentity::parse(s).map_err(|e| {
+                VerticalSpreadBuildRefusal::UnparseableContract {
+                    symbol: s.to_string(),
+                    reason: e.to_string(),
+                }
+            })
+        };
+        Self::new(parse(long_symbol)?, parse(short_symbol)?)
+    }
+
+    pub fn long(&self) -> &OptionContractIdentity {
+        &self.long
+    }
+
+    pub fn short(&self) -> &OptionContractIdentity {
+        &self.short
+    }
+
+    pub fn right(&self) -> OptionRight {
+        self.long.right()
+    }
+}
+
+/// A proposed vertical submission. Fields are public for inspection; a value
+/// reaches HTTP only as a [`VerifiedVerticalSpreadSubmission`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitVerticalSpreadRequest {
+    pub client_order_id: String,
+    /// Units of the overall spread, a positive integer decimal string.
+    pub qty: String,
+    /// Net spread limit price, a non-zero canonical decimal string.
+    pub limit_price: String,
+    pub time_in_force: String,
+    pub vertical: VerifiedVertical,
+    pub action: VerticalAction,
+}
+
+/// A request proven by [`build_verified_vertical_spread_request`]. The inner
+/// request is private, so `AlpacaBrokerAdapter::submit_vertical_spread`
+/// accepting this type is a compile-time guarantee.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedVerticalSpreadSubmission(SubmitVerticalSpreadRequest);
 
@@ -154,98 +242,98 @@ impl VerifiedVerticalSpreadSubmission {
     }
 }
 
-/// Closed-vocabulary refusal for [`build_verified_vertical_spread_request`].
-/// Every reachable non-frozen shape refuses here, before any
-/// [`SubmitVerticalSpreadRequest`] -- let alone any HTTP body -- is ever
-/// constructed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerticalSpreadBuildRefusal {
-    /// `proposed` was refused by the frozen classifier itself -- e.g.
-    /// mismatched underlying/expiry/right, equal strikes, same-direction
-    /// legs, more than two legs, or any other non-frozen shape.
-    NotAFrozenStructure(mqk_execution::option_strategy_permission::OptionStrategyRefusal),
-    /// The classifier accepted `proposed`, but as a single-leg structure
-    /// (`LongCall`/`LongPut`/`CoveredCall`/`CashSecuredPut`) -- those are
-    /// single-order submissions, never mleg.
-    NotAVerticalSpread { structure_code: &'static str },
-    /// The two legs' position intents are not one supported open/close
-    /// combination for a single atomic spread action (open both legs
-    /// together, or close both legs together).
-    UnsupportedPositionIntentCombination {
-        long_intent: MlegPositionIntent,
-        short_intent: MlegPositionIntent,
-    },
+fn invalid(field: &'static str, detail: impl Into<String>) -> VerticalSpreadBuildRefusal {
+    VerticalSpreadBuildRefusal::InvalidOrderField {
+        field,
+        detail: detail.into(),
+    }
 }
 
-/// The one sanctioned way to build a vertical-spread submission. Re-derives
-/// the frozen structure from `proposed` itself (see module doc for why this
-/// never trusts a pre-built [`OptionStrategyStructure`]); `long_symbol`/
-/// `short_symbol` are the caller-resolved Alpaca OCC-style contract symbols
-/// for `proposed`'s long/short legs respectively -- this crate does not
-/// parse or construct option symbols itself (same boundary
-/// `build_mleg_submit_body` already documented).
-#[allow(clippy::too_many_arguments)]
+/// The one sanctioned way to build a submission from a proven vertical.
 pub fn build_verified_vertical_spread_request(
-    proposed: &ProposedOptionStrategy,
-    long_symbol: &str,
-    short_symbol: &str,
-    long_intent: MlegPositionIntent,
-    short_intent: MlegPositionIntent,
-    client_order_id: String,
-    qty: String,
-    limit_price: String,
-    time_in_force: String,
+    vertical: VerifiedVertical,
+    action: VerticalAction,
+    client_order_id: &str,
+    qty: &str,
+    limit_price: &str,
+    time_in_force: &str,
 ) -> Result<VerifiedVerticalSpreadSubmission, VerticalSpreadBuildRefusal> {
-    let structure = classify_option_strategy_structure(proposed)
-        .map_err(VerticalSpreadBuildRefusal::NotAFrozenStructure)?;
-
-    match &structure {
-        OptionStrategyStructure::CallVerticalSpread { .. }
-        | OptionStrategyStructure::PutVerticalSpread { .. } => {}
-        other => {
-            return Err(VerticalSpreadBuildRefusal::NotAVerticalSpread {
-                structure_code: other.structure_code(),
-            })
-        }
+    let client_order_id = client_order_id.trim();
+    if client_order_id.is_empty() || client_order_id.len() > 128 {
+        return Err(invalid("client_order_id", "must be 1-128 characters"));
     }
-
-    let supported_intents = matches!(
-        (long_intent, short_intent),
-        (
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen
-        ) | (
-            MlegPositionIntent::BuyToClose,
-            MlegPositionIntent::SellToClose
-        )
-    );
-    if !supported_intents {
-        return Err(
-            VerticalSpreadBuildRefusal::UnsupportedPositionIntentCombination {
-                long_intent,
-                short_intent,
-            },
-        );
+    let qty_ok = !qty.is_empty()
+        && qty.chars().all(|c| c.is_ascii_digit())
+        && qty.parse::<u32>().map(|n| n > 0).unwrap_or(false)
+        && !qty.starts_with('0');
+    if !qty_ok {
+        return Err(invalid("qty", format!("{qty:?} is not a positive integer")));
     }
-
+    let price_ok = is_nonzero_decimal(limit_price);
+    if !price_ok {
+        return Err(invalid(
+            "limit_price",
+            format!("{limit_price:?} is not a non-zero decimal"),
+        ));
+    }
+    // Conservative MQD policy: only `day` is accepted for mleg until the
+    // provider's other time-in-force behavior is proven for this path.
+    if time_in_force != "day" {
+        return Err(invalid(
+            "time_in_force",
+            format!("{time_in_force:?} is not accepted for mleg (only \"day\")"),
+        ));
+    }
     Ok(VerifiedVerticalSpreadSubmission(
         SubmitVerticalSpreadRequest {
-            client_order_id,
-            qty,
-            limit_price,
-            time_in_force,
-            long_leg: VerticalSpreadLeg {
-                option_symbol: long_symbol.to_string(),
-                side: MlegSide::Buy,
-                position_intent: long_intent,
-            },
-            short_leg: VerticalSpreadLeg {
-                option_symbol: short_symbol.to_string(),
-                side: MlegSide::Sell,
-                position_intent: short_intent,
-            },
+            client_order_id: client_order_id.to_string(),
+            qty: qty.to_string(),
+            limit_price: limit_price.trim().to_string(),
+            time_in_force: time_in_force.to_string(),
+            vertical,
+            action,
         },
     ))
+}
+
+/// `-?digits[.digits]` with a non-zero value and at most 9 fractional digits.
+fn is_nonzero_decimal(raw: &str) -> bool {
+    let t = raw.trim();
+    let body = t.strip_prefix('-').unwrap_or(t);
+    let mut parts = body.splitn(2, '.');
+    let int = parts.next().unwrap_or("");
+    let frac = parts.next();
+    let digits_ok = !int.is_empty()
+        && int.chars().all(|c| c.is_ascii_digit())
+        && frac.map_or(true, |f| {
+            !f.is_empty() && f.len() <= 9 && f.chars().all(|c| c.is_ascii_digit())
+        });
+    digits_ok && body.chars().any(|c| c.is_ascii_digit() && c != '0')
+}
+
+/// Construct the single request body for both legs: exactly two entries, each
+/// at `ratio_qty = "1"`, symbols from the verified identities, side/intent from
+/// the typed action. Never split into separate submissions.
+pub fn build_mleg_submit_body(req: &SubmitVerticalSpreadRequest) -> AlpacaMlegSubmitBody {
+    let (long_wire, short_wire) = req.action.leg_wire();
+    let leg = |c: &OptionContractIdentity, w: LegWire| AlpacaMlegLegBody {
+        symbol: c.occ_symbol(),
+        side: w.side.as_str().to_string(),
+        position_intent: w.position_intent.as_str().to_string(),
+        ratio_qty: "1".to_string(),
+    };
+    AlpacaMlegSubmitBody {
+        order_class: "mleg".to_string(),
+        qty: req.qty.clone(),
+        order_type: "limit".to_string(),
+        time_in_force: req.time_in_force.clone(),
+        limit_price: req.limit_price.clone(),
+        legs: vec![
+            leg(req.vertical.long(), long_wire),
+            leg(req.vertical.short(), short_wire),
+        ],
+        client_order_id: req.client_order_id.clone(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,25 +352,89 @@ pub struct SubmittedVerticalSpread {
     pub short_leg: SubmittedVerticalSpreadLeg,
 }
 
-/// Closed-vocabulary refusal for a broker response that does not match the
-/// exactly-two-legs contract this crate requires. Never silently narrowed
-/// (e.g. taking `legs[0]`/`legs[1]` by position without checking symbol
-/// identity) -- broker truth disagreeing with what was requested is a
-/// genuine anomaly, not a shape to paper over.
+/// Closed-vocabulary refusal for a provider response that does not authenticate
+/// against the request that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MlegRefusal {
-    LegCountMismatch { expected: usize, actual: usize },
-    LegIdentityMismatch { detail: String },
+    ParentIdMissing,
+    ClientOrderIdMismatch {
+        expected: String,
+        actual: String,
+    },
+    OrderClassMismatch {
+        actual: String,
+    },
+    QtyMismatch {
+        expected: String,
+        actual: String,
+    },
+    LegCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    LegIdentityMismatch {
+        detail: String,
+    },
+    LegSideMismatch {
+        symbol: String,
+        expected: String,
+        actual: String,
+    },
 }
 
-/// Verify and normalize a broker response against the request that
-/// produced it. Matches each response leg back to the request's long/short
-/// leg by `option_symbol` -- never by array position, since Alpaca's
-/// response leg order is not documented as stable.
+/// Canonical `(integer digits, fractional digits)` of an unsigned decimal
+/// (leading/trailing zeros stripped); `None` when not a plain decimal.
+fn canonical_unsigned_decimal(raw: &str) -> Option<(String, String)> {
+    let t = raw.trim();
+    let mut parts = t.splitn(2, '.');
+    let int = parts.next()?;
+    let frac = parts.next().unwrap_or("");
+    if int.is_empty()
+        || !int.chars().all(|c| c.is_ascii_digit())
+        || !frac.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let int = int.trim_start_matches('0');
+    Some((
+        if int.is_empty() { "0" } else { int }.to_string(),
+        frac.trim_end_matches('0').to_string(),
+    ))
+}
+
+fn same_decimal(a: &str, b: &str) -> bool {
+    match (canonical_unsigned_decimal(a), canonical_unsigned_decimal(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Authenticate and normalize a provider response against its request. Legs
+/// are matched by exact contract symbol, never by array position.
 pub fn normalize_mleg_submit_response(
     resp: AlpacaMlegSubmitResponse,
     req: &SubmitVerticalSpreadRequest,
 ) -> Result<SubmittedVerticalSpread, MlegRefusal> {
+    if resp.id.trim().is_empty() {
+        return Err(MlegRefusal::ParentIdMissing);
+    }
+    if resp.client_order_id != req.client_order_id {
+        return Err(MlegRefusal::ClientOrderIdMismatch {
+            expected: req.client_order_id.clone(),
+            actual: resp.client_order_id,
+        });
+    }
+    if resp.order_class != "mleg" {
+        return Err(MlegRefusal::OrderClassMismatch {
+            actual: resp.order_class,
+        });
+    }
+    if !same_decimal(&resp.qty, &req.qty) {
+        return Err(MlegRefusal::QtyMismatch {
+            expected: req.qty.clone(),
+            actual: resp.qty,
+        });
+    }
     if resp.legs.len() != 2 {
         return Err(MlegRefusal::LegCountMismatch {
             expected: 2,
@@ -290,37 +442,55 @@ pub fn normalize_mleg_submit_response(
         });
     }
 
-    let find_leg = |option_symbol: &str| {
-        resp.legs
-            .iter()
-            .find(|l| l.symbol == option_symbol)
-            .cloned()
-    };
-
-    let long_resp =
-        find_leg(&req.long_leg.option_symbol).ok_or_else(|| MlegRefusal::LegIdentityMismatch {
-            detail: format!(
-                "no response leg matched requested long leg symbol {:?}",
-                req.long_leg.option_symbol
-            ),
-        })?;
-    let short_resp =
-        find_leg(&req.short_leg.option_symbol).ok_or_else(|| MlegRefusal::LegIdentityMismatch {
-            detail: format!(
-                "no response leg matched requested short leg symbol {:?}",
-                req.short_leg.option_symbol
-            ),
-        })?;
-    if long_resp.symbol == short_resp.symbol {
-        return Err(MlegRefusal::LegIdentityMismatch {
-            detail: format!(
-                "long and short leg resolved to the same response leg (symbol {:?}) -- \
-                 requested legs must be distinct contracts",
-                long_resp.symbol
-            ),
-        });
+    let (long_wire, short_wire) = req.action.leg_wire();
+    let expected = [
+        (req.vertical.long().occ_symbol(), long_wire),
+        (req.vertical.short().occ_symbol(), short_wire),
+    ];
+    let mut found = Vec::with_capacity(2);
+    for (symbol, wire) in &expected {
+        let matches: Vec<_> = resp.legs.iter().filter(|l| &l.symbol == symbol).collect();
+        let leg = match matches.as_slice() {
+            [one] => *one,
+            [] => {
+                return Err(MlegRefusal::LegIdentityMismatch {
+                    detail: format!("no response leg matched submitted contract {symbol:?}"),
+                })
+            }
+            _ => {
+                return Err(MlegRefusal::LegIdentityMismatch {
+                    detail: format!("contract {symbol:?} appears more than once in the response"),
+                })
+            }
+        };
+        if leg.side != wire.side.as_str() {
+            return Err(MlegRefusal::LegSideMismatch {
+                symbol: symbol.clone(),
+                expected: wire.side.as_str().to_string(),
+                actual: leg.side.clone(),
+            });
+        }
+        if let Some(intent) = leg.position_intent.as_deref() {
+            if intent != wire.position_intent.as_str() {
+                return Err(MlegRefusal::LegIdentityMismatch {
+                    detail: format!(
+                        "leg {symbol:?} position_intent {intent:?} != submitted {:?}",
+                        wire.position_intent.as_str()
+                    ),
+                });
+            }
+        }
+        if leg.id.trim().is_empty() {
+            return Err(MlegRefusal::LegIdentityMismatch {
+                detail: format!("leg {symbol:?} has no broker id"),
+            });
+        }
+        found.push(leg.clone());
     }
-
+    // Two distinct submitted contracts each matched exactly one response leg
+    // and the response has exactly two legs: no missing, extra or duplicate.
+    let short_resp = found.pop().expect("two legs");
+    let long_resp = found.pop().expect("two legs");
     Ok(SubmittedVerticalSpread {
         broker_parent_order_id: resp.id,
         client_order_id: resp.client_order_id,
@@ -343,377 +513,283 @@ mod tests {
     use super::*;
     use crate::types::AlpacaMlegLegResponse;
 
-    fn leg(option_symbol: &str, side: MlegSide, intent: MlegPositionIntent) -> VerticalSpreadLeg {
-        VerticalSpreadLeg {
-            option_symbol: option_symbol.to_string(),
-            side,
-            position_intent: intent,
-        }
+    const LONG_CALL: &str = "AAPL260619C00500000";
+    const SHORT_CALL: &str = "AAPL260619C00510000";
+    const LONG_PUT: &str = "AAPL260619P00510000";
+    const SHORT_PUT: &str = "AAPL260619P00500000";
+
+    fn submission(
+        long: &str,
+        short: &str,
+        action: VerticalAction,
+    ) -> VerifiedVerticalSpreadSubmission {
+        build_verified_vertical_spread_request(
+            VerifiedVertical::from_occ_symbols(long, short).unwrap(),
+            action,
+            "co-1",
+            "1",
+            "2.50",
+            "day",
+        )
+        .unwrap()
     }
 
-    fn request() -> SubmitVerticalSpreadRequest {
-        SubmitVerticalSpreadRequest {
-            client_order_id: "co-1".to_string(),
-            qty: "1".to_string(),
-            limit_price: "2.50".to_string(),
-            time_in_force: "day".to_string(),
-            long_leg: leg(
-                "AAPL260619C00500000",
-                MlegSide::Buy,
-                MlegPositionIntent::BuyToOpen,
+    #[test]
+    fn open_and_close_call_and_put_verticals_derive_exact_wire_legs() {
+        use VerticalAction::{CloseVertical, OpenVertical};
+        // (long, short, action, long side/intent, short side/intent)
+        let cases = [
+            (
+                LONG_CALL,
+                SHORT_CALL,
+                OpenVertical,
+                ("buy", "buy_to_open"),
+                ("sell", "sell_to_open"),
             ),
-            short_leg: leg(
-                "AAPL260619C00510000",
-                MlegSide::Sell,
-                MlegPositionIntent::SellToOpen,
+            (
+                LONG_PUT,
+                SHORT_PUT,
+                OpenVertical,
+                ("buy", "buy_to_open"),
+                ("sell", "sell_to_open"),
             ),
+            (
+                LONG_CALL,
+                SHORT_CALL,
+                CloseVertical,
+                ("sell", "sell_to_close"),
+                ("buy", "buy_to_close"),
+            ),
+            (
+                LONG_PUT,
+                SHORT_PUT,
+                CloseVertical,
+                ("sell", "sell_to_close"),
+                ("buy", "buy_to_close"),
+            ),
+        ];
+        for (long, short, action, lw, sw) in cases {
+            let sub = submission(long, short, action);
+            let body = build_mleg_submit_body(sub.request());
+            assert_eq!(body.order_class, "mleg");
+            assert_eq!(body.legs.len(), 2, "one parent, exactly two legs");
+            assert_eq!(body.legs[0].symbol, long);
+            assert_eq!(body.legs[1].symbol, short);
+            assert_eq!(
+                (
+                    body.legs[0].side.as_str(),
+                    body.legs[0].position_intent.as_str()
+                ),
+                lw,
+                "{long} {action:?}"
+            );
+            assert_eq!(
+                (
+                    body.legs[1].side.as_str(),
+                    body.legs[1].position_intent.as_str()
+                ),
+                sw,
+                "{short} {action:?}"
+            );
+            assert!(body.legs.iter().all(|l| l.ratio_qty == "1"));
         }
     }
 
     #[test]
-    fn build_mleg_submit_body_carries_exactly_two_legs_never_split() {
-        let body = build_mleg_submit_body(&request());
-        assert_eq!(body.order_class, "mleg");
-        assert_eq!(body.legs.len(), 2);
-        assert_eq!(body.legs[0].symbol, "AAPL260619C00500000");
-        assert_eq!(body.legs[0].side, "buy");
-        assert_eq!(body.legs[0].position_intent, "buy_to_open");
-        assert_eq!(body.legs[1].symbol, "AAPL260619C00510000");
-        assert_eq!(body.legs[1].side, "sell");
-        assert_eq!(body.legs[1].position_intent, "sell_to_open");
+    fn a_vertical_is_only_the_frozen_shape_and_only_from_canonical_occ_symbols() {
+        let refuse = |l: &str, s: &str| VerifiedVertical::from_occ_symbols(l, s).unwrap_err();
+        assert!(matches!(
+            refuse(LONG_CALL, "MSFT260619C00510000"),
+            VerticalSpreadBuildRefusal::MismatchedUnderlying { .. }
+        ));
+        assert!(
+            matches!(
+                refuse(LONG_CALL, "AAPL260717C00510000"),
+                VerticalSpreadBuildRefusal::NotAFrozenStructure(_)
+            ),
+            "mismatched expiration"
+        );
+        assert!(
+            matches!(
+                refuse(LONG_CALL, LONG_PUT),
+                VerticalSpreadBuildRefusal::NotAFrozenStructure(_)
+            ),
+            "call + put"
+        );
+        assert!(
+            matches!(
+                refuse(LONG_CALL, LONG_CALL),
+                VerticalSpreadBuildRefusal::NotAFrozenStructure(_)
+            ),
+            "same strike / same contract"
+        );
+        // Non-canonical / wrong-shape strings cannot even name a contract.
+        for bad in [
+            "AAPL260619C0050000",
+            "aapl260619C00510000",
+            "AAPL260619X00510000",
+            "AAPL260631C00510000",
+            "AAPL",
+        ] {
+            assert!(
+                matches!(
+                    refuse(bad, SHORT_CALL),
+                    VerticalSpreadBuildRefusal::UnparseableContract { .. }
+                ),
+                "{bad}"
+            );
+        }
     }
 
-    fn resp_leg(id: &str, symbol: &str, side: &str, status: &str) -> AlpacaMlegLegResponse {
+    #[test]
+    fn order_fields_are_validated() {
+        let v = || VerifiedVertical::from_occ_symbols(LONG_CALL, SHORT_CALL).unwrap();
+        let build = |co: &str, qty: &str, px: &str, tif: &str| {
+            build_verified_vertical_spread_request(
+                v(),
+                VerticalAction::OpenVertical,
+                co,
+                qty,
+                px,
+                tif,
+            )
+        };
+        assert!(build("co", "1", "2.50", "day").is_ok());
+        assert!(
+            build("co", "3", "-0.25", "day").is_ok(),
+            "credit spread price"
+        );
+        for (co, qty, px, tif) in [
+            ("", "1", "2.50", "day"),
+            ("co", "0", "2.50", "day"),
+            ("co", "1.5", "2.50", "day"),
+            ("co", "abc", "2.50", "day"),
+            ("co", "1", "0", "day"),
+            ("co", "1", "x", "day"),
+            ("co", "1", "2.50", "gtc"),
+        ] {
+            assert!(
+                build(co, qty, px, tif).is_err(),
+                "{co:?} {qty:?} {px:?} {tif:?}"
+            );
+        }
+    }
+
+    fn resp_leg(id: &str, symbol: &str, side: &str) -> AlpacaMlegLegResponse {
         AlpacaMlegLegResponse {
             id: id.to_string(),
             symbol: symbol.to_string(),
             side: side.to_string(),
-            status: status.to_string(),
+            status: "accepted".to_string(),
+            position_intent: None,
         }
     }
 
-    #[test]
-    fn normalize_matches_legs_by_symbol_not_response_order() {
-        let req = request();
-        // Response lists the SHORT leg first -- normalization must not
-        // assume request/response leg order agree.
-        let resp = AlpacaMlegSubmitResponse {
+    fn good_resp(action: VerticalAction) -> AlpacaMlegSubmitResponse {
+        let (lw, sw) = action.leg_wire();
+        AlpacaMlegSubmitResponse {
             id: "parent-1".to_string(),
             client_order_id: "co-1".to_string(),
             order_class: "mleg".to_string(),
             qty: "1".to_string(),
             status: "accepted".to_string(),
             legs: vec![
-                resp_leg("leg-short", "AAPL260619C00510000", "sell", "accepted"),
-                resp_leg("leg-long", "AAPL260619C00500000", "buy", "accepted"),
+                resp_leg("leg-s", SHORT_CALL, sw.side.as_str()),
+                resp_leg("leg-l", LONG_CALL, lw.side.as_str()),
             ],
-        };
-
-        let normalized = normalize_mleg_submit_response(resp, &req).expect("must normalize");
-        assert_eq!(normalized.broker_parent_order_id, "parent-1");
-        assert_eq!(normalized.long_leg.broker_leg_order_id, "leg-long");
-        assert_eq!(normalized.long_leg.option_symbol, "AAPL260619C00500000");
-        assert_eq!(normalized.short_leg.broker_leg_order_id, "leg-short");
-        assert_eq!(normalized.short_leg.option_symbol, "AAPL260619C00510000");
+        }
     }
 
     #[test]
-    fn normalize_refuses_when_broker_returns_wrong_leg_count() {
-        let req = request();
-        let resp = AlpacaMlegSubmitResponse {
-            id: "parent-2".to_string(),
-            client_order_id: "co-1".to_string(),
-            order_class: "mleg".to_string(),
-            qty: "1".to_string(),
-            status: "accepted".to_string(),
-            legs: vec![resp_leg(
-                "leg-long",
-                "AAPL260619C00500000",
-                "buy",
-                "accepted",
-            )],
-        };
-
-        assert_eq!(
-            normalize_mleg_submit_response(resp, &req).unwrap_err(),
-            MlegRefusal::LegCountMismatch {
-                expected: 2,
-                actual: 1
-            }
-        );
+    fn a_matching_response_is_authenticated_and_matched_by_symbol_not_position() {
+        for action in [VerticalAction::OpenVertical, VerticalAction::CloseVertical] {
+            let sub = submission(LONG_CALL, SHORT_CALL, action);
+            let out = normalize_mleg_submit_response(good_resp(action), sub.request()).unwrap();
+            assert_eq!(out.broker_parent_order_id, "parent-1");
+            assert_eq!(out.long_leg.broker_leg_order_id, "leg-l");
+            assert_eq!(out.short_leg.broker_leg_order_id, "leg-s");
+        }
     }
 
     #[test]
-    fn normalize_refuses_when_a_requested_symbol_has_no_matching_response_leg() {
-        let req = request();
-        let resp = AlpacaMlegSubmitResponse {
-            id: "parent-3".to_string(),
-            client_order_id: "co-1".to_string(),
-            order_class: "mleg".to_string(),
-            qty: "1".to_string(),
-            status: "accepted".to_string(),
-            legs: vec![
-                resp_leg("leg-long", "AAPL260619C00500000", "buy", "accepted"),
-                // Wrong symbol -- broker returned something other than the
-                // requested short leg.
-                resp_leg("leg-other", "AAPL260619C00520000", "sell", "accepted"),
-            ],
+    fn every_response_disagreement_is_refused() {
+        let action = VerticalAction::OpenVertical;
+        let sub = submission(LONG_CALL, SHORT_CALL, action);
+        let req = sub.request();
+        let refuse = |f: &dyn Fn(&mut AlpacaMlegSubmitResponse)| {
+            let mut r = good_resp(action);
+            f(&mut r);
+            normalize_mleg_submit_response(r, req).unwrap_err()
         };
-
         assert!(matches!(
-            normalize_mleg_submit_response(resp, &req).unwrap_err(),
-            MlegRefusal::LegIdentityMismatch { .. }
+            refuse(&|r| r.id = " ".into()),
+            MlegRefusal::ParentIdMissing
         ));
-    }
-
-    // -----------------------------------------------------------------
-    // D5 correction: build_verified_vertical_spread_request proves a
-    // frozen vertical before any SubmitVerticalSpreadRequest exists.
-    // -----------------------------------------------------------------
-
-    use mqk_execution::option_strategy_permission::{
-        OptionLegSide, OptionStrategyRefusal, ProposedOptionLeg,
-    };
-    use mqk_schemas::{OptionRight, QtyMicros};
-
-    fn proposed_leg(
-        side: OptionLegSide,
-        right: OptionRight,
-        strike_micros: i64,
-        expiry: &str,
-    ) -> ProposedOptionLeg {
-        ProposedOptionLeg {
-            side,
-            right,
-            strike_micros,
-            expiry_yyyymmdd: expiry.to_string(),
-            qty: QtyMicros::new(1_000_000),
-            multiplier: 100,
-        }
-    }
-
-    fn valid_call_vertical() -> mqk_execution::option_strategy_permission::ProposedOptionStrategy {
-        mqk_execution::option_strategy_permission::ProposedOptionStrategy {
-            underlying: "AAPL".to_string(),
-            legs: vec![
-                proposed_leg(
-                    OptionLegSide::Long,
-                    OptionRight::Call,
-                    500_000_000,
-                    "20260619",
-                ),
-                proposed_leg(
-                    OptionLegSide::Short,
-                    OptionRight::Call,
-                    510_000_000,
-                    "20260619",
-                ),
-            ],
-            covering_share_qty: None,
-            cash_secured_collateral_micros: None,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_build(
-        proposed: &mqk_execution::option_strategy_permission::ProposedOptionStrategy,
-        long_intent: MlegPositionIntent,
-        short_intent: MlegPositionIntent,
-    ) -> Result<VerifiedVerticalSpreadSubmission, VerticalSpreadBuildRefusal> {
-        build_verified_vertical_spread_request(
-            proposed,
-            "AAPL260619C00500000",
-            "AAPL260619C00510000",
-            long_intent,
-            short_intent,
-            "co-1".to_string(),
-            "1".to_string(),
-            "2.50".to_string(),
-            "day".to_string(),
-        )
-    }
-
-    #[test]
-    fn valid_call_vertical_builds_a_verified_submission() {
-        let verified = try_build(
-            &valid_call_vertical(),
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .expect("a valid call vertical must build");
-        let req = verified.request();
-        assert_eq!(req.long_leg.option_symbol, "AAPL260619C00500000");
-        assert_eq!(req.long_leg.side, MlegSide::Buy);
-        assert_eq!(req.short_leg.option_symbol, "AAPL260619C00510000");
-        assert_eq!(req.short_leg.side, MlegSide::Sell);
-    }
-
-    #[test]
-    fn valid_put_vertical_builds_a_verified_submission() {
-        let mut proposed = valid_call_vertical();
-        proposed.legs[0].right = OptionRight::Put;
-        proposed.legs[1].right = OptionRight::Put;
-        let verified = try_build(
-            &proposed,
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .expect("a valid put vertical must build");
-        assert_eq!(
-            verified.request().long_leg.option_symbol,
-            "AAPL260619C00500000"
-        );
-    }
-
-    #[test]
-    fn mismatched_expiration_refuses_before_any_request_is_built() {
-        let mut proposed = valid_call_vertical();
-        proposed.legs[1].expiry_yyyymmdd = "20260717".to_string();
-        let err = try_build(
-            &proposed,
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            VerticalSpreadBuildRefusal::NotAFrozenStructure(
-                OptionStrategyRefusal::SpreadLegsMustShareRightAndExpiry
-            )
-        );
-    }
-
-    #[test]
-    fn call_plus_put_refuses_before_any_request_is_built() {
-        let mut proposed = valid_call_vertical();
-        proposed.legs[1].right = OptionRight::Put;
-        let err = try_build(
-            &proposed,
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            VerticalSpreadBuildRefusal::NotAFrozenStructure(
-                OptionStrategyRefusal::SpreadLegsMustShareRightAndExpiry
-            )
-        );
-    }
-
-    #[test]
-    fn equal_strikes_refuses_before_any_request_is_built() {
-        let mut proposed = valid_call_vertical();
-        proposed.legs[1].strike_micros = proposed.legs[0].strike_micros;
-        let err = try_build(
-            &proposed,
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            VerticalSpreadBuildRefusal::NotAFrozenStructure(
-                OptionStrategyRefusal::SpreadLegsMustHaveDistinctStrikes
-            )
-        );
-    }
-
-    #[test]
-    fn same_direction_legs_refuses_before_any_request_is_built() {
-        let mut proposed = valid_call_vertical();
-        proposed.legs[1].side = OptionLegSide::Long; // both long -- not a vertical
-        let err = try_build(
-            &proposed,
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            VerticalSpreadBuildRefusal::NotAFrozenStructure(
-                OptionStrategyRefusal::SpreadLegsMustBeOppositeDirection
-            )
-        );
-    }
-
-    #[test]
-    fn unsupported_multi_leg_structure_refuses_before_any_request_is_built() {
-        // Three legs -- never a frozen shape at all.
-        let mut proposed = valid_call_vertical();
-        proposed.legs.push(proposed_leg(
-            OptionLegSide::Long,
-            OptionRight::Call,
-            520_000_000,
-            "20260619",
+        assert!(matches!(
+            refuse(&|r| r.client_order_id = "other".into()),
+            MlegRefusal::ClientOrderIdMismatch { .. }
         ));
-        let err = try_build(
-            &proposed,
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            VerticalSpreadBuildRefusal::NotAFrozenStructure(OptionStrategyRefusal::TooManyLegs {
-                leg_count: 3
-            })
+        assert!(matches!(
+            refuse(&|r| r.order_class = "simple".into()),
+            MlegRefusal::OrderClassMismatch { .. }
+        ));
+        assert!(matches!(
+            refuse(&|r| r.qty = "2".into()),
+            MlegRefusal::QtyMismatch { .. }
+        ));
+        assert!(
+            matches!(
+                refuse(&|r| {
+                    r.legs.pop();
+                }),
+                MlegRefusal::LegCountMismatch { actual: 1, .. }
+            ),
+            "missing leg"
+        );
+        assert!(
+            matches!(
+                refuse(&|r| r.legs.push(resp_leg("x", "AAPL260619C00520000", "buy"))),
+                MlegRefusal::LegCountMismatch { actual: 3, .. }
+            ),
+            "extra leg"
+        );
+        assert!(
+            matches!(
+                refuse(&|r| r.legs[1].symbol = "AAPL260619C00999000".into()),
+                MlegRefusal::LegIdentityMismatch { .. }
+            ),
+            "wrong returned symbol"
+        );
+        assert!(
+            matches!(
+                refuse(&|r| r.legs[0].symbol = LONG_CALL.into()),
+                MlegRefusal::LegIdentityMismatch { .. }
+            ),
+            "duplicate leg"
+        );
+        assert!(
+            matches!(
+                refuse(&|r| r.legs[1].side = "sell".into()),
+                MlegRefusal::LegSideMismatch { .. }
+            ),
+            "wrong returned side"
+        );
+        assert!(
+            matches!(
+                refuse(&|r| r.legs[1].position_intent = Some("sell_to_close".into())),
+                MlegRefusal::LegIdentityMismatch { .. }
+            ),
+            "wrong returned intent"
         );
     }
 
     #[test]
-    fn single_leg_structure_is_refused_as_not_a_vertical_spread() {
-        // A single long call is a real frozen shape (long_call) -- but it
-        // is never an mleg submission.
-        let proposed = mqk_execution::option_strategy_permission::ProposedOptionStrategy {
-            underlying: "AAPL".to_string(),
-            legs: vec![proposed_leg(
-                OptionLegSide::Long,
-                OptionRight::Call,
-                500_000_000,
-                "20260619",
-            )],
-            covering_share_qty: None,
-            cash_secured_collateral_micros: None,
-        };
-        let err = try_build(
-            &proposed,
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            VerticalSpreadBuildRefusal::NotAVerticalSpread {
-                structure_code: "long_call"
-            }
-        );
-    }
-
-    #[test]
-    fn malformed_long_short_intent_combination_refuses() {
-        let err = try_build(
-            &valid_call_vertical(),
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToClose, // opening one leg, closing the other -- invalid
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            VerticalSpreadBuildRefusal::UnsupportedPositionIntentCombination {
-                long_intent: MlegPositionIntent::BuyToOpen,
-                short_intent: MlegPositionIntent::SellToClose,
-            }
-        );
-    }
-
-    #[test]
-    fn closing_both_legs_is_a_supported_intent_combination() {
-        try_build(
-            &valid_call_vertical(),
-            MlegPositionIntent::BuyToClose,
-            MlegPositionIntent::SellToClose,
-        )
-        .expect("closing both legs together must build");
+    fn a_close_response_with_open_sides_is_refused() {
+        let sub = submission(LONG_CALL, SHORT_CALL, VerticalAction::CloseVertical);
+        // Provider echoes OPEN sides for a CLOSE request.
+        let err =
+            normalize_mleg_submit_response(good_resp(VerticalAction::OpenVertical), sub.request())
+                .unwrap_err();
+        assert!(matches!(err, MlegRefusal::LegSideMismatch { .. }));
     }
 }

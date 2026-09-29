@@ -64,7 +64,7 @@ pub mod option_lifecycle_normalize;
 pub mod snapshot;
 pub mod types;
 use crate::mleg::{
-    build_mleg_submit_body, normalize_mleg_submit_response, MlegRefusal, SubmittedVerticalSpread,
+    build_mleg_submit_body, normalize_mleg_submit_response, SubmittedVerticalSpread,
     VerifiedVerticalSpreadSubmission,
 };
 use crate::normalize::normalize_trade_update;
@@ -831,12 +831,14 @@ impl AlpacaBrokerAdapter {
     /// Never submits the two legs as independent orders -- `build_body`
     /// (see `mleg::build_mleg_submit_body`) always carries both legs in
     /// the single request this method sends.
-    /// D5 correction: accepts only a [`VerifiedVerticalSpreadSubmission`] --
-    /// constructible solely via [`mleg::build_verified_vertical_spread_request`],
-    /// which re-derives and proves the frozen call/put vertical structure
-    /// before any request exists at all. The compiler, not caller
-    /// discipline, rules out ever reaching this HTTP call with an unproven
-    /// two-symbol pair.
+    /// Accepts only a [`VerifiedVerticalSpreadSubmission`] -- built from a
+    /// typed [`mleg::VerifiedVertical`] (two parsed OCC identities proven to
+    /// be a frozen vertical) and a typed [`mleg::VerticalAction`]. The wire
+    /// symbols are derived from those identities and each leg's side/intent
+    /// from the action, so the verified model and the submitted contracts are
+    /// one authority. The provider's answer is authenticated (parent id,
+    /// `client_order_id`, `order_class`, qty, both legs' symbols and sides)
+    /// before it is returned; any disagreement is `AmbiguousSubmit`.
     pub fn submit_vertical_spread(
         &self,
         verified: &VerifiedVerticalSpreadSubmission,
@@ -886,16 +888,16 @@ impl AlpacaBrokerAdapter {
                     detail: format!("submit_vertical_spread: response parse error: {e}"),
                 })
         })?;
-        normalize_mleg_submit_response(alpaca, req).map_err(|refusal| match refusal {
-            MlegRefusal::LegCountMismatch { expected, actual } => BrokerError::AmbiguousSubmit {
+        // Any disagreement between the provider's answer and what was submitted
+        // is an unauthenticated response: the order may be live at the broker
+        // in an unproven shape, so it is quarantined as ambiguous.
+        normalize_mleg_submit_response(alpaca, req).map_err(|refusal| {
+            BrokerError::AmbiguousSubmit {
                 detail: format!(
-                    "submit_vertical_spread: broker returned {actual} legs, expected \
-                     {expected} -- the order may be live at the broker in an unproven shape"
+                    "submit_vertical_spread: provider response failed authentication \
+                     ({refusal:?}) -- the order may be live at the broker in an unproven shape"
                 ),
-            },
-            MlegRefusal::LegIdentityMismatch { detail } => BrokerError::AmbiguousSubmit {
-                detail: format!("submit_vertical_spread: {detail}"),
-            },
+            }
         })
     }
 
@@ -918,8 +920,9 @@ impl AlpacaBrokerAdapter {
             detail: format!(
                 "cancel_vertical_spread: REST DELETE /v2/orders/{{id}} success-path semantics \
                  for order_class=mleg parent {broker_parent_order_id:?} (atomic vs. per-leg \
-                 cancel) are not sufficiently proven here -- conservative MQD policy refusal, \
-                 not a claim that Alpaca leaves mleg cancel undocumented"
+                 cancel) are not sufficiently proven here -- MQD conservative policy: MLEG \
+                 cancel/replace semantics not accepted for V4 (not a claim that Alpaca leaves \
+                 mleg cancel undocumented)"
             ),
         })
     }
@@ -943,8 +946,9 @@ impl AlpacaBrokerAdapter {
             detail: format!(
                 "replace_vertical_spread: REST PATCH /v2/orders/{{id}} success-path leg-resupply \
                  semantics for order_class=mleg parent {broker_parent_order_id:?} are not \
-                 sufficiently proven here -- conservative MQD policy refusal, not a claim that \
-                 Alpaca leaves mleg replace undocumented"
+                 sufficiently proven here -- MQD conservative policy: MLEG cancel/replace \
+                 semantics not accepted for V4 (not a claim that Alpaca leaves mleg replace \
+                 undocumented)"
             ),
         })
     }
@@ -2659,152 +2663,162 @@ mod broker_retry_tests {
 
 // ---------------------------------------------------------------------------
 // D5: multi-leg vertical-spread submission -- capability gate, single-POST
-// shape, and cancel/replace fail-closed refusal. Mock fixtures only, no
-// real Alpaca order.
+// shape, response authentication, and cancel/replace fail-closed refusal.
+// Mock fixtures only, no real Alpaca order.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod mleg_vertical_spread_tests {
     use super::*;
-    use crate::mleg::{build_verified_vertical_spread_request, MlegPositionIntent};
-    use mqk_execution::option_strategy_permission::{
-        OptionLegSide, ProposedOptionLeg, ProposedOptionStrategy,
-    };
-    use mqk_schemas::{OptionRight, QtyMicros};
+    use crate::mleg::{build_verified_vertical_spread_request, VerifiedVertical, VerticalAction};
+    use httpmock::prelude::*;
 
-    /// A valid call vertical: long $500 call / short $510 call, same
-    /// underlying/expiry, opening both legs -- the one shape every test in
-    /// this module builds from unless it is deliberately proving a refusal.
-    fn proposed_call_vertical() -> ProposedOptionStrategy {
-        ProposedOptionStrategy {
-            underlying: "AAPL".to_string(),
-            legs: vec![
-                ProposedOptionLeg {
-                    side: OptionLegSide::Long,
-                    right: OptionRight::Call,
-                    strike_micros: 500_000_000,
-                    expiry_yyyymmdd: "20260619".to_string(),
-                    qty: QtyMicros::new(1_000_000),
-                    multiplier: 100,
-                },
-                ProposedOptionLeg {
-                    side: OptionLegSide::Short,
-                    right: OptionRight::Call,
-                    strike_micros: 510_000_000,
-                    expiry_yyyymmdd: "20260619".to_string(),
-                    qty: QtyMicros::new(1_000_000),
-                    multiplier: 100,
-                },
-            ],
-            covering_share_qty: None,
-            cash_secured_collateral_micros: None,
-        }
-    }
+    const LONG: &str = "AAPL260619C00500000";
+    const SHORT: &str = "AAPL260619C00510000";
 
-    fn verified_request() -> VerifiedVerticalSpreadSubmission {
+    fn verified(action: VerticalAction) -> VerifiedVerticalSpreadSubmission {
         build_verified_vertical_spread_request(
-            &proposed_call_vertical(),
-            "AAPL260619C00500000",
-            "AAPL260619C00510000",
-            MlegPositionIntent::BuyToOpen,
-            MlegPositionIntent::SellToOpen,
-            "test-co-1".to_string(),
-            "1".to_string(),
-            "2.50".to_string(),
-            "day".to_string(),
+            VerifiedVertical::from_occ_symbols(LONG, SHORT).unwrap(),
+            action,
+            "test-co-1",
+            "1",
+            "2.50",
+            "day",
         )
-        .expect("proposed_call_vertical must build a verified submission")
+        .expect("a frozen call vertical must build")
     }
 
-    /// The capability defaults off in `new_for_test` -- refusal must happen
-    /// before any HTTP call. `MockServer` is intentionally not started: a
-    /// network call here would panic against a non-listening address,
-    /// proving this really is a pre-HTTP refusal.
+    fn ok_response(long_side: &str, short_side: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "parent-1",
+            "client_order_id": "test-co-1",
+            "order_class": "mleg",
+            "qty": "1",
+            "status": "accepted",
+            "legs": [
+                {"id": "leg-long-1", "symbol": LONG, "side": long_side, "status": "accepted"},
+                {"id": "leg-short-1", "symbol": SHORT, "side": short_side, "status": "accepted"}
+            ]
+        })
+    }
+
+    /// The capability defaults off in `new_for_test` -- refusal happens before
+    /// any HTTP call (no server is started; a network call would fail).
     #[test]
     fn submit_vertical_spread_refuses_before_any_http_call_when_capability_disabled() {
         let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string());
         let err = adapter
-            .submit_vertical_spread(&verified_request())
+            .submit_vertical_spread(&verified(VerticalAction::OpenVertical))
             .unwrap_err();
-        assert_eq!(
+        assert!(matches!(
             err,
-            BrokerError::Reject {
-                code: "options_mleg_capability_disabled".to_string(),
-                detail: "submit_vertical_spread: options_mleg_capability_enabled is false -- \
-                         this capability defaults off and must be explicitly opted into"
-                    .to_string(),
-            }
-        );
+            BrokerError::Reject { code, .. } if code == "options_mleg_capability_disabled"
+        ));
     }
 
     #[test]
-    fn submit_vertical_spread_sends_exactly_one_post_with_both_legs() {
-        use httpmock::prelude::*;
-
+    fn open_sends_exactly_one_post_with_open_sides_and_intents() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/v2/orders")
-                .json_body_partial(r#"{"order_class": "mleg"}"#)
-                .json_body_partial(r#"{"legs": [{"symbol": "AAPL260619C00500000"}, {"symbol": "AAPL260619C00510000"}]}"#);
-            then.status(200).json_body(serde_json::json!({
-                "id": "parent-1",
-                "client_order_id": "test-co-1",
-                "order_class": "mleg",
-                "qty": "1",
-                "status": "accepted",
-                "legs": [
-                    {"id": "leg-long-1", "symbol": "AAPL260619C00500000", "side": "buy", "status": "accepted"},
-                    {"id": "leg-short-1", "symbol": "AAPL260619C00510000", "side": "sell", "status": "accepted"}
-                ]
-            }));
+                .json_body_partial(r#"{"order_class": "mleg", "client_order_id": "test-co-1"}"#)
+                .json_body_partial(&format!(
+                    r#"{{"legs": [
+                        {{"symbol": "{LONG}", "side": "buy", "position_intent": "buy_to_open", "ratio_qty": "1"}},
+                        {{"symbol": "{SHORT}", "side": "sell", "position_intent": "sell_to_open", "ratio_qty": "1"}}
+                    ]}}"#
+                ));
+            then.status(200).json_body(ok_response("buy", "sell"));
         });
-
         let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
             .with_options_mleg_capability_enabled(true);
         let submitted = adapter
-            .submit_vertical_spread(&verified_request())
-            .expect("capability enabled, mock returns exactly two legs -- must succeed");
-
+            .submit_vertical_spread(&verified(VerticalAction::OpenVertical))
+            .expect("authenticated response must succeed");
         assert_eq!(submitted.broker_parent_order_id, "parent-1");
         assert_eq!(submitted.long_leg.broker_leg_order_id, "leg-long-1");
         assert_eq!(submitted.short_leg.broker_leg_order_id, "leg-short-1");
-        // Exactly one submission for both legs -- never two independent
-        // per-leg orders.
+        // One parent POST for both legs -- never per-leg orders.
         mock.assert_hits(1);
     }
 
-    /// Negative control: a broker response missing a leg must never be
-    /// treated as a normal success -- the order may be live at the broker
-    /// in an unproven shape, so this must surface as `AmbiguousSubmit`
-    /// (fail closed, no synthetic completion), not `Reject`.
     #[test]
-    fn submit_vertical_spread_fails_closed_when_broker_returns_wrong_leg_count() {
-        use httpmock::prelude::*;
-
+    fn close_sends_close_sides_and_intents() {
         let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/v2/orders");
-            then.status(200).json_body(serde_json::json!({
-                "id": "parent-2",
-                "client_order_id": "test-co-1",
-                "order_class": "mleg",
-                "qty": "1",
-                "status": "accepted",
-                "legs": [
-                    {"id": "leg-long-1", "symbol": "AAPL260619C00500000", "side": "buy", "status": "accepted"}
-                ]
-            }));
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v2/orders")
+                .json_body_partial(&format!(
+                    r#"{{"legs": [
+                    {{"symbol": "{LONG}", "side": "sell", "position_intent": "sell_to_close"}},
+                    {{"symbol": "{SHORT}", "side": "buy", "position_intent": "buy_to_close"}}
+                ]}}"#
+                ));
+            then.status(200).json_body(ok_response("sell", "buy"));
         });
-
         let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
             .with_options_mleg_capability_enabled(true);
-        let err = adapter
-            .submit_vertical_spread(&verified_request())
-            .unwrap_err();
-        assert!(
-            matches!(err, BrokerError::AmbiguousSubmit { .. }),
-            "a leg-count mismatch must fail closed as AmbiguousSubmit, got {err:?}"
-        );
+        adapter
+            .submit_vertical_spread(&verified(VerticalAction::CloseVertical))
+            .expect("close must succeed against a matching response");
+        mock.assert_hits(1);
+    }
+
+    /// Every provider-side disagreement quarantines as `AmbiguousSubmit`
+    /// (the order may be live at the broker), never `Reject`/success.
+    #[test]
+    fn unauthenticated_provider_responses_are_quarantined_as_ambiguous() {
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            ("wrong client_order_id", {
+                let mut v = ok_response("buy", "sell");
+                v["client_order_id"] = "someone-else".into();
+                v
+            }),
+            ("wrong order_class", {
+                let mut v = ok_response("buy", "sell");
+                v["order_class"] = "simple".into();
+                v
+            }),
+            ("wrong qty", {
+                let mut v = ok_response("buy", "sell");
+                v["qty"] = "2".into();
+                v
+            }),
+            ("missing leg", {
+                let mut v = ok_response("buy", "sell");
+                v["legs"].as_array_mut().unwrap().pop();
+                v
+            }),
+            ("extra leg", {
+                let mut v = ok_response("buy", "sell");
+                v["legs"].as_array_mut().unwrap().push(serde_json::json!(
+                    {"id": "x", "symbol": "AAPL260619C00520000", "side": "buy", "status": "accepted"}
+                ));
+                v
+            }),
+            ("wrong returned symbol", {
+                let mut v = ok_response("buy", "sell");
+                v["legs"][1]["symbol"] = "AAPL260619C00999000".into();
+                v
+            }),
+            ("wrong returned side", ok_response("sell", "sell")),
+        ];
+        for (label, body) in cases {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/v2/orders");
+                then.status(200).json_body(body.clone());
+            });
+            let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
+                .with_options_mleg_capability_enabled(true);
+            let err = adapter
+                .submit_vertical_spread(&verified(VerticalAction::OpenVertical))
+                .unwrap_err();
+            assert!(
+                matches!(err, BrokerError::AmbiguousSubmit { .. }),
+                "{label}: got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -2812,10 +2826,16 @@ mod mleg_vertical_spread_tests {
         let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string())
             .with_options_mleg_capability_enabled(true);
         let err = adapter.cancel_vertical_spread("parent-1").unwrap_err();
-        assert!(matches!(
-            err,
-            BrokerError::Reject { code, .. } if code == "options_mleg_cancel_unproven"
-        ));
+        match err {
+            BrokerError::Reject { code, detail } => {
+                assert_eq!(code, "options_mleg_cancel_unproven");
+                assert!(
+                    detail.contains("MQD conservative policy"),
+                    "policy wording, not an 'undocumented' claim: {detail}"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -2823,9 +2843,12 @@ mod mleg_vertical_spread_tests {
         let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string())
             .with_options_mleg_capability_enabled(true);
         let err = adapter.replace_vertical_spread("parent-1").unwrap_err();
-        assert!(matches!(
-            err,
-            BrokerError::Reject { code, .. } if code == "options_mleg_replace_unproven"
-        ));
+        match err {
+            BrokerError::Reject { code, detail } => {
+                assert_eq!(code, "options_mleg_replace_unproven");
+                assert!(detail.contains("MQD conservative policy"), "{detail}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }
