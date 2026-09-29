@@ -694,8 +694,13 @@ mod tests {
             unreachable!("the order-submit gate never fetches from Alpaca")
         }
 
-        fn broker_account_id(&self) -> String {
-            "hermetic-order-submit-acct".to_string()
+        fn broker_account_authority(&self) -> Result<mqk_db::BrokerAccountAuthority, String> {
+            mqk_db::BrokerAccountAuthority::new(
+                "alpaca",
+                "hermetic-order-submit-acct",
+                DeploymentMode::LiveShadow.as_api_label(),
+            )
+            .map_err(|e| e.to_string())
         }
     }
 
@@ -714,12 +719,21 @@ mod tests {
 
             // valid_order_request() targets symbol "AAPL" -- seed unresolved
             // lifecycle evidence for that exact symbol under this fetcher's
-            // own broker_account_id.
+            // own registered provider account.
+            let authority = mqk_db::BrokerAccountAuthority::new(
+                "alpaca",
+                "hermetic-order-submit-acct",
+                DeploymentMode::LiveShadow.as_api_label(),
+            )
+            .expect("authority");
+            mqk_db::verify_or_register_broker_account_authority(db, &authority, chrono::Utc::now())
+                .await
+                .expect("authority registration");
             mqk_db::option_lifecycle_activity::insert_option_lifecycle_activity_if_new(
                 db,
                 &mqk_db::option_lifecycle_activity::NewOptionLifecycleActivity {
                     activity_id: "hermetic-d3-opexc".to_string(),
-                    broker_account_id: "hermetic-order-submit-acct".to_string(),
+                    broker_account_id: authority.key(),
                     engine_id: "mqk-daemon".to_string(),
                     mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
                     activity_type:
