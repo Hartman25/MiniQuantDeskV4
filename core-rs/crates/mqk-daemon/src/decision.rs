@@ -664,12 +664,14 @@ pub(crate) fn non_equity_explicit_size_gate(
     Ok(())
 }
 
-/// Time-in-force admitted for an order of `asset_class`.
+/// Validate-only time-in-force admission for an order of `asset_class`.
 ///
-/// Crypto time-in-force is EXPLICIT-ONLY (operator policy): an order must itself
-/// carry `gtc` or `ioc`. Crypto has no session-scoped `day`, and no crypto order
-/// is ever rewritten from one time-in-force into another -- `day`, `fok`, `opg`,
-/// `cls`, empty and unknown are refused. Equity time-in-force is untouched.
+/// Crypto time-in-force is EXPLICIT-ONLY (operator policy): the decision must
+/// already carry `gtc` or `ioc`, emitted upstream by the strategy/deployment
+/// construction seam (`crypto_execution_policy::strategy_time_in_force`). This
+/// function never reads policy or environment and never rewrites a value --
+/// `day`, `fok`, `opg`, `cls`, empty and unknown are refused. Equity
+/// time-in-force is untouched.
 fn admit_time_in_force(asset_class: &str, tif: &str) -> Result<String, String> {
     let tif = tif.trim().to_ascii_lowercase();
     if asset_class != "crypto" {
@@ -682,61 +684,6 @@ fn admit_time_in_force(asset_class: &str, tif: &str) -> Result<String, String> {
              (crypto requires an explicit gtc or ioc; no time_in_force is defaulted or rewritten)"
         )),
     }
-}
-
-/// B5: resolve the time_in_force actually admitted for an order of
-/// `asset_class`, given the deployment-level Crypto execution policy
-/// (`crypto_execution_policy` module, read once by the caller so this stays
-/// pure and testable without env-var races).
-///
-/// Non-crypto asset classes (equity and anything else) are byte-for-byte
-/// unchanged from the prior behavior: `decision`'s own `time_in_force`
-/// passes straight through [`admit_time_in_force`].
-///
-/// Crypto's generic strategy→decision translator
-/// ([`bar_result_to_decisions`]) always stamps `"day"` -- there is no
-/// asset-class awareness at that layer -- which `admit_time_in_force` would
-/// always refuse. This is the one production seam that instead consults the
-/// operator's explicit `MQK_CRYPTO_TIME_IN_FORCE` policy and, when it
-/// resolves to `Explicit(gtc)`/`Explicit(ioc)`, emits *that* value into the
-/// real order/decision path -- never `decision`'s own placeholder. An
-/// `Unconfigured` or `Invalid` policy refuses before any crypto economic
-/// action is constructed or dispatched (IR-2's admission contract, now with
-/// a real configured source instead of only a refusal path).
-fn resolve_admitted_time_in_force_with_crypto_config(
-    asset_class: &str,
-    decision_tif: &str,
-    crypto_config: crate::state::crypto_execution_policy::CryptoTimeInForceConfig,
-) -> Result<String, String> {
-    use crate::state::crypto_execution_policy::CryptoTimeInForceConfig;
-
-    if asset_class != "crypto" {
-        return admit_time_in_force(asset_class, decision_tif);
-    }
-    match crypto_config {
-        CryptoTimeInForceConfig::Explicit(tif) => Ok(tif.as_str().to_string()),
-        CryptoTimeInForceConfig::Unconfigured => Err(format!(
-            "internal decision refused: crypto time_in_force policy is not configured \
-             ({} is unset); an explicit gtc or ioc policy is required before any crypto \
-             economic action is constructed",
-            crate::state::crypto_execution_policy::CRYPTO_TIME_IN_FORCE_ENV
-        )),
-        CryptoTimeInForceConfig::Invalid => Err(format!(
-            "internal decision refused: crypto time_in_force policy ({}) is not a recognized \
-             gtc/ioc value; no default or rewritten time_in_force is ever admitted",
-            crate::state::crypto_execution_policy::CRYPTO_TIME_IN_FORCE_ENV
-        )),
-    }
-}
-
-/// Production entry point for [`resolve_admitted_time_in_force_with_crypto_config`]:
-/// reads the real `MQK_CRYPTO_TIME_IN_FORCE` env policy once.
-fn resolve_admitted_time_in_force(asset_class: &str, decision_tif: &str) -> Result<String, String> {
-    resolve_admitted_time_in_force_with_crypto_config(
-        asset_class,
-        decision_tif,
-        crate::state::crypto_execution_policy::crypto_time_in_force_config_from_env(),
-    )
 }
 
 fn build_order_json(
@@ -761,20 +708,17 @@ fn build_order_json(
         order["asset_class"] = serde_json::Value::String(instrument.asset_class.clone());
     }
 
-    // B5: persist the canonical config identity behind this order's
-    // time_in_force so later audit never depends on rereading a
-    // (possibly since-changed) MQK_CRYPTO_TIME_IN_FORCE env var. Derived
-    // purely from the already-resolved `d.time_in_force` (guaranteed
-    // gtc/ioc by `resolve_admitted_time_in_force` before this point) --
-    // no env access here.
+    // B5: persist the canonical identity of the policy behind this order's
+    // time_in_force, derived purely from the value the construction seam
+    // already emitted -- audit never depends on a mutable environment var.
     if instrument.asset_class == "crypto" {
-        let config =
-            crate::state::crypto_execution_policy::crypto_time_in_force_config_from_env_value(
-                Some(&d.time_in_force),
-            );
-        order["crypto_execution_policy_fingerprint"] = serde_json::Value::String(
-            crate::state::crypto_execution_policy::crypto_execution_policy_fingerprint(config),
-        );
+        if let Some(fp) =
+            crate::state::crypto_execution_policy::crypto_execution_policy_fingerprint_for_decision_tif(
+                &d.time_in_force,
+            )
+        {
+            order["crypto_execution_policy_fingerprint"] = serde_json::Value::String(fp);
+        }
     }
 
     if let Some(snapshot) = instrument.economics_snapshot.as_ref() {
@@ -904,6 +848,27 @@ pub fn bar_result_to_decisions(
     bar_end_ts: i64,
     current_positions: &BTreeMap<String, QtyMicros>,
 ) -> Vec<InternalStrategyDecision> {
+    bar_result_to_decisions_with_tif(result, run_id, bar_end_ts, current_positions, |_| {
+        Ok("day".to_string())
+    })
+}
+
+/// Construction seam: like [`bar_result_to_decisions`], but the
+/// time-in-force of each decision is supplied by the strategy/deployment
+/// policy (`tif_for_symbol`) instead of the generic `"day"`. An `Err` refuses
+/// that decision before it is constructed. A non-`day` value participates in
+/// `decision_id` (a `gtc`<->`ioc` change is a different economic intent);
+/// `day` reproduces the historical identity byte-for-byte.
+pub fn bar_result_to_decisions_with_tif<F>(
+    result: &mqk_strategy::StrategyBarResult,
+    run_id: Uuid,
+    bar_end_ts: i64,
+    current_positions: &BTreeMap<String, QtyMicros>,
+    tif_for_symbol: F,
+) -> Vec<InternalStrategyDecision>
+where
+    F: Fn(&str) -> Result<String, String>,
+{
     if !result.intents.should_execute() {
         return vec![];
     }
@@ -956,20 +921,31 @@ pub fn bar_result_to_decisions(
                 | crate::capital_policy::OrderIntent::SellBeyondLongToShort
                 | crate::capital_policy::OrderIntent::NoOp => return None,
             };
+            let time_in_force = match tif_for_symbol(&t.symbol) {
+                Ok(tif) => tif,
+                Err(reason) => {
+                    tracing::error!(
+                        symbol = %t.symbol,
+                        reason = %reason,
+                        "time_in_force_policy_refused: no decision constructed"
+                    );
+                    return None;
+                }
+            };
             // STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02: identity is anchored
             // on the strategy's raw signed TARGET (`t.qty`), never on the
             // derived `delta`/`side` — see the doc comment above for why.
-            let decision_id = Uuid::new_v5(
-                &Uuid::NAMESPACE_DNS,
-                format!(
-                    "mqk.strategy-decision.v3|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{target_qty}|{bar_end_ts}",
-                    symbol = t.symbol,
-                    timeframe_secs = result.spec.timeframe_secs,
-                    target_qty = t.qty,
-                )
-                .as_bytes(),
-            )
-            .to_string();
+            let mut identity = format!(
+                "mqk.strategy-decision.v3|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{target_qty}|{bar_end_ts}",
+                symbol = t.symbol,
+                timeframe_secs = result.spec.timeframe_secs,
+                target_qty = t.qty,
+            );
+            if time_in_force != "day" {
+                identity.push_str(&format!("|tif={time_in_force}"));
+            }
+            let decision_id =
+                Uuid::new_v5(&Uuid::NAMESPACE_DNS, identity.as_bytes()).to_string();
             Some(InternalStrategyDecision {
                 decision_id,
                 strategy_id: strategy_id.clone(),
@@ -979,7 +955,7 @@ pub fn bar_result_to_decisions(
                 side,
                 qty,
                 order_type: "market".to_string(),
-                time_in_force: "day".to_string(),
+                time_in_force,
                 limit_price: None,
             })
         })
@@ -1020,6 +996,42 @@ pub fn decisions_from_bar_facts(
             }
             Vec::new()
         }
+    }
+}
+
+/// Production variant of [`decisions_from_bar_facts`]: identical bar-identity
+/// fail-closed handling, with decision time-in-force supplied by the
+/// strategy/deployment policy via [`bar_result_to_decisions_with_tif`].
+pub fn decisions_from_bar_facts_with_tif<F>(
+    result: &mqk_strategy::StrategyBarResult,
+    run_id: Uuid,
+    bar_facts: Option<&crate::state::EvaluatedBarFacts>,
+    current_positions: &BTreeMap<String, QtyMicros>,
+    tif_for_symbol: F,
+) -> Vec<InternalStrategyDecision>
+where
+    F: Fn(&str) -> Result<String, String>,
+{
+    match bar_facts {
+        Some(facts) => bar_result_to_decisions_with_tif(
+            result,
+            run_id,
+            facts.bar_end_ts,
+            current_positions,
+            tif_for_symbol,
+        ),
+        None => decisions_from_bar_facts(result, run_id, None, current_positions),
+    }
+}
+
+/// Registry-resolved asset class of `symbol` (`"equity"`, `"crypto"`), used by
+/// the construction seam to pick the class's time-in-force. Resolution only:
+/// no policy is applied here.
+pub(crate) fn resolve_symbol_asset_class(state: &AppState, symbol: &str) -> Result<String, String> {
+    match resolve_order_instrument_context(state, symbol) {
+        Ok(ctx) => Ok(ctx.asset_class),
+        Err(OrderInstrumentContextError::Unavailable(m))
+        | Err(OrderInstrumentContextError::Rejected(m)) => Err(m),
     }
 }
 
@@ -1640,7 +1652,7 @@ pub async fn submit_internal_strategy_decision(
     }
 
     let mut decision = decision;
-    match resolve_admitted_time_in_force(&instrument_context.asset_class, &decision.time_in_force) {
+    match admit_time_in_force(&instrument_context.asset_class, &decision.time_in_force) {
         Ok(tif) => decision.time_in_force = tif,
         Err(blocker) => {
             return outcome(
@@ -2121,132 +2133,167 @@ mod m6_trading_registry_snapshot_writer_tests {
     }
 
     // -----------------------------------------------------------------
-    // B5: configured Crypto TIF policy controls the real decision
+    // B5: Crypto TIF authority lives upstream (construction seam); decision.rs
+    // only validates.
     // -----------------------------------------------------------------
 
     use crate::state::crypto_execution_policy::{
-        crypto_execution_policy_fingerprint, CryptoTimeInForce, CryptoTimeInForceConfig,
+        crypto_execution_policy_fingerprint, strategy_time_in_force, CryptoTimeInForce,
+        CryptoTimeInForceConfig,
     };
 
-    #[test]
-    fn b5_configured_gtc_reaches_the_actual_order_decision() {
-        let resolved = resolve_admitted_time_in_force_with_crypto_config(
-            "crypto",
-            "day", // the generic translator's meaningless placeholder
-            CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Gtc),
-        )
-        .expect("configured gtc must be admitted");
-        assert_eq!(resolved, "gtc");
+    fn b5_result(symbol: &str, target_micros: i64) -> mqk_strategy::StrategyBarResult {
+        mqk_strategy::StrategyBarResult {
+            spec: mqk_strategy::StrategySpec::new("intraday_scalper", 300),
+            semantic_fingerprint: "fp".to_string(),
+            intents: mqk_strategy::StrategyIntents {
+                mode: mqk_strategy::IntentMode::Live,
+                output: mqk_strategy::StrategyOutput {
+                    targets: vec![mqk_strategy::TargetPosition::new(
+                        symbol,
+                        mqk_schemas::QtyMicros::new(target_micros),
+                    )],
+                },
+            },
+        }
+    }
 
-        let context = btc_context();
-        let mut d = decision();
-        d.time_in_force = resolved;
-        let order = build_order_json(&d, &context);
-        assert_eq!(order["time_in_force"], "gtc");
+    /// The exact resolver shape production wires: asset class -> policy TIF.
+    fn b5_resolver(
+        class: &'static str,
+        config: CryptoTimeInForceConfig,
+    ) -> impl Fn(&str) -> Result<String, String> {
+        move |_symbol| strategy_time_in_force(class, config).map(str::to_string)
+    }
+
+    fn b5_construct(
+        class: &'static str,
+        config: CryptoTimeInForceConfig,
+    ) -> Vec<InternalStrategyDecision> {
+        bar_result_to_decisions_with_tif(
+            &b5_result("BTC/USD", 100_000),
+            Uuid::nil(),
+            1_000,
+            &BTreeMap::new(),
+            b5_resolver(class, config),
+        )
     }
 
     #[test]
-    fn b5_configured_ioc_reaches_the_actual_order_decision() {
-        let resolved = resolve_admitted_time_in_force_with_crypto_config(
-            "crypto",
-            "day",
-            CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Ioc),
-        )
-        .expect("configured ioc must be admitted");
-        assert_eq!(resolved, "ioc");
-
-        let context = btc_context();
-        let mut d = decision();
-        d.time_in_force = resolved;
-        let order = build_order_json(&d, &context);
-        assert_eq!(order["time_in_force"], "ioc");
+    fn b5_construction_seam_emits_configured_gtc_and_ioc_into_the_decision() {
+        for (tif, label) in [
+            (CryptoTimeInForce::Gtc, "gtc"),
+            (CryptoTimeInForce::Ioc, "ioc"),
+        ] {
+            let ds = b5_construct("crypto", CryptoTimeInForceConfig::Explicit(tif));
+            assert_eq!(ds.len(), 1);
+            assert_eq!(ds[0].time_in_force, label);
+            // The emitted value passes decision.rs validate-only admission
+            // unchanged and reaches the durable order JSON.
+            assert_eq!(
+                admit_time_in_force("crypto", &ds[0].time_in_force).as_deref(),
+                Ok(label)
+            );
+            let order = build_order_json(&ds[0], &btc_context());
+            assert_eq!(order["time_in_force"], label);
+            // Provenance persists the canonical value of what was constructed.
+            assert_eq!(
+                order["crypto_execution_policy_fingerprint"],
+                serde_json::Value::String(crypto_execution_policy_fingerprint(
+                    CryptoTimeInForceConfig::Explicit(tif)
+                ))
+            );
+        }
     }
 
     #[test]
-    fn b5_unconfigured_invalid_and_day_all_refuse_before_construction() {
+    fn b5_unconfigured_or_invalid_policy_constructs_no_crypto_decision() {
         for config in [
             CryptoTimeInForceConfig::Unconfigured,
             CryptoTimeInForceConfig::Invalid,
         ] {
-            let err = resolve_admitted_time_in_force_with_crypto_config("crypto", "day", config)
-                .expect_err("unconfigured/invalid crypto policy must refuse");
+            assert!(b5_construct("crypto", config).is_empty());
+        }
+    }
+
+    #[test]
+    fn b5_decision_layer_refuses_day_and_never_rewrites_it() {
+        // A crypto decision that reaches admission carrying `day` (or any
+        // non-gtc/ioc) is refused, not rewritten -- there is no policy in
+        // this layer to rewrite it with.
+        for tif in ["day", "fok", "opg", "cls", "", "unknown"] {
+            let err = admit_time_in_force("crypto", tif).expect_err("must refuse");
             assert!(err.contains("internal decision refused"), "{err}");
         }
     }
 
     #[test]
-    fn b5_gtc_ioc_change_the_persisted_policy_fingerprint_case_whitespace_does_not() {
-        let context = btc_context();
+    fn b5_gtc_ioc_change_decision_identity_case_whitespace_does_not() {
+        let id = |raw: &str| {
+            let config =
+                crate::state::crypto_execution_policy::crypto_time_in_force_config_from_env_value(
+                    Some(raw),
+                );
+            b5_construct("crypto", config)[0].decision_id.clone()
+        };
+        assert_ne!(
+            id("gtc"),
+            id("ioc"),
+            "gtc<->ioc is a different economic intent"
+        );
+        assert_eq!(id("gtc"), id(" GTC "));
+        assert_eq!(id("ioc"), id("Ioc\n"));
+    }
 
-        let mut gtc_decision = decision();
-        gtc_decision.time_in_force = resolve_admitted_time_in_force_with_crypto_config(
-            "crypto",
-            "day",
+    #[test]
+    fn b5_equity_construction_and_identity_are_byte_for_byte_unchanged() {
+        let generic = bar_result_to_decisions(
+            &b5_result("AAPL", 10_000_000),
+            Uuid::nil(),
+            1_000,
+            &BTreeMap::new(),
+        );
+        for config in [
+            CryptoTimeInForceConfig::Unconfigured,
+            CryptoTimeInForceConfig::Invalid,
             CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Gtc),
-        )
-        .unwrap();
-        let gtc_order = build_order_json(&gtc_decision, &context);
-
-        let mut ioc_decision = decision();
-        ioc_decision.time_in_force = resolve_admitted_time_in_force_with_crypto_config(
-            "crypto",
-            "day",
             CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Ioc),
-        )
-        .unwrap();
-        let ioc_order = build_order_json(&ioc_decision, &context);
-
-        assert_ne!(
-            gtc_order["crypto_execution_policy_fingerprint"],
-            ioc_order["crypto_execution_policy_fingerprint"],
-            "gtc<->ioc is an economic behavior change and must change the persisted fingerprint"
-        );
-
-        // A second, independently-resolved gtc decision (same semantic
-        // config, arrived at via case/whitespace normalization upstream in
-        // crypto_execution_policy) must persist the identical fingerprint --
-        // proving the persisted value is the canonical semantic identity,
-        // not a raw-string echo.
-        let expected_gtc_fp = crypto_execution_policy_fingerprint(
-            CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Gtc),
-        );
-        assert_eq!(
-            gtc_order["crypto_execution_policy_fingerprint"],
-            serde_json::Value::String(expected_gtc_fp)
-        );
-    }
-
-    #[test]
-    fn b5_mutation_guard_generic_day_pass_through_for_crypto_must_go_red() {
-        // Regression proof: a crypto order's time_in_force must never equal
-        // the generic translator's raw "day" placeholder after resolution --
-        // if a future edit reintroduces `admit_time_in_force`'s pass-through
-        // behavior for crypto (i.e. resolves without consulting the
-        // configured policy at all), this must fail.
-        let resolved = resolve_admitted_time_in_force_with_crypto_config(
-            "crypto",
-            "day",
-            CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Gtc),
-        )
-        .expect("configured gtc must be admitted");
-        assert_ne!(
-            resolved, "day",
-            "crypto must never emit the generic translator's day placeholder"
-        );
-    }
-
-    #[test]
-    fn b5_equity_behavior_is_byte_for_byte_unchanged() {
+        ] {
+            let with_policy = bar_result_to_decisions_with_tif(
+                &b5_result("AAPL", 10_000_000),
+                Uuid::nil(),
+                1_000,
+                &BTreeMap::new(),
+                b5_resolver("equity", config),
+            );
+            assert_eq!(with_policy.len(), 1);
+            assert_eq!(with_policy[0].time_in_force, "day");
+            assert_eq!(with_policy[0].decision_id, generic[0].decision_id);
+        }
         for tif in ["day", "gtc", "ioc", "fok"] {
-            assert_eq!(
-                resolve_admitted_time_in_force_with_crypto_config(
-                    "equity",
-                    tif,
-                    CryptoTimeInForceConfig::Unconfigured,
-                )
-                .as_deref(),
-                admit_time_in_force("equity", tif).as_deref(),
-                "equity resolution must match admit_time_in_force exactly, tif={tif:?}"
+            assert_eq!(admit_time_in_force("equity", tif).as_deref(), Ok(tif));
+        }
+    }
+
+    #[test]
+    fn b5_decision_rs_holds_no_crypto_policy_or_environment_authority() {
+        // Production (pre-test) section of this file only.
+        let production = include_str!("decision.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "MQK_CRYPTO_TIME_IN_FORCE",
+            "CRYPTO_TIME_IN_FORCE_ENV",
+            "configured_crypto_time_in_force",
+            "crypto_time_in_force_config_from_env",
+            "resolve_admitted_time_in_force",
+            "CryptoTimeInForceConfig",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "decision.rs production code must not reference `{forbidden}`: Crypto TIF \
+                 authority is upstream of decision.rs"
             );
         }
     }

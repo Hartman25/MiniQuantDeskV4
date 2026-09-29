@@ -22,20 +22,18 @@
 //!   an already-read `Option<&str>`; `_from_env` is the one env-reading
 //!   wrapper, mirroring `env.rs`'s `operator_auth_mode_from_env_values`/
 //!   `_from_env` pair.
-//! - B5 correction: `decision.rs::resolve_admitted_time_in_force` is now the
-//!   one production caller. It reads this module's resolved config once,
-//!   then emits `Explicit(gtc)`/`Explicit(ioc)` directly into the real
-//!   `InternalStrategyDecision`/order-intent path for a crypto order —
-//!   `decision.rs` never reaches into this module to silently rewrite an
-//!   *existing* decision value (the pattern IR-2 forbids); it replaces the
-//!   generic translator's meaningless `"day"` placeholder, which crypto
-//!   never admits, with the configured choice before the order is built.
-//!   `Unconfigured`/`Invalid` refuses before that order is constructed.
+//! - Authority: the parsed policy is bound ONCE into the deployment
+//!   configuration authority (`RuntimeSelection::crypto_time_in_force`,
+//!   resolved from the environment at daemon start, never re-read). The
+//!   strategy->decision construction seam
+//!   (`decision::bar_result_to_decisions_with_tif`, driven by
+//!   [`strategy_time_in_force`]) emits `gtc`/`ioc` directly into the
+//!   `InternalStrategyDecision`. `decision.rs` at admission only VALIDATES
+//!   (`admit_time_in_force`); it never reads this policy or the environment
+//!   and never rewrites a value. `Unconfigured`/`Invalid` refuses before any
+//!   crypto economic intent is constructed.
 //! - Crypto capability remains default off (`D2/B4`) at the higher
-//!   dispatch/arm gates; this module's config is consumed unconditionally
-//!   once a crypto decision reaches `submit_internal_strategy_decision`,
-//!   matching this repo's established precedent for asset-class capability
-//!   work (`ASSET-CORE-01`..`05`).
+//!   dispatch/arm gates.
 
 use sha2::{Digest, Sha256};
 
@@ -54,6 +52,16 @@ impl CryptoTimeInForce {
         match self {
             Self::Gtc => "gtc",
             Self::Ioc => "ioc",
+        }
+    }
+
+    /// Strict parse of an already-emitted decision value (trim + ASCII case
+    /// only). `day`, `fok`, `opg`, `cls`, empty and unknown are `None`.
+    pub fn parse_admitted(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "gtc" => Some(Self::Gtc),
+            "ioc" => Some(Self::Ioc),
+            _ => None,
         }
     }
 }
@@ -114,14 +122,6 @@ pub fn crypto_time_in_force_config_from_env_value(raw: Option<&str>) -> CryptoTi
     }
 }
 
-/// Production entry point: reads [`CRYPTO_TIME_IN_FORCE_ENV`] and delegates
-/// to [`crypto_time_in_force_config_from_env_value`].
-pub fn crypto_time_in_force_config_from_env() -> CryptoTimeInForceConfig {
-    crypto_time_in_force_config_from_env_value(
-        std::env::var(CRYPTO_TIME_IN_FORCE_ENV).ok().as_deref(),
-    )
-}
-
 /// Deterministic, versioned identity for the resolved Crypto execution-policy
 /// config — the "relevant semantic/config fingerprint" the economic TIF
 /// choice must participate in. `Explicit(Gtc)` and `Explicit(Ioc)` produce
@@ -137,6 +137,37 @@ pub fn crypto_execution_policy_fingerprint(config: CryptoTimeInForceConfig) -> S
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Construction-seam TIF for a strategy decision of `asset_class`.
+///
+/// Non-crypto classes keep the generic strategy value (`day`) byte-for-byte.
+/// Crypto emits the configured `gtc`/`ioc` directly; `Unconfigured`/`Invalid`
+/// refuse so no crypto economic intent is ever constructed without an
+/// explicit policy. Pure: the policy is a parameter.
+pub fn strategy_time_in_force(
+    asset_class: &str,
+    config: CryptoTimeInForceConfig,
+) -> Result<&'static str, String> {
+    if asset_class != "crypto" {
+        return Ok("day");
+    }
+    match config {
+        CryptoTimeInForceConfig::Explicit(tif) => Ok(tif.as_str()),
+        CryptoTimeInForceConfig::Unconfigured => Err(format!(
+            "crypto time_in_force policy is not configured ({CRYPTO_TIME_IN_FORCE_ENV} is unset);              an explicit gtc or ioc policy is required before any crypto economic intent is              constructed"
+        )),
+        CryptoTimeInForceConfig::Invalid => Err(format!(
+            "crypto time_in_force policy ({CRYPTO_TIME_IN_FORCE_ENV}) is not a recognized gtc/ioc              value; no default or rewritten time_in_force is ever emitted"
+        )),
+    }
+}
+
+/// Fingerprint of the TIF actually carried by a constructed crypto decision.
+/// `None` when the carried value is not `gtc`/`ioc` (nothing to attest).
+pub fn crypto_execution_policy_fingerprint_for_decision_tif(tif: &str) -> Option<String> {
+    CryptoTimeInForce::parse_admitted(tif)
+        .map(|t| crypto_execution_policy_fingerprint(CryptoTimeInForceConfig::Explicit(t)))
 }
 
 #[cfg(test)]
@@ -255,5 +286,66 @@ mod tests {
         assert_ne!(unconfigured, invalid);
         assert_ne!(unconfigured, gtc);
         assert_ne!(invalid, gtc);
+    }
+
+    #[test]
+    fn strategy_time_in_force_emits_configured_value_and_refuses_otherwise() {
+        let gtc = CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Gtc);
+        let ioc = CryptoTimeInForceConfig::Explicit(CryptoTimeInForce::Ioc);
+        assert_eq!(strategy_time_in_force("crypto", gtc), Ok("gtc"));
+        assert_eq!(strategy_time_in_force("crypto", ioc), Ok("ioc"));
+        for cfg in [
+            CryptoTimeInForceConfig::Unconfigured,
+            CryptoTimeInForceConfig::Invalid,
+        ] {
+            assert!(strategy_time_in_force("crypto", cfg).is_err());
+        }
+        // Equity is byte-for-byte the generic strategy value under any config.
+        for cfg in [
+            CryptoTimeInForceConfig::Unconfigured,
+            CryptoTimeInForceConfig::Invalid,
+            gtc,
+            ioc,
+        ] {
+            assert_eq!(strategy_time_in_force("equity", cfg), Ok("day"));
+        }
+    }
+
+    #[test]
+    fn parse_admitted_accepts_only_gtc_ioc() {
+        assert_eq!(
+            CryptoTimeInForce::parse_admitted(" GTC "),
+            Some(CryptoTimeInForce::Gtc)
+        );
+        assert_eq!(
+            CryptoTimeInForce::parse_admitted("ioc"),
+            Some(CryptoTimeInForce::Ioc)
+        );
+        for raw in ["day", "fok", "opg", "cls", "", "unknown"] {
+            assert_eq!(CryptoTimeInForce::parse_admitted(raw), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn decision_tif_fingerprint_matches_config_fingerprint_and_is_canonical() {
+        let gtc = crypto_execution_policy_fingerprint(CryptoTimeInForceConfig::Explicit(
+            CryptoTimeInForce::Gtc,
+        ));
+        assert_eq!(
+            crypto_execution_policy_fingerprint_for_decision_tif(" GTC "),
+            Some(gtc.clone())
+        );
+        assert_eq!(
+            crypto_execution_policy_fingerprint_for_decision_tif("gtc"),
+            Some(gtc)
+        );
+        assert_ne!(
+            crypto_execution_policy_fingerprint_for_decision_tif("gtc"),
+            crypto_execution_policy_fingerprint_for_decision_tif("ioc")
+        );
+        assert_eq!(
+            crypto_execution_policy_fingerprint_for_decision_tif("day"),
+            None
+        );
     }
 }

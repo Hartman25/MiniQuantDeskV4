@@ -1712,6 +1712,7 @@ impl AppState {
             adapter_id: kind.as_str().to_string(),
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
             readiness,
+            crypto_time_in_force: state.runtime_selection.crypto_time_in_force,
         };
         state.broker_snapshot_source = BrokerSnapshotTruthSource::from_broker_kind(Some(kind));
         state.alpaca_ws_continuity = Arc::new(RwLock::new(match kind {
@@ -1743,6 +1744,7 @@ impl AppState {
             adapter_id: state.runtime_selection.adapter_id.clone(),
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
             readiness,
+            crypto_time_in_force: state.runtime_selection.crypto_time_in_force,
         };
         state.calendar_spec =
             calendar_spec_for_deployment(mode, state.runtime_selection.broker_kind);
@@ -1758,6 +1760,7 @@ impl AppState {
             adapter_id: kind.as_str().to_string(),
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
             readiness,
+            crypto_time_in_force: state.runtime_selection.crypto_time_in_force,
         };
         state.broker_snapshot_source = BrokerSnapshotTruthSource::from_broker_kind(Some(kind));
         state.alpaca_ws_continuity = Arc::new(RwLock::new(match kind {
@@ -5038,15 +5041,13 @@ operator_reconcile_or_repair_required"
         &self.runtime_selection.run_config_hash
     }
 
-    /// Mission-B5 (V4-M5-M8 crypto TIF policy): the operator's explicit
-    /// Crypto time-in-force configuration, read fresh from
-    /// `MQK_CRYPTO_TIME_IN_FORCE` on every call — see
-    /// `crypto_execution_policy` module docs for the full contract. Zero
-    /// production callers today (crypto capability stays default off).
+    /// Deployment-level Crypto time-in-force policy, bound once into
+    /// `RuntimeSelection` at daemon start (never re-read from the
+    /// environment); see `crypto_execution_policy` module docs.
     pub fn configured_crypto_time_in_force(
         &self,
     ) -> crypto_execution_policy::CryptoTimeInForceConfig {
-        crypto_execution_policy::crypto_time_in_force_config_from_env()
+        self.runtime_selection.crypto_time_in_force
     }
 
     pub fn deployment_readiness(&self) -> &DeploymentReadiness {

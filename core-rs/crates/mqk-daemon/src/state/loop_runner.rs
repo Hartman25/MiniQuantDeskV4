@@ -1657,11 +1657,32 @@ pub(super) fn spawn_execution_loop(
                             // decision::decisions_from_bar_facts's doc comment for the
                             // full rationale and its fail-closed handling of a missing
                             // `bar_facts`.
-                            let decisions = crate::decision::decisions_from_bar_facts(
+                            //
+                            // B5: the deployment-bound Crypto TIF policy is
+                            // emitted here, at construction, per symbol asset
+                            // class. A symbol whose class cannot be resolved
+                            // keeps the generic `day`; admission then refuses
+                            // it if it is in fact crypto (validate-only).
+                            let crypto_tif_config = state_arc.configured_crypto_time_in_force();
+                            let decisions = crate::decision::decisions_from_bar_facts_with_tif(
                                 &bar_result,
                                 run_id,
                                 bar_facts.as_ref(),
                                 &current_positions,
+                                |symbol| {
+                                    match crate::decision::resolve_symbol_asset_class(
+                                        &state_arc, symbol,
+                                    ) {
+                                        Ok(class) => {
+                                            super::crypto_execution_policy::strategy_time_in_force(
+                                                &class,
+                                                crypto_tif_config,
+                                            )
+                                            .map(str::to_string)
+                                        }
+                                        Err(_) => Ok("day".to_string()),
+                                    }
+                                },
                             );
                             // AUTON-NO-TRADE-01: log when strategy produced no admissible
                             // decisions.  This is honest: signal=0 means hold/flat or the

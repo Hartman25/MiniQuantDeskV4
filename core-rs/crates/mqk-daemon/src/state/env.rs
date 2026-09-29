@@ -78,6 +78,14 @@ pub(crate) fn runtime_selection_from_env_values(
     mode: Option<&str>,
     adapter_id: Option<&str>,
 ) -> RuntimeSelection {
+    runtime_selection_from_env_values_with_crypto_tif(mode, adapter_id, None)
+}
+
+pub(crate) fn runtime_selection_from_env_values_with_crypto_tif(
+    mode: Option<&str>,
+    adapter_id: Option<&str>,
+    crypto_time_in_force: Option<&str>,
+) -> RuntimeSelection {
     let deployment_mode = parse_deployment_mode(mode).unwrap_or_else(|| {
         parse_deployment_mode(Some(DEFAULT_DAEMON_DEPLOYMENT_MODE))
             .expect("default deployment mode must be valid")
@@ -107,13 +115,22 @@ pub(crate) fn runtime_selection_from_env_values(
             }
         ),
         readiness,
+        crypto_time_in_force:
+            super::crypto_execution_policy::crypto_time_in_force_config_from_env_value(
+                crypto_time_in_force,
+            ),
     }
 }
 
 pub(crate) fn runtime_selection_from_env() -> RuntimeSelection {
     let mode = std::env::var(DAEMON_DEPLOYMENT_MODE_ENV).ok();
     let adapter_id = std::env::var(DAEMON_ADAPTER_ID_ENV).ok();
-    runtime_selection_from_env_values(mode.as_deref(), adapter_id.as_deref())
+    let crypto_tif = std::env::var(super::crypto_execution_policy::CRYPTO_TIME_IN_FORCE_ENV).ok();
+    runtime_selection_from_env_values_with_crypto_tif(
+        mode.as_deref(),
+        adapter_id.as_deref(),
+        crypto_tif.as_deref(),
+    )
 }
 
 pub(crate) fn parse_deployment_mode(raw: Option<&str>) -> Option<DeploymentMode> {

@@ -248,6 +248,11 @@ pub struct RuntimeSelection {
     pub adapter_id: String,
     pub run_config_hash: String,
     pub readiness: DeploymentReadiness,
+    /// Deployment-level Crypto time-in-force policy, resolved once at daemon
+    /// start (never re-read from the environment). The strategy->decision
+    /// construction seam emits this value directly; see
+    /// `crypto_execution_policy`.
+    pub crypto_time_in_force: super::crypto_execution_policy::CryptoTimeInForceConfig,
 }
 
 // ---------------------------------------------------------------------------
