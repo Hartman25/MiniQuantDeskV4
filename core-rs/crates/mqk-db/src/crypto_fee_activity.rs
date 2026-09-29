@@ -370,3 +370,113 @@ pub async fn fetch_crypto_fee_activity(
     )
     .transpose()
 }
+
+/// One confirmed cash fee (signed exactly as the provider reported: a debit is
+/// negative) awaiting consumption by the canonical ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedCryptoCashFee {
+    pub broker_account_id: String,
+    pub activity_id: String,
+    pub fee_micros: i64,
+}
+
+/// Cost-evidence summary for accounts registered under `deployment_mode`.
+///
+/// `unattributed_asset_denominated` counts fees charged in the traded asset
+/// itself: real cost that is NOT representable as cash without per-fill price
+/// evidence this ledger does not have. A non-zero count means cost truth is
+/// PARTIAL -- callers must never present the cash total as complete cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptoFeeEvidenceSummary {
+    pub cash_fee_count: usize,
+    /// Checked sum of confirmed cash fees (signed).
+    pub cash_fee_total_micros: i64,
+    pub unattributed_asset_denominated: usize,
+    pub confirmed_zero: usize,
+}
+
+impl CryptoFeeEvidenceSummary {
+    /// `true` only when there is at least one fee record and none is
+    /// unattributed. No evidence at all is NOT proven-zero cost.
+    pub fn cost_fully_attributed(&self) -> bool {
+        self.unattributed_asset_denominated == 0 && (self.cash_fee_count + self.confirmed_zero) > 0
+    }
+}
+
+/// Confirmed cash fees for `deployment_mode` accounts in a deterministic order
+/// (`ingested_at_utc`, account, activity id). Only `cash_fee` rows: an
+/// asset-denominated fee is never converted to cash here.
+pub async fn list_confirmed_crypto_cash_fees(
+    pool: &PgPool,
+    deployment_mode: &str,
+) -> Result<Vec<ConfirmedCryptoCashFee>> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        r#"
+        select f.broker_account_id, f.activity_id, f.fee_micros
+          from sys_crypto_fee_activity_ledger f
+          join sys_broker_account_authority a on a.authority_key = f.broker_account_id
+         where a.deployment_mode = $1
+           and f.attribution_status = 'cash_fee'
+           and f.fee_micros is not null
+         order by f.ingested_at_utc asc, f.broker_account_id asc, f.activity_id asc
+        "#,
+    )
+    .bind(deployment_mode)
+    .fetch_all(pool)
+    .await
+    .context("list_confirmed_crypto_cash_fees failed")?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(broker_account_id, activity_id, fee_micros)| ConfirmedCryptoCashFee {
+                broker_account_id,
+                activity_id,
+                fee_micros,
+            },
+        )
+        .collect())
+}
+
+/// Summarize the fee evidence for `deployment_mode` accounts. Fails closed on
+/// sum overflow.
+pub async fn summarize_crypto_fee_evidence(
+    pool: &PgPool,
+    deployment_mode: &str,
+) -> Result<CryptoFeeEvidenceSummary> {
+    let cash = list_confirmed_crypto_cash_fees(pool, deployment_mode).await?;
+    let mut total = 0i64;
+    for fee in &cash {
+        total = total.checked_add(fee.fee_micros).with_context(|| {
+            format!(
+                "summarize_crypto_fee_evidence: cash fee total overflows at {}",
+                fee.activity_id
+            )
+        })?;
+    }
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        select f.attribution_status, count(*)
+          from sys_crypto_fee_activity_ledger f
+          join sys_broker_account_authority a on a.authority_key = f.broker_account_id
+         where a.deployment_mode = $1
+         group by f.attribution_status
+        "#,
+    )
+    .bind(deployment_mode)
+    .fetch_all(pool)
+    .await
+    .context("summarize_crypto_fee_evidence: status counts failed")?;
+    let count_of = |status: &str| {
+        counts
+            .iter()
+            .find(|(s, _)| s == status)
+            .map(|(_, n)| *n as usize)
+            .unwrap_or(0)
+    };
+    Ok(CryptoFeeEvidenceSummary {
+        cash_fee_count: cash.len(),
+        cash_fee_total_micros: total,
+        unattributed_asset_denominated: count_of("asset_denominated_fee_unsupported"),
+        confirmed_zero: count_of("confirmed_zero_fee"),
+    })
+}

@@ -263,6 +263,30 @@ impl AppState {
         // ledger. A journal row that cannot be translated fails the whole
         // start closed -- a portfolio that silently omitted real economic
         // evidence must never trade.
+        // B6: confirmed Crypto broker fees (posted day-end, never inside a fill)
+        // reach the Crypto ledger. Partial cost truth is surfaced, never hidden.
+        if matches!(domain, super::ExecutionDomain::Crypto24_7) {
+            let summary = super::crypto_fee_ledger::replay_crypto_fees_into_portfolio(
+                &db,
+                self.deployment_mode().as_api_label(),
+                &mut portfolio,
+            )
+            .await
+            .map_err(|err| {
+                RuntimeLifecycleError::internal("crypto fee ledger replay failed", err)
+            })?;
+            if !summary.cost_fully_attributed() {
+                tracing::warn!(
+                    run_id = %run_id,
+                    cash_fee_count = summary.cash_fee_count,
+                    unattributed_asset_denominated = summary.unattributed_asset_denominated,
+                    "crypto_fee_cost_truth_partial: fee evidence is missing or includes \
+                     asset-denominated fees that cannot be attributed to cash; the ledger's \
+                     cost is NOT proven complete"
+                );
+            }
+        }
+
         let lifecycle_replay = if matches!(domain, super::ExecutionDomain::EquityNyse) {
             let replay = super::option_lifecycle_ledger::replay_lifecycle_journal_into_portfolio(
                 &db,

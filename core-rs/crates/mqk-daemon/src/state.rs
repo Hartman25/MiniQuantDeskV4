@@ -18,6 +18,7 @@ mod broker;
 pub(crate) mod closed_trade_attribution;
 pub mod crypto_execution_policy;
 pub mod crypto_fee_ingestion;
+pub mod crypto_fee_ledger;
 mod deadman;
 pub(crate) mod dry_run_strategy;
 mod env;
