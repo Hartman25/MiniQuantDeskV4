@@ -403,7 +403,14 @@ async fn absorb_lifecycle_adjustments(
             .map_err(|e| {
                 anyhow::anyhow!("journal entry {} untranslatable: {e}", entry.journal_seq)
             })?;
-        orchestrator.apply_lifecycle_adjustment(adjustment);
+        orchestrator
+            .apply_lifecycle_adjustment(adjustment)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "journal entry {} refused by the ledger (event stays awaiting the broker): {e}",
+                    entry.journal_seq
+                )
+            })?;
     }
     Ok(())
 }

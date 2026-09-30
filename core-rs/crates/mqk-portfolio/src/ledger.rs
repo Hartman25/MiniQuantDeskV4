@@ -59,6 +59,9 @@ pub enum LedgerError {
     InvalidLifecycleAdjustment(&'static str),
     /// This `economic_apply_id` has already been appended to this ledger.
     DuplicateLifecycleAdjustment { economic_apply_id: String },
+    /// The adjustment could not be applied exactly (insufficient option
+    /// position, arithmetic overflow); nothing was mutated.
+    LifecycleApplyRefused(crate::accounting::LifecycleApplyError),
 }
 
 impl std::fmt::Display for LedgerError {
@@ -91,6 +94,7 @@ impl std::fmt::Display for LedgerError {
                 f,
                 "ledger invariant: lifecycle adjustment {economic_apply_id} already applied"
             ),
+            Self::LifecycleApplyRefused(e) => write!(f, "ledger invariant: {e}"),
         }
     }
 }
@@ -246,8 +250,8 @@ impl Ledger {
                 economic_apply_id: adj.economic_apply_id,
             });
         }
-        crate::accounting::apply_entry(&mut self.state, LedgerEntry::LifecycleAdjustment(adj));
-        Ok(())
+        crate::accounting::try_apply_entry(&mut self.state, LedgerEntry::LifecycleAdjustment(adj))
+            .map_err(LedgerError::LifecycleApplyRefused)
     }
 
     // -----------------------------------------------------------------------

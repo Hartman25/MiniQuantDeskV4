@@ -2878,10 +2878,11 @@ async fn runtime_halts_when_lease_is_lost() {
         .expect("load arm state")
         .expect("arm state persisted");
     assert_eq!(arm_state.0, "DISARMED");
-    let lease = mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
-        .await
-        .expect("fetch current lease")
-        .expect("active lease row");
+    let lease =
+        mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+            .await
+            .expect("fetch current lease")
+            .expect("active lease row");
     assert_eq!(lease.holder_id, "other-runtime");
 }
 
@@ -2963,10 +2964,11 @@ async fn runtime_holder_id_is_compact_and_stable() {
         .await
         .expect("first tick acquires lease");
 
-    let lease = mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
-        .await
-        .expect("fetch_current_lease")
-        .expect("active lease row");
+    let lease =
+        mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+            .await
+            .expect("fetch_current_lease")
+            .expect("active lease row");
 
     // make_lease_test_orchestrator passes "runtime-lease-test" as dispatcher_id.
     let expected = format!("runtime-lease-test|run={run_id}");

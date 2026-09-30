@@ -26,48 +26,147 @@ fn i128_to_i64_clamp(x: i128) -> i64 {
     }
 }
 
+/// Why a lifecycle adjustment cannot be applied. The portfolio is never
+/// mutated when one of these is returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LifecycleApplyError {
+    /// The local ledger does not hold the exact option quantity, on the side the
+    /// event names, that the event consumes. Never "whatever exists".
+    OptionPositionInsufficient {
+        symbol: String,
+        required: QtyMicros,
+        held_on_side: QtyMicros,
+    },
+    /// A quantity operation is not representable.
+    QuantityArithmetic(&'static str),
+    /// The signed cash delta does not fit the cash balance.
+    CashOverflow,
+    /// The realized P&L of the underlying delivery does not fit.
+    RealizedPnlOverflow,
+}
+
+impl std::fmt::Display for LifecycleApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OptionPositionInsufficient {
+                symbol,
+                required,
+                held_on_side,
+            } => write!(
+                f,
+                "lifecycle adjustment refused: {symbol} requires {required} on the named side, \
+                 local ledger holds {held_on_side}"
+            ),
+            Self::QuantityArithmetic(why) => {
+                write!(
+                    f,
+                    "lifecycle adjustment refused: quantity arithmetic: {why}"
+                )
+            }
+            Self::CashOverflow => write!(f, "lifecycle adjustment refused: cash overflow"),
+            Self::RealizedPnlOverflow => {
+                write!(f, "lifecycle adjustment refused: realized P&L overflow")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LifecycleApplyError {}
+
 /// Apply a ledger entry to the portfolio (incremental).
 ///
 /// Deterministic, pure logic, no IO.
 /// This function also appends the entry to the portfolio ledger.
+///
+/// A lifecycle adjustment that cannot be applied exactly (see
+/// [`LifecycleApplyError`]) is dropped with ZERO mutation -- not applied, not
+/// recorded. Callers that must observe the refusal use [`try_apply_entry`].
 pub fn apply_entry(pf: &mut PortfolioState, entry: LedgerEntry) {
+    let _ = try_apply_entry(pf, entry);
+}
+
+/// [`apply_entry`] that reports a refused lifecycle adjustment. On `Err` the
+/// portfolio (positions, cash, realized P&L, ledger) is exactly as before.
+pub fn try_apply_entry(
+    pf: &mut PortfolioState,
+    entry: LedgerEntry,
+) -> Result<(), LifecycleApplyError> {
     match &entry {
         LedgerEntry::Fill(f) => apply_fill(pf, f),
         LedgerEntry::Cash(c) => apply_cash(pf, c),
-        LedgerEntry::LifecycleAdjustment(a) => apply_lifecycle_adjustment(pf, a),
+        LedgerEntry::LifecycleAdjustment(a) => try_apply_lifecycle_adjustment(pf, a)?,
     }
     pf.ledger.push(entry);
+    Ok(())
 }
 
-/// Apply one options lifecycle adjustment (exercise/assignment/expiration).
+/// Apply one options lifecycle adjustment (exercise/assignment/expiration),
+/// all-or-nothing.
 ///
-/// - Option: removes contracts toward flat FIFO (negative delta removes long
-///   lots, positive removes short lots); saturates at flat, never crossing into
-///   the opposite side, no realized P&L, no cash.
+/// The whole adjustment is checked and computed on a scratch copy first; the
+/// live portfolio is replaced only if every step succeeded.
+///
+/// - Option: removes EXACTLY `|option_qty_delta|` contracts FIFO from the side
+///   the delta names (negative: long lots, positive: short lots). Fewer
+///   contracts on that side is a refusal -- never a partial flatten. No
+///   realized P&L, no cash.
 /// - Underlying: opens/reduces lots through the ordinary FIFO at the strike
 ///   basis, with NO cash movement of its own.
-/// - Cash: exactly the provider-signed `cash_delta_micros`.
-pub fn apply_lifecycle_adjustment(pf: &mut PortfolioState, adj: &LifecycleAdjustment) {
-    apply_lifecycle_adjustment_core(
-        &mut pf.cash_micros,
-        &mut pf.realized_pnl_micros,
-        &mut pf.positions,
-        adj,
-    );
+/// - Cash: exactly the provider-signed `cash_delta_micros`, checked.
+pub fn try_apply_lifecycle_adjustment(
+    pf: &mut PortfolioState,
+    adj: &LifecycleAdjustment,
+) -> Result<(), LifecycleApplyError> {
+    let mut cash = pf.cash_micros;
+    let mut realized = pf.realized_pnl_micros;
+    let mut positions = pf.positions.clone();
+    apply_lifecycle_adjustment_checked(&mut cash, &mut realized, &mut positions, adj)?;
+    pf.cash_micros = cash;
+    pf.realized_pnl_micros = realized;
+    pf.positions = positions;
+    Ok(())
 }
 
-fn apply_lifecycle_adjustment_core(
+/// Checked lifecycle application over caller-owned scratch state. Partial
+/// mutation of the scratch on `Err` is the caller's to discard.
+fn apply_lifecycle_adjustment_checked(
     cash_micros: &mut i64,
     realized_pnl_micros: &mut i64,
     positions: &mut BTreeMap<String, PositionState>,
     adj: &LifecycleAdjustment,
-) {
-    // 1. option position removal (no P&L, no cash).
-    if let Some(pos) = positions.get_mut(&adj.option_symbol) {
-        remove_lots_toward_flat(pos, adj.option_qty_delta);
-        if pos.is_flat() {
-            positions.remove(&adj.option_symbol);
-        }
+) -> Result<(), LifecycleApplyError> {
+    // 1. option position: the exact quantity, on the named side, must exist.
+    let required =
+        adj.option_qty_delta
+            .checked_abs()
+            .ok_or(LifecycleApplyError::QuantityArithmetic(
+                "option delta magnitude",
+            ))?;
+    let remove_long = adj.option_qty_delta.is_negative();
+    let held_on_side = positions
+        .get(&adj.option_symbol)
+        .map(|pos| side_qty(pos, remove_long))
+        .unwrap_or(Ok(QtyMicros::ZERO))?;
+    if held_on_side < required {
+        return Err(LifecycleApplyError::OptionPositionInsufficient {
+            symbol: adj.option_symbol.clone(),
+            required,
+            held_on_side,
+        });
+    }
+    let pos =
+        positions
+            .get_mut(&adj.option_symbol)
+            .ok_or(LifecycleApplyError::QuantityArithmetic(
+                "option position vanished after the sufficiency check",
+            ))?;
+    if !remove_lots_exact(pos, remove_long, required)?.is_zero() {
+        return Err(LifecycleApplyError::QuantityArithmetic(
+            "option lots did not cover the checked quantity",
+        ));
+    }
+    if pos.is_flat() {
+        positions.remove(&adj.option_symbol);
     }
 
     // 2. underlying delivery at the strike basis (lots only).
@@ -75,30 +174,59 @@ fn apply_lifecycle_adjustment_core(
         let pos = positions
             .entry(u.symbol.clone())
             .or_insert_with(|| PositionState::new(u.symbol.clone()));
+        // Realized P&L of the delivery is accumulated from zero; a value at the
+        // i64 rails means the FIFO clamped, which is a refusal here.
+        let mut delivery_pnl = 0i64;
         if u.qty_delta.is_positive() {
-            buy_fifo(pos, realized_pnl_micros, u.qty_delta, u.basis_price_micros);
+            buy_fifo(pos, &mut delivery_pnl, u.qty_delta, u.basis_price_micros);
         } else if u.qty_delta.is_negative() {
-            let qty = u.qty_delta.checked_abs().expect(
-                "underlying delta magnitude must be representable as its own absolute value",
-            );
-            sell_fifo(pos, realized_pnl_micros, qty, u.basis_price_micros);
+            let qty = u
+                .qty_delta
+                .checked_abs()
+                .ok_or(LifecycleApplyError::QuantityArithmetic(
+                    "underlying delta magnitude",
+                ))?;
+            sell_fifo(pos, &mut delivery_pnl, qty, u.basis_price_micros);
         }
+        if delivery_pnl == i64::MAX || delivery_pnl == i64::MIN {
+            return Err(LifecycleApplyError::RealizedPnlOverflow);
+        }
+        *realized_pnl_micros = realized_pnl_micros
+            .checked_add(delivery_pnl)
+            .ok_or(LifecycleApplyError::RealizedPnlOverflow)?;
         if pos.is_flat() {
             positions.remove(&u.symbol);
         }
     }
 
     // 3. the provider's own signed cash.
-    *cash_micros = cash_micros.saturating_add(adj.cash_delta_micros);
+    *cash_micros = cash_micros
+        .checked_add(adj.cash_delta_micros)
+        .ok_or(LifecycleApplyError::CashOverflow)?;
+    Ok(())
 }
 
-/// Remove `delta`'s magnitude of lots FIFO from the side `delta` names
-/// (negative: long lots, positive: short lots), stopping at flat.
-fn remove_lots_toward_flat(pos: &mut PositionState, delta: QtyMicros) {
-    let remove_long = delta.is_negative();
-    let mut remaining = delta
-        .checked_abs()
-        .expect("lifecycle delta magnitude must be representable as its own absolute value");
+/// Total magnitude of the lots on one side of a position (checked).
+fn side_qty(pos: &PositionState, long: bool) -> Result<QtyMicros, LifecycleApplyError> {
+    let mut total = QtyMicros::ZERO;
+    for lot in &pos.lots {
+        if (long && lot.is_long()) || (!long && lot.is_short()) {
+            total = total
+                .checked_add(lot.abs_qty())
+                .ok_or(LifecycleApplyError::QuantityArithmetic("side quantity sum"))?;
+        }
+    }
+    Ok(total)
+}
+
+/// Remove `qty` of lots FIFO from one side; returns what could NOT be removed
+/// (zero after a passed sufficiency check).
+fn remove_lots_exact(
+    pos: &mut PositionState,
+    remove_long: bool,
+    qty: QtyMicros,
+) -> Result<QtyMicros, LifecycleApplyError> {
+    let mut remaining = qty;
     let mut i = 0usize;
     while remaining.is_positive() && i < pos.lots.len() {
         let matches_side = if remove_long {
@@ -114,10 +242,12 @@ fn remove_lots_toward_flat(pos: &mut PositionState, delta: QtyMicros) {
         let left = pos.lots[i]
             .abs_qty()
             .checked_sub(take)
-            .expect("take is bounded by abs_qty(), so this subtraction cannot underflow");
+            .ok_or(LifecycleApplyError::QuantityArithmetic("lot remainder"))?;
         remaining = remaining
             .checked_sub(take)
-            .expect("take is bounded by remaining (via .min()), so this cannot underflow");
+            .ok_or(LifecycleApplyError::QuantityArithmetic(
+                "remaining quantity",
+            ))?;
         if left.is_zero() {
             pos.lots.remove(i);
         } else {
@@ -125,11 +255,14 @@ fn remove_lots_toward_flat(pos: &mut PositionState, delta: QtyMicros) {
                 left
             } else {
                 left.checked_neg()
-                    .expect("remaining lot magnitude must be representable as its own negation")
+                    .ok_or(LifecycleApplyError::QuantityArithmetic(
+                        "short lot negation",
+                    ))?
             };
             i += 1;
         }
     }
+    Ok(remaining)
 }
 
 /// Apply a cash entry: just affects cash.
@@ -306,7 +439,15 @@ pub fn recompute_from_ledger(
                 cash = cash.saturating_add(c.amount_micros);
             }
             LedgerEntry::LifecycleAdjustment(a) => {
-                apply_lifecycle_adjustment_core(&mut cash, &mut realized, &mut positions, a);
+                // The incremental path never records a refused adjustment, so a
+                // ledger built by it never contains one; apply on scratch so a
+                // foreign stream that does is skipped, not half-applied.
+                let (mut c, mut r, mut p) = (cash, realized, positions.clone());
+                if apply_lifecycle_adjustment_checked(&mut c, &mut r, &mut p, a).is_ok() {
+                    cash = c;
+                    realized = r;
+                    positions = p;
+                }
             }
             LedgerEntry::Fill(f) => {
                 // cash move

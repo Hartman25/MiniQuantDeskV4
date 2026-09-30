@@ -593,6 +593,9 @@ async fn p07_recovery_replays_the_journal_into_the_ledger_with_the_same_economic
         .await
         .unwrap();
     let mut ledger = mqk_portfolio::Ledger::new(START_CASH);
+    ledger
+        .append_fill(Fill::new(CALL, Side::Buy, units(2), PREMIUM, 0))
+        .unwrap();
     let adj = journal_entry_to_ledger_adjustment(&entries[0]).unwrap();
     ledger.append_lifecycle_adjustment(adj.clone()).unwrap();
     assert!(matches!(

@@ -2,7 +2,7 @@
 //! (`LedgerEntry::LifecycleAdjustment`).
 //!
 //! The four required economic directions, expiration, provider-signed cash,
-//! saturation at flat, FIFO interaction with the underlying, and the
+//! all-or-nothing refusal (insufficient/wrong-side option, cash overflow), FIFO interaction with the underlying, and the
 //! incremental-vs-recompute determinism invariant. Pure (no DB).
 //!
 //! Sign convention under test: the option delta is the change to the option
@@ -11,8 +11,9 @@
 //! provider's signed `net_amount`.
 
 use mqk_portfolio::{
-    apply_entry, recompute_from_ledger, Fill, LedgerEntry, LifecycleAdjustment, PortfolioState,
-    QtyMicros, Side, UnderlyingAdjustment,
+    apply_entry, recompute_from_ledger, try_apply_entry, Fill, Ledger, LedgerEntry, LedgerError,
+    LifecycleAdjustment, LifecycleApplyError, PortfolioState, QtyMicros, Side,
+    UnderlyingAdjustment,
 };
 
 const OPTION: &str = "AAPL230721C00150000";
@@ -142,16 +143,110 @@ fn cash_is_exactly_the_provider_value_never_recomputed_from_qty_and_strike() {
     assert_eq!(pf.cash_micros, cash_before - 15_000_370_000);
 }
 
+/// Everything an adjustment could touch, for exact before/after comparison.
+fn fingerprint(pf: &PortfolioState) -> (i64, i64, Vec<(String, Vec<(QtyMicros, i64)>)>, usize) {
+    (
+        pf.cash_micros,
+        pf.realized_pnl_micros,
+        pf.positions
+            .iter()
+            .map(|(s, p)| {
+                (
+                    s.clone(),
+                    p.lots
+                        .iter()
+                        .map(|l| (l.qty_signed, l.entry_price_micros))
+                        .collect(),
+                )
+            })
+            .collect(),
+        pf.ledger.len(),
+    )
+}
+
+/// An adjustment that cannot be applied EXACTLY mutates nothing: not the
+/// option, not the underlying, not cash, not the ledger.
 #[test]
-fn option_removal_saturates_at_flat_and_never_crosses_to_the_other_side() {
+fn insufficient_wrong_side_or_missing_option_position_is_a_zero_mutation_refusal() {
+    // Event consumes 5 long contracts; only 1 is held. It carries a full
+    // exercise (underlying + cash) that must NOT be applied around the shortfall.
     let mut pf = holding(OPTION, 1);
-    // Evidence removes 5 long contracts; only 1 is held locally.
-    apply(&mut pf, adjustment(OPTION, -5, None, 0));
-    assert_eq!(qty(&pf, OPTION), QtyMicros::ZERO, "flat, not short");
-    // Removing a short side never touches a long holding.
+    let before = fingerprint(&pf);
+    let err = try_apply_entry(
+        &mut pf,
+        LedgerEntry::LifecycleAdjustment(adjustment(OPTION, -5, Some(500), -75_000_000_000)),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        LifecycleApplyError::OptionPositionInsufficient { .. }
+    ));
+    assert_eq!(fingerprint(&pf), before, "insufficient quantity");
+
+    // Wrong side: a long holding cannot satisfy the removal of short contracts.
     let mut pf = holding(OPTION, 2);
-    apply(&mut pf, adjustment(OPTION, 2, None, 0));
-    assert_eq!(qty(&pf, OPTION), units(2), "no short lots to remove");
+    let before = fingerprint(&pf);
+    assert!(try_apply_entry(
+        &mut pf,
+        LedgerEntry::LifecycleAdjustment(adjustment(OPTION, 2, Some(-200), 30_000_000_000)),
+    )
+    .is_err());
+    assert_eq!(fingerprint(&pf), before, "wrong side");
+
+    // Missing entirely.
+    let mut pf = PortfolioState::new(START_CASH);
+    let before = fingerprint(&pf);
+    assert!(try_apply_entry(
+        &mut pf,
+        LedgerEntry::LifecycleAdjustment(adjustment(OPTION, -1, Some(100), -15_000_000_000)),
+    )
+    .is_err());
+    assert_eq!(fingerprint(&pf), before, "missing position");
+
+    // The infallible entry point drops the same adjustment without recording it.
+    let mut pf = holding(OPTION, 1);
+    let before = fingerprint(&pf);
+    apply(&mut pf, adjustment(OPTION, -5, Some(500), -75_000_000_000));
+    assert_eq!(fingerprint(&pf), before, "apply_entry must not half-apply");
+}
+
+/// A cash delta that does not fit refuses the whole adjustment: the option is
+/// NOT removed and the underlying is NOT delivered around it.
+#[test]
+fn cash_overflow_refuses_the_whole_adjustment_with_zero_mutation() {
+    let mut pf = holding(OPTION, 2);
+    pf.cash_micros = i64::MAX - 1_000;
+    let before = fingerprint(&pf);
+    let err = try_apply_entry(
+        &mut pf,
+        LedgerEntry::LifecycleAdjustment(adjustment(OPTION, -2, Some(200), 30_000_000_000)),
+    )
+    .unwrap_err();
+    assert_eq!(err, LifecycleApplyError::CashOverflow);
+    assert_eq!(fingerprint(&pf), before);
+    assert_eq!(qty(&pf, OPTION), units(2), "option still held");
+    assert!(
+        !pf.positions.contains_key("AAPL"),
+        "no underlying delivered"
+    );
+}
+
+/// The Ledger facade surfaces the refusal and, having recorded nothing, still
+/// accepts the same economic_apply_id once the position exists.
+#[test]
+fn ledger_refusal_records_nothing_and_does_not_burn_the_apply_id() {
+    let mut ledger = Ledger::new(START_CASH);
+    let adj = adjustment(OPTION, -2, Some(200), -30_000_000_000);
+    assert!(matches!(
+        ledger.append_lifecycle_adjustment(adj.clone()),
+        Err(LedgerError::LifecycleApplyRefused(_))
+    ));
+    assert_eq!(ledger.snapshot().entry_count, 0);
+    ledger
+        .append_fill(Fill::new(OPTION, Side::Buy, units(2), PREMIUM, 0))
+        .unwrap();
+    ledger.append_lifecycle_adjustment(adj).unwrap();
+    assert_eq!(ledger.snapshot().qty_signed("AAPL"), units(200));
 }
 
 #[test]
@@ -167,6 +262,12 @@ fn delivered_shares_close_an_existing_long_fifo_with_realized_pnl_at_the_strike(
     apply_entry(
         &mut pf,
         LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, units(200), 140_000_000, 0)),
+    );
+    // The exercised put must actually be held: an adjustment consumes exactly
+    // the contracts the event names.
+    apply_entry(
+        &mut pf,
+        LedgerEntry::Fill(Fill::new(PUT, Side::Buy, units(2), PREMIUM, 0)),
     );
     let realized_before = pf.realized_pnl_micros;
     // Long put exercised: 200 shares delivered at the 150 strike.

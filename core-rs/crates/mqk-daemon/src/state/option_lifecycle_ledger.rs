@@ -22,7 +22,8 @@ use sqlx::PgPool;
 
 use mqk_db::{BrokerAccountAuthority, LifecycleJournalEntry};
 use mqk_portfolio::{
-    apply_entry, LedgerEntry, LifecycleAdjustment, PortfolioState, QtyMicros, UnderlyingAdjustment,
+    try_apply_entry, LedgerEntry, LifecycleAdjustment, PortfolioState, QtyMicros,
+    UnderlyingAdjustment,
 };
 
 use super::option_lifecycle_ingestion::OPTION_LIFECYCLE_EXECUTION_DOMAIN;
@@ -128,7 +129,13 @@ pub async fn replay_lifecycle_journal_into_portfolio(
         let adjustment = journal_entry_to_ledger_adjustment(entry).map_err(|e| {
             anyhow::anyhow!("replay_lifecycle_journal_into_portfolio: refusing recovery: {e}")
         })?;
-        apply_entry(portfolio, LedgerEntry::LifecycleAdjustment(adjustment));
+        try_apply_entry(portfolio, LedgerEntry::LifecycleAdjustment(adjustment)).map_err(|e| {
+            anyhow::anyhow!(
+                "replay_lifecycle_journal_into_portfolio: refusing recovery: journal entry {} \
+                 cannot be applied exactly: {e}",
+                entry.journal_seq
+            )
+        })?;
         replay.applied_ids.push(entry.economic_apply_id.clone());
     }
     Ok(replay)

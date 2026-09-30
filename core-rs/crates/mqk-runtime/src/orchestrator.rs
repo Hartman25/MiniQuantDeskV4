@@ -1673,20 +1673,27 @@ where
     /// Called BETWEEN ticks by the owning loop -- never from inside a tick
     /// phase -- so the tick's phase ordering is untouched. It is not a fill and
     /// creates no order or broker event; it replays the journal row whose
-    /// deterministic `economic_apply_id` gates it. Returns `true` when newly
-    /// applied, `false` for an id already applied (zero mutation).
-    pub fn apply_lifecycle_adjustment(&mut self, adjustment: LifecycleAdjustment) -> bool {
-        if !self
+    /// deterministic `economic_apply_id` gates it. Returns `Ok(true)` when newly
+    /// applied, `Ok(false)` for an id already applied (zero mutation). An
+    /// adjustment the ledger cannot apply exactly is `Err` with ZERO mutation and
+    /// its id is NOT recorded as applied, so the event stays awaiting the broker.
+    pub fn apply_lifecycle_adjustment(
+        &mut self,
+        adjustment: LifecycleAdjustment,
+    ) -> Result<bool, mqk_portfolio::LifecycleApplyError> {
+        if self
             .applied_lifecycle_adjustments
-            .insert(adjustment.economic_apply_id.clone())
+            .contains(&adjustment.economic_apply_id)
         {
-            return false;
+            return Ok(false);
         }
-        apply_entry(
+        let id = adjustment.economic_apply_id.clone();
+        mqk_portfolio::try_apply_entry(
             &mut self.portfolio,
             LedgerEntry::LifecycleAdjustment(adjustment),
-        );
-        true
+        )?;
+        self.applied_lifecycle_adjustments.insert(id);
+        Ok(true)
     }
     /// Immutable view of the current OMS order map.
     pub fn oms_orders(&self) -> &BTreeMap<String, OmsOrder> {

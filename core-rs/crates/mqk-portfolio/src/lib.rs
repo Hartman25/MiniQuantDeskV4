@@ -26,7 +26,10 @@ pub mod dynamic_selection;
 pub mod ledger;
 pub mod option_lifecycle;
 
-pub use accounting::{apply_entry, apply_fill, apply_lifecycle_adjustment, recompute_from_ledger};
+pub use accounting::{
+    apply_entry, apply_fill, recompute_from_ledger, try_apply_entry,
+    try_apply_lifecycle_adjustment, LifecycleApplyError,
+};
 pub use allocator::{
     AllocationConstraints, AllocationDecision, AllocationError, Allocator, Candidate,
     RejectedCandidate, RejectionReason,
@@ -107,8 +110,7 @@ pub use ordering::{apply_fills_canonical, sort_fills_canonical, TaggedFill};
 
 pub use types::{
     symbol_is_crypto_pair_format, CashEntry, FeeAttributionStatus, Fill, LedgerEntry,
-    LifecycleAdjustment, Lot, PortfolioState, PositionState, QtyMicros, Side,
-    UnderlyingAdjustment,
+    LifecycleAdjustment, Lot, PortfolioState, PositionState, QtyMicros, Side, UnderlyingAdjustment,
 };
 
 // PORTFOLIO-LIVE-WEIGHTS-01: live position valuation / weight truth seam
