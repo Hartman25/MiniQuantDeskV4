@@ -6,6 +6,21 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -14. M5-M8 Frozen Acceptance Correction (2026-09-29, `V4-M5-M8-FROZEN-CLOSURE-03`)
+
+Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G9 and the final section of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `21718bcb`; five local code commits (`f54c0bdf`..`e81f896b`) plus a clippy follow-up and the docs commit; NOT pushed. Supersedes §-13 where they differ.
+
+- Fee and lifecycle consumers are isolated by exact broker account (two accounts of one deployment mode never share fees or lifecycle rows).
+- Lifecycle economics fail closed before mutation (exact option quantity, checked arithmetic, all-or-nothing).
+- The lifecycle restart fence derives from durable state; the lifecycle fetcher's absence cannot clear it.
+- A lifecycle event clears only after option + underlying + cash agreement.
+- An external signal with omitted `asset_class` requires positive registry proof of Equity.
+- Deterministic approved M5-M8 implementation is locally complete for these five frozen defects only. Not performed: `cargo test --workspace`, CI, any Paper/Live session, real broker call, push. M6/M7/M8 operational exit gates NOT complete. ML PLANNED / NOT AUTHORIZED.
+- Open, unrelated: `b1c_c14` (stale promotion fixture). `scenario_multi_symbol_dispatch_summary_01::s12` fails on CRLF Windows working copies (environmental). Use a fresh disposable DB for daemon lifecycle tests.
+- Next: independent review of `21718bcb`..HEAD, then an explicit operator push decision.
+
+---
+
 ## -13. M5-M8 Final Exception Correction (2026-09-28, `V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`)
 
 Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G8 and the final section of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `26bd9c12`; ten local code commits (`9eafefd8`..`02b9a638`) plus the docs commit; NOT pushed. Supersedes §-12 and §-11 where they differ.

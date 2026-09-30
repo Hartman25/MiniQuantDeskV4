@@ -955,7 +955,7 @@ Starting HEAD `ead40bf1` (G4's baseline). Ending HEAD `e5fea9d5`. Thirty-nine lo
 
 ### G7. M5-M8 independent-review correction controller (`V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01`, 2026-09-28)
 
-> **Superseded in part by §G8** (`V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`): the B5, B6, D1, D2, D3 and D5 "CORRECTED_PROVEN" rows below did not reach the authoritative seam; read §G8 for current truth.
+> **Superseded in part by §G9 and §G8** (`V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`): the B5, B6, D1, D2, D3 and D5 "CORRECTED_PROVEN" rows below did not reach the authoritative seam; read §G8 for current truth.
 
 Starting HEAD `b50dc0ba` (G6's ending HEAD). Ending HEAD `6cdd0d9b`. Seven local commits above `origin/main` `48bed899`, **NOT PUSHED**. This controller is the independent review of G6's `48bed899`..`e5fea9d5` stack G6 itself called for; it corrects six confirmed defects in that stack (B5, B6, D1, D2, D3, D5) and closes one further gap D3's own wiring exposed in its own second sweep. It does not reopen or redo B1-B4, C1-C4, or D4 — none of those were found defective.
 
@@ -1001,6 +1001,24 @@ Starting HEAD `26bd9c12` (clean tree, 35 ahead of `origin/main` `48bed899`). Ten
 **Not performed:** `cargo test --workspace`; GitHub CI; any Paper/Live session or order; any real Alpaca options/crypto or IBKR Gateway call; push. The shared long-lived test DB (`mqk_test`) holds residual `paper`-mode lifecycle journal rows from earlier runs that make some daemon lifecycle-matrix tests report `RECONCILE_DRIFT` there; use a fresh disposable database.
 
 **Status:** M6/M7/M8 operational exit gates are **NOT complete**. Crypto and mleg capability flags remain default-off. ML remains PLANNED / NOT AUTHORIZED. Remaining hard stops are operator/operational (real-broker validation, crypto capability decision, IBKR Gateway, 24/7 scheduling proof), not ordinary code defects known to this controller. Next: independent review of `26bd9c12`..HEAD, then an explicit operator push decision.
+
+### G9. M5-M8 frozen acceptance correction (`V4-M5-M8-FROZEN-CLOSURE-03`, 2026-09-29)
+
+Starting HEAD `21718bcb` (clean, 46 ahead of `origin/main` `48bed899`). Five local code commits plus one clippy follow-up and this docs commit, **NOT PUSHED**. Supersedes G8 where they differ: G8's D2 ("checked arithmetic"), D3 ("gate clears only at RECONCILED after broker agreement") and fee-consumer rows did not hold for two accounts of one deployment mode, an insufficient option position, a fetcher-less process, or cash.
+
+| Commit | Defect | What is now true |
+|---|---|---|
+| `f54c0bdf` | 1 | Fee and lifecycle consumers were scoped by `deployment_mode` alone, so two provider accounts under one mode shared fees and lifecycle rows. Every fee/journal/awaiting-event/subsumption query now takes the typed `BrokerAccountAuthority` (key + mode). With no established account, replay refuses whenever any account of the mode holds relevant rows, reconcile does nothing, subsumption is skipped. |
+| `3e0e1b41`, `c2ff680b` | 2 | Lifecycle application removed lots only "toward flat", still delivered the underlying/cash around a shortfall, and used saturating cash. The whole adjustment is now preflighted on scratch state (exact option quantity on the named side, checked quantity/realized/cash arithmetic) and applied all-or-nothing; a refusal mutates nothing, records nothing, and does not burn the `economic_apply_id` (the event stays `APPLIED_AWAITING_BROKER`). |
+| `ec9bdcee` | 3 | `check_symbol_fence`/`check_account_fence` returned Clear when the in-memory lifecycle fetcher was absent. The answer is now the durable state: with no fetcher any unreconciled event of the deployment mode fences (superset fence; can block, never clear); a fetcher whose account cannot be proven still refuses. |
+| `68e1469b` | 4 | `RECONCILED` now also requires cash agreement: the journal cash, the cash the local ledger actually applied, and the cash re-derived from the durable provider rows through the single settlement verification must be equal (an expiration must prove zero). Broker account cash is deliberately not compared (ledger cash is seeded from configured equity; the provider posts settlement cash before its activity record reaches the ledger). |
+| `e81f896b` | 5 | An omitted `asset_class` on the external strategy-signal route is legacy implicit-Equity only when the canonical v1 instrument registry positively proves an enabled Equity (Gate 0b; unproven 400, unreadable registry 503). Explicit `equity` keeps its own path; Options stay disabled. |
+
+**Proof:** each invariant has one focused load-bearing test and one mutation (predicate removed / permissive-remove + saturating cash / fetcher-None => Clear / cash agreement skipped / implicit Equity restored) that turned it RED, and restoring it turned it GREEN. Acceptance boundary (fresh disposable Postgres :5434 database): targeted `cargo clippy -D warnings --tests` clean on mqk-db, mqk-portfolio, mqk-runtime, mqk-daemon; `cargo check --workspace --tests` clean; focused suites green (db journal 11, portfolio lifecycle 13, fee ledger 8, lifecycle apply 7, pending gate 7, D3 gating 6, daemon `option_lifecycle` lib tests 17, runtime lifecycle 6); the twenty external-signal route suites green after their fixtures were given an explicit equity class; `git diff --check` clean.
+
+**Not fixed / out of scope:** `scenario_native_strategy_bridge_b1c::b1c_c14_loop_path_creates_durable_outbox_row` (stale promotion fixture, unchanged, separate debt). `scenario_multi_symbol_dispatch_summary_01::s12` fails on this CRLF Windows working copy because it `include_str!`s `routes/strategy.rs` and searches for an LF-delimited marker; environmental, unrelated to these edits.
+
+**Not performed:** `cargo test --workspace`, GitHub CI, any Paper/Live session or order, any real broker/provider call, push. M6/M7/M8 operational exit gates remain **NOT** complete. ML remains PLANNED / NOT AUTHORIZED. The deterministic approved M5-M8 implementation is locally complete for the five frozen defects above; no milestone is claimed `ACCEPTED` or `OPERATIONALLY VALIDATED`. Next: independent review of `21718bcb`..HEAD, then an explicit operator push decision.
 
 ## H. Immediate Sequencing From This Contract
 

@@ -1191,7 +1191,7 @@ Crypto time-in-force is no longer an open operator decision. Because the generic
 
 ## M5-M8 Independent-Review Correction Controller (`V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01`, 2026-09-28)
 
-> **Superseded in part by the final section of this file (`V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`) and ledger §G8.** The "CORRECTED_PROVEN" rows below for B5/B6/D1/D2/D3/D5 and any "LOCALLY COMPLETE" wording are withdrawn where they differ.
+> **Superseded in part by the final section of this file (`V4-M5-M8-FROZEN-CLOSURE-03`, then `V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02`) and ledger §G8.** The "CORRECTED_PROVEN" rows below for B5/B6/D1/D2/D3/D5 and any "LOCALLY COMPLETE" wording are withdrawn where they differ.
 
 Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G7. Starting HEAD `b50dc0ba` (this section's own G6 baseline); ending HEAD `6cdd0d9b`; seven local commits, not pushed. Independent review of the row above found six confirmed defects (B5, B6, D1, D2, D3, D5); this controller closes all six plus one further gap D3's own second sweep exposed.
 
@@ -1229,3 +1229,19 @@ b1c_c14 ignored DB test (stale promotion fixture, unrelated to this controller) 
 ```
 
 Not performed: `cargo test --workspace`, GitHub CI, any Paper/Live session or order, any real broker/IBKR call, push. No milestone is claimed `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`. Next: independent review of `26bd9c12`..HEAD, then an explicit operator push decision.
+## M5-M8 Frozen Acceptance Correction (`V4-M5-M8-FROZEN-CLOSURE-03`, 2026-09-29)
+
+Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G9. Starting HEAD `21718bcb`; five local code commits (`f54c0bdf`..`e81f896b`), one clippy follow-up, plus this docs commit; not pushed. Supersedes the G8 section above where they differ.
+
+```
+1 exact broker-account scoping of fee + lifecycle consumers (two accounts of one mode isolated)      FIXED_PROVEN (f54c0bdf)
+2 D2 lifecycle economics fail closed before mutation (exact option qty, checked arithmetic)           FIXED_PROVEN (3e0e1b41, c2ff680b)
+3 lifecycle fence derives from durable state, not fetcher presence (restart-safe)                     FIXED_PROVEN (ec9bdcee)
+4 RECONCILED requires cash + option + underlying agreement                                            FIXED_PROVEN (68e1469b)
+5 external signal with omitted asset_class requires positive registry proof of Equity                 FIXED_PROVEN (e81f896b)
+M6/M7/M8 operational exit gates                                                                       NOT COMPLETE - OPERATOR_VALIDATION_REQUIRED
+b1c_c14 ignored DB test (stale promotion fixture)                                                     OPEN (separate debt)
+ML                                                                                                    PLANNED / NOT AUTHORIZED
+```
+
+Not performed: `cargo test --workspace`, GitHub CI, any Paper/Live session or order, any real broker/provider call, push. Next: independent review of `21718bcb`..HEAD, then an explicit operator push decision.
