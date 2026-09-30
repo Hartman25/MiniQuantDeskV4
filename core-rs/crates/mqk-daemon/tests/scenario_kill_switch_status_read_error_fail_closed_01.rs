@@ -71,8 +71,9 @@ async fn fault_injecting_pool_or_skip() -> Option<sqlx::PgPool> {
                 Box::pin(async move {
                     // Column set/types must match crates/mqk-db/migrations
                     // 0001_init.sql + 0002_run_lifecycle.sql + 0063_runs_
-                    // stop_requested.sql's real `runs` table exactly, so
-                    // `fetch_latest_run_for_engine`'s select still
+                    // stop_requested.sql + 0081_runs_execution_domain.sql's
+                    // real `runs` table exactly, so
+                    // `fetch_latest_run_for_engine_for_domain`'s select still
                     // type-checks against this temp view.
                     sqlx::query(
                         r#"
@@ -81,6 +82,7 @@ async fn fault_injecting_pool_or_skip() -> Option<sqlx::PgPool> {
                           null::uuid as run_id,
                           null::text as engine_id,
                           null::text as mode,
+                          null::text as execution_domain,
                           null::timestamptz as started_at_utc,
                           null::text as git_hash,
                           null::text as config_hash,

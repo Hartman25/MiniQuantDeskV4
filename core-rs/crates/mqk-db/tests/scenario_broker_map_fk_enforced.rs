@@ -121,8 +121,8 @@ async fn broker_map_insert_with_parent_outbox_succeeds() -> anyhow::Result<()> {
     // Create run + outbox row so the FK prerequisite is satisfied.
     sqlx::query(
         "INSERT INTO runs \
-         (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint) \
-         VALUES ($1, 'eb4-fk-test', 'PAPER', 'test', 'test', '{}', 'test')",
+         (run_id, engine_id, mode, execution_domain, git_hash, config_hash, config_json, host_fingerprint) \
+         VALUES ($1, 'eb4-fk-test', 'PAPER', 'equity_nyse', 'test', 'test', '{}', 'test')",
     )
     .bind(run_id)
     .execute(&pool)
