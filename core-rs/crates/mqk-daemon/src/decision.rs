@@ -316,7 +316,7 @@ impl DurableOrderInstrumentContext {
 }
 
 #[derive(Debug)]
-enum OrderInstrumentContextError {
+pub(crate) enum OrderInstrumentContextError {
     Unavailable(String),
     Rejected(String),
 }
@@ -529,7 +529,10 @@ fn resolve_order_instrument_context_from_registry(
     }
 }
 
-fn legacy_equity_symbol_is_enabled(
+/// The canonical positive proof that `symbol` is an enabled Equity: the v1
+/// instrument registry must list it. `Err` means the authority could not be
+/// read/validated (unavailable), which is never the same as "not an Equity".
+pub(crate) fn legacy_equity_symbol_is_enabled(
     state: &AppState,
     symbol: &str,
 ) -> Result<bool, OrderInstrumentContextError> {

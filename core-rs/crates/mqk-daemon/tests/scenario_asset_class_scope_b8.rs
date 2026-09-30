@@ -132,8 +132,19 @@ fn signal_with_ac(ac: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn as_01_asset_class_absent_passes_gate_0() {
-    let st = Arc::new(state::AppState::new());
-    let router = routes::build_router(st);
+    // An omitted class is legacy implicit-Equity ONLY for a registry-proven
+    // Equity (Gate 0b); provision that proof so the B8 gate itself is isolated.
+    let registry = std::env::temp_dir().join(format!("b8-as01-{}.json", std::process::id()));
+    std::fs::write(
+        &registry,
+        r#"[{"instrument_id":"equity:US:AAPL","symbol":"AAPL","asset_class":"equity",
+"provider":"test","provider_symbol":"AAPL","venue":"TEST","currency":"USD",
+"enabled":true,"timeframes":["1D"],"notes":"b8 as-01 fixture"}]"#,
+    )
+    .expect("write registry fixture");
+    let mut st = state::AppState::new();
+    st.instrument_registry_path = registry.to_str().unwrap().to_string();
+    let router = routes::build_router(Arc::new(st));
 
     let (status, body) = call(router, signal_req(base_signal())).await;
     let json = parse_json(body);

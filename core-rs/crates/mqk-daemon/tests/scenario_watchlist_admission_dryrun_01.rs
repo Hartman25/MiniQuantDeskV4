@@ -449,6 +449,7 @@ async fn ad10_strategy_signal_route_behavior_unchanged() {
     // because AppState::new() uses default (Paper mode, no ExternalSignalIngestion).
     let payload = serde_json::json!({
         "signal_id": "ad10-test-signal",
+        "asset_class": "equity",
         "strategy_id": "strat-scalper-001",
         "symbol": "AAPL",
         "side": "buy",

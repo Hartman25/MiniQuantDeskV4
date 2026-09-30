@@ -231,6 +231,7 @@ async fn post_signal(
 ) -> (StatusCode, serde_json::Value) {
     let body = serde_json::json!({
         "signal_id": format!("sig-test-{}", next_id()),
+        "asset_class": "equity",
         "strategy_id": strategy_id,
         "symbol": "AAPL",
         "side": "buy",

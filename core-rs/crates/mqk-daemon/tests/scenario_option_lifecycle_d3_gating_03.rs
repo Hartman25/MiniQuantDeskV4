@@ -365,6 +365,14 @@ async fn post_signal(
     (status, serde_json::from_slice(&bytes).expect("json"))
 }
 
+/// A signal with an EXPLICIT `equity` class (its own authorization path); the
+/// identity-omitting variant is [`signal`].
+fn equity_signal(symbol: &str) -> serde_json::Value {
+    let mut body = signal(symbol);
+    body["asset_class"] = serde_json::json!("equity");
+    body
+}
+
 fn signal(symbol: &str) -> serde_json::Value {
     serde_json::json!({
         "signal_id": format!("d3-{}", Uuid::new_v4().simple()),
@@ -413,14 +421,14 @@ async fn r03_the_external_signal_route_is_fenced_by_the_lifecycle_gate() {
     let router = routes::build_router(st);
 
     // The underlying is fenced (PENDING_EVIDENCE).
-    let (status, json) = post_signal(router.clone(), signal("AAPL")).await;
+    let (status, json) = post_signal(router.clone(), equity_signal("AAPL")).await;
     assert_eq!(status, StatusCode::CONFLICT, "{json}");
     assert_eq!(json["disposition"], "rejected", "{json}");
     assert!(blockers(&json).contains("options-lifecycle"), "{json}");
 
     // An unrelated symbol passes the lifecycle fence (it may be refused by a
     // LATER gate, but never for the lifecycle reason).
-    let (_status, json) = post_signal(router, signal("MSFT")).await;
+    let (_status, json) = post_signal(router, equity_signal("MSFT")).await;
     assert!(
         !blockers(&json).contains("options-lifecycle"),
         "MSFT must not be fenced by an AAPL option event: {json}"
@@ -451,6 +459,63 @@ async fn r04_an_occ_contract_without_asset_class_is_never_implied_to_be_equity()
     let (status, json) = post_signal(router, body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     assert!(blockers(&json).contains("not supported"), "{json}");
+}
+
+/// Router over an `AppState` whose canonical v1 instrument registry file lists
+/// exactly one enabled Equity, `AAPL`.
+fn router_with_equity_registry(path: Option<&std::path::Path>) -> axum::Router {
+    let mut st = state::AppState::new();
+    if let Some(path) = path {
+        std::fs::write(
+            path,
+            r#"[{"instrument_id":"equity:US:AAPL","symbol":"AAPL","asset_class":"equity",
+"provider":"test","provider_symbol":"AAPL","venue":"TEST","currency":"USD",
+"enabled":true,"timeframes":["1D"],"notes":"gate 0b fixture"}]"#,
+        )
+        .expect("write registry fixture");
+        st.instrument_registry_path = path.to_str().unwrap().to_string();
+    } else {
+        st.instrument_registry_path = "does/not/exist/equities.json".to_string();
+    }
+    routes::build_router(Arc::new(st))
+}
+
+const NOT_PROVEN: &str = "not proven to be an enabled Equity";
+
+#[tokio::test]
+async fn r06_an_omitted_asset_class_needs_positive_registry_proof_of_equity() {
+    let path = std::env::temp_dir().join(format!("gate0b-{}.json", Uuid::new_v4().simple()));
+    let router = router_with_equity_registry(Some(&path));
+
+    // 1. Registry-proven Equity: passes the identity gate (a LATER gate refuses
+    //    this default state, but never for the identity reason).
+    let (_s, json) = post_signal(router.clone(), signal("AAPL")).await;
+    assert!(!blockers(&json).contains(NOT_PROVEN), "{json}");
+    assert!(!blockers(&json).contains("OCC option contract"), "{json}");
+
+    // 2. An unregistered ticker-looking symbol is NOT implied to be Equity.
+    let (status, json) = post_signal(router.clone(), signal("ZZZZ")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["disposition"], "rejected");
+    assert!(blockers(&json).contains(NOT_PROVEN), "{json}");
+
+    // 3. An OCC contract is refused (and never laundered through the default).
+    let (status, json) = post_signal(router.clone(), signal(CALL)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(blockers(&json).contains("OCC option contract"), "{json}");
+
+    // 4. An explicit `equity` keeps its own (existing) authorization path.
+    let mut body = signal("ZZZZ");
+    body["asset_class"] = serde_json::json!("equity");
+    let (_s, json) = post_signal(router, body).await;
+    assert!(!blockers(&json).contains(NOT_PROVEN), "{json}");
+    let _ = std::fs::remove_file(&path);
+
+    // 5. An unreadable registry is unavailable authority, not an assumed Equity.
+    let (status, json) = post_signal(router_with_equity_registry(None), signal("AAPL")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
+    assert_eq!(json["disposition"], "unavailable");
+    assert!(blockers(&json).contains("could not prove"), "{json}");
 }
 
 #[tokio::test]

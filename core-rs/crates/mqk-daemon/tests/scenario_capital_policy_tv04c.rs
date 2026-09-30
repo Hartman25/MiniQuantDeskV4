@@ -185,6 +185,7 @@ async fn post_limit_signal(
 ) -> (StatusCode, serde_json::Value) {
     let body = serde_json::json!({
         "signal_id": format!("sig-tv04c-{}", next_id()),
+        "asset_class": "equity",
         "strategy_id": strategy_id,
         "symbol": "AAPL",
         "side": "buy",

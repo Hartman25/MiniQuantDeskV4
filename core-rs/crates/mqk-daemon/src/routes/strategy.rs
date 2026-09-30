@@ -238,6 +238,7 @@ pub(crate) async fn build_dispatch_summary_response_v2(
 // and enqueues them to the execution outbox for dispatch by the orchestrator.
 //
 // Gate sequence (fail-closed):
+//   0b. asset_class_identity        — omitted asset_class needs a registry-proven Equity (D3 final)
 //   1.  signal_ingestion_configured — ExternalSignalIngestion must be wired
 //   1e. capital_budget              — per-strategy budget authorized (TV-04B)
 //   1f. position_sizing             — implied notional within broker/account cap (TV-04C)
@@ -283,6 +284,54 @@ pub(crate) async fn strategy_signal(
             );
         }
     };
+
+    // Gate 0b: an omitted `asset_class` is legacy implicit-Equity compatibility,
+    // and only for a symbol the canonical instrument registry positively proves
+    // to be an enabled Equity. Failing to parse as an OCC contract, lacking a
+    // slash, or merely looking like a ticker is NOT proof. An unreadable
+    // registry is unavailable authority (503), never an assumed Equity. An
+    // explicit `equity` skips this gate; explicit non-equity classes were
+    // already refused in validation.
+    if validated.asset_class_omitted {
+        let refusal = match crate::decision::legacy_equity_symbol_is_enabled(&st, &validated.symbol)
+        {
+            Ok(true) => None,
+            Ok(false) => Some((
+                StatusCode::BAD_REQUEST,
+                "rejected",
+                format!(
+                    "symbol '{}' is not proven to be an enabled Equity by the canonical \
+                     instrument registry and no asset_class was supplied: an unproven symbol \
+                     is never implied to be Equity",
+                    validated.symbol
+                ),
+            )),
+            Err(crate::decision::OrderInstrumentContextError::Unavailable(why))
+            | Err(crate::decision::OrderInstrumentContextError::Rejected(why)) => Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                format!(
+                    "asset_class was omitted and the canonical instrument registry could not \
+                     prove '{}' is an Equity: {why}",
+                    validated.symbol
+                ),
+            )),
+        };
+        if let Some((status, disposition, blocker)) = refusal {
+            return refused_signal_response(
+                status,
+                "gate_0b_asset_class_identity",
+                disposition,
+                RefusedSignalArgs {
+                    signal_id: validated.signal_id,
+                    strategy_id: validated.strategy_id,
+                    symbol: validated.symbol.clone(),
+                    active_run_id: None,
+                    blockers: vec![blocker],
+                },
+            );
+        }
+    }
 
     // Gate 1: signal ingestion must be configured for this deployment.
     if !matches!(
@@ -1515,6 +1564,9 @@ struct ValidatedStrategySignal {
     signal_id: String,
     strategy_id: String,
     symbol: String,
+    /// `true` when the caller supplied no `asset_class`: legacy implicit-Equity
+    /// compatibility then needs a positive registry proof (Gate 0b).
+    asset_class_omitted: bool,
     /// STRATEGY-PROMOTION-REGISTRY-01D: intentionally NOT validated at
     /// Gate 0 (field validation runs before every other gate, including
     /// gates that existing tests exercise independently of promotion).
@@ -1671,6 +1723,7 @@ fn validate_strategy_signal(
         signal_id,
         strategy_id,
         symbol,
+        asset_class_omitted: body.asset_class.is_none(),
         timeframe_secs: body.timeframe_secs,
         side,
         qty: qty.expect("validated qty"),

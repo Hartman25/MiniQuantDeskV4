@@ -73,6 +73,7 @@ fn signal_req(body: serde_json::Value) -> Request<axum::body::Body> {
 fn valid_signal_body(signal_id: &str) -> serde_json::Value {
     serde_json::json!({
         "signal_id": signal_id,
+        "asset_class": "equity",
         "strategy_id": "strat-obs01",
         "symbol": "SPY",
         "side": "buy",

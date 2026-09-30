@@ -656,6 +656,7 @@ async fn ptday01_e06_strategy_signal_route_is_real_and_fail_closed() {
 
     let signal_body = serde_json::to_string(&serde_json::json!({
         "signal_id": "ptday01-e06-signal-001",
+        "asset_class": "equity",
         "strategy_id": "spy_test_v1",
         "symbol": "SPY",
         "side": "buy",
@@ -737,6 +738,7 @@ async fn ptday02_e07_gap_detected_blocks_strategy_signals() {
 
     let signal_body = serde_json::to_string(&serde_json::json!({
         "signal_id": "ptday02-e07-signal-001",
+        "asset_class": "equity",
         "strategy_id": "spy_test_v1",
         "symbol": "SPY",
         "side": "buy",
@@ -815,6 +817,7 @@ async fn ptday02_e08_cold_start_unproven_blocks_strategy_signals() {
 
     let signal_body = serde_json::to_string(&serde_json::json!({
         "signal_id": "ptday02-e08-signal-001",
+        "asset_class": "equity",
         "strategy_id": "spy_test_v1",
         "symbol": "SPY",
         "side": "buy",
@@ -889,6 +892,7 @@ async fn ptday02_e09_live_continuity_passes_gate_signal_reaches_db_gate() {
 
     let signal_body = serde_json::to_string(&serde_json::json!({
         "signal_id": "ptday02-e09-signal-001",
+        "asset_class": "equity",
         "strategy_id": "spy_test_v1",
         "symbol": "SPY",
         "side": "buy",
@@ -959,6 +963,7 @@ async fn e10_setup() -> Arc<state::AppState> {
 fn e10_signal_body(signal_id: &str) -> String {
     serde_json::to_string(&serde_json::json!({
         "signal_id": signal_id,
+        "asset_class": "equity",
         "strategy_id": "spy_test_v1",
         "symbol": "SPY",
         "side": "buy",
@@ -1339,6 +1344,7 @@ async fn ptday05_e12_phase1_happy_path_all_gates_satisfied_reaches_db_gate() {
 
     let signal_body = serde_json::to_string(&serde_json::json!({
         "signal_id": "ptday05-e12-phase1-001",
+        "asset_class": "equity",
         "strategy_id": "spy_momentum_v1",
         "symbol": "SPY",
         "side": "buy",
@@ -1540,7 +1546,9 @@ async fn ptauto01b_e14a_gap_detected_halts_real_execution_loop() {
     }
 
     let run_id = uuid::Uuid::parse_str(E14_RUN_ID_STR).expect("E14 fixed run_id must parse");
-    let exit_note = st.run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    let exit_note = st
+        .run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
 
     // The loop must exit with the PT-AUTO-01 note (not tick error, not deadman).
     //
@@ -1596,7 +1604,9 @@ async fn ptauto01b_e14b_live_continuity_does_not_trigger_pt_auto01_halt() {
     .await;
 
     let run_id = uuid::Uuid::parse_str(E14_RUN_ID_STR).expect("E14 fixed run_id must parse");
-    let exit_note = st.run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    let exit_note = st
+        .run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
 
     // The exit note must NOT be the PT-AUTO-01 message — PT-AUTO-01 did not fire.
     // (The loop exits via tick error when the lazy pool fails Phase-0 DB check.)
@@ -1658,6 +1668,7 @@ async fn ptauto02_e15a_under_limit_passes_gate_1d_reaches_db_gate() {
 
     let signal_body = serde_json::json!({
         "signal_id": "e15a-sig-0001",
+        "asset_class": "equity",
         "strategy_id": "test-strat",
         "symbol": "AAPL",
         "side": "buy",
@@ -1719,6 +1730,7 @@ async fn ptauto02_e15b_at_limit_gate_1d_fires_409_day_limit_reached() {
 
     let signal_body = serde_json::json!({
         "signal_id": "e15b-sig-0001",
+        "asset_class": "equity",
         "strategy_id": "test-strat",
         "symbol": "AAPL",
         "side": "buy",
@@ -1784,7 +1796,11 @@ async fn ptauto03_e16a_system_status_surfaces_signal_count_healthy() {
         state::DeploymentMode::Paper,
         state::BrokerKind::Alpaca,
     ));
-    assert_eq!(st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse), 0, "E16a: count must be 0 at boot");
+    assert_eq!(
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
+        0,
+        "E16a: count must be 0 at boot"
+    );
 
     let (status, body) = call(
         routes::build_router(Arc::clone(&st)),
@@ -1943,6 +1959,7 @@ async fn ptauto04_e17_phase2_consolidated_healthy_path_all_autonomous_controls_p
     // ── Signal route: send signal through real production router ─────────────
     let signal_body = serde_json::json!({
         "signal_id": "ptauto04-e17-consolidated-001",
+        "asset_class": "equity",
         "strategy_id": "spy_momentum_v1",
         "symbol": "SPY",
         "side": "buy",

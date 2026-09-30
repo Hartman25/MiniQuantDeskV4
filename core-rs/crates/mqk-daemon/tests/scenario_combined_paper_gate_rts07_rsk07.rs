@@ -124,6 +124,7 @@ fn signal_body(signal_id: &str) -> axum::body::Body {
     axum::body::Body::from(
         serde_json::json!({
             "signal_id": signal_id,
+            "asset_class": "equity",
             "strategy_id": "strat-rts07",
             "symbol": "SPY",
             "side": "buy",
