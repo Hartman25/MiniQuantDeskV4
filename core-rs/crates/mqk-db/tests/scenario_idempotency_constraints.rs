@@ -55,8 +55,9 @@ async fn broker_order_map_rejects_duplicate_broker_id() {
     // EB-4: create a run so outbox rows satisfy the oms_outbox.run_id FK.
     sqlx::query(
         "INSERT INTO runs \
-         (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint) \
-         VALUES ($1, 'd3-test', 'PAPER', 'd3', 'd3', '{}', 'd3') \
+         (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint, \
+          execution_domain) \
+         VALUES ($1, 'd3-test', 'PAPER', 'd3', 'd3', '{}', 'd3', 'equity_nyse') \
          ON CONFLICT (run_id) DO NOTHING",
     )
     .bind(run_id)
@@ -124,8 +125,9 @@ async fn broker_order_map_allows_distinct_broker_ids() {
     // EB-4: create a run and outbox rows for both internal_ids.
     sqlx::query(
         "INSERT INTO runs \
-         (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint) \
-         VALUES ($1, 'd3-test', 'PAPER', 'd3', 'd3', '{}', 'd3') \
+         (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint, \
+          execution_domain) \
+         VALUES ($1, 'd3-test', 'PAPER', 'd3', 'd3', '{}', 'd3', 'equity_nyse') \
          ON CONFLICT (run_id) DO NOTHING",
     )
     .bind(run_id)
