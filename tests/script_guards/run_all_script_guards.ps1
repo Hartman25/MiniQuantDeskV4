@@ -85,6 +85,7 @@ $Guards = @(
     'test_multi_symbol_smoke_runner_gate.ps1',
     'test_heavy_lock_atomic_01.ps1',
     'test_ci_local_toolchain_convergence.ps1',
+    'test_canonical_fmt_check_command_length.ps1',
     'test_canonical_safe_ignored_matrix.ps1',
     'test_dev_shell_dsn_mask.ps1',
     'test_export_research_evidence_manifest.ps1',
