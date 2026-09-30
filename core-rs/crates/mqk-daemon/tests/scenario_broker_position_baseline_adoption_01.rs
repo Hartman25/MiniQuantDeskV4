@@ -139,6 +139,35 @@ async fn test_db_pool() -> sqlx::PgPool {
         .expect("DB connect failed")
 }
 
+/// Every lifecycle activity the D3 fixtures below seed carries this prefix.
+const D3_BASELINE_ACTIVITY_LIKE: &str = "d3-baseline-opexc-%";
+
+/// Removes only the D3 fixtures' own lifecycle rows (event-state row before
+/// its raw ledger row, FK order), keyed on this file's activity-id namespace.
+/// The adoption fence is mode-wide, so an unresolved fixture row left behind
+/// would refuse every later adoption sharing the PAPER mode. Returns the
+/// number of unresolved fixture rows still present afterwards (expected 0).
+async fn purge_d3_baseline_lifecycle_fixtures(db: &sqlx::PgPool) -> i64 {
+    sqlx::query("delete from sys_option_lifecycle_event_state where lifecycle_activity_id like $1")
+        .bind(D3_BASELINE_ACTIVITY_LIKE)
+        .execute(db)
+        .await
+        .expect("purge d3 fixture event-state rows failed");
+    sqlx::query("delete from sys_option_lifecycle_activity_ledger where activity_id like $1")
+        .bind(D3_BASELINE_ACTIVITY_LIKE)
+        .execute(db)
+        .await
+        .expect("purge d3 fixture ledger rows failed");
+    sqlx::query_scalar(
+        "select count(*) from sys_option_lifecycle_event_state \
+         where lifecycle_activity_id like $1 and state <> 'RECONCILED'",
+    )
+    .bind(D3_BASELINE_ACTIVITY_LIKE)
+    .fetch_one(db)
+    .await
+    .expect("count leftover d3 fixture rows failed")
+}
+
 // ---------------------------------------------------------------------------
 // PBA01: No baseline → reconcile engine reports dirty for unknown broker order.
 //
@@ -1057,6 +1086,7 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
     let db = test_db_pool().await;
     mqk_db::migrate(&db).await.expect("migration failed");
     let _ = mqk_db::clear_broker_position_baseline(&db).await;
+    let _ = purge_d3_baseline_lifecycle_fixtures(&db).await;
 
     let provider_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
     let authority = mqk_db::BrokerAccountAuthority::new("alpaca", &provider_id, "paper").unwrap();
@@ -1105,6 +1135,11 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
 
     let router = paper_alpaca_router_from_state(Arc::clone(&st));
     let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+    // Capture, then release the fixture: assertions below must not be able to
+    // panic before the test-owned lifecycle rows are gone.
+    let row_after = mqk_db::load_broker_position_baseline(&db).await;
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+    let leftover_d3_rows = purge_d3_baseline_lifecycle_fixtures(&db).await;
 
     assert_eq!(
         status,
@@ -1115,15 +1150,16 @@ async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
     assert_eq!(json["gate"], "repair.option_lifecycle_pending", "{json}");
 
     // No baseline row must have been written -- the whole adoption refused.
-    let row = mqk_db::load_broker_position_baseline(&db)
-        .await
-        .expect("load failed");
+    let row = row_after.expect("load failed");
     assert!(
         row.is_none(),
         "D3-BASELINE-01: no baseline row must be written when adoption is refused"
     );
 
-    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+    assert_eq!(
+        leftover_d3_rows, 0,
+        "no unresolved d3-baseline fixture may outlive its test"
+    );
 }
 
 /// D3-BASELINE-03: the option (and its underlying) are ABSENT from the broker
@@ -1138,6 +1174,7 @@ async fn d3_baseline03_an_option_absent_from_the_snapshot_still_refuses_adoption
     let db = test_db_pool().await;
     mqk_db::migrate(&db).await.expect("migration failed");
     let _ = mqk_db::clear_broker_position_baseline(&db).await;
+    let _ = purge_d3_baseline_lifecycle_fixtures(&db).await;
 
     let provider_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
     let authority = mqk_db::BrokerAccountAuthority::new("alpaca", &provider_id, "paper").unwrap();
@@ -1188,6 +1225,11 @@ async fn d3_baseline03_an_option_absent_from_the_snapshot_still_refuses_adoption
 
     let router = paper_alpaca_router_from_state(Arc::clone(&st));
     let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+    // Capture, then release the fixture: assertions below must not be able to
+    // panic before the test-owned lifecycle rows are gone.
+    let row_after = mqk_db::load_broker_position_baseline(&db).await;
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+    let leftover_d3_rows = purge_d3_baseline_lifecycle_fixtures(&db).await;
 
     assert_eq!(
         status,
@@ -1198,15 +1240,16 @@ async fn d3_baseline03_an_option_absent_from_the_snapshot_still_refuses_adoption
     assert_eq!(json["gate"], "repair.option_lifecycle_pending", "{json}");
 
     // No baseline row must have been written -- the whole adoption refused.
-    let row = mqk_db::load_broker_position_baseline(&db)
-        .await
-        .expect("load failed");
+    let row = row_after.expect("load failed");
     assert!(
         row.is_none(),
         "D3-BASELINE-03: no baseline row must be written when adoption is refused"
     );
 
-    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+    assert_eq!(
+        leftover_d3_rows, 0,
+        "no unresolved d3-baseline fixture may outlive its test"
+    );
 }
 
 /// D3-BASELINE-02: positions with zero lifecycle evidence (every real
