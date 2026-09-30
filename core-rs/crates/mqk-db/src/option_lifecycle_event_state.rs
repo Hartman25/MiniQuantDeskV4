@@ -20,6 +20,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 
+use crate::broker_account_authority::BrokerAccountAuthority;
 use crate::option_lifecycle_activity::OptionLifecycleActivityType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,13 +338,13 @@ pub async fn find_any_unreconciled_lifecycle_event(
     row.map(row_to_state).transpose()
 }
 
-/// Every `APPLIED_AWAITING_BROKER` event of accounts registered under
-/// `deployment_mode` in `execution_domain` -- the set a reconcile pass tries to
-/// move to `RECONCILED`.
+/// Every `APPLIED_AWAITING_BROKER` event of exactly `account` in
+/// `execution_domain` -- the set a reconcile pass tries to move to
+/// `RECONCILED`. Another account's events are never visible.
 pub async fn list_awaiting_broker_lifecycle_events(
     pool: &PgPool,
     execution_domain: &str,
-    deployment_mode: &str,
+    account: &BrokerAccountAuthority,
 ) -> Result<Vec<OptionLifecycleEventStateRow>> {
     let cols = STATE_COLUMNS
         .split(", ")
@@ -351,13 +352,44 @@ pub async fn list_awaiting_broker_lifecycle_events(
         .collect::<Vec<_>>()
         .join(", ");
     let q = format!(
-        "select {cols} from sys_option_lifecycle_event_state s join sys_broker_account_authority a on a.authority_key = s.broker_account_id where s.execution_domain = $1 and a.deployment_mode = $2 and s.state = 'APPLIED_AWAITING_BROKER' order by s.created_at_utc asc, s.lifecycle_activity_id asc, s.lifecycle_activity_type asc"
+        "select {cols} from sys_option_lifecycle_event_state s join sys_broker_account_authority a on a.authority_key = s.broker_account_id where s.execution_domain = $1 and s.broker_account_id = $2 and a.deployment_mode = $3 and s.state = 'APPLIED_AWAITING_BROKER' order by s.created_at_utc asc, s.lifecycle_activity_id asc, s.lifecycle_activity_type asc"
     );
     let rows: Vec<StateRow> = sqlx::query_as(&q)
         .bind(execution_domain)
-        .bind(deployment_mode)
+        .bind(account.key())
+        .bind(account.deployment_mode())
         .fetch_all(pool)
         .await
         .context("list_awaiting_broker_lifecycle_events failed")?;
     rows.into_iter().map(row_to_state).collect()
+}
+
+/// Fail-closed fence probe for a caller that could not establish its own
+/// provider account: the oldest unreconciled lifecycle event of ANY account
+/// registered under `deployment_mode` in `execution_domain` (optionally only
+/// those fencing `symbol` as option contract or underlying). Durable unresolved
+/// state must fence even when no account identity is available; this is a
+/// superset fence and never a source of state to apply.
+pub async fn find_unreconciled_lifecycle_event_in_deployment_mode(
+    pool: &PgPool,
+    execution_domain: &str,
+    deployment_mode: &str,
+    symbol: Option<&str>,
+) -> Result<Option<OptionLifecycleEventStateRow>> {
+    let cols = STATE_COLUMNS
+        .split(", ")
+        .map(|c| format!("s.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let q = format!(
+        "select {cols} from sys_option_lifecycle_event_state s join sys_broker_account_authority a on a.authority_key = s.broker_account_id where s.execution_domain = $1 and a.deployment_mode = $2 and s.state <> 'RECONCILED' and ($3::text is null or s.option_symbol = $3 or s.underlying_symbol = $3) order by s.created_at_utc asc, s.lifecycle_activity_id asc, s.lifecycle_activity_type asc, s.broker_account_id asc limit 1"
+    );
+    let row: Option<StateRow> = sqlx::query_as(&q)
+        .bind(execution_domain)
+        .bind(deployment_mode)
+        .bind(symbol)
+        .fetch_optional(pool)
+        .await
+        .context("find_unreconciled_lifecycle_event_in_deployment_mode failed")?;
+    row.map(row_to_state).transpose()
 }

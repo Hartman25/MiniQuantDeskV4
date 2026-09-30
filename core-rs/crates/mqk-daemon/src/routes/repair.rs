@@ -3271,15 +3271,22 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
     // effect (the fence above proved none is still pending), so stop replaying
     // those journal entries on top of it. A failure here is safe: a stale
     // replay double counts and reconcile fails closed rather than accepting it.
-    if let Err(e) = mqk_db::subsume_reconciled_lifecycle_journal(
-        db,
-        crate::state::option_lifecycle_ingestion::OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
-        st.deployment_mode().as_api_label(),
-        Utc::now(),
-    )
-    .await
-    {
-        tracing::warn!(error = %e, "option_lifecycle_journal_subsume_failed_after_baseline_adoption");
+    // Only the daemon's own proven provider account is subsumed; without an
+    // established account nothing is touched (another account's entries under
+    // the same deployment mode are never this baseline's to absorb).
+    if let Some(account) = crate::state::option_lifecycle_ledger::lifecycle_fetcher_account(
+        st.option_lifecycle_activity_fetcher.as_ref(),
+    ) {
+        if let Err(e) = mqk_db::subsume_reconciled_lifecycle_journal(
+            db,
+            crate::state::option_lifecycle_ingestion::OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
+            &account,
+            Utc::now(),
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "option_lifecycle_journal_subsume_failed_after_baseline_adoption");
+        }
     }
 
     // IDLE-RECONCILE-AFTER-BASELINE-01: Run reconcile comparison while idle.

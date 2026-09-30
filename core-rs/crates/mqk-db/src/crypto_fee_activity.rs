@@ -35,6 +35,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::broker_account_authority::BrokerAccountAuthority;
+
 /// The three [`FeeAttributionRecord`]-equivalent shapes this table can hold
 /// (mirrors `mqk_broker_alpaca::fee_attribution::FeeAttributionRecord`
 /// exactly; this crate has no dependency on that crate, so the shape is
@@ -380,7 +382,7 @@ pub struct ConfirmedCryptoCashFee {
     pub fee_micros: i64,
 }
 
-/// Cost-evidence summary for accounts registered under `deployment_mode`.
+/// Cost-evidence summary for one provider account.
 ///
 /// `unattributed_asset_denominated` counts fees charged in the traded asset
 /// itself: real cost that is NOT representable as cash without per-fill price
@@ -403,25 +405,28 @@ impl CryptoFeeEvidenceSummary {
     }
 }
 
-/// Confirmed cash fees for `deployment_mode` accounts in a deterministic order
+/// Confirmed cash fees of exactly `account` in a deterministic order
 /// (`ingested_at_utc`, account, activity id). Only `cash_fee` rows: an
-/// asset-denominated fee is never converted to cash here.
+/// asset-denominated fee is never converted to cash here. Another provider
+/// account under the same deployment mode is never visible.
 pub async fn list_confirmed_crypto_cash_fees(
     pool: &PgPool,
-    deployment_mode: &str,
+    account: &BrokerAccountAuthority,
 ) -> Result<Vec<ConfirmedCryptoCashFee>> {
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
         r#"
         select f.broker_account_id, f.activity_id, f.fee_micros
           from sys_crypto_fee_activity_ledger f
           join sys_broker_account_authority a on a.authority_key = f.broker_account_id
-         where a.deployment_mode = $1
+         where f.broker_account_id = $1
+           and a.deployment_mode = $2
            and f.attribution_status = 'cash_fee'
            and f.fee_micros is not null
          order by f.ingested_at_utc asc, f.broker_account_id asc, f.activity_id asc
         "#,
     )
-    .bind(deployment_mode)
+    .bind(account.key())
+    .bind(account.deployment_mode())
     .fetch_all(pool)
     .await
     .context("list_confirmed_crypto_cash_fees failed")?;
@@ -437,13 +442,38 @@ pub async fn list_confirmed_crypto_cash_fees(
         .collect())
 }
 
-/// Summarize the fee evidence for `deployment_mode` accounts. Fails closed on
-/// sum overflow.
-pub async fn summarize_crypto_fee_evidence(
+/// Number of confirmed cash fees held by ANY account registered under
+/// `deployment_mode`. Presence probe only, for callers that could not establish
+/// their own account: a non-zero count means account-scoped consumption is
+/// impossible and they must fail closed. Never a source of fees to consume.
+pub async fn count_confirmed_crypto_cash_fees_for_deployment_mode(
     pool: &PgPool,
     deployment_mode: &str,
+) -> Result<i64> {
+    let (n,): (i64,) = sqlx::query_as(
+        r#"
+        select count(*)
+          from sys_crypto_fee_activity_ledger f
+          join sys_broker_account_authority a on a.authority_key = f.broker_account_id
+         where a.deployment_mode = $1
+           and f.attribution_status = 'cash_fee'
+           and f.fee_micros is not null
+        "#,
+    )
+    .bind(deployment_mode)
+    .fetch_one(pool)
+    .await
+    .context("count_confirmed_crypto_cash_fees_for_deployment_mode failed")?;
+    Ok(n)
+}
+
+/// Summarize the fee evidence of exactly `account`. Fails closed on sum
+/// overflow.
+pub async fn summarize_crypto_fee_evidence(
+    pool: &PgPool,
+    account: &BrokerAccountAuthority,
 ) -> Result<CryptoFeeEvidenceSummary> {
-    let cash = list_confirmed_crypto_cash_fees(pool, deployment_mode).await?;
+    let cash = list_confirmed_crypto_cash_fees(pool, account).await?;
     let mut total = 0i64;
     for fee in &cash {
         total = total.checked_add(fee.fee_micros).with_context(|| {
@@ -458,11 +488,13 @@ pub async fn summarize_crypto_fee_evidence(
         select f.attribution_status, count(*)
           from sys_crypto_fee_activity_ledger f
           join sys_broker_account_authority a on a.authority_key = f.broker_account_id
-         where a.deployment_mode = $1
+         where f.broker_account_id = $1
+           and a.deployment_mode = $2
          group by f.attribution_status
         "#,
     )
-    .bind(deployment_mode)
+    .bind(account.key())
+    .bind(account.deployment_mode())
     .fetch_all(pool)
     .await
     .context("summarize_crypto_fee_evidence: status counts failed")?;

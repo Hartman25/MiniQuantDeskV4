@@ -266,8 +266,13 @@ impl AppState {
         // B6: confirmed Crypto broker fees (posted day-end, never inside a fill)
         // reach the Crypto ledger. Partial cost truth is surfaced, never hidden.
         if matches!(domain, super::ExecutionDomain::Crypto24_7) {
+            let fee_account = self
+                .crypto_fee_activity_fetcher
+                .as_ref()
+                .and_then(|f| f.broker_account_authority().ok());
             let summary = super::crypto_fee_ledger::replay_crypto_fees_into_portfolio(
                 &db,
+                fee_account.as_ref(),
                 self.deployment_mode().as_api_label(),
                 &mut portfolio,
             )
@@ -288,8 +293,12 @@ impl AppState {
         }
 
         let lifecycle_replay = if matches!(domain, super::ExecutionDomain::EquityNyse) {
+            let lifecycle_account = super::option_lifecycle_ledger::lifecycle_fetcher_account(
+                self.option_lifecycle_activity_fetcher.as_ref(),
+            );
             let replay = super::option_lifecycle_ledger::replay_lifecycle_journal_into_portfolio(
                 &db,
+                lifecycle_account.as_ref(),
                 self.deployment_mode().as_api_label(),
                 &mut portfolio,
             )

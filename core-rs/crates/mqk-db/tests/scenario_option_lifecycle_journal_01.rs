@@ -15,6 +15,7 @@
 //! | J08  | The journal is immutable (trigger); subsumption is set-once              |
 //! | J09  | APPLIED -> RECONCILED is compare-and-set; reconciled entries subsume     |
 //! | J10  | economic_apply_id is deterministic and account/domain/event scoped       |
+//! | J11  | Two accounts of ONE deployment mode never see/subsume/clear each other  |
 //!
 //! DB-backed (port 5434 test Postgres); fresh account per test.
 
@@ -25,11 +26,12 @@ use mqk_db::option_lifecycle_activity::{
 };
 use mqk_db::{
     apply_lifecycle_adjustment_tx, economic_apply_id, fetch_lifecycle_journal_entry,
-    fetch_option_lifecycle_event_state, list_unsubsumed_lifecycle_journal,
-    mark_lifecycle_event_reconciled, record_lifecycle_evaluation,
-    subsume_reconciled_lifecycle_journal, verify_or_register_broker_account_authority,
-    ApplyAdjustmentOutcome, BrokerAccountAuthority, CorrelationBasis, LifecycleEvaluation,
-    LifecycleEventState, LifecycleStateSeed, NewLifecycleAdjustment, UnderlyingDelivery,
+    fetch_option_lifecycle_event_state, list_awaiting_broker_lifecycle_events,
+    list_unsubsumed_lifecycle_journal, mark_lifecycle_event_reconciled,
+    record_lifecycle_evaluation, subsume_reconciled_lifecycle_journal,
+    verify_or_register_broker_account_authority, ApplyAdjustmentOutcome, BrokerAccountAuthority,
+    CorrelationBasis, LifecycleEvaluation, LifecycleEventState, LifecycleStateSeed,
+    NewLifecycleAdjustment, UnderlyingDelivery,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -240,7 +242,7 @@ async fn j01_apply_is_atomic_and_an_exact_retry_adds_nothing() {
         .await
         .expect("retry");
     assert_eq!(retry, ApplyAdjustmentOutcome::AlreadyApplied(entry.clone()));
-    let all = list_unsubsumed_lifecycle_journal(&pool, DOMAIN, "paper")
+    let all = list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &a)
         .await
         .unwrap();
     assert_eq!(
@@ -517,10 +519,10 @@ async fn j09_reconciled_is_compare_and_set_and_reconciled_entries_subsume() {
         .unwrap();
 
     // Awaiting the broker: subsumption never touches it and it stays replayable.
-    subsume_reconciled_lifecycle_journal(&pool, DOMAIN, "paper", Utc::now())
+    subsume_reconciled_lifecycle_journal(&pool, DOMAIN, &a, Utc::now())
         .await
         .unwrap();
-    assert!(list_unsubsumed_lifecycle_journal(&pool, DOMAIN, "paper")
+    assert!(list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &a)
         .await
         .unwrap()
         .iter()
@@ -551,15 +553,88 @@ async fn j09_reconciled_is_compare_and_set_and_reconciled_entries_subsume() {
     .await
     .is_err());
 
-    let n = subsume_reconciled_lifecycle_journal(&pool, DOMAIN, "paper", Utc::now())
+    let n = subsume_reconciled_lifecycle_journal(&pool, DOMAIN, &a, Utc::now())
         .await
         .unwrap();
     assert!(n >= 1);
-    assert!(!list_unsubsumed_lifecycle_journal(&pool, DOMAIN, "paper")
+    assert!(!list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &a)
         .await
         .unwrap()
         .iter()
         .any(|e| e.broker_account_id == key));
+}
+
+#[tokio::test]
+async fn j11_two_accounts_of_one_deployment_mode_never_see_each_others_lifecycle() {
+    use OptionLifecycleActivityType::Exercise;
+    let pool = require_pool().await;
+    // Both accounts are registered under deployment_mode "paper".
+    let a = account(&pool, "j11a").await;
+    let b = account(&pool, "j11b").await;
+    assert_eq!(a.deployment_mode(), b.deployment_mode());
+    let (ka, kb) = (a.key(), b.key());
+    for k in [&ka, &kb] {
+        seed_ready(&pool, k, "X1", Exercise, Some("X1")).await;
+        apply_lifecycle_adjustment_tx(&pool, &exercise_adjustment(k, "X1", "X1"))
+            .await
+            .unwrap();
+    }
+
+    let only = |entries: &[mqk_db::LifecycleJournalEntry], k: &str| {
+        !entries.is_empty() && entries.iter().all(|e| e.broker_account_id == k)
+    };
+    let ja = list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &a)
+        .await
+        .unwrap();
+    let jb = list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &b)
+        .await
+        .unwrap();
+    assert!(only(&ja, &ka), "A's journal must contain only A's entries");
+    assert!(only(&jb, &kb), "B's journal must contain only B's entries");
+
+    let wa = list_awaiting_broker_lifecycle_events(&pool, DOMAIN, &a)
+        .await
+        .unwrap();
+    let wb = list_awaiting_broker_lifecycle_events(&pool, DOMAIN, &b)
+        .await
+        .unwrap();
+    assert!(!wa.is_empty() && wa.iter().all(|e| e.broker_account_id == ka));
+    assert!(!wb.is_empty() && wb.iter().all(|e| e.broker_account_id == kb));
+
+    // Reconciling and subsuming B leaves A's pending lifecycle fully intact.
+    assert!(
+        mark_lifecycle_event_reconciled(&pool, &kb, "X1", Exercise, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        subsume_reconciled_lifecycle_journal(&pool, DOMAIN, &b, Utc::now())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        subsume_reconciled_lifecycle_journal(&pool, DOMAIN, &a, Utc::now())
+            .await
+            .unwrap(),
+        0,
+        "A's entry is still awaiting the broker and is never subsumed"
+    );
+    assert_eq!(
+        state(&pool, &ka, "X1", Exercise).await.state,
+        LifecycleEventState::AppliedAwaitingBroker,
+        "B's reconcile never clears A's pending lifecycle"
+    );
+    assert!(list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &b)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(only(
+        &list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &a)
+            .await
+            .unwrap(),
+        &ka
+    ));
 }
 
 #[tokio::test]

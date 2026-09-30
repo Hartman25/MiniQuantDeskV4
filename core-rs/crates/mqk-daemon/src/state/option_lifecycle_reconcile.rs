@@ -30,7 +30,7 @@ use sqlx::PgPool;
 
 use mqk_db::{
     fetch_lifecycle_journal_entry, list_awaiting_broker_lifecycle_events,
-    mark_lifecycle_event_reconciled, LifecycleJournalEntry,
+    mark_lifecycle_event_reconciled, BrokerAccountAuthority, LifecycleJournalEntry,
 };
 use mqk_portfolio::{PortfolioState, QtyMicros};
 
@@ -73,12 +73,12 @@ pub struct LifecycleReconcileReport {
     pub disagreeing: usize,
 }
 
-/// Try to move every `APPLIED_AWAITING_BROKER` event of `deployment_mode`
-/// accounts to `RECONCILED`. Never regresses anything; an event that does not
+/// Try to move every `APPLIED_AWAITING_BROKER` event of exactly `account` to
+/// `RECONCILED`. Never regresses anything; an event that does not
 /// qualify simply stays fenced.
 pub async fn reconcile_awaiting_lifecycle_events(
     pool: &PgPool,
-    deployment_mode: &str,
+    account: &BrokerAccountAuthority,
     absorbed: &BTreeSet<String>,
     local: &BTreeMap<String, QtyMicros>,
     broker: &BTreeMap<String, QtyMicros>,
@@ -89,7 +89,7 @@ pub async fn reconcile_awaiting_lifecycle_events(
     let events = list_awaiting_broker_lifecycle_events(
         pool,
         OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
-        deployment_mode,
+        account,
     )
     .await?;
     for event in events {

@@ -55,8 +55,7 @@ async fn require_pool() -> PgPool {
     pool
 }
 
-/// Unique deployment-mode label per account: the reconcile pass is mode-scoped,
-/// so tests sharing the DB never see each other's awaiting events.
+/// Fresh provider account under a unique deployment-mode label.
 fn fresh_authority(label: &str) -> BrokerAccountAuthority {
     let u = Uuid::new_v4().simple().to_string();
     BrokerAccountAuthority::new("alpaca", &format!("d3-{label}-{u}"), &format!("m{u}")).unwrap()
@@ -177,8 +176,7 @@ fn exercise_rows() -> Vec<AlpacaOptionLifecycleActivity> {
 async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles() {
     let pool = require_pool().await;
     let auth = fresh_authority("r01");
-    let mode = auth.deployment_mode().to_string();
-    let f = mock(auth, exercise_rows());
+    let f = mock(auth.clone(), exercise_rows());
     let (key, apply_id) = applied_exercise(&pool, &f).await;
 
     let agree = book(&[("AAPL", 200)]);
@@ -191,7 +189,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
     // Ledger has not absorbed the entry.
     let r = reconcile_awaiting_lifecycle_events(
         &pool,
-        &mode,
+        &auth,
         &not_absorbed,
         &agree,
         &agree,
@@ -205,7 +203,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
     // Broker snapshot older than the apply proves nothing.
     let r = reconcile_awaiting_lifecycle_events(
         &pool,
-        &mode,
+        &auth,
         &absorbed,
         &agree,
         &agree,
@@ -220,7 +218,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
     let broker_holds = book(&[("AAPL", 200), (CALL, 2)]);
     let r = reconcile_awaiting_lifecycle_events(
         &pool,
-        &mode,
+        &auth,
         &absorbed,
         &agree,
         &broker_holds,
@@ -234,7 +232,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
     // Underlying disagrees.
     let r = reconcile_awaiting_lifecycle_events(
         &pool,
-        &mode,
+        &auth,
         &absorbed,
         &agree,
         &book(&[("AAPL", 100)]),
@@ -254,7 +252,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
     // Fresh, agreeing, absorbed: RECONCILED, gate clears.
     let r = reconcile_awaiting_lifecycle_events(
         &pool,
-        &mode,
+        &auth,
         &absorbed,
         &agree,
         &agree,

@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::broker_account_authority::BrokerAccountAuthority;
 use crate::option_lifecycle_activity::OptionLifecycleActivityType;
 use crate::option_lifecycle_event_state::{CorrelationBasis, LifecycleEventState};
 
@@ -361,18 +362,19 @@ pub async fn fetch_lifecycle_journal_entry(
 }
 
 /// Journal entries a run recovery must replay on top of its baseline + fills:
-/// every not-yet-baseline-subsumed entry whose account is registered under
-/// `deployment_mode`, in `journal_seq` order.
+/// every not-yet-baseline-subsumed entry of exactly `account`, in `journal_seq`
+/// order. Another provider account under the same deployment mode is never
+/// visible.
 pub async fn list_unsubsumed_lifecycle_journal(
     pool: &PgPool,
     execution_domain: &str,
-    deployment_mode: &str,
+    account: &BrokerAccountAuthority,
 ) -> Result<Vec<LifecycleJournalEntry>> {
     let q = format!(
         "select {} from sys_option_lifecycle_adjustment_journal j \
          join sys_broker_account_authority a on a.authority_key = j.broker_account_id \
-         where j.execution_domain = $1 and a.deployment_mode = $2 \
-           and j.baseline_subsumed_at_utc is null \
+         where j.execution_domain = $1 and j.broker_account_id = $2 \
+           and a.deployment_mode = $3 and j.baseline_subsumed_at_utc is null \
          order by j.journal_seq asc",
         JOURNAL_COLUMNS
             .split(", ")
@@ -382,11 +384,33 @@ pub async fn list_unsubsumed_lifecycle_journal(
     );
     let rows: Vec<JournalRow> = sqlx::query_as(&q)
         .bind(execution_domain)
-        .bind(deployment_mode)
+        .bind(account.key())
+        .bind(account.deployment_mode())
         .fetch_all(pool)
         .await
         .context("list_unsubsumed_lifecycle_journal failed")?;
     rows.into_iter().map(row_to_entry).collect()
+}
+
+/// Number of not-yet-subsumed journal entries held by ANY account registered
+/// under `deployment_mode`. Presence probe only, for callers that could not
+/// establish their own account: a non-zero count means account-scoped
+/// consumption is impossible and they must fail closed. Never a source of
+/// entries to apply.
+pub async fn count_unsubsumed_lifecycle_journal_for_deployment_mode(
+    pool: &PgPool,
+    execution_domain: &str,
+    deployment_mode: &str,
+) -> Result<i64> {
+    let (n,): (i64,) = sqlx::query_as(
+        "select count(*) from sys_option_lifecycle_adjustment_journal j          join sys_broker_account_authority a on a.authority_key = j.broker_account_id          where j.execution_domain = $1 and a.deployment_mode = $2            and j.baseline_subsumed_at_utc is null",
+    )
+    .bind(execution_domain)
+    .bind(deployment_mode)
+    .fetch_one(pool)
+    .await
+    .context("count_unsubsumed_lifecycle_journal_for_deployment_mode failed")?;
+    Ok(n)
 }
 
 /// `APPLIED_AWAITING_BROKER -> RECONCILED`, only after the caller proved broker
@@ -420,32 +444,35 @@ pub async fn mark_lifecycle_event_reconciled(
 }
 
 /// After an operator baseline adoption absorbed broker truth: stop replaying
-/// every RECONCILED journal entry of `deployment_mode` accounts. Entries still
-/// awaiting the broker are never subsumed (the adoption route refuses while any
-/// exist). Returns the number of entries newly subsumed.
+/// every RECONCILED journal entry of exactly `account`. Entries still awaiting
+/// the broker are never subsumed (the adoption route refuses while any exist),
+/// and another account's entries are never touched. Returns the number of
+/// entries newly subsumed.
 pub async fn subsume_reconciled_lifecycle_journal(
     pool: &PgPool,
     execution_domain: &str,
-    deployment_mode: &str,
+    account: &BrokerAccountAuthority,
     now_utc: DateTime<Utc>,
 ) -> Result<u64> {
     let r = sqlx::query(
         r#"
         update sys_option_lifecycle_adjustment_journal j
-           set baseline_subsumed_at_utc = $3
+           set baseline_subsumed_at_utc = $4
           from sys_option_lifecycle_event_state s, sys_broker_account_authority a
          where s.broker_account_id = j.broker_account_id
            and s.lifecycle_activity_id = j.lifecycle_activity_id
            and s.lifecycle_activity_type = j.lifecycle_activity_type
            and s.state = 'RECONCILED'
            and a.authority_key = j.broker_account_id
-           and a.deployment_mode = $2
+           and j.broker_account_id = $2
+           and a.deployment_mode = $3
            and j.execution_domain = $1
            and j.baseline_subsumed_at_utc is null
         "#,
     )
     .bind(execution_domain)
-    .bind(deployment_mode)
+    .bind(account.key())
+    .bind(account.deployment_mode())
     .bind(now_utc)
     .execute(pool)
     .await

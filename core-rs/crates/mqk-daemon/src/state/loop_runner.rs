@@ -349,11 +349,19 @@ async fn reconcile_lifecycle_against_broker(
     };
     let broker = super::reconcile_broker_snapshot_from_schema(&snapshot)
         .map_err(|e| anyhow::anyhow!("broker snapshot conversion failed: {e}"))?;
+    // No established provider account -> nothing may be reconciled: an event
+    // stays fenced rather than being attributed to whichever account this
+    // deployment mode happens to hold.
+    let Some(account) = super::option_lifecycle_ledger::lifecycle_fetcher_account(
+        state.option_lifecycle_activity_fetcher.as_ref(),
+    ) else {
+        return Ok(());
+    };
     let local =
         super::option_lifecycle_reconcile::local_position_quantities(orchestrator.portfolio());
     super::option_lifecycle_reconcile::reconcile_awaiting_lifecycle_events(
         pool,
-        state.deployment_mode().as_api_label(),
+        &account,
         orchestrator.applied_lifecycle_adjustment_ids(),
         &local,
         &broker.positions,
@@ -375,9 +383,12 @@ async fn absorb_lifecycle_adjustments(
     state: &Arc<AppState>,
     orchestrator: &mut DaemonOrchestrator,
 ) -> anyhow::Result<()> {
-    let entries = mqk_db::list_unsubsumed_lifecycle_journal(
+    let account = super::option_lifecycle_ledger::lifecycle_fetcher_account(
+        state.option_lifecycle_activity_fetcher.as_ref(),
+    );
+    let entries = super::option_lifecycle_ledger::load_unsubsumed_journal(
         pool,
-        super::option_lifecycle_ingestion::OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
+        account.as_ref(),
         state.deployment_mode().as_api_label(),
     )
     .await?;

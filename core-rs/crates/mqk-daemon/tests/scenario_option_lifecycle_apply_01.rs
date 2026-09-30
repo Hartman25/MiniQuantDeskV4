@@ -567,7 +567,7 @@ async fn p07_recovery_replays_the_journal_into_the_ledger_with_the_same_economic
     let key = auth.key();
     let mode = auth.deployment_mode().to_string();
     let f = MockFetcher::new(
-        auth,
+        auth.clone(),
         vec![
             act("X1", "OPEXC", CALL, "-2", None, "0"),
             act("X1", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
@@ -580,7 +580,7 @@ async fn p07_recovery_replays_the_journal_into_the_ledger_with_the_same_economic
 
     let mut recovered = holding(CALL, 2);
     let cash_before = recovered.cash_micros;
-    let replay = replay_lifecycle_journal_into_portfolio(&pool, &mode, &mut recovered)
+    let replay = replay_lifecycle_journal_into_portfolio(&pool, Some(&auth), &mode, &mut recovered)
         .await
         .expect("replay");
     assert_eq!(replay.applied_ids.len(), 1);
@@ -589,7 +589,7 @@ async fn p07_recovery_replays_the_journal_into_the_ledger_with_the_same_economic
     assert_eq!(recovered.cash_micros, cash_before - 30_000_000_000);
 
     // The ledger refuses a second application of the same entry.
-    let entries = mqk_db::list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &mode)
+    let entries = mqk_db::list_unsubsumed_lifecycle_journal(&pool, DOMAIN, &auth)
         .await
         .unwrap();
     let mut ledger = mqk_portfolio::Ledger::new(START_CASH);
