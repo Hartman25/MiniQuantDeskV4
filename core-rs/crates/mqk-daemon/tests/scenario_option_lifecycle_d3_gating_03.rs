@@ -185,12 +185,17 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
 
     let absorbed: BTreeSet<String> = [apply_id.clone()].into_iter().collect();
     let not_absorbed: BTreeSet<String> = BTreeSet::new();
+    // The exercise's provider-signed cash (-150 x 200), as the ledger applied it.
+    let cash_ok: BTreeMap<String, i64> = [(apply_id.clone(), -30_000_000_000)].into();
+    let cash_off: BTreeMap<String, i64> = [(apply_id.clone(), -30_000_000_001)].into();
+    let cash_unapplied: BTreeMap<String, i64> = BTreeMap::new();
 
     // Ledger has not absorbed the entry.
     let r = reconcile_awaiting_lifecycle_events(
         &pool,
         &auth,
         &not_absorbed,
+        &cash_ok,
         &agree,
         &agree,
         fresh,
@@ -205,6 +210,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
         &pool,
         &auth,
         &absorbed,
+        &cash_ok,
         &agree,
         &agree,
         stale,
@@ -220,6 +226,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
         &pool,
         &auth,
         &absorbed,
+        &cash_ok,
         &agree,
         &broker_holds,
         fresh,
@@ -234,6 +241,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
         &pool,
         &auth,
         &absorbed,
+        &cash_ok,
         &agree,
         &book(&[("AAPL", 100)]),
         fresh,
@@ -242,6 +250,38 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
     .await
     .unwrap();
     assert_eq!((r.reconciled, r.disagreeing), (0, 1));
+
+    // Option and underlying AGREE with the broker, but the cash the local
+    // ledger applied does not match the provider-evidenced settlement cash (or
+    // is absent): positions alone never clear the gate.
+    for wrong in [&cash_off, &cash_unapplied] {
+        let r = reconcile_awaiting_lifecycle_events(
+            &pool,
+            &auth,
+            &absorbed,
+            wrong,
+            &agree,
+            &agree,
+            fresh,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.reconciled, r.cash_disagreeing), (0, 1));
+        assert_eq!(
+            fetch_option_lifecycle_event_state(
+                &pool,
+                &key,
+                "X1",
+                OptionLifecycleActivityType::Exercise,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+            LifecycleEventState::AppliedAwaitingBroker
+        );
+    }
 
     // Still fenced after every refusal.
     assert!(evaluate_option_lifecycle_pending_gate(&pool, &key, "AAPL")
@@ -254,6 +294,7 @@ async fn r01_only_a_fresh_agreeing_snapshot_over_an_absorbed_ledger_reconciles()
         &pool,
         &auth,
         &absorbed,
+        &cash_ok,
         &agree,
         &agree,
         fresh,

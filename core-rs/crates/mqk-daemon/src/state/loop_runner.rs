@@ -363,6 +363,7 @@ async fn reconcile_lifecycle_against_broker(
         pool,
         &account,
         orchestrator.applied_lifecycle_adjustment_ids(),
+        &super::option_lifecycle_reconcile::local_lifecycle_cash(orchestrator.portfolio()),
         &local,
         &broker.positions,
         snapshot.captured_at_utc,
