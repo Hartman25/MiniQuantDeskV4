@@ -2007,10 +2007,16 @@ mod tests {
             .expect("fetch_current_lease crypto")
             .expect("crypto lease must exist");
 
-        assert_eq!(equity_lease.execution_domain, crate::EXECUTION_DOMAIN_EQUITY_NYSE);
+        assert_eq!(
+            equity_lease.execution_domain,
+            crate::EXECUTION_DOMAIN_EQUITY_NYSE
+        );
         assert_eq!(equity_lease.run_id, Some(equity_run));
         assert_eq!(equity_lease.holder_id, "equity-runtime");
-        assert_eq!(crypto_lease.execution_domain, crate::EXECUTION_DOMAIN_CRYPTO_24_7);
+        assert_eq!(
+            crypto_lease.execution_domain,
+            crate::EXECUTION_DOMAIN_CRYPTO_24_7
+        );
         assert_eq!(crypto_lease.run_id, Some(crypto_run));
         assert_eq!(crypto_lease.holder_id, "crypto-runtime");
     }
@@ -2074,8 +2080,7 @@ mod tests {
                 .expect("fetch_current_lease equity")
                 .expect("equity lease must still exist");
         assert_eq!(
-            equity_after_crypto_refresh.lease_expires_at,
-            equity_lease.lease_expires_at,
+            equity_after_crypto_refresh.lease_expires_at, equity_lease.lease_expires_at,
             "refreshing crypto's lease must not change equity's expiry"
         );
 

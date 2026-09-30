@@ -66,7 +66,10 @@ use super::helpers::{build_fault_signals, runtime_error_response, sticky_halt_fa
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap,
         Err(err) => return runtime_error_response(err),
     };
@@ -808,7 +811,10 @@ pub(crate) async fn create_incident(
 /// present (`truth_state = "active"`); falls back to `"unacked"` for all rows
 /// when no DB pool is available (`truth_state = "no_db"`).
 pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
-    let status_snap = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status_snap = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(s) => s,
         Err(err) => return runtime_error_response(err),
     };

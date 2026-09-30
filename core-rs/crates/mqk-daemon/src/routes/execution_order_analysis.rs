@@ -83,7 +83,10 @@ async fn load_execution_outbox(
         return Ok(unavailable("no_db"));
     };
 
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };
@@ -292,7 +295,10 @@ pub(crate) async fn execution_replace_cancel_chains(
             .into_response();
     };
 
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };

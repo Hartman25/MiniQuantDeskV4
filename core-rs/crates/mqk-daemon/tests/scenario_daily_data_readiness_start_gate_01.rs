@@ -301,7 +301,7 @@ async fn sg_01_missing_assignments_blocks_before_run_creation() {
     let st = ready_state_with_fleet(Some("intraday_scalper")).await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-01: missing assignments must refuse start");
     assert_eq!(
@@ -351,7 +351,7 @@ async fn sg_02_strategy_id_mismatch_blocks_before_run_creation() {
     let st = ready_state_with_fleet(Some("intraday_scalper")).await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-02: strategy-id mismatch must refuse start");
     assert_eq!(
@@ -391,7 +391,7 @@ async fn sg_03_target_symbol_mismatch_blocks_before_run_creation() {
     let st = ready_state_with_fleet(Some("intraday_scalper")).await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-03: target-symbol mismatch must refuse start");
     assert_eq!(
@@ -428,7 +428,7 @@ async fn sg_04_timeframe_mismatch_blocks_before_run_creation() {
     let st = ready_state_with_fleet(Some("intraday_scalper")).await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-04: timeframe mismatch must refuse start");
     assert_eq!(
@@ -465,7 +465,7 @@ async fn sg_05_db_unavailable_blocks_and_reports_evidence_not_persisted() {
     assert!(st.db.is_none(), "SG-05: precondition — no DB configured");
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-05: db-unavailable assignment must refuse start");
     assert_eq!(
@@ -506,7 +506,7 @@ async fn sg_06_valid_fixed_window_override_does_not_cause_false_calendar_unavail
     let st = ready_state_with_fleet(Some("intraday_scalper")).await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-06: precondition — start still refused (no DB attached)");
     assert_eq!(
@@ -568,7 +568,7 @@ async fn sg_06b_invalid_fixed_window_override_blocks_before_run_creation() {
         .await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-06B: invalid fixed-window override must refuse start");
     assert_eq!(
@@ -637,7 +637,7 @@ async fn sg_07_market_data_missing_blocks_creates_no_run_no_outbox_no_loop() {
         .await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-07: market_data_missing assignment must refuse start");
     assert_eq!(
@@ -729,7 +729,7 @@ async fn sg_08_pre_start_evidence_attempted_even_when_blocked_and_keeps_original
         .await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-08: blocked assignment must refuse start");
     assert_eq!(
@@ -848,7 +848,7 @@ async fn sg_09_ready_verdict_refuses_start_when_evidence_persist_fails() {
         .await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-09: ready verdict must refuse start if evidence persist fails");
     assert_eq!(
@@ -953,7 +953,9 @@ async fn sg_10_ready_start_creates_run_and_links_evidence_but_later_gate_still_e
             .await
             .expect("count run_linked events before");
 
-    let result = st.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await;
+    let result = st
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
+        .await;
     let err = result.expect_err(
         "SG-10 (req #22): B2A strategy-registry gate must still fire even though \
          daily-data readiness was ready — this bundle adds a prerequisite, it does \
@@ -1032,7 +1034,7 @@ async fn sg_11_non_applicable_mode_preserves_prior_deployment_gate_behavior() {
     let st = std::sync::Arc::new(AppState::new_for_test_with_mode(DeploymentMode::Paper));
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-11: paper+paper must still refuse at the pre-existing deployment gate");
     assert_eq!(
@@ -1171,7 +1173,7 @@ async fn sg_12_sequential_identical_attempts_produce_distinct_evaluation_ids() {
         .await;
 
     let err1 = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-12 attempt 1: market_data_missing must block");
     assert_eq!(
@@ -1179,7 +1181,7 @@ async fn sg_12_sequential_identical_attempts_produce_distinct_evaluation_ids() {
         "runtime.start_refused.daily_data_readiness_blocked"
     );
     let err2 = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-12 attempt 2: market_data_missing must block");
     assert_eq!(
@@ -1262,8 +1264,14 @@ async fn sg_13_concurrent_identical_attempts_produce_distinct_evaluation_ids() {
     let st_a = std::sync::Arc::clone(&st);
     let st_b = std::sync::Arc::clone(&st);
     let (res_a, res_b) = tokio::join!(
-        async move { st_a.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await },
-        async move { st_b.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await },
+        async move {
+            st_a.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
+                .await
+        },
+        async move {
+            st_b.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
+                .await
+        },
     );
     assert!(
         res_a.is_err() && res_b.is_err(),
@@ -1868,7 +1876,7 @@ async fn sg_18_missing_assignments_with_db_persists_evidence_identity_and_create
     let st = db_backed_state_with_no_assignment_source(&pool).await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-18: missing assignments must refuse start");
     assert_eq!(
@@ -1963,11 +1971,11 @@ async fn sg_19_sequential_identical_missing_assignment_attempts_produce_distinct
     let st = db_backed_state_with_no_assignment_source(&pool).await;
 
     let err1 = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-19 attempt 1: missing assignments must block");
     let err2 = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-19 attempt 2: missing assignments must block");
 
@@ -2018,8 +2026,14 @@ async fn sg_20_concurrent_identical_missing_assignment_attempts_produce_distinct
     let st_a = std::sync::Arc::clone(&st);
     let st_b = std::sync::Arc::clone(&st);
     let (res_a, res_b) = tokio::join!(
-        async move { st_a.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await },
-        async move { st_b.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await },
+        async move {
+            st_a.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
+                .await
+        },
+        async move {
+            st_b.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
+                .await
+        },
     );
     let err_a = res_a.expect_err("SG-20: attempt A must block");
     let err_b = res_b.expect_err("SG-20: attempt B must block");
@@ -2067,7 +2081,7 @@ async fn sg_21_missing_assignments_no_db_returns_original_blocker_with_evaluatio
     assert!(st.db.is_none(), "SG-21: precondition — no DB configured");
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("SG-21: missing assignments with no DB must refuse start");
     assert_eq!(

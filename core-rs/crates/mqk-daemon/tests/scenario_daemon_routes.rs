@@ -2439,7 +2439,8 @@ async fn prod02_running_without_reconcile_result_is_critical() {
     // Inject a fake execution loop so current_status_snapshot returns "running".
     // Reconcile status remains at the default "unknown" (no DB, no tick yet).
     let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"prod02-test-run");
-    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
 
     let req = Request::builder()
         .method("GET")

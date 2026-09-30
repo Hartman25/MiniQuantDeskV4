@@ -19,7 +19,10 @@ use super::helpers::{
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn oms_overview(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
@@ -146,7 +149,10 @@ pub(crate) async fn oms_overview(State(st): State<Arc<AppState>>) -> impl IntoRe
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn metrics_dashboards(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };

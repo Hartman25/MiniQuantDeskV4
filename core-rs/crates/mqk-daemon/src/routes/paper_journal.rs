@@ -206,7 +206,10 @@ async fn paper_journal_response<R: serde::Serialize>(
         return unavailable_response::<R>(canonical, quantity_schema_version, "no_db");
     };
 
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };

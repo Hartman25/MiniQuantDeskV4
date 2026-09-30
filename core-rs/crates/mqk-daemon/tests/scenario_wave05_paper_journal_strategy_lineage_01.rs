@@ -318,7 +318,8 @@ async fn seed_active_run(st: &Arc<state::AppState>) -> Uuid {
         .await
         .expect("heartbeat_run");
 
-    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     run_id
 }
 
@@ -629,7 +630,8 @@ async fn wl04_legacy_row_without_fingerprint_key_reports_unknown() {
                 state::OperatorAuthMode::ExplicitDevNoToken,
             ),
         ));
-        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_fill_row(&journal, &dec_id);
@@ -704,7 +706,8 @@ async fn wl05_manual_order_reports_unattributed_not_invented() {
                 state::OperatorAuthMode::ExplicitDevNoToken,
             ),
         ));
-        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_fill_row(&journal, &client_request_id);
@@ -774,7 +777,8 @@ async fn wl06_missing_originating_outbox_reports_lineage_missing_not_unattribute
                 state::OperatorAuthMode::ExplicitDevNoToken,
             ),
         ));
-        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
 
         let journal = fetch_journal(&st).await;
         // The fills query itself succeeded (one telemetry row exists) --
@@ -993,7 +997,8 @@ async fn wl08b_external_signal_source_missing_strategy_id_is_lineage_invalid() {
                 state::OperatorAuthMode::ExplicitDevNoToken,
             ),
         ));
-        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_fill_row(&journal, &dec_id);
@@ -1126,7 +1131,8 @@ async fn wl10_fingerprint_without_strategy_id_or_malformed_is_lineage_invalid() 
                 state::OperatorAuthMode::ExplicitDevNoToken,
             ),
         ));
-        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
 
         let journal = fetch_journal(&st).await;
 

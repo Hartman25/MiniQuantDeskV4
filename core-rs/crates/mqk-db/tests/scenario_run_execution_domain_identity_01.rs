@@ -108,7 +108,10 @@ async fn d01_equity_and_crypto_active_runs_coexist_and_are_isolated() -> Result<
         equity_active.run_id, equity_run_id,
         "D01: equity_nyse's active-run query must return the equity run, not the crypto one"
     );
-    assert_eq!(equity_active.execution_domain, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE);
+    assert_eq!(
+        equity_active.execution_domain,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE
+    );
 
     let crypto_active = mqk_db::fetch_active_run_for_engine_for_domain(
         &pool,
@@ -122,7 +125,10 @@ async fn d01_equity_and_crypto_active_runs_coexist_and_are_isolated() -> Result<
         crypto_active.run_id, crypto_run_id,
         "D01: crypto_24_7's active-run query must return the crypto run, not the equity one"
     );
-    assert_eq!(crypto_active.execution_domain, mqk_db::EXECUTION_DOMAIN_CRYPTO_24_7);
+    assert_eq!(
+        crypto_active.execution_domain,
+        mqk_db::EXECUTION_DOMAIN_CRYPTO_24_7
+    );
 
     // Halting/stopping one domain's run must not appear under the other
     // domain's query at all (isolation, not merely "returns the right one
@@ -182,9 +188,10 @@ async fn d02_insert_run_for_domain_refuses_unknown_domain() -> Result<()> {
 #[tokio::test]
 async fn d03_fetch_active_run_for_domain_refuses_unknown_domain() -> Result<()> {
     let pool = require_pool(&require_db_url()).await?;
-    let err = mqk_db::fetch_active_run_for_engine_for_domain(&pool, "any-engine", "PAPER", "day_fx")
-        .await
-        .expect_err("D03: an unknown execution_domain must error, not return None");
+    let err =
+        mqk_db::fetch_active_run_for_engine_for_domain(&pool, "any-engine", "PAPER", "day_fx")
+            .await
+            .expect_err("D03: an unknown execution_domain must error, not return None");
     assert!(
         err.to_string().contains("unknown execution_domain"),
         "unexpected error: {err}"

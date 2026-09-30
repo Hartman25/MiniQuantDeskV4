@@ -146,7 +146,10 @@ pub(crate) async fn execution_order_causality(
     };
 
     // Step 3: Get active run_id.
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };

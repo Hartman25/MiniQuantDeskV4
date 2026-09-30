@@ -344,7 +344,13 @@ pub async fn fetch_latest_run_for_engine(
     engine_id: &str,
     mode: &str,
 ) -> Result<Option<RunRow>> {
-    fetch_latest_run_for_engine_for_domain(pool, engine_id, mode, crate::EXECUTION_DOMAIN_EQUITY_NYSE).await
+    fetch_latest_run_for_engine_for_domain(
+        pool,
+        engine_id,
+        mode,
+        crate::EXECUTION_DOMAIN_EQUITY_NYSE,
+    )
+    .await
 }
 
 pub async fn fetch_latest_run_for_engine_for_domain(
@@ -403,7 +409,13 @@ pub async fn fetch_active_run_for_engine(
     engine_id: &str,
     mode: &str,
 ) -> Result<Option<RunRow>> {
-    fetch_active_run_for_engine_for_domain(pool, engine_id, mode, crate::EXECUTION_DOMAIN_EQUITY_NYSE).await
+    fetch_active_run_for_engine_for_domain(
+        pool,
+        engine_id,
+        mode,
+        crate::EXECUTION_DOMAIN_EQUITY_NYSE,
+    )
+    .await
 }
 
 /// The single-active-run-per-domain gate (B2): at most one ARMED/RUNNING run
@@ -919,13 +931,12 @@ pub async fn clear_halted_run_and_reset_stale_claims(
 
     // Lock the run row FIRST — the same serialization boundary
     // `acquire_or_refresh_lease_for_running_run` uses. See doc comment above.
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE",
-    )
-    .bind(run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("clear_halted_run_and_reset_stale_claims: run lock failed")?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("clear_halted_run_and_reset_stale_claims: run lock failed")?;
 
     let Some((status, execution_domain)) = row else {
         tx.rollback().await.ok();
@@ -1168,13 +1179,12 @@ pub async fn stop_run_if_evidence_clean(
 
     // Lock the run row FIRST -- see doc comment above for the serialization
     // boundary this shares with the lease/claim/clear-halted-run primitives.
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE",
-    )
-    .bind(run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("stop_run_if_evidence_clean: run lock failed")?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("stop_run_if_evidence_clean: run lock failed")?;
 
     let Some((status, execution_domain)) = row else {
         tx.rollback().await.ok();

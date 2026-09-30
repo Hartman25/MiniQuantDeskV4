@@ -97,7 +97,10 @@ async fn lr01_repeated_in_session_ticks_without_live_ws_never_creates_ownership(
         "LR-01 pre: must start ColdStartUnproven"
     );
     assert!(
-        state.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
+        state
+            .locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await
+            .is_none(),
         "LR-01 pre: must have no active run"
     );
 
@@ -112,7 +115,10 @@ async fn lr01_repeated_in_session_ticks_without_live_ws_never_creates_ownership(
             "LR-01 tick {tick}: locally_started must remain false (no phantom start)"
         );
         assert!(
-            state.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
+            state
+                .locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+                .await
+                .is_none(),
             "LR-01 tick {tick}: locally_owned_run_id must remain None"
         );
 

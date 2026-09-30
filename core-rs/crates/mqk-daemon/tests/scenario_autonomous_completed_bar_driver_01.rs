@@ -1979,7 +1979,9 @@ async fn active_bootstrap_state(pool: sqlx::PgPool) -> state::AppState {
 /// without starting a real execution loop, provider, or broker.
 async fn running_dispatch_eligible_state(pool: sqlx::PgPool, run_id: Uuid) -> state::AppState {
     let state = active_bootstrap_state(pool).await;
-    state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    state
+        .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     // D4 REPAIR 2: `AppState::record_signal_evaluation` derives its
     // evaluation identity from `status.active_run_id`, not from
     // `execution_loop`'s injected ownership — production keeps both in sync
@@ -5534,7 +5536,9 @@ async fn running_dispatch_eligibility_17_25_blocks_before_claim() {
             pool.clone(),
             OperatorAuthMode::ExplicitDevNoToken,
         );
-        state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        state
+            .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
         assert_blocked(
             &pool,
             &state,
@@ -5586,7 +5590,9 @@ async fn running_dispatch_eligibility_17_25_blocks_before_claim() {
             pool.clone(),
             OperatorAuthMode::ExplicitDevNoToken,
         );
-        state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        state
+            .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
         // Dormant: bootstrap from an empty fleet.
         let dormant = NativeStrategyBootstrap::bootstrap(None, &build_daemon_plugin_registry());
         state
@@ -5643,7 +5649,9 @@ async fn running_dispatch_eligibility_17_25_blocks_before_claim() {
             pool.clone(),
             OperatorAuthMode::ExplicitDevNoToken,
         );
-        state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        state
+            .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
         // Failed: fleet names a strategy id that is not in the registry.
         let failed = NativeStrategyBootstrap::bootstrap(
             Some(&["not_a_registered_strategy".to_string()]),
@@ -5987,7 +5995,9 @@ async fn race_36_38_runtime_or_bootstrap_disappears_before_claim_blocks() {
             pool.clone(),
             OperatorAuthMode::ExplicitDevNoToken,
         );
-        state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        state
+            .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
         state.set_native_strategy_bootstrap_for_test(None).await;
 
         let provider = Arc::new(FakeQueueProvider::new());

@@ -195,8 +195,12 @@ pub(crate) struct DynamicSelectionStatusResponse {
 
 pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let checked_at_utc = Utc::now().to_rfc3339();
-    let lifecycle = st.local_runtime_lifecycle_label(crate::state::ExecutionDomain::EquityNyse).await;
-    let active_run_id = st.local_runtime_owning_run_id(crate::state::ExecutionDomain::EquityNyse).await;
+    let lifecycle = st
+        .local_runtime_lifecycle_label(crate::state::ExecutionDomain::EquityNyse)
+        .await;
+    let active_run_id = st
+        .local_runtime_owning_run_id(crate::state::ExecutionDomain::EquityNyse)
+        .await;
 
     let mode_resolution = crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
     let preview = crate::dynamic_selection_mode::effective_mode(
@@ -233,7 +237,10 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
         checked_at_utc: checked_at_utc.clone(),
     };
 
-    let Some(snapshot) = st.dynamic_selection_runtime_snapshot(crate::state::ExecutionDomain::EquityNyse).await else {
+    let Some(snapshot) = st
+        .dynamic_selection_runtime_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    else {
         return (StatusCode::OK, Json(response)).into_response();
     };
 
@@ -408,7 +415,10 @@ pub(crate) async fn dynamic_selection_plans(
         }
     };
 
-    let Some(run_id) = explicit_run_id.or(st.local_runtime_owning_run_id(crate::state::ExecutionDomain::EquityNyse).await) else {
+    let Some(run_id) = explicit_run_id.or(st
+        .local_runtime_owning_run_id(crate::state::ExecutionDomain::EquityNyse)
+        .await)
+    else {
         return (
             StatusCode::OK,
             Json(DynamicSelectionPlansListResponse {

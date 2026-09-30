@@ -385,7 +385,7 @@ async fn lo02d_qr02_halted_status_surfaces_from_durable_db_truth_without_injecti
 
     // Read status snapshot directly — simulates what /api/v1/system/status surfaces.
     let snapshot = st
-        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect("QR-02: current_status_snapshot failed");
 

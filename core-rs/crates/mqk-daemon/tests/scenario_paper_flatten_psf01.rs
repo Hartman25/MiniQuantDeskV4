@@ -188,7 +188,8 @@ async fn seed_running_run(st: &Arc<AppState>) -> Uuid {
         .await
         .expect("persist arm state");
     // Inject the local owner handle so status.state == "running".
-    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     run_id
 }
 

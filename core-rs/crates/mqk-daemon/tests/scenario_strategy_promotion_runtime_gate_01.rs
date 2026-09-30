@@ -371,7 +371,8 @@ async fn seed_active_run(st: &Arc<state::AppState>) -> Uuid {
     mqk_db::heartbeat_run(pool, run_id, now)
         .await
         .expect("heartbeat_run");
-    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     run_id
 }
 
@@ -680,7 +681,9 @@ async fn internal_active_paper_exact_identity_accepted_one_outbox_row() {
     let run_id = seed_active_run(&st).await;
 
     let before_account = st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse);
-    let before_symbol = st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, SYMBOL).await;
+    let before_symbol = st
+        .symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, SYMBOL)
+        .await;
 
     let dec_id = unique_id("dec");
     let d = make_decision(&dec_id, &sid, SYMBOL, TIMEFRAME_SECS);
@@ -704,7 +707,8 @@ async fn internal_active_paper_exact_identity_accepted_one_outbox_row() {
         "account-wide counter increments only after a new outbox insert"
     );
     assert_eq!(
-        st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, SYMBOL).await,
+        st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, SYMBOL)
+            .await,
         before_symbol + 1,
         "per-symbol counter increments only after a new outbox insert"
     );

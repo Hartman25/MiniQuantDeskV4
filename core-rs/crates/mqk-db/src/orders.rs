@@ -670,13 +670,12 @@ pub async fn outbox_claim_batch_for_run_with_lease_authority(
         .await
         .context("outbox_claim_batch_for_run_with_lease_authority: begin tx failed")?;
 
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE",
-    )
-    .bind(run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("outbox_claim_batch_for_run_with_lease_authority: run lock failed")?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("outbox_claim_batch_for_run_with_lease_authority: run lock failed")?;
 
     let Some((status, execution_domain)) = row else {
         tx.rollback().await.ok();

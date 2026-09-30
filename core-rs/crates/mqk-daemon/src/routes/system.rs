@@ -89,7 +89,10 @@ pub(crate) async fn health(State(st): State<Arc<AppState>>) -> impl IntoResponse
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> Response {
-    match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => (StatusCode::OK, Json(snapshot)).into_response(),
         Err(err) => runtime_error_response(err),
     }
@@ -100,7 +103,10 @@ pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> Response 
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
@@ -315,7 +321,10 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
@@ -877,7 +886,10 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     };
 
     // Runtime-start truth: a locally-owned run blocks start (409 Conflict).
-    let runtime_start_allowed = st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await.is_none();
+    let runtime_start_allowed = st
+        .locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse)
+        .await
+        .is_none();
 
     // AUTON-NO-TRADE-01: Bar ticker Gate 2 — NYSE session must be "regular".
     //
@@ -1365,7 +1377,9 @@ async fn dynamic_selection_readiness_projection(
         st.deployment_mode(),
         st.runtime_selection().broker_kind,
     );
-    let snapshot = st.dynamic_selection_runtime_snapshot(crate::state::ExecutionDomain::EquityNyse).await;
+    let snapshot = st
+        .dynamic_selection_runtime_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await;
 
     crate::api_types::DynamicSelectionReadinessProjection {
         configured_mode: snapshot
@@ -2717,7 +2731,10 @@ pub(crate) async fn system_instrument_economics_status(
 pub(crate) async fn system_runtime_leadership(
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
@@ -2839,7 +2856,10 @@ fn session_profile_status_for_calendar_spec(
 }
 
 pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
@@ -3436,7 +3456,10 @@ mod tests {
             DeploymentMode::Paper,
             crate::state::BrokerKind::Alpaca,
         ));
-        assert!(state.dynamic_selection_runtime_snapshot(crate::state::ExecutionDomain::EquityNyse).await.is_none());
+        assert!(state
+            .dynamic_selection_runtime_snapshot(crate::state::ExecutionDomain::EquityNyse)
+            .await
+            .is_none());
 
         let projection = dynamic_selection_readiness_projection(&state).await;
         std::env::remove_var(

@@ -643,7 +643,8 @@ async fn seed_and_run(
     mqk_db::heartbeat_run(pool, run_id, now)
         .await
         .expect("heartbeat_run");
-    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
 
     (st, run_id)
 }
@@ -728,7 +729,9 @@ async fn d06_restart_recomputes_identical_decision_id_and_resubmit_is_a_noop() {
         let st_after = Arc::new(common::with_canonical_equity_registry(
             state::AppState::new_with_db(pool.clone()),
         ));
-        st_after.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        st_after
+            .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
         let after = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
         assert_eq!(
             after[0].decision_id, decision_id,
@@ -877,7 +880,9 @@ async fn c4_restart_replay_with_partial_fill_creates_zero_additional_order() {
         let st_after = Arc::new(common::with_canonical_equity_registry(
             state::AppState::new_with_db(pool.clone()),
         ));
-        st_after.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+        st_after
+            .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+            .await;
         let after = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &at(symbol, 5));
         assert_eq!(
             after[0].decision_id, decision_id,

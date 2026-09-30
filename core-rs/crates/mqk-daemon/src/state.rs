@@ -2348,7 +2348,9 @@ impl AppState {
             ws_gap_fill_fetcher,
             crypto_fee_activity_fetcher,
             option_lifecycle_activity_fetcher,
-            lifecycle_absorb_runs: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
+            lifecycle_absorb_runs: Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeSet::new(),
+            )),
             broker_baseline: Arc::new(RwLock::new(None)),
             snapshot_fetcher,
             asset_shortable_preflight_fetcher,

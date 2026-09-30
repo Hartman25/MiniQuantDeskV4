@@ -355,7 +355,7 @@ async fn self_heal_01_t1_wait_then_t4_freshness_gate_clears_without_manual_inter
         .await;
 
     let err_t1 = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("T1: a structurally pending first bar must still refuse start");
     assert_eq!(
@@ -391,7 +391,10 @@ async fn self_heal_01_t1_wait_then_t4_freshness_gate_clears_without_manual_inter
     st.set_daily_data_readiness_clock_override_for_test(Some(t4))
         .await;
 
-    match st.start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await {
+    match st
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(_) => {
             // Full success also satisfies every downstream gate -- strictly
             // stronger than what this test claims, and fine.
@@ -479,7 +482,7 @@ async fn self_heal_02_t2_bar_due_but_missing_still_fails_closed() {
         .await;
 
     let err = st
-        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect_err("T2: a genuinely missing current-session bar must still refuse start");
     assert_ne!(

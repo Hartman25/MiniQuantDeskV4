@@ -92,11 +92,16 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             .into_response();
     };
 
-    let runtime_status = match state.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let runtime_status = match state
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => return lifecycle_error_response(err),
     };
-    let local_owned_run_id = state.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await;
+    let local_owned_run_id = state
+        .locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse)
+        .await;
     let run_owned_locally = local_owned_run_id
         .zip(runtime_status.active_run_id)
         .is_some_and(|(local, active)| local == active);
@@ -472,7 +477,10 @@ fn control_plane_now_utc() -> DateTime<Utc> {
 }
 
 async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, note: &str) {
-    let mut snapshot = match state.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let mut snapshot = match state
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(_) => crate::state::StatusSnapshot {
             daemon_uptime_secs: crate::state::uptime_secs(),

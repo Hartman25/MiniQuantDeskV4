@@ -245,7 +245,7 @@ async fn lo02e_ks01_halt_persists_disarmed_operator_halt_surfaces_on_fresh_resta
 
     // Read status from DB — simulates what /api/v1/system/status surfaces at restart.
     let snapshot = st2
-        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
+        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse)
         .await
         .expect("KS-01: current_status_snapshot on fresh AppState must not error");
 

@@ -114,7 +114,10 @@ pub(crate) async fn execution_order_timeline(
     };
 
     // Step 3: Get the active run_id from the durable status snapshot.
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };
@@ -334,7 +337,10 @@ pub(crate) async fn execution_order_trace(
     };
 
     // Step 3: Get the active run_id from the durable status snapshot.
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };
@@ -548,7 +554,10 @@ pub(crate) async fn execution_order_replay(
     };
 
     // Step 3: Get the active run_id from the durable status snapshot.
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };
