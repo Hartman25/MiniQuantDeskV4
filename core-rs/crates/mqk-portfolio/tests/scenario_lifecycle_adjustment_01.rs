@@ -144,23 +144,13 @@ fn cash_is_exactly_the_provider_value_never_recomputed_from_qty_and_strike() {
 }
 
 /// Everything an adjustment could touch, for exact before/after comparison.
-fn fingerprint(pf: &PortfolioState) -> (i64, i64, Vec<(String, Vec<(QtyMicros, i64)>)>, usize) {
-    (
+fn fingerprint(pf: &PortfolioState) -> String {
+    format!(
+        "cash={} realized={} ledger_len={} positions={:?}",
         pf.cash_micros,
         pf.realized_pnl_micros,
-        pf.positions
-            .iter()
-            .map(|(s, p)| {
-                (
-                    s.clone(),
-                    p.lots
-                        .iter()
-                        .map(|l| (l.qty_signed, l.entry_price_micros))
-                        .collect(),
-                )
-            })
-            .collect(),
         pf.ledger.len(),
+        pf.positions
     )
 }
 

@@ -151,6 +151,7 @@ pub struct LifecycleReconcileReport {
 /// Try to move every `APPLIED_AWAITING_BROKER` event of exactly `account` to
 /// `RECONCILED`. Never regresses anything; an event that does not
 /// qualify simply stays fenced.
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile_awaiting_lifecycle_events(
     pool: &PgPool,
     account: &BrokerAccountAuthority,
