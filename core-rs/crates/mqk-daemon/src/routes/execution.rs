@@ -327,11 +327,12 @@ pub(crate) async fn execution_order_submit(
     // options-lifecycle event for this exact symbol must block a manual
     // operator order on it, mirroring `decision.rs`'s Gate 7b exactly (this
     // is a second real economic-order-admission surface, not the same
-    // seam). No `option_lifecycle_activity_fetcher` configured means no
-    // Alpaca account is connected -- vacuously Clear.
+    // seam). Durable unresolved state fences even with no
+    // `option_lifecycle_activity_fetcher` in this process.
     match crate::state::option_lifecycle_pending_gate::check_symbol_fence(
         db,
         st.option_lifecycle_activity_fetcher.as_ref(),
+        st.deployment_mode().as_api_label(),
         &validated.symbol,
     )
     .await

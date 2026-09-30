@@ -10,6 +10,7 @@
 //! | G03  | Only RECONCILED clears the gate                                            |
 //! | G04  | The state is durable: a fresh connection (restart) sees the same fence     |
 //! | G05  | The whole-account fence covers an option that vanished from a snapshot     |
+//! | G06  | Durable pending state fences with NO lifecycle fetcher in the process      |
 //!
 //! DB-backed (port 5434 test Postgres); mock provider only; fresh account per
 //! test.
@@ -298,26 +299,31 @@ async fn g04_the_fence_is_durable_across_a_restart() {
 async fn g05_the_account_fence_and_the_fetcher_helpers_fail_closed() {
     let pool = require_pool().await;
     let auth = fresh_authority("g05");
+    let mode = auth.deployment_mode().to_string();
     let f = mock(auth, vec![act("L1", "OPEXP", CALL, "-1", None, "0")]);
     cycle(&pool, &f).await;
     let fetcher: Arc<dyn OptionLifecycleActivityFetcher> = f.clone();
 
     // Whole-account fence: an option that has vanished from a broker snapshot
     // cannot bypass it because ANY unreconciled event blocks adoption.
-    let account = check_account_fence(&pool, Some(&fetcher)).await.unwrap();
+    let account = check_account_fence(&pool, Some(&fetcher), &mode)
+        .await
+        .unwrap();
     assert!(account.must_fail_closed());
-    assert!(check_symbol_fence(&pool, Some(&fetcher), "AAPL")
+    assert!(check_symbol_fence(&pool, Some(&fetcher), &mode, "AAPL")
         .await
         .unwrap()
         .must_fail_closed());
-    assert!(!check_symbol_fence(&pool, Some(&fetcher), "MSFT")
+    assert!(!check_symbol_fence(&pool, Some(&fetcher), &mode, "MSFT")
         .await
         .unwrap()
         .must_fail_closed());
 
-    // No fetcher = no Alpaca account = vacuously clear.
+    // A deployment mode with no durable lifecycle state at all is Clear.
     assert_eq!(
-        check_account_fence(&pool, None).await.unwrap(),
+        check_account_fence(&pool, None, "no-such-mode")
+            .await
+            .unwrap(),
         OptionLifecycleGateStatus::Clear
     );
 
@@ -337,11 +343,105 @@ async fn g05_the_account_fence_and_the_fetcher_helpers_fail_closed() {
     }
     let broken: Arc<dyn OptionLifecycleActivityFetcher> = Arc::new(NoAuthority);
     assert!(matches!(
-        check_symbol_fence(&pool, Some(&broken), "AAPL").await,
+        check_symbol_fence(&pool, Some(&broken), &mode, "AAPL").await,
         Err(GateCheckError::AuthorityUnavailable(_))
     ));
     assert!(matches!(
-        check_account_fence(&pool, Some(&broken)).await,
+        check_account_fence(&pool, Some(&broken), &mode).await,
         Err(GateCheckError::AuthorityUnavailable(_))
     ));
+}
+
+/// Durable unresolved lifecycle state fences even when this process has NO
+/// lifecycle fetcher (fresh restart, polling disabled): fetcher presence only
+/// decides whether new evidence can be polled, never whether pending state
+/// exists.
+#[tokio::test]
+async fn g06_durable_pending_state_fences_with_no_fetcher_in_the_process() {
+    use OptionLifecycleActivityType::Exercise;
+    let pool = require_pool().await;
+
+    // PENDING_EVIDENCE -> READY_TO_APPLY -> APPLIED_AWAITING_BROKER, each with
+    // NO fetcher handed to the gate.
+    let auth = fresh_authority("g06");
+    let key = auth.key();
+    let mode = auth.deployment_mode().to_string();
+    let f = mock(
+        auth.clone(),
+        vec![act("L1", "OPEXC", CALL, "-2", None, "0")],
+    );
+    cycle(&pool, &f).await;
+    let steps: [(&str, LifecycleEventState); 3] = [
+        ("PENDING_EVIDENCE", LifecycleEventState::PendingEvidence),
+        ("READY_TO_APPLY", LifecycleEventState::ReadyToApply),
+        (
+            "APPLIED_AWAITING_BROKER",
+            LifecycleEventState::AppliedAwaitingBroker,
+        ),
+    ];
+    for (i, (label, expected)) in steps.iter().enumerate() {
+        if i == 1 {
+            *f.rows.lock().unwrap() = vec![
+                act("L1", "OPEXC", CALL, "-2", None, "0"),
+                act("L1", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
+            ];
+            cycle(&pool, &f).await;
+        }
+        if i == 2 {
+            apply_ready_lifecycle_events(&pool, &key, Utc::now())
+                .await
+                .unwrap();
+        }
+        for sym in [CALL, "AAPL"] {
+            let status = check_symbol_fence(&pool, None, &mode, sym).await.unwrap();
+            assert_eq!(blocked_state(&status), Some(*expected), "{label} / {sym}");
+        }
+        assert!(check_account_fence(&pool, None, &mode)
+            .await
+            .unwrap()
+            .must_fail_closed());
+    }
+    assert!(
+        !check_symbol_fence(&pool, None, &mode, "MSFT")
+            .await
+            .unwrap()
+            .must_fail_closed(),
+        "an unrelated symbol stays clear"
+    );
+
+    // PENDING_AMBIGUOUS, also with no fetcher.
+    let amb = fresh_authority("g06-amb");
+    let amb_mode = amb.deployment_mode().to_string();
+    let f2 = mock(
+        amb,
+        vec![
+            act("L1", "OPEXC", CALL, "-2", None, "0"),
+            act("T1", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
+            act("T2", "OPTRD", "AAPL", "200", Some("150"), "-30000"),
+        ],
+    );
+    cycle(&pool, &f2).await;
+    assert_eq!(
+        blocked_state(
+            &check_symbol_fence(&pool, None, &amb_mode, CALL)
+                .await
+                .unwrap()
+        ),
+        Some(LifecycleEventState::PendingAmbiguous)
+    );
+
+    // Only RECONCILED clears it, fetcher or not.
+    assert!(
+        mark_lifecycle_event_reconciled(&pool, &key, "L1", Exercise, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        check_symbol_fence(&pool, None, &mode, CALL).await.unwrap(),
+        OptionLifecycleGateStatus::Clear
+    );
+    assert_eq!(
+        check_account_fence(&pool, None, &mode).await.unwrap(),
+        OptionLifecycleGateStatus::Clear
+    );
 }

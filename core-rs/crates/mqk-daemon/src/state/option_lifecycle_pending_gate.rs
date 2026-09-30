@@ -12,7 +12,8 @@
 //! account.
 //!
 //! Read-only: makes no write. Restart-safe: the answer is the durable state
-//! row, there is no in-memory pending flag to lose.
+//! row, there is no in-memory pending flag to lose -- and it does not depend on
+//! the lifecycle fetcher existing (see [`check_symbol_fence`]).
 //!
 //! Every economic admission seam consults this gate through
 //! [`check_symbol_fence`]: the internal strategy decision path, the manual
@@ -27,7 +28,8 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use mqk_db::{
-    find_any_unreconciled_lifecycle_event, find_fencing_lifecycle_event, LifecycleEventState,
+    find_any_unreconciled_lifecycle_event, find_fencing_lifecycle_event,
+    find_unreconciled_lifecycle_event_in_deployment_mode, LifecycleEventState,
     OptionLifecycleEventStateRow,
 };
 
@@ -125,16 +127,34 @@ impl std::fmt::Display for GateCheckError {
     }
 }
 
-/// The shared per-symbol check used by every economic admission seam. A
-/// deployment with no lifecycle fetcher has no Alpaca account and therefore no
-/// lifecycle evidence: vacuously `Clear`.
+/// The shared per-symbol check used by every economic admission seam.
+///
+/// The answer is the durable lifecycle state, never the presence of the
+/// in-memory `fetcher`. The fetcher only establishes WHICH provider account is
+/// ours (polling new evidence is a separate concern):
+///
+/// - fetcher present, account proven -> exactly that account's fence;
+/// - fetcher present, account NOT provable -> `AuthorityUnavailable` (refuse);
+/// - fetcher absent (fresh process, polling disabled) -> our account is
+///   unknown, so ANY unreconciled event of an account registered under
+///   `deployment_mode` fences the symbol. This is a superset fence: it can
+///   block, never clear, and an empty durable state is still `Clear`.
 pub async fn check_symbol_fence(
     pool: &PgPool,
     fetcher: Option<&Arc<dyn OptionLifecycleActivityFetcher>>,
+    deployment_mode: &str,
     symbol: &str,
 ) -> Result<OptionLifecycleGateStatus, GateCheckError> {
     let Some(fetcher) = fetcher else {
-        return Ok(OptionLifecycleGateStatus::Clear);
+        let row = find_unreconciled_lifecycle_event_in_deployment_mode(
+            pool,
+            OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
+            deployment_mode,
+            Some(symbol.trim()),
+        )
+        .await
+        .map_err(|e| GateCheckError::Database(e.to_string()))?;
+        return Ok(OptionLifecycleGateStatus::from_row(row));
     };
     let authority = fetcher
         .broker_account_authority()
@@ -146,13 +166,23 @@ pub async fn check_symbol_fence(
 
 /// Whole-account variant for operations that overwrite local truth for every
 /// symbol at once (baseline adoption): fenced by ANY unreconciled event, so an
-/// option that vanished from a broker snapshot can never bypass the gate.
+/// option that vanished from a broker snapshot can never bypass the gate. Same
+/// durable-state / fetcher-independence rules as [`check_symbol_fence`].
 pub async fn check_account_fence(
     pool: &PgPool,
     fetcher: Option<&Arc<dyn OptionLifecycleActivityFetcher>>,
+    deployment_mode: &str,
 ) -> Result<OptionLifecycleGateStatus, GateCheckError> {
     let Some(fetcher) = fetcher else {
-        return Ok(OptionLifecycleGateStatus::Clear);
+        let row = find_unreconciled_lifecycle_event_in_deployment_mode(
+            pool,
+            OPTION_LIFECYCLE_EXECUTION_DOMAIN.as_str(),
+            deployment_mode,
+            None,
+        )
+        .await
+        .map_err(|e| GateCheckError::Database(e.to_string()))?;
+        return Ok(OptionLifecycleGateStatus::from_row(row));
     };
     let authority = fetcher
         .broker_account_authority()

@@ -3134,6 +3134,7 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
     match crate::state::option_lifecycle_pending_gate::check_account_fence(
         db,
         st.option_lifecycle_activity_fetcher.as_ref(),
+        st.deployment_mode().as_api_label(),
     )
     .await
     {

@@ -814,6 +814,7 @@ pub(crate) async fn strategy_signal(
         match crate::state::option_lifecycle_pending_gate::check_symbol_fence(
             db,
             st.option_lifecycle_activity_fetcher.as_ref(),
+            st.deployment_mode().as_api_label(),
             &validated.symbol,
         )
         .await

@@ -1586,14 +1586,14 @@ pub async fn submit_internal_strategy_decision(
     // yet applied by D2) for this exact symbol must block real economic
     // action on it. Scoped by the configured Alpaca account's own identity
     // (mirrors B6/D1's `broker_account_id` pattern) so this account's
-    // pending evidence never leaks into a check for a different account. No
-    // `option_lifecycle_activity_fetcher` configured means no Alpaca account
-    // is connected at all -- vacuously Clear, since no lifecycle evidence
-    // could exist without one (matches D1/D2's own "Alpaca options
-    // capability does not exist in this codebase yet" scope).
+    // pending evidence never leaks into a check for a different account.
+    // Durable unresolved state fences regardless of whether the lifecycle
+    // fetcher exists in this process: without one the account is unknown and
+    // any unreconciled event of this deployment mode fences the symbol.
     match crate::state::option_lifecycle_pending_gate::check_symbol_fence(
         db,
         state.option_lifecycle_activity_fetcher.as_ref(),
+        state.deployment_mode().as_api_label(),
         &decision.symbol,
     )
     .await
