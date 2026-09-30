@@ -4802,7 +4802,8 @@ mod real_production_effects_matrix_tests {
             .await
             .expect("B2.5-STATUS-DOMAIN-ISOLATION-01: arm_state baseline reset must succeed");
         let state = hermetic_paper_state(&pool);
-        let equity_run_id = uuid::Uuid::new_v4();
+        let equity_run_id = uuid::Uuid::from_u128(0xB25_5741_0001);
+        delete_run_and_its_events(&pool, equity_run_id).await;
         state
             .establish_db_backed_active_run_for_test(ExecutionDomain::EquityNyse, equity_run_id)
             .await

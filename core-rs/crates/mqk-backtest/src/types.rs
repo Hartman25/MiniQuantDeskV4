@@ -1356,7 +1356,7 @@ mod quantity_semantics_tests {
     // byte-identical to calling the untouched V1 function directly ---
     #[test]
     fn qs_t03_whole_units_delegates_exactly_to_v1_function() {
-        let config_id = Uuid::new_v4();
+        let config_id = Uuid::from_u128(0x51_0003);
         let economics = econ_equity();
         let v1 = derive_run_id_with_semantic_identity(
             "strat", &config_id, "hash", &economics, "exec", "fp",
@@ -1377,7 +1377,7 @@ mod quantity_semantics_tests {
     // else) produces a different run_id than the V1 function would ---
     #[test]
     fn qs_t04_fractional_domain_changes_run_id() {
-        let config_id = Uuid::new_v4();
+        let config_id = Uuid::from_u128(0x51_0004);
         let economics = econ_equity();
         let v1 = derive_run_id_with_semantic_identity(
             "strat", &config_id, "hash", &economics, "exec", "fp",
@@ -1398,7 +1398,7 @@ mod quantity_semantics_tests {
     // output, for the new (fractional) branch too ---
     #[test]
     fn qs_t05_fractional_run_id_is_deterministic() {
-        let config_id = Uuid::new_v4();
+        let config_id = Uuid::from_u128(0x51_0005);
         let economics = econ_equity();
         let a = derive_run_id_with_quantity_semantics(
             "strat",
