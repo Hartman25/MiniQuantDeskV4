@@ -130,13 +130,25 @@ async fn post_adopt(router: axum::Router, confirmation: &str) -> (StatusCode, se
     post_adopt_json(router, serde_json::json!({ "confirmation": confirmation })).await
 }
 
+// Stale d3-baseline rows left by an earlier crashed/older run of this binary
+// would fence every DB-backed test that runs before the D3 tests' own pre-clean
+// (bsr*), so the namespace is purged once, before the first DB-backed test.
+static STALE_D3_FIXTURES_PURGED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
 async fn test_db_pool() -> sqlx::PgPool {
     let url = std::env::var(mqk_db::ENV_DB_URL).expect("MQK_DATABASE_URL required");
-    sqlx::postgres::PgPoolOptions::new()
+    let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
         .await
-        .expect("DB connect failed")
+        .expect("DB connect failed");
+    STALE_D3_FIXTURES_PURGED
+        .get_or_init(|| async {
+            mqk_db::migrate(&pool).await.expect("migration failed");
+            purge_d3_baseline_lifecycle_fixtures(&pool).await;
+        })
+        .await;
+    pool
 }
 
 /// Every lifecycle activity the D3 fixtures below seed carries this prefix.
