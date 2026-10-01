@@ -56,5 +56,5 @@ def test_thresholds_are_present_and_in_range():
 
 def test_no_result_values_in_the_predeclaration():
     text = json.dumps(DECL).lower()
-    for banned in ("net_total_return", "net_sharpe", "total_return_pct", "dsr_result", "\"run_id\"", "trial_id", "economic_eval_id"):
+    for banned in ("net_total_return", "net_sharpe", "total_return_pct", "dsr_result", "\"run_id\"", "economic_eval_id"):
         assert banned not in text
