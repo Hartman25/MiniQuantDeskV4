@@ -6,6 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -18. Campaign 03 Rejected; trend_sma50 Family Closed (2026-10-01, `V4-M1-TREND-SMA50-CAMPAIGN-03-FINAL-01`)
+
+Not pushed. Record: `docs/research/M1_NATIVE_TREND_CAMPAIGN_RESULT.md`. Supersedes §-17's open decision.
+
+- Campaign 03 (half-equity notional, new identities) ran once: position agreement 1.0 on all five symbols, judge `evaluated` (PBO 0.179), but every DSR is below the frozen 0.5 minimum, every symbol fails a required robustness scenario, and the scanner review gives 0/5 `paper_candidate`. Hard stop: no qualifying candidate.
+- The `trend_sma50` family is closed (no campaign 04, no further notional percentage). M1 remains `M1_BLOCKED`; promotion rows 0; Paper fleet unset; holdout untouched; `intraday_scalper` rejection intact.
+- Next decision: a different hypothesis. Costs and about 160 signal flips over the window dominate the daily SMA-cross rule under the conservative bar-range execution model; a slower or lower-turnover rule is the open design question for the operator.
+- Promotion-policy thresholds: frozen before any result in `PREDECLARED_CAMPAIGN*.json`; the deployed daemon config still has them unset (none were written because no candidate reached promotion).
+
+---
+
 ## -17. M1 Native Research Bridge Built; Campaign Produced No Candidate (2026-10-01, `V4-M1-NATIVE-RESEARCH-PROMOTION-BRIDGE-01`)
 
 Not pushed. Full record: `docs/research/M1_NATIVE_TREND_CAMPAIGN_RESULT.md`, census: `docs/research/M1_NATIVE_RESEARCH_BRIDGE_CENSUS.md`. Supersedes §-16's "structurally blocked" claim: the seam is now built.

@@ -28,3 +28,15 @@ The economic protocol sizes at a fixed `equity_usd` but admits fills against run
 ## Not done
 
 No daemon promotion transition (no candidate), no end-to-end route proof with native-bound evidence beyond gate unit tests and a synthetic rehearsal of backtest + the three finalizers, no Paper readiness or market-hours work.
+
+## Campaign 03 — final sizing specification, REJECTED
+
+Definition: `PREDECLARED_CAMPAIGN_03.json` (committed before any campaign 03 economics). Sizing changed to a 50,000 notional of 100,000 equity (identity-bearing: every trial and economic identity differs from campaign 02), stress cap 25,000 so P7B stays strictly tighter, thresholds and everything else unchanged. No statistic from campaigns 01/02 was reused or assumed.
+
+- **Position agreement:** 1.000 for all five symbols (desired long bars equal held long bars: EFA 1,662, GLD 1,491, IEF 1,342, SPY 1,850, VNQ 1,594), so the evaluation implemented the strategy.
+- **Population:** copy of campaign 02's registry plus five new trials: 10 attempted, 6 evaluable (five new plus campaign 02's IEF), 4 excluded `no_successful_attempt`, effective independent trial count 5.08. Judge `evaluated`, PBO 0.179 (evaluable). Campaign 01's five trials live in another registry and are disclosed, not pooled.
+- **Economics (net, discrete, costed):** EFA -22.2%, GLD +4.9% (Sharpe 0.10), IEF -20.7%, SPY -23.5%, VNQ -58.7%; costs 32-72% of equity on 85-110x turnover from ~160 signal flips.
+- **DSR:** GLD 0.093; EFA 0.002; SPY 0.001; IEF and VNQ about 0. All below the frozen 0.5 minimum.
+- **Robustness (canonical gauntlet, symbol leave-one-out not applicable to one symbol):** every symbol fails at least one required scenario (EFA 1, GLD 1, IEF 2, SPY 5, VNQ 5); genuine shuffled placebo and DSR/PBO sensitivity pass except as listed in the artifacts.
+- **Scanner review:** 0 of 5 `paper_candidate` (EFA, IEF, SPY, VNQ `negative_total_return`; GLD `non_positive_alpha`).
+- **Outcome:** no candidate qualifies; no promotion attempt; holdout reserved in all three registries; campaign 01 and 02 registries unchanged. Final for the family: no further notional percentage.
