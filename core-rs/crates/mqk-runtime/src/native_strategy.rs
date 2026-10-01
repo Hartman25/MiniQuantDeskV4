@@ -753,6 +753,9 @@ mod tests {
         assert!(names.contains(&"trend_sma50"));
         assert!(names.contains(&"dual_sma_50_200_trend"));
         assert!(names.contains(&"pullback_mean_reversion_20_2"));
+        assert!(names.contains(&"absolute_momentum_252"));
+        assert!(names.contains(&"near_high_momentum_252_3pct"));
+        assert!(names.contains(&"trend_pullback_5d_4pct_hold5"));
     }
 
     #[test]
