@@ -1,0 +1,213 @@
+{
+  "campaign_id": "M1-DUAL-SMA-50-200-CAMPAIGN-01",
+  "mission_id": "V4-M1-DUAL-SMA-50-200-CAMPAIGN-01",
+  "frozen_before_any_result": true,
+  "predeclared_utc_date": "2026-10-01",
+  "wave_classification": "NEW_HYPOTHESIS_NATIVE_DEPLOYABLE_CANDIDATE_CAMPAIGN_FIXED_SYMBOL_LIST",
+  "protocol_note": "New economic hypothesis, not a campaign of the closed trend_sma50 family. Candidates are evaluated through the existing registered economic_walk_forward_v1 protocol; the decision stream is emitted by the real native Rust strategy (mqk backtest native-signals); no trading rule is re-implemented in Python. Hypothesis != trial != attempt != evaluation slice: one hypothesis, one trial per fixed symbol, retries are new attempts of the same trial.",
+  "hypothesis": {
+    "hypothesis_id": "m1_dual_sma_50_200_gtaa5_v1",
+    "name": "Long/flat dual moving-average trend regime on a fixed five-asset-class ETF list",
+    "economic_rationale": "A broad liquid asset whose 50-day simple moving average is above its 200-day simple moving average is in a confirmed medium/long-term uptrend; trend persistence should make forward returns in that regime large enough to justify a long position after conservative execution costs. When the 50-day average is not above the 200-day average the target is flat. Comparing two averages instead of price against one average is a regime rule that changes state far less often than the closed price-versus-SMA50 rule.",
+    "primary_references": [
+      "Brock, Lakonishok & LeBaron (1992), 'Simple Technical Trading Rules and the Stochastic Properties of Stock Returns', Journal of Finance 47(5):1731-1764",
+      "Faber (2007), 'A Quantitative Approach to Tactical Asset Allocation', Journal of Wealth Management 9(4):69-79",
+      "Moskowitz, Ooi & Pedersen (2012), 'Time Series Momentum', Journal of Financial Economics 104(2):228-250"
+    ],
+    "direction": "long_only_flat",
+    "distinct_from_closed_family": "trend_sma50 compared the last close with its 50-day mean; this family compares the 50-day mean with the 200-day mean. It is a different rule, not a parameter retry. trend_sma50 is closed and unmodified.",
+    "falsification_condition": "A symbol's candidate is REJECTED if it fails any gate listed under rejection_gates. The campaign is rejected as a whole if no candidate clears every gate. No other fast/slow pair, band, filter or confirmation rule is evaluated in this campaign."
+  },
+  "native_engine": {
+    "strategy_id": "dual_sma_50_200_trend",
+    "source": "core-rs/crates/mqk-strategy/src/engines/dual_sma_50_200_trend.rs",
+    "timeframe_secs": 86400,
+    "fast_lookback_closes": 50,
+    "slow_lookback_closes": 200,
+    "rule": "fast_sma = integer mean of the latest 50 completed closes; slow_sma = integer mean of the latest 200 completed closes; target = +1 share if fast_sma > slow_sma, else 0. Equality is flat. Fewer than 200 completed bars, any incomplete bar in the 200-bar window, or any non-positive close is flat. Never short.",
+    "parameter_rationale": "50 and 200 are the canonical pair of the technical-trading and trend-following literature cited above; fixed here, never tuned, and no other pair is evaluated.",
+    "fixed_one_share_signal": true,
+    "forbidden_additions": [
+      "hysteresis",
+      "percentage bands",
+      "volatility or ATR filters",
+      "stop losses",
+      "confirmation-day counts",
+      "adaptive lookbacks",
+      "monthly overlays",
+      "any additional parameter"
+    ]
+  },
+  "universe": {
+    "selection_rule": "The five asset-class proxies of Faber (2007)'s GTAA list that exist as enabled ETFs in config/instruments/equities.json: US equities, foreign developed equities, 10-year Treasuries, US real estate, commodities. DBC/GSCI is not in the registry; GLD is the registry's commodity proxy.",
+    "symbols": [
+      "EFA",
+      "GLD",
+      "IEF",
+      "SPY",
+      "VNQ"
+    ],
+    "symbol_roles": {
+      "SPY": "US equities",
+      "EFA": "foreign developed equities",
+      "IEF": "10-year Treasuries",
+      "VNQ": "US real estate",
+      "GLD": "commodities proxy"
+    },
+    "universe_mode": "fixed_ex_ante",
+    "point_in_time_membership": false,
+    "survivorship_note": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean. Each symbol is its own registered trial and the judge deflates over all five, so selection among them is accounted for; residual survivorship of the list itself is a stated limitation.",
+    "max_trials": 5,
+    "additional_candidate_after_predeclaration": "forbidden",
+    "population_note": "Same fixed list as the closed trend_sma50 campaigns. Fifteen trial attempts were already recorded for that other hypothesis family (campaigns 01-03); they are disclosed, are not part of this campaign's judge population (a different hypothesis and experiment), and are not hidden."
+  },
+  "experiment": {
+    "real_experiment_id": "M1-DUAL-SMA-50-200-CAMPAIGN-01-REAL",
+    "registry_db_relative_path": "runs/run_dual_sma_01/registry/research.sqlite3",
+    "trial_per_symbol": true,
+    "population_policy": "The judge's population is every trial registered under real_experiment_id in this campaign's own registry (scope = experiment_id, hypothesis_id unset); losing and failed trials are never excluded by hand.",
+    "judge_scope": "whole experiment, never a subset"
+  },
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "adjustment": "all",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2026-09-01T00:00:00Z",
+    "asof": "2026-10-01",
+    "fallback_if_corporate_action_gate_refuses": {
+      "end_utc": "2025-05-01T00:00:00Z",
+      "note": "Boundary already established as corporate-action-safe by prior campaigns. Used only if the fail-closed gate refuses the primary window; declared now, before any result."
+    },
+    "completed_bars_only": true,
+    "reuse_verified_data_from": {
+      "run_dir": "runs/run_01/data",
+      "rule": "byte-identical reuse after verifying the provenance manifest artifact_sha256 and row_count against the CSV; no new provider call"
+    }
+  },
+  "partition": {
+    "evaluation_start_utc": "2016-03-01T00:00:00Z",
+    "test_months": 12,
+    "holdout_months": 6,
+    "expected_folds": 10,
+    "holdout_rule": "last 6 calendar months of the dataset, reserved_not_evaluated, never consumed by this campaign",
+    "warmup_note": "The Rust emitter receives bars from 2016-01-04, so the first 200 completed closes exist in 2016-10; signals before that are flat by construction. The partition is carried over unchanged, so roughly the first seven months of fold 1 are structurally flat."
+  },
+  "economic_protocol": {
+    "protocol_id": "economic_walk_forward_v1",
+    "signal_policy": {
+      "direction_policy": "long_only_v1",
+      "entry_threshold": 0.5,
+      "long_only": true,
+      "max_gross_exposure": 1.0
+    },
+    "cost_model": {
+      "commission_bps_per_side": 10.0,
+      "slippage_bps_per_side": 0.0
+    },
+    "execution_pricing": {
+      "pricing_model_id": "rust_conservative_bar_range_v1",
+      "slippage_bps": 5,
+      "volatility_mult_bps": 0
+    },
+    "weight_to_share": {
+      "equity_usd": 100000.0,
+      "max_position_notional_usd": 50000.0
+    },
+    "annualization": {
+      "annualization_days": 252,
+      "risk_free_rate_annual": 0.0
+    }
+  },
+  "native_backtest": {
+    "initial_cash_micros": 1000000000,
+    "initial_cash_rule": "USD 1,000 for every symbol, fixed now; one share of every listed symbol costs less than this over the whole window",
+    "timeframe_secs": 86400,
+    "integrity_calendar": "us-equity-regular",
+    "bars": "the same provenance-bound research bars converted deterministically, truncated at the holdout start",
+    "evidence_root_layout": "runs/run_dual_sma_01/backtest/<symbol>"
+  },
+  "robustness": {
+    "block_counts": [
+      8,
+      10,
+      12
+    ],
+    "dsr_max_sensitivity_range": 0.15,
+    "pbo_max_sensitivity_range": 0.15,
+    "p7a_p7b_stress": {
+      "stress_execution_slippage_bps": 15,
+      "stress_execution_volatility_mult_bps": 10,
+      "stress_max_position_notional_usd": 25000.0,
+      "max_drawdown_ceiling": 0.4
+    },
+    "source_note": "Reuses the finite values the Wave06 campaign already froze before its results; the notional cap is half the single-symbol long-only natural position (equity_usd x max_gross_exposure = 100,000)."
+  },
+  "scanner_review": {
+    "policy": "mqk_backtest::StrategyScanReviewPolicy::default (min_bars 252, min_trades 5, min_return_pct 0, min_alpha_pct 0, max_drawdown_pct 25, min_profit_factor 1.05) -- unchanged",
+    "data": "the same discovery-only converted bars (truncated at the holdout start), one registry/bars root per campaign run"
+  },
+  "promotion_policy": {
+    "note": "No canonical production threshold values exist in the deployed configuration. These are fixed now, before any result, and are supplied to the daemon only for the promotion transition.",
+    "MQK_PROMOTION_MIN_SHARPE": 0.5,
+    "MQK_PROMOTION_MAX_MDD": 0.25,
+    "MQK_PROMOTION_MIN_CAGR": 0.0,
+    "MQK_PROMOTION_MIN_PROFIT_FACTOR": 1.05,
+    "MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT": 0.4,
+    "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO": 0.5,
+    "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING": 0.5,
+    "MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING": 1
+  },
+  "rejection_gates": [
+    "economic evaluation fails or is insolvent",
+    "judge not evaluable (DSR/PBO) or DSR below promotion_policy minimum or PBO above maximum",
+    "any required robustness scenario fails or is not evaluable (canonical P9 gauntlet, genuine shuffled placebo, P7A/P7B stress, DSR/PBO block-count sensitivity)",
+    "native stress suite fails",
+    "scanner review is not paper_candidate",
+    "any promotion_policy threshold fails in canonical evaluate_promotion"
+  ],
+  "stopping_rule": {
+    "run_once": true,
+    "no_retuning_on_failure": true,
+    "no_additional_symbols": true,
+    "no_additional_lookbacks": true,
+    "no_additional_fast_slow_pairs": true,
+    "no_filters_bands_or_confirmation_rules": true,
+    "no_additional_notional_percentage": true,
+    "no_holdout_consumption": true,
+    "no_campaign_02_of_this_hypothesis_without_new_authorization": true,
+    "if_no_candidate_clears_every_gate": "record REJECTED and stop; any other fast/slow pair, hysteresis or confirmation filter needs a new explicit operator decision",
+    "infrastructure_failure": "retry the same attempt/trial identity under the existing contract; an economic failure is finalized failed and never retried"
+  },
+  "attempt_identity_rules": "A retry after an infrastructure failure is a new attempt of the SAME trial_id. trial_id derives from strategy_id, symbol, native semantic fingerprint, bars provenance, partition policy and economic protocol only.",
+  "forbidden_after_predeclaration": [
+    "changing the symbol list, either lookback, partition, costs, sizing or thresholds after seeing any result",
+    "registering only winning trials",
+    "defining identity from a result value",
+    "consuming the reserved holdout",
+    "promoting any candidate by hand or outside the production transition route",
+    "adding any parameter, band, filter or confirmation rule"
+  ],
+  "run_dir": "runs/run_dual_sma_01",
+  "execution_fidelity": {
+    "floor": 0.95,
+    "metric": "fraction of evaluated bars on which the simulated discrete share position (held before that bar's order) agrees, long vs flat, with the executed desired weight; positions only, never P&L",
+    "enforced_by": "mqk_research.ml.native_signal_registry_integration.NATIVE_EXECUTION_FIDELITY_FLOOR; an attempt below the floor is finalized failed and kept"
+  },
+  "sizing_note": "Carried forward from campaign 03 (equity_usd 100000, max_position_notional_usd 50000, stress cap 25000 = half of baseline so P7B stays strictly tighter). Chosen because campaign 03 showed it removes the fill-time allocation-cap collision (position agreement 1.0), not because of any profitability.",
+  "turnover_measurement": {
+    "gate": false,
+    "descriptive_only": true,
+    "report_per_symbol": [
+      "long entries",
+      "exits",
+      "total state transitions",
+      "days long",
+      "position-agreement ratio",
+      "transaction-cost drag"
+    ],
+    "rule": "measured and reported; no turnover threshold is introduced. Comparison with trend_sma50 happens only after the campaign completes and never changes it."
+  },
+  "backtest_history_note": "The backtest engine window is max(config bar_history_len, the strategy's required_history_bars()), so a 200-bar rule is evaluated on 200 bars in Backtest, the emitter, the scanner and the stress/robustness reruns."
+}
