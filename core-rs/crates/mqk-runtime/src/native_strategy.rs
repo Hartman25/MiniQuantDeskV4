@@ -752,6 +752,7 @@ mod tests {
         assert!(names.contains(&"intraday_scalper"));
         assert!(names.contains(&"trend_sma50"));
         assert!(names.contains(&"dual_sma_50_200_trend"));
+        assert!(names.contains(&"pullback_mean_reversion_20_2"));
     }
 
     #[test]

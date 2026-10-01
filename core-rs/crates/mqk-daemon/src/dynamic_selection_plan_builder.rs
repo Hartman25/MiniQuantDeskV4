@@ -141,7 +141,7 @@ pub async fn build_dynamic_selection_plan(
     let mut pending: Vec<PendingCandidate> = Vec::new();
     // Defect F: `true` the moment any one symbol's deduplicated candidate
     // strategy-ID set exceeds `MAX_STRATEGY_UNIVERSE` (which mirrors
-    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s seven identities) --
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s eight identities) --
     // checked per symbol, independently of the total-pairs bound below,
     // since a single over-loaded symbol can stay under the total while still
     // locally violating this one.
@@ -236,7 +236,7 @@ pub(crate) async fn evaluate_candidate(
     now_utc: DateTime<Utc>,
 ) -> SelectionCandidateEvidence {
     // Defect F: classify an unregistered strategy_id cheaply, against
-    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (the seven-identity
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (the eight-identity
     // authority) -- zero I/O, not even ephemeral registry construction --
     // and refuse immediately, before any promotion/artifact/readiness query
     // is ever dispatched. A watchlist-assigned unknown ID still gets a
@@ -704,7 +704,7 @@ pub(crate) mod tests {
         ));
         let calendar = NyseWeekdaysProvider;
         let ctx = ctx_no_db(&st, &calendar);
-        // 5 symbols x 8 strategy ids (over MAX_STRATEGY_UNIVERSE=7) = 40 > 35.
+        // 5 symbols x 9 strategy ids (over MAX_STRATEGY_UNIVERSE=8) = 45 > 40.
         let symbols = vec!["A", "B", "C", "D", "E"]
             .into_iter()
             .map(|s| SymbolStrategyAssignment {
@@ -714,7 +714,7 @@ pub(crate) mod tests {
             })
             .collect();
         let cfg = config(symbols);
-        let fleet: Vec<String> = (0..8).map(|i| format!("strategy_{i}")).collect();
+        let fleet: Vec<String> = (0..9).map(|i| format!("strategy_{i}")).collect();
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1466,7 +1466,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Defect F: eight distinct strategy IDs configured for one symbol must
+    /// Defect F: nine distinct strategy IDs configured for one symbol must
     /// stop the whole plan closed *before* any candidate I/O -- proven with
     /// `ctx_no_db` (a `None` DB pool would make every candidate's promotion
     /// query fail anyway, so the *only* way this test's assertion can pass
@@ -1485,7 +1485,7 @@ pub(crate) mod tests {
             strategy_id: "assigned_only".to_string(),
             timeframe: "1D".to_string(),
         }]);
-        let fleet: Vec<String> = (0..8).map(|i| format!("strategy_{i}")).collect();
+        let fleet: Vec<String> = (0..9).map(|i| format!("strategy_{i}")).collect();
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1498,7 +1498,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Defect F: exactly all seven known strategy IDs for one symbol must still
+    /// Defect F: exactly all eight known strategy IDs for one symbol must still
     /// evaluate normally (the bound is `<=` MAX_STRATEGY_UNIVERSE, not `<`).
     #[tokio::test]
     async fn all_known_strategy_ids_for_one_symbol_evaluate_normally() {
@@ -1516,7 +1516,7 @@ pub(crate) mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(fleet.len(), 7);
+        assert_eq!(fleet.len(), 8);
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1524,7 +1524,7 @@ pub(crate) mod tests {
             mqk_portfolio::DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED
         );
         let aapl = &plan.symbol_results[0];
-        assert_eq!(aapl.candidates.len(), 7, "all seven known IDs evaluate");
+        assert_eq!(aapl.candidates.len(), 8, "all eight known IDs evaluate");
         // With no DB, every known ID reaches the promotion-query stage (the
         // stage right after the cheap registration check) -- proving each
         // one was individually evaluated, not short-circuited as unknown.

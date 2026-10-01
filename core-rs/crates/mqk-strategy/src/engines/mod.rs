@@ -5,6 +5,7 @@ use mqk_execution::AssetClass;
 pub mod dual_sma_50_200_trend;
 pub mod intraday_scalper;
 pub mod mean_reversion;
+pub mod pullback_mean_reversion_20_2;
 pub mod swing_momentum;
 pub mod trend_sma50;
 pub mod volatility_breakout;
@@ -15,6 +16,7 @@ pub use intraday_scalper::{
     IntradayScalperStrategy,
 };
 pub use mean_reversion::MeanReversionStrategy;
+pub use pullback_mean_reversion_20_2::PullbackMeanReversion202Strategy;
 pub use swing_momentum::SwingMomentumStrategy;
 pub use trend_sma50::TrendSma50Strategy;
 pub use volatility_breakout::VolatilityBreakoutStrategy;
@@ -23,7 +25,7 @@ pub use volatility_breakout::VolatilityBreakoutStrategy;
 /// [`register_builtin_strategies`] registers, in registration order. Five
 /// engine *implementations* (`swing_momentum`, `mean_reversion`,
 /// `volatility_breakout`, `intraday_scalper`, `trend_sma50`,
-/// `dual_sma_50_200_trend`) back seven registered strategy
+/// `dual_sma_50_200_trend`, `pullback_mean_reversion_20_2`) back eight registered strategy
 /// *identities* — `intraday_scalper`'s short-only variant
 /// (`intraday_short_scalper`) is a distinct registered identity sharing the
 /// same engine implementation. Any bound or guard elsewhere in the
@@ -41,6 +43,7 @@ pub const REGISTERED_STRATEGY_IDS: &[&str] = &[
     intraday_scalper::NAME,
     trend_sma50::NAME,
     dual_sma_50_200_trend::NAME,
+    pullback_mean_reversion_20_2::NAME,
     intraday_scalper::SHORT_NAME,
 ];
 
@@ -85,6 +88,13 @@ pub fn register_builtin_strategies(
     let dual_symbol = symbol.clone();
     registry.register(dual_sma_50_200_trend::meta(), move || {
         Box::new(DualSma50200TrendStrategy::new(dual_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let pullback_symbol = symbol.clone();
+    registry.register(pullback_mean_reversion_20_2::meta(), move || {
+        Box::new(PullbackMeanReversion202Strategy::new(
+            pullback_symbol.clone(),
+        )) as Box<dyn Strategy>
     })?;
 
     // SHORT-SIDE-PARALLEL-STRATEGY-DRY-RUN-01: register the short-only variant
@@ -176,6 +186,13 @@ fn register_with_sizing(
         registry.register(dual_sma_50_200_trend::meta(), move || {
             Box::new(DualSma50200TrendStrategy::new(dual_symbol.clone())) as Box<dyn Strategy>
         })?;
+
+        let pullback_symbol = symbol.clone();
+        registry.register(pullback_mean_reversion_20_2::meta(), move || {
+            Box::new(PullbackMeanReversion202Strategy::new(
+                pullback_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
     }
 
     let scalp_symbol = symbol.clone();
@@ -225,7 +242,7 @@ mod registered_strategy_ids_tests {
     }
 
     #[test]
-    fn registered_strategy_ids_has_seven_distinct_entries() {
+    fn registered_strategy_ids_has_eight_distinct_entries() {
         let mut unique = REGISTERED_STRATEGY_IDS.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -234,7 +251,7 @@ mod registered_strategy_ids_tests {
             REGISTERED_STRATEGY_IDS.len(),
             "every registered strategy identity must be distinct"
         );
-        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 7);
+        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 8);
     }
 
     #[test]
