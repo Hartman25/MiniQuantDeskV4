@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -20. pullback_mean_reversion_20_2 Campaign 01 Rejected (2026-10-01, `V4-M1-PULLBACK-MEAN-REVERSION-CAMPAIGN-01`)
+
+Not pushed. Record: `docs/research/M1_PULLBACK_MEAN_REVERSION_CAMPAIGN_RESULT.md`.
+
+- New stateful native engine `pullback_mean_reversion_20_2` (universe now eight), exact integer entry/exit boundaries, state owned by the instance with a deterministic first-call window replay; the emitter stream matched an independent exact-rational state machine on 100% of bars for all five symbols.
+- Predeclared before implementation and results; ran once on the fixed five symbols: position agreement 1.0, positive gross on four of five, but 40-49 round trips cost 14-47% of equity, every net return is negative, no DSR reaches 0.5, PBO 0.528 (limit 0.5), review 0/5 `paper_candidate`. Rejected; family stopped.
+- M1 remains `M1_BLOCKED`; promotion rows 0; Paper fleet unset; holdout untouched; review, promotion and P9 policy unchanged; `intraday_scalper`, `trend_sma50`, `dual_sma_50_200_trend` closed and unmodified.
+
+---
+
 ## -19. dual_sma_50_200_trend Campaign 01 Rejected (2026-10-01, `V4-M1-DUAL-SMA-50-200-CAMPAIGN-01`)
 
 Not pushed. Record: `docs/research/M1_DUAL_SMA_CAMPAIGN_RESULT.md`.
