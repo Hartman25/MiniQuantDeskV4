@@ -23,10 +23,10 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "research-py" / "src"))
 
-CAMPAIGN_FILE = os.environ.get("M1_CAMPAIGN_FILE", "PREDECLARED_CAMPAIGN_02.json")
+CAMPAIGN_FILE = os.environ.get("M1_CAMPAIGN_FILE", "PREDECLARED_CAMPAIGN_03.json")
 DECL = json.loads((HERE / CAMPAIGN_FILE).read_text(encoding="utf-8"))
 RUN = HERE / DECL.get("run_dir", "runs/run_01")
-REGISTRY = RUN / "registry" / "research.sqlite3"
+REGISTRY = HERE / DECL["experiment"].get("registry_db_relative_path", str(Path(DECL.get("run_dir", "runs/run_01")) / "registry" / "research.sqlite3"))
 EXPERIMENT = DECL["experiment"]["real_experiment_id"]
 HYPOTHESIS = DECL["hypothesis"]["hypothesis_id"]
 STRATEGY = DECL["native_engine"]["strategy_id"]
@@ -87,6 +87,20 @@ def stage_reuse_data(_args) -> None:
                  "corporate_actions_provenance.json"):
         shutil.copyfile(src / name, RUN / "data" / name)
     print("reused", rows, "rows", manifest["artifact_sha256"][:12])
+
+
+def stage_seed_registry(_args) -> None:
+    """Byte-identical copy of the prior campaign's registry so its trial history stays in the judge population."""
+    import shutil
+    from mqk_research.ml.util_hash import sha256_file
+    src = HERE / DECL["experiment"]["seed_registry_copy_from"]
+    if REGISTRY.exists():
+        raise SystemExit("fail-closed: registry already exists; the seed copy runs once")
+    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, REGISTRY)
+    if sha256_file(src) != sha256_file(REGISTRY):
+        raise SystemExit("fail-closed: seed registry copy does not match its source")
+    print("seeded registry from", src.name, sha256_file(REGISTRY)[:12])
 
 
 def stage_fetch(args) -> None:
@@ -157,8 +171,10 @@ def stage_judge(_args) -> None:
     from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge
     from mqk_research.exp_distributed.storage import ResearchResultStore
     trials = ResearchResultStore(REGISTRY).list_trials(experiment_id=EXPERIMENT)
-    if len(trials) != len(SYMBOLS):
-        raise SystemExit(f"fail-closed: {len(trials)} registered trials, expected {len(SYMBOLS)}")
+    seed = DECL["experiment"].get("seed_registry_copy_from")
+    prior = len(ResearchResultStore(HERE / seed).list_trials(experiment_id=EXPERIMENT)) if seed else 0
+    if len(trials) != prior + len(SYMBOLS):
+        raise SystemExit(f"fail-closed: {len(trials)} registered trials, expected {prior + len(SYMBOLS)}")
     art = build_multiple_testing_judge(experiment_id=EXPERIMENT, registry_db=REGISTRY)
     (RUN / "judge").mkdir(parents=True, exist_ok=True)
     path = RUN / "judge" / "judge.json"
@@ -179,6 +195,9 @@ def stage_backtest(_args) -> None:
     index = json.loads(INDEX.read_text(encoding="utf-8"))
     nb = DECL["native_backtest"]
     for sym in SYMBOLS:
+        if "failed" in index[sym]:
+            print(sym, "no succeeded trial; rejected, no backtest evidence")
+            continue
         out = _run_cli("backtest", "csv", "--bars", str(RUN / "trials" / sym / "bt_bars.csv"), "--strategy", STRATEGY,
                        "--symbol", sym, "--timeframe-secs", str(nb["timeframe_secs"]),
                        "--initial-cash-micros", str(nb["initial_cash_micros"]),
@@ -199,6 +218,8 @@ def stage_finalize(_args) -> None:
     py = sys.executable
     for sym in SYMBOLS:
         rec = index[sym]
+        if "failed" in rec:
+            continue
         common = ["--artifact-root", str(RUN / "backtest" / sym), "--run-id", rec["backtest_run_id"],
                   "--registry-db", str(REGISTRY), "--trial-id", rec["trial_id"]]
         _run_cli("backtest", "finalize-robustness-sensitivity", *common, "--judge-artifact-sha256", sha,
@@ -241,7 +262,7 @@ def stage_summary(_args) -> None:
     print(INDEX.read_text(encoding="utf-8"))
 
 
-STAGES = {"check": stage_check, "fetch": stage_fetch, "reuse_data": stage_reuse_data, "trials": stage_trials, "judge": stage_judge,
+STAGES = {"check": stage_check, "fetch": stage_fetch, "reuse_data": stage_reuse_data, "seed_registry": stage_seed_registry, "trials": stage_trials, "judge": stage_judge,
           "backtest": stage_backtest, "finalize": stage_finalize, "review": stage_review, "summary": stage_summary}
 
 

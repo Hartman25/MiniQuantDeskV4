@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 import pytest
 
-CAMPAIGN_FILES = ["PREDECLARED_CAMPAIGN.json", "PREDECLARED_CAMPAIGN_02.json"]
+CAMPAIGN_FILES = ["PREDECLARED_CAMPAIGN.json", "PREDECLARED_CAMPAIGN_02.json", "PREDECLARED_CAMPAIGN_03.json"]
 DECL = json.loads((HERE / "PREDECLARED_CAMPAIGN_02.json").read_text(encoding="utf-8"))
 V1 = json.loads((HERE / "PREDECLARED_CAMPAIGN.json").read_text(encoding="utf-8"))
 ENGINE_SRC = (REPO / "core-rs/crates/mqk-strategy/src/engines/trend_sma50.rs").read_text(encoding="utf-8")
@@ -84,3 +84,48 @@ def test_voiding_evidence_contains_no_return_values():
     text = json.dumps(DECL["amendment"]).lower()
     for banned in ("net_total_return", "net_sharpe", "total_return", "sharpe", "dsr", "drawdown"):
         assert banned not in text
+
+
+V3 = json.loads((HERE / "PREDECLARED_CAMPAIGN_03.json").read_text(encoding="utf-8"))
+
+
+def test_campaign_03_changes_only_sizing_and_its_consistency_consequences():
+    a, b = DECL, V3
+    assert b["amends_campaign"] == a["campaign_id"]
+    for key in ("hypothesis", "native_engine", "universe", "partition", "promotion_policy", "scanner_review",
+                "native_backtest", "rejection_gates", "execution_fidelity"):
+        assert a[key] == b[key], key
+    assert {k: v for k, v in a["data"].items() if k != "reuse_verified_data_from"} == \
+        {k: v for k, v in b["data"].items() if k != "reuse_verified_data_from"}
+    for key in ("signal_policy", "cost_model", "execution_pricing", "annualization"):
+        assert a["economic_protocol"][key] == b["economic_protocol"][key], key
+    equity = a["economic_protocol"]["weight_to_share"]["equity_usd"]
+    assert b["economic_protocol"]["weight_to_share"] == {"equity_usd": equity, "max_position_notional_usd": equity * 0.5}
+    ra, rb = dict(a["robustness"]), dict(b["robustness"])
+    sa, sb = dict(ra.pop("p7a_p7b_stress")), dict(rb.pop("p7a_p7b_stress"))
+    assert ra == rb
+    assert sb.pop("stress_max_position_notional_usd") == equity * 0.25 and sa.pop("stress_max_position_notional_usd") == 50000.0
+    assert sa == sb
+    # the stress cap must stay strictly tighter than the baseline cap (P7B adversity validator)
+    assert equity * 0.25 < b["economic_protocol"]["weight_to_share"]["max_position_notional_usd"]
+    assert b["stopping_rule"]["no_additional_notional_percentage"] is True
+
+
+def test_campaign_03_trial_identity_differs_from_campaign_02_because_sizing_is_identity_bearing():
+    import sys
+    sys.path.insert(0, str(REPO / "research-py" / "src"))
+    from mqk_research.ml.economic_walkforward import (
+        AnnualizationSpec, CostModelSpec, EconomicWalkForwardSpec, SignalPolicySpec, economic_protocol_identity)
+    from mqk_research.ml.execution_pricing import ExecutionPricingSpec
+    from mqk_research.ml.weight_to_share import WeightToShareSpec
+
+    def spec(decl):
+        p = decl["economic_protocol"]
+        return EconomicWalkForwardSpec(
+            signal_policy=SignalPolicySpec(**p["signal_policy"]), cost_model=CostModelSpec(**p["cost_model"]),
+            execution_pricing=ExecutionPricingSpec(**p["execution_pricing"]),
+            weight_to_share=WeightToShareSpec(**p["weight_to_share"]), annualization=AnnualizationSpec(**p["annualization"]))
+
+    i2, i3 = economic_protocol_identity(spec(DECL).normalized()), economic_protocol_identity(spec(V3).normalized())
+    assert i2 != i3
+    assert i2["weight_to_share"] != i3["weight_to_share"]
