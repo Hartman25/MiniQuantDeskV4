@@ -6,6 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -15. M1 Promotion-Authority Closure Attempt (2026-10-01, `V4-M1-PROMOTION-AUTHORITY-AND-PAPER-CLOSURE-01`)
+
+Outcome: **M1_BLOCKED, operator decision required.** Not pushed.
+
+- Candidate census over canonical repo evidence found no protocol-eligible US equity/ETF candidate: `intraday_scalper`/AAPL/5m and the `swing_momentum` 1D scan are rejected review artifacts; DISCOVERY-01, SHORT-01, SHORT-02/03/04, Wave06 LIQ-01/VOL-01 are `REJECTED_NOT_ADVANCED`; ALPHA-01 run_02 is inconclusive. Further alpha discovery remains `OPERATOR-DEFERRED`. Native engines `mean_reversion` and `volatility_breakout` have no evaluation record; evaluating them is new discovery, not continuation of an eligible candidate.
+- Actual Paper (read-only): `sys_strategy_promotion_transitions` has 0 rows; arm state `DISARMED` (`InboundContinuityUnproven`), last run HALTED, daemon not running; one deployed identity (`intraday_scalper`/AAPL/300) has no `active_paper` promotion. No Paper/Live mutation, no market-hours run.
+- Repaired one stale ignored test (`b1c_c14`) so it exercises the real Gate 3b config-identity and registry seams, with a drifted-fingerprint negative control.
+- Operator decision needed: authorize a new/continued candidate search (or a named existing engine evaluation), or remove/replace the deployed identity. Clearing the HALTED/DISARMED state also needs operator action.
+
+---
+
 ## -14. M5-M8 Frozen Acceptance Correction (2026-09-29, `V4-M5-M8-FROZEN-CLOSURE-03`)
 
 Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G9 and the final section of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `21718bcb`; five local code commits (`f54c0bdf`..`e81f896b`) plus a clippy follow-up and the docs commit; NOT pushed. Supersedes §-13 where they differ.
