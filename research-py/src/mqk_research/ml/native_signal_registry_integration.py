@@ -53,6 +53,7 @@ __all__ = [
     "NATIVE_SIGNAL_STREAM_PROTOCOL_ID",
     "NativeSignalError",
     "build_native_signal_trial_identity",
+    "native_holdout_start",
     "plan_native_folds",
     "research_bars_to_backtest_csv",
     "run_registered_native_signal_economic_eval",
@@ -70,15 +71,28 @@ class NativeFold:
     test_end: pd.Timestamp
 
 
-def research_bars_to_backtest_csv(bars_csv: Path, symbol: str, out_csv: Path) -> Path:
+def research_bars_to_backtest_csv(
+    bars_csv: Path,
+    symbol: str,
+    out_csv: Path,
+    *,
+    end_exclusive_utc: Optional[pd.Timestamp] = None,
+) -> Path:
     """Deterministic conversion of the provenance-bound research bars for
     `symbol` into the Rust backtest loader format: epoch-second `end_ts` and
-    integer micros with `micros = round(price * 1e6)`. Identical on every run."""
+    integer micros with `micros = round(price * 1e6)`. Identical on every run.
+    `end_exclusive_utc` drops every bar at or after that instant -- the native
+    bridge always passes the reserved holdout start so no holdout-period bar
+    ever reaches the Rust emitter, backtest or scanner."""
     bars = pd.read_csv(bars_csv)
     bars = bars[bars["symbol"].astype(str) == symbol].copy()
     if bars.empty:
         raise NativeSignalError(f"no bars for symbol {symbol!r} in {bars_csv}")
     bars["end_ts"] = pd.to_datetime(bars["end_ts"], utc=True)
+    if end_exclusive_utc is not None:
+        bars = bars[bars["end_ts"] < pd.Timestamp(end_exclusive_utc)]
+        if bars.empty:
+            raise NativeSignalError("no bars remain before the exclusive end")
     bars = bars.sort_values("end_ts", kind="mergesort")
     if bars["end_ts"].duplicated().any():
         raise NativeSignalError("duplicate end_ts rows for symbol")
@@ -125,6 +139,15 @@ def plan_native_folds(
     if not folds:
         raise NativeSignalError("no evaluation fold fits before the reserved holdout")
     return folds, holdout_start, dataset_end
+
+
+def native_holdout_start(bars_csv: Path, symbol: str, holdout_months: int) -> pd.Timestamp:
+    """The reserved holdout start the bridge derives for `symbol`'s bars."""
+    bars = pd.read_csv(bars_csv)
+    ts = pd.to_datetime(bars[bars["symbol"].astype(str) == symbol]["end_ts"], utc=True)
+    if ts.empty:
+        raise NativeSignalError(f"no bars for symbol {symbol!r} in {bars_csv}")
+    return compute_holdout_boundary(ts.min(), ts.max(), int(holdout_months))[1]
 
 
 def _load_signals(
@@ -255,20 +278,6 @@ def run_registered_native_signal_economic_eval(
         if not p.exists():
             raise FileNotFoundError(f"Missing required native-signal input: {p}")
 
-    # The backtest CSV must be exactly the deterministic conversion of the
-    # provenance-bound research bars -- never an independently supplied file.
-    check_csv = run_dir / "backtest_bars_check.csv"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    research_bars_to_backtest_csv(bars_csv, symbol, check_csv)
-    expected_sha = sha256_file(check_csv)
-    if sha256_file(backtest_bars_csv) != expected_sha:
-        raise NativeSignalError("backtest bars csv is not the conversion of the research bars")
-
-    signals, meta = _load_signals(
-        signals_csv, signals_meta_json, strategy_id=strategy_id, symbol=symbol,
-        backtest_bars_sha256=expected_sha,
-    )
-
     bars = pd.read_csv(bars_csv)
     bars = bars[bars["symbol"].astype(str) == symbol]
     bar_ts = pd.to_datetime(bars["end_ts"], utc=True)
@@ -276,6 +285,23 @@ def run_registered_native_signal_economic_eval(
         t_min=bar_ts.min(), t_max=bar_ts.max(),
         evaluation_start_utc=evaluation_start_utc,
         test_months=test_months, holdout_months=holdout_months,
+    )
+
+    # The backtest CSV must be exactly the deterministic conversion of the
+    # provenance-bound research bars, truncated at the reserved holdout start
+    # -- never an independently supplied file, never containing a holdout bar.
+    check_csv = run_dir / "backtest_bars_check.csv"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    research_bars_to_backtest_csv(bars_csv, symbol, check_csv, end_exclusive_utc=holdout_start)
+    expected_sha = sha256_file(check_csv)
+    if sha256_file(backtest_bars_csv) != expected_sha:
+        raise NativeSignalError(
+            "backtest bars csv is not the holdout-truncated conversion of the research bars"
+        )
+
+    signals, meta = _load_signals(
+        signals_csv, signals_meta_json, strategy_id=strategy_id, symbol=symbol,
+        backtest_bars_sha256=expected_sha,
     )
 
     trial_id, identity = build_native_signal_trial_identity(

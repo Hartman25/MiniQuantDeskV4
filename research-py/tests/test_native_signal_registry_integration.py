@@ -96,7 +96,8 @@ def _manifest(bars: pd.DataFrame, bars_path: Path) -> dict:
 
 
 def _write_stream(tmp: Path, bars_csv: Path, *, strategy=STRATEGY, fingerprint=FP_X, qty_one=1_000_000):
-    bt = research_bars_to_backtest_csv(bars_csv, SYMBOL, tmp / "bt_bars.csv")
+    bt = research_bars_to_backtest_csv(
+        bars_csv, SYMBOL, tmp / "bt_bars.csv", end_exclusive_utc=pd.Timestamp("2021-07-01", tz="UTC"))
     spy = pd.read_csv(bt)
     stream = pd.DataFrame({
         "symbol": SYMBOL, "decision_ts": spy["end_ts"],
@@ -214,6 +215,17 @@ def test_failure_after_attempt_start_is_preserved_as_failed(tmp_path):
     attempts = store.list_attempts(trial["trial_id"])
     assert [a["status"] for a in attempts] == ["failed"]
     assert "no native signals inside fold" in attempts[0]["failure_reason"]
+
+
+def test_no_holdout_bar_reaches_the_emitter_input(tmp_path):
+    env = Env(tmp_path)
+    bt = pd.read_csv(env.bt)
+    holdout_start = int(pd.Timestamp("2021-07-01", tz="UTC").timestamp())
+    assert bt["end_ts"].max() < holdout_start
+    # An untruncated conversion is refused as the backtest input.
+    full = research_bars_to_backtest_csv(env.bars_csv, SYMBOL, tmp_path / "full.csv")
+    with pytest.raises(NativeSignalError, match="holdout-truncated"):
+        env.run(backtest_bars_csv=full)
 
 
 def test_plan_native_folds_never_reaches_the_holdout():
