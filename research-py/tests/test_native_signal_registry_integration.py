@@ -214,6 +214,19 @@ def test_refuses_before_registering_anything(tmp_path, mutate):
         assert ResearchResultStore(env.db).list_trials(experiment_id=EXPERIMENT) == []
 
 
+def test_wrong_timeframe_or_wrong_expected_fingerprint_is_refused_before_registering(tmp_path):
+    env = Env(tmp_path)
+    with pytest.raises(NativeSignalError, match="timeframe_secs"):
+        env.run(expected_timeframe_secs=3_600)
+    with pytest.raises(NativeSignalError, match="semantic_fingerprint"):
+        env.run(expected_semantic_fingerprint=FP_Y)
+    if env.db.exists():
+        assert ResearchResultStore(env.db).list_trials(experiment_id=EXPERIMENT) == []
+    # The matching expectations register normally.
+    out = json.loads(env.run(expected_timeframe_secs=86_400, expected_semantic_fingerprint=FP_X).read_text())
+    assert out["registry"]["semantic_fingerprint"] == FP_X
+
+
 def test_failure_after_attempt_start_is_preserved_as_failed(tmp_path):
     env = Env(tmp_path)
     # A start date that leaves a fold without any signals fails after the attempt begins.

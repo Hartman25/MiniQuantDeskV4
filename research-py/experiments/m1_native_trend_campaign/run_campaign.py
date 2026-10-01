@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "research-py" / "src"))
 
-CAMPAIGN_FILE = os.environ.get("M1_CAMPAIGN_FILE", "PREDECLARED_CAMPAIGN_03.json")
+CAMPAIGN_FILE = os.environ.get("M1_CAMPAIGN_FILE", "PREDECLARED_CAMPAIGN_DUAL_SMA_01.json")
 DECL = json.loads((HERE / CAMPAIGN_FILE).read_text(encoding="utf-8"))
 RUN = HERE / DECL.get("run_dir", "runs/run_01")
 REGISTRY = HERE / DECL["experiment"].get("registry_db_relative_path", str(Path(DECL.get("run_dir", "runs/run_01")) / "registry" / "research.sqlite3"))
@@ -153,7 +153,8 @@ def stage_trials(_args) -> None:
                 signals_csv=sdir / "emit" / "native_signals.csv", signals_meta_json=sdir / "emit" / "native_signals_meta.json",
                 economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
                 test_months=part["test_months"], holdout_months=part["holdout_months"],
-                hypothesis_text=DECL["hypothesis"]["economic_rationale"], registry_db=REGISTRY)
+                hypothesis_text=DECL["hypothesis"]["economic_rationale"], registry_db=REGISTRY,
+                expected_timeframe_secs=DECL["native_engine"]["timeframe_secs"])
         except NativeSignalError as exc:  # the failed attempt is already durable; register every symbol
             index[sym] = {"failed": str(exc)}
             print(sym, "FAILED attempt kept:", str(exc)[:160])

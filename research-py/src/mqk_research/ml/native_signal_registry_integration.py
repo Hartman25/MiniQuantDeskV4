@@ -190,6 +190,8 @@ def _load_signals(
     strategy_id: str,
     symbol: str,
     backtest_bars_sha256: str,
+    expected_timeframe_secs: int,
+    expected_semantic_fingerprint: Optional[str],
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     meta = json.loads(Path(meta_json).read_text(encoding="utf-8"))
     if meta.get("protocol_id") != NATIVE_SIGNAL_STREAM_PROTOCOL_ID:
@@ -203,6 +205,14 @@ def _load_signals(
     fp = str(meta.get("semantic_fingerprint", ""))
     if len(fp) != 64 or any(c not in "0123456789abcdef" for c in fp):
         raise NativeSignalError("signal stream semantic_fingerprint is not 64 lowercase hex")
+    if int(meta.get("timeframe_secs", -1)) != int(expected_timeframe_secs):
+        raise NativeSignalError(
+            f"signal stream timeframe_secs {meta.get('timeframe_secs')!r} != expected {expected_timeframe_secs}"
+        )
+    if expected_semantic_fingerprint is not None and fp != expected_semantic_fingerprint:
+        raise NativeSignalError(
+            "signal stream semantic_fingerprint does not equal the expected native fingerprint"
+        )
     if meta.get("native_signals_csv_sha256") != sha256_file(Path(signals_csv)):
         raise NativeSignalError("signal stream csv does not match its recorded sha256")
     if meta.get("bars_csv_sha256") != backtest_bars_sha256:
@@ -290,6 +300,8 @@ def run_registered_native_signal_economic_eval(
     holdout_months: int = 6,
     hypothesis_text: Optional[str] = None,
     registry_db: Optional[Path] = None,
+    expected_timeframe_secs: int = 86_400,
+    expected_semantic_fingerprint: Optional[str] = None,
 ) -> Path:
     """Official registered entry point for a native strategy's signals.
     Order mirrors the classifier path: identity -> trial -> attempt (BEFORE
@@ -335,6 +347,8 @@ def run_registered_native_signal_economic_eval(
     signals, meta = _load_signals(
         signals_csv, signals_meta_json, strategy_id=strategy_id, symbol=symbol,
         backtest_bars_sha256=expected_sha,
+        expected_timeframe_secs=expected_timeframe_secs,
+        expected_semantic_fingerprint=expected_semantic_fingerprint,
     )
 
     trial_id, identity = build_native_signal_trial_identity(
