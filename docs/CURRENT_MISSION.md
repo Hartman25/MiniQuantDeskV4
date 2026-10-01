@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -21. Native Hypothesis Batch 01 Rejected (2026-10-01, `V4-M1-NATIVE-HYPOTHESIS-BATCH-01`)
+
+Not pushed. Record: `docs/research/M1_BATCH01_RESULT.md`; census `docs/research/M1_BATCH01_CENSUS.md`.
+
+- Three new stateless native engines (`absolute_momentum_252`, `near_high_momentum_252_3pct`, `trend_pullback_5d_4pct_hold5`; universe now eleven) x five fixed symbols = 15 trials predeclared in one experiment before any engine or result; all 15 registered before the first attempt; one batch-wide judge (hypothesis unset).
+- Result: 15 attempted, 14 evaluable (one never traded), PBO 0.238, best DSR 0.214 (< 0.5), review 0/15 `paper_candidate`. Batch rejected; the three hypotheses are closed.
+- M1 remains `M1_BLOCKED`; promotion rows 0; Paper fleet unset; holdout untouched; review, promotion, P9 and cost policy unchanged. Last new-hypothesis controller before independent review of `7dd31e5d..HEAD`.
+
+---
+
 ## -20. pullback_mean_reversion_20_2 Campaign 01 Rejected (2026-10-01, `V4-M1-PULLBACK-MEAN-REVERSION-CAMPAIGN-01`)
 
 Not pushed. Record: `docs/research/M1_PULLBACK_MEAN_REVERSION_CAMPAIGN_RESULT.md`.

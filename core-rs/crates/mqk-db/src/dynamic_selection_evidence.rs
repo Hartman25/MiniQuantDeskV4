@@ -26,8 +26,8 @@ use uuid::Uuid;
 /// Single shared candidate-read bound authority, mirroring the conflict-
 /// evidence store's `RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND`. A
 /// legitimate plan is bounded by
-/// `mqk_portfolio::dynamic_selection::MAX_CANDIDATE_PAIRS` (25 today); this
-/// bound is generous headroom while still refusing an unbounded read for a
+/// `mqk_portfolio::dynamic_selection::MAX_CANDIDATE_PAIRS` (a small fixed
+/// product, far below this bound); this bound is generous headroom while still refusing an unbounded read for a
 /// pathological/corrupted row.
 pub const DYNAMIC_SELECTION_CANDIDATE_READ_BOUND: usize = 256;
 
