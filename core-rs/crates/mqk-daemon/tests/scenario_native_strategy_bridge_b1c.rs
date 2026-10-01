@@ -31,6 +31,8 @@
 //! | C13 | Cover short: target=0, current=-7                            | buy 7 (delta=+7)                                            |
 //! | C14 | DB-backed: loop path → durable outbox row, correct source    | signal_source="internal_strategy_decision" (requires DB)    |
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -46,10 +48,17 @@ use mqk_strategy::{
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Gate 3b requires a verified 64-lowercase-hex config fingerprint on the promoted
+/// row, byte-equal to the decision's `strategy_semantic_fingerprint`. Both sides of
+/// the fixture must use this one value; a non-hex or `None` side never matches.
+fn fixture_fingerprint() -> String {
+    "9".repeat(64)
+}
+
 fn live_result(targets: Vec<TargetPosition>) -> StrategyBarResult {
     StrategyBarResult {
         spec: StrategySpec::new("test_strategy", 300),
-        semantic_fingerprint: "test-fixture:test_strategy".to_string(),
+        semantic_fingerprint: fixture_fingerprint(),
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput { targets },
@@ -83,8 +92,8 @@ async fn seed_active_paper_promotion(
             strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             timeframe_secs,
-            config_fingerprint: None,
-            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            config_fingerprint: Some(fixture_fingerprint()),
+            config_identity_status: "verified_v1".to_string(),
             previous_state: previous_state.map(|s| s.to_string()),
             new_state: new_state.to_string(),
             parent_transition_id: None,
@@ -135,7 +144,7 @@ async fn seed_active_paper_promotion(
 fn shadow_result(targets: Vec<TargetPosition>) -> StrategyBarResult {
     StrategyBarResult {
         spec: StrategySpec::new("test_strategy", 300),
-        semantic_fingerprint: "test-fixture:test_strategy".to_string(),
+        semantic_fingerprint: fixture_fingerprint(),
         intents: StrategyIntents {
             mode: IntentMode::Shadow,
             output: StrategyOutput { targets },
@@ -563,7 +572,7 @@ fn b1c_c13_close_short_position() {
 ///   `MQK_DATABASE_URL=postgres://... cargo test -p mqk-daemon \
 ///    --test scenario_native_strategy_bridge_b1c -- --include-ignored`
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-daemon --features testkit --test scenario_native_strategy_bridge_b1c -- --include-ignored"]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-daemon --test scenario_native_strategy_bridge_b1c -- --include-ignored"]
 async fn b1c_c14_loop_path_creates_durable_outbox_row() {
     // `seed_active_paper_promotion` derives its transition_ids from a fixed
     // UUIDv5 namespace keyed only on (strategy_id, symbol, timeframe_secs) --
@@ -599,7 +608,9 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
         seed_active_paper_promotion(&pool, strategy_id, "AAPL", 300).await;
 
         // Build AppState with DB and arm state.
-        let st = Arc::new(state::AppState::new_with_db(pool.clone()));
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db(pool.clone()),
+        ));
         mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
             .await
             .expect("C14: arm state");
@@ -643,6 +654,7 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
         );
 
         let decision = decisions.into_iter().next().unwrap();
+        let decision_for_drift = decision.clone();
         let decision_id = decision.decision_id.clone();
 
         // First submission: must be accepted.
@@ -689,6 +701,31 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
         assert_eq!(
             outcome2.disposition, "duplicate",
             "C14: second submission of same decision_id → 'duplicate'"
+        );
+
+        // Negative control: a decision whose semantic fingerprint differs from the
+        // promoted one must be refused by Gate 3b and must not reach the outbox.
+        let mut drifted = decision_for_drift;
+        drifted.strategy_semantic_fingerprint = "8".repeat(64);
+        drifted.decision_id = format!("{}-drift", drifted.decision_id);
+        let outcome3 = submit_internal_strategy_decision(&st, drifted.clone()).await;
+        assert!(
+            !outcome3.accepted,
+            "C14: drifted fingerprint must be refused"
+        );
+        assert_eq!(
+            outcome3.disposition, "promotion_config_mismatch",
+            "C14: drifted fingerprint → promotion_config_mismatch"
+        );
+        let drift_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM oms_outbox WHERE idempotency_key = $1")
+                .bind(&drifted.decision_id)
+                .fetch_one(&pool)
+                .await
+                .expect("C14: drift outbox count");
+        assert_eq!(
+            drift_rows, 0,
+            "C14: refused drifted decision must write no outbox row"
         );
     })
     .await;
