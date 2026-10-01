@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -19. dual_sma_50_200_trend Campaign 01 Rejected (2026-10-01, `V4-M1-DUAL-SMA-50-200-CAMPAIGN-01`)
+
+Not pushed. Record: `docs/research/M1_DUAL_SMA_CAMPAIGN_RESULT.md`.
+
+- New native engine `dual_sma_50_200_trend` (universe now seven); the backtest history window now honors a strategy's `required_history_bars()` and the Paper context load limit is 256, both of which a 200-bar rule would otherwise have silently starved.
+- Predeclared before implementation and results; ran once on the fixed five symbols: position agreement 1.0, four of five positive net, 9-17 transitions per symbol, but PBO 0.548 (limit 0.5), only GLD and SPY clear DSR 0.5, every symbol fails regime concentration, and the review gives 0/5 `paper_candidate` (alpha against buy-and-hold). Rejected; family stopped.
+- M1 remains `M1_BLOCKED`; promotion rows 0; Paper fleet unset; holdout untouched; `intraday_scalper` and `trend_sma50` unchanged. Next decision: another hypothesis, or a review of whether the frozen alpha-against-buy-and-hold review gate is the right bar for a long/flat trend-timing rule (a policy decision for the operator, not changed here).
+
+---
+
 ## -18. Campaign 03 Rejected; trend_sma50 Family Closed (2026-10-01, `V4-M1-TREND-SMA50-CAMPAIGN-03-FINAL-01`)
 
 Not pushed. Record: `docs/research/M1_NATIVE_TREND_CAMPAIGN_RESULT.md`. Supersedes §-17's open decision.
