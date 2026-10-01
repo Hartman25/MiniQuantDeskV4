@@ -122,7 +122,7 @@ def _run_cli(*argv: str) -> str:
 
 def stage_trials(_args) -> None:
     from mqk_research.ml.native_signal_registry_integration import (
-        native_holdout_start, research_bars_to_backtest_csv, run_registered_native_signal_economic_eval)
+        NativeSignalError, native_holdout_start, research_bars_to_backtest_csv, run_registered_native_signal_economic_eval)
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     index = {}
     for sym in SYMBOLS:  # every symbol, in fixed order; no result-dependent skipping
@@ -132,13 +132,18 @@ def stage_trials(_args) -> None:
         bt = research_bars_to_backtest_csv(BARS, sym, sdir / "bt_bars.csv", end_exclusive_utc=hold)
         _run_cli("backtest", "native-signals", "--bars-path", str(bt), "--strategy", STRATEGY, "--symbol", sym,
                  "--timeframe-secs", str(DECL["native_engine"]["timeframe_secs"]), "--out-dir", str(sdir / "emit"))
-        out = run_registered_native_signal_economic_eval(
-            sdir / "run", experiment_id=EXPERIMENT, hypothesis_id=HYPOTHESIS, strategy_id=STRATEGY, symbol=sym,
-            bars_csv=BARS, bars_provenance=manifest, backtest_bars_csv=bt,
-            signals_csv=sdir / "emit" / "native_signals.csv", signals_meta_json=sdir / "emit" / "native_signals_meta.json",
-            economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
-            test_months=part["test_months"], holdout_months=part["holdout_months"],
-            hypothesis_text=DECL["hypothesis"]["economic_rationale"], registry_db=REGISTRY)
+        try:
+            out = run_registered_native_signal_economic_eval(
+                sdir / "run", experiment_id=EXPERIMENT, hypothesis_id=HYPOTHESIS, strategy_id=STRATEGY, symbol=sym,
+                bars_csv=BARS, bars_provenance=manifest, backtest_bars_csv=bt,
+                signals_csv=sdir / "emit" / "native_signals.csv", signals_meta_json=sdir / "emit" / "native_signals_meta.json",
+                economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
+                test_months=part["test_months"], holdout_months=part["holdout_months"],
+                hypothesis_text=DECL["hypothesis"]["economic_rationale"], registry_db=REGISTRY)
+        except NativeSignalError as exc:  # the failed attempt is already durable; register every symbol
+            index[sym] = {"failed": str(exc)}
+            print(sym, "FAILED attempt kept:", str(exc)[:160])
+            continue
         econ = json.loads(out.read_text(encoding="utf-8"))
         index[sym] = {"trial_id": econ["registry"]["trial_id"], "economic_eval_id": econ["ids"]["economic_eval_id"],
                       "economic_path": str(out), "attempt_index": econ["registry"]["attempt_index"],
