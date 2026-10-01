@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "research-py" / "src"))
 
-CAMPAIGN_FILE = os.environ.get("M1_CAMPAIGN_FILE", "PREDECLARED_CAMPAIGN_DUAL_SMA_01.json")
+CAMPAIGN_FILE = os.environ.get("M1_CAMPAIGN_FILE", "PREDECLARED_CAMPAIGN_PULLBACK_01.json")
 DECL = json.loads((HERE / CAMPAIGN_FILE).read_text(encoding="utf-8"))
 RUN = HERE / DECL.get("run_dir", "runs/run_01")
 REGISTRY = HERE / DECL["experiment"].get("registry_db_relative_path", str(Path(DECL.get("run_dir", "runs/run_01")) / "registry" / "research.sqlite3"))
