@@ -2,12 +2,14 @@ use crate::sizing::TargetSizing;
 use crate::{PluginRegistry, RegistryError, Strategy};
 use mqk_execution::AssetClass;
 
+pub mod dual_sma_50_200_trend;
 pub mod intraday_scalper;
 pub mod mean_reversion;
 pub mod swing_momentum;
 pub mod trend_sma50;
 pub mod volatility_breakout;
 
+pub use dual_sma_50_200_trend::DualSma50200TrendStrategy;
 pub use intraday_scalper::{
     compute_diagnostics as intraday_scalper_compute_diagnostics, IntradayScalperDiagnostics,
     IntradayScalperStrategy,
@@ -20,7 +22,8 @@ pub use volatility_breakout::VolatilityBreakoutStrategy;
 /// IR9: the single authoritative list of every strategy identity
 /// [`register_builtin_strategies`] registers, in registration order. Five
 /// engine *implementations* (`swing_momentum`, `mean_reversion`,
-/// `volatility_breakout`, `intraday_scalper`, `trend_sma50`) back six registered strategy
+/// `volatility_breakout`, `intraday_scalper`, `trend_sma50`,
+/// `dual_sma_50_200_trend`) back seven registered strategy
 /// *identities* — `intraday_scalper`'s short-only variant
 /// (`intraday_short_scalper`) is a distinct registered identity sharing the
 /// same engine implementation. Any bound or guard elsewhere in the
@@ -37,6 +40,7 @@ pub const REGISTERED_STRATEGY_IDS: &[&str] = &[
     volatility_breakout::NAME,
     intraday_scalper::NAME,
     trend_sma50::NAME,
+    dual_sma_50_200_trend::NAME,
     intraday_scalper::SHORT_NAME,
 ];
 
@@ -76,6 +80,11 @@ pub fn register_builtin_strategies(
     let trend_symbol = symbol.clone();
     registry.register(trend_sma50::meta(), move || {
         Box::new(TrendSma50Strategy::new(trend_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let dual_symbol = symbol.clone();
+    registry.register(dual_sma_50_200_trend::meta(), move || {
+        Box::new(DualSma50200TrendStrategy::new(dual_symbol.clone())) as Box<dyn Strategy>
     })?;
 
     // SHORT-SIDE-PARALLEL-STRATEGY-DRY-RUN-01: register the short-only variant
@@ -162,6 +171,11 @@ fn register_with_sizing(
         registry.register(trend_sma50::meta(), move || {
             Box::new(TrendSma50Strategy::new(trend_symbol.clone())) as Box<dyn Strategy>
         })?;
+
+        let dual_symbol = symbol.clone();
+        registry.register(dual_sma_50_200_trend::meta(), move || {
+            Box::new(DualSma50200TrendStrategy::new(dual_symbol.clone())) as Box<dyn Strategy>
+        })?;
     }
 
     let scalp_symbol = symbol.clone();
@@ -211,7 +225,7 @@ mod registered_strategy_ids_tests {
     }
 
     #[test]
-    fn registered_strategy_ids_has_six_distinct_entries() {
+    fn registered_strategy_ids_has_seven_distinct_entries() {
         let mut unique = REGISTERED_STRATEGY_IDS.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -220,7 +234,7 @@ mod registered_strategy_ids_tests {
             REGISTERED_STRATEGY_IDS.len(),
             "every registered strategy identity must be distinct"
         );
-        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 6);
+        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 7);
     }
 
     #[test]

@@ -176,7 +176,7 @@ enum BacktestCmd {
         bars: String,
 
         /// Strategy name to run (see `mqk backtest list-strategies`).
-        /// Available: swing_momentum, mean_reversion, volatility_breakout, intraday_scalper, trend_sma50.
+        /// Available: swing_momentum, mean_reversion, volatility_breakout, intraday_scalper, trend_sma50, dual_sma_50_200_trend.
         #[arg(long, default_value = "swing_momentum")]
         strategy: String,
 
