@@ -220,7 +220,7 @@ mod tests {
     /// flat through the flat segment and long from the step bar onward.
     fn flat_then_step() -> Vec<BacktestBar> {
         let mut closes = vec![100_000_000; 60];
-        closes.extend(std::iter::repeat(120_000_000).take(10));
+        closes.extend([120_000_000_i64; 10]);
         series(&closes)
     }
 
