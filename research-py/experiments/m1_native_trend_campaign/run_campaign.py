@@ -23,8 +23,9 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "research-py" / "src"))
 
-DECL = json.loads((HERE / "PREDECLARED_CAMPAIGN.json").read_text(encoding="utf-8"))
-RUN = HERE / "runs" / "run_01"
+CAMPAIGN_FILE = os.environ.get("M1_CAMPAIGN_FILE", "PREDECLARED_CAMPAIGN_02.json")
+DECL = json.loads((HERE / CAMPAIGN_FILE).read_text(encoding="utf-8"))
+RUN = HERE / DECL.get("run_dir", "runs/run_01")
 REGISTRY = RUN / "registry" / "research.sqlite3"
 EXPERIMENT = DECL["experiment"]["real_experiment_id"]
 HYPOTHESIS = DECL["hypothesis"]["hypothesis_id"]
@@ -69,6 +70,23 @@ def _load_alpaca_env() -> None:
 def stage_check(_args) -> None:
     assert len(SYMBOLS) == DECL["universe"]["max_trials"] == 5
     print(f"campaign={DECL['campaign_id']} symbols={SYMBOLS} strategy={STRATEGY} cli_present={CLI.exists()}")
+
+
+def stage_reuse_data(_args) -> None:
+    """Byte-identical reuse of a previously fetched, provenance-verified bars set."""
+    import shutil
+    from mqk_research.ml.util_hash import sha256_file
+    src = HERE / DECL["data"]["reuse_verified_data_from"]["run_dir"]
+    manifest = json.loads((src / "research_bars_provenance.json").read_text(encoding="utf-8"))
+    csv_path = src / "research_bars.csv"
+    rows = len(pd.read_csv(csv_path))
+    if sha256_file(csv_path) != manifest["artifact_sha256"] or rows != manifest["row_count"]:
+        raise SystemExit("fail-closed: source bars do not match their provenance manifest")
+    (RUN / "data").mkdir(parents=True, exist_ok=True)
+    for name in ("research_bars.csv", "research_bars_provenance.json", "corporate_actions.json",
+                 "corporate_actions_provenance.json"):
+        shutil.copyfile(src / name, RUN / "data" / name)
+    print("reused", rows, "rows", manifest["artifact_sha256"][:12])
 
 
 def stage_fetch(args) -> None:
@@ -218,7 +236,7 @@ def stage_summary(_args) -> None:
     print(INDEX.read_text(encoding="utf-8"))
 
 
-STAGES = {"check": stage_check, "fetch": stage_fetch, "trials": stage_trials, "judge": stage_judge,
+STAGES = {"check": stage_check, "fetch": stage_fetch, "reuse_data": stage_reuse_data, "trials": stage_trials, "judge": stage_judge,
           "backtest": stage_backtest, "finalize": stage_finalize, "review": stage_review, "summary": stage_summary}
 
 

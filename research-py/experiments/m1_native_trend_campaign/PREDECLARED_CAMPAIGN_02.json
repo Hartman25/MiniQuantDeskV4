@@ -1,0 +1,237 @@
+{
+  "campaign_id": "M1-NATIVE-TREND-CAMPAIGN-02",
+  "mission_id": "V4-M1-NATIVE-RESEARCH-PROMOTION-BRIDGE-01",
+  "frozen_before_any_result": true,
+  "predeclared_utc_date": "2026-10-01",
+  "wave_classification": "NEW_NATIVE_DEPLOYABLE_CANDIDATE_CAMPAIGN_FIXED_SYMBOL_LIST",
+  "protocol_note": "Candidates are evaluated through the existing registered economic_walk_forward_v1 protocol. The decision stream is emitted by the real native Rust strategy (mqk backtest native-signals); no trading rule is re-implemented in Python. Hypothesis != trial != attempt != evaluation slice: one hypothesis, one trial per fixed symbol, retries are new attempts of the same trial.",
+  "hypothesis": {
+    "hypothesis_id": "m1_trend_sma50_gtaa5_v1",
+    "name": "Long-only daily trend filter on a fixed five-asset-class ETF list",
+    "economic_rationale": "Prices that trade above their own trailing average tend to persist (trend/time-series momentum), so holding the asset only while its last completed close exceeds its trailing 50-day mean should reduce exposure during sustained drawdowns relative to passive holding, at the cost of lagging in uninterrupted rallies.",
+    "primary_references": [
+      "Brock, Lakonishok & LeBaron (1992), 'Simple Technical Trading Rules and the Stochastic Properties of Stock Returns', Journal of Finance 47(5):1731-1764",
+      "Faber (2007), 'A Quantitative Approach to Tactical Asset Allocation', Journal of Wealth Management 9(4):69-79",
+      "Moskowitz, Ooi & Pedersen (2012), 'Time Series Momentum', Journal of Financial Economics 104(2):228-250"
+    ],
+    "direction": "long_only_flat",
+    "falsification_condition": "A symbol's candidate is REJECTED if it fails any gate listed under rejection_gates. The campaign is rejected as a whole if no candidate clears every gate."
+  },
+  "native_engine": {
+    "strategy_id": "trend_sma50",
+    "source": "core-rs/crates/mqk-strategy/src/engines/trend_sma50.rs",
+    "timeframe_secs": 86400,
+    "lookback_closes": 50,
+    "lookback_rationale": "50 is the shortest window of Brock et al. (1992)'s canonical set and equals the backtest engine's default bar_history_len, so Backtest and Paper evaluate the same decision. It is fixed here and was not tuned; no other lookback is evaluated in this campaign.",
+    "rule": "target = +1 share if the last completed close is strictly above the integer mean of the trailing 50 completed closes (including itself), else 0",
+    "fixed_one_share_signal": true
+  },
+  "universe": {
+    "selection_rule": "The five asset-class proxies of Faber (2007)'s GTAA list that exist as enabled ETFs in config/instruments/equities.json: US equities, foreign developed equities, 10-year Treasuries, US real estate, commodities. DBC/GSCI is not in the registry; GLD is the registry's commodity proxy.",
+    "symbols": [
+      "EFA",
+      "GLD",
+      "IEF",
+      "SPY",
+      "VNQ"
+    ],
+    "symbol_roles": {
+      "SPY": "US equities",
+      "EFA": "foreign developed equities",
+      "IEF": "10-year Treasuries",
+      "VNQ": "US real estate",
+      "GLD": "commodities proxy"
+    },
+    "universe_mode": "fixed_ex_ante",
+    "point_in_time_membership": false,
+    "survivorship_note": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean. Each symbol is its own registered trial and the judge deflates over all five, so selection among them is accounted for; residual survivorship of the list itself is a stated limitation.",
+    "max_trials": 5,
+    "additional_candidate_after_predeclaration": "forbidden"
+  },
+  "experiment": {
+    "real_experiment_id": "M1-NATIVE-TREND-CAMPAIGN-02-REAL",
+    "registry_db_relative_path": "runs/run_02/registry/research.sqlite3",
+    "trial_per_symbol": true,
+    "judge_scope": "whole experiment (all five trials), never a subset"
+  },
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "adjustment": "all",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2026-09-01T00:00:00Z",
+    "asof": "2026-10-01",
+    "fallback_if_corporate_action_gate_refuses": {
+      "end_utc": "2025-05-01T00:00:00Z",
+      "note": "Boundary already established as corporate-action-safe by prior campaigns. Used only if the fail-closed gate refuses the primary window; declared now, before any result."
+    },
+    "completed_bars_only": true,
+    "reuse_verified_data_from": {
+      "run_dir": "runs/run_01/data",
+      "rule": "byte-identical reuse after verifying the provenance manifest artifact_sha256 and row_count against the CSV; no new provider call"
+    }
+  },
+  "partition": {
+    "evaluation_start_utc": "2016-03-01T00:00:00Z",
+    "test_months": 12,
+    "holdout_months": 6,
+    "expected_folds": 10,
+    "holdout_rule": "last 6 calendar months of the dataset, reserved_not_evaluated, never consumed by this campaign",
+    "warmup_note": "Signals before 50 completed closes exist are flat by construction."
+  },
+  "economic_protocol": {
+    "protocol_id": "economic_walk_forward_v1",
+    "signal_policy": {
+      "direction_policy": "long_only_v1",
+      "entry_threshold": 0.5,
+      "long_only": true,
+      "max_gross_exposure": 1.0
+    },
+    "cost_model": {
+      "commission_bps_per_side": 10.0,
+      "slippage_bps_per_side": 0.0
+    },
+    "execution_pricing": {
+      "pricing_model_id": "rust_conservative_bar_range_v1",
+      "slippage_bps": 5,
+      "volatility_mult_bps": 0
+    },
+    "weight_to_share": {
+      "equity_usd": 100000.0,
+      "max_position_notional_usd": 90000.0
+    },
+    "annualization": {
+      "annualization_days": 252,
+      "risk_free_rate_annual": 0.0
+    }
+  },
+  "native_backtest": {
+    "initial_cash_micros": 1000000000,
+    "initial_cash_rule": "USD 1,000 for every symbol, fixed now; one share of every listed symbol costs less than this over the whole window",
+    "timeframe_secs": 86400,
+    "integrity_calendar": "us-equity-regular",
+    "bars": "the same provenance-bound research bars converted deterministically, truncated at the holdout start",
+    "evidence_root_layout": "runs/run_01/backtest/<symbol>"
+  },
+  "robustness": {
+    "block_counts": [
+      8,
+      10,
+      12
+    ],
+    "dsr_max_sensitivity_range": 0.15,
+    "pbo_max_sensitivity_range": 0.15,
+    "p7a_p7b_stress": {
+      "stress_execution_slippage_bps": 15,
+      "stress_execution_volatility_mult_bps": 10,
+      "stress_max_position_notional_usd": 50000.0,
+      "max_drawdown_ceiling": 0.4
+    },
+    "source_note": "Reuses the finite values the Wave06 campaign already froze before its results; the notional cap is half the single-symbol long-only natural position (equity_usd x max_gross_exposure = 100,000)."
+  },
+  "scanner_review": {
+    "policy": "mqk_backtest::StrategyScanReviewPolicy::default (min_bars 252, min_trades 5, min_return_pct 0, min_alpha_pct 0, max_drawdown_pct 25, min_profit_factor 1.05) -- unchanged",
+    "data": "the same discovery-only converted bars (truncated at the holdout start), one registry/bars root per campaign run"
+  },
+  "promotion_policy": {
+    "note": "No canonical production threshold values exist in the deployed configuration. These are fixed now, before any result, and are supplied to the daemon only for the promotion transition.",
+    "MQK_PROMOTION_MIN_SHARPE": 0.5,
+    "MQK_PROMOTION_MAX_MDD": 0.25,
+    "MQK_PROMOTION_MIN_CAGR": 0.0,
+    "MQK_PROMOTION_MIN_PROFIT_FACTOR": 1.05,
+    "MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT": 0.4,
+    "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO": 0.5,
+    "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING": 0.5,
+    "MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING": 1
+  },
+  "rejection_gates": [
+    "economic evaluation fails or is insolvent",
+    "judge not evaluable (DSR/PBO) or DSR below promotion_policy minimum or PBO above maximum",
+    "any required robustness scenario fails or is not evaluable (canonical P9 gauntlet, genuine shuffled placebo, P7A/P7B stress, DSR/PBO block-count sensitivity)",
+    "native stress suite fails",
+    "scanner review is not paper_candidate",
+    "any promotion_policy threshold fails in canonical evaluate_promotion"
+  ],
+  "stopping_rule": {
+    "run_once": true,
+    "no_retuning_on_failure": true,
+    "no_additional_symbols": true,
+    "no_additional_lookbacks": true,
+    "no_holdout_consumption": true,
+    "if_no_candidate_clears_every_gate": "record REJECTED and stop; a new economic hypothesis needs a new operator decision",
+    "this_is_the_final_run_for_this_hypothesis_family": true,
+    "no_further_amendment": "forbidden: no campaign 03, no further change to any field above"
+  },
+  "attempt_identity_rules": "A retry after an infrastructure failure is a new attempt of the SAME trial_id. trial_id derives from strategy_id, symbol, native semantic fingerprint, bars provenance, partition policy and economic protocol only.",
+  "forbidden_after_predeclaration": [
+    "changing the symbol list, lookback, partition, costs or thresholds after seeing any result",
+    "registering only winning trials",
+    "defining identity from a result value",
+    "consuming the reserved holdout",
+    "promoting any candidate by hand or outside the production transition route"
+  ],
+  "amends_campaign": "M1-NATIVE-TREND-CAMPAIGN-01",
+  "run_dir": "runs/run_02",
+  "execution_fidelity": {
+    "floor": 0.95,
+    "metric": "fraction of evaluated bars on which the simulated discrete share position (held before that bar's order) agrees, long vs flat, with the executed desired weight; positions only, never P&L",
+    "enforced_by": "mqk_research.ml.native_signal_registry_integration.NATIVE_EXECUTION_FIDELITY_FLOOR; an attempt below the floor is finalized failed and kept"
+  },
+  "amendment": {
+    "status": "IMPLEMENTABILITY_DEFECT_CORRECTION_NOT_A_RETUNE",
+    "voided_run": {
+      "campaign_id": "M1-NATIVE-TREND-CAMPAIGN-01",
+      "run_dir": "runs/run_01",
+      "disposition": "INVALID_FOR_STATED_HYPOTHESIS: preserved unchanged on disk and in its registry; its trials stay registered and visible; its numbers are never combined with this campaign's",
+      "reason": "The economic engine rejects a fill whose notional exceeds the allocation cap at the conservative fill price. Campaign 01 sized one fully weighted symbol exactly at that cap, so most entries were rejected and the simulated position did not follow the strategy.",
+      "outcome_free_evidence": {
+        "metric": "discrete long bars held vs desired long bars (positions only)",
+        "EFA": {
+          "desired_long_bars": 1662,
+          "discrete_long_bars": 275,
+          "agreement": 0.448
+        },
+        "GLD": {
+          "desired_long_bars": 1491,
+          "discrete_long_bars": 54,
+          "agreement": 0.428
+        },
+        "IEF": {
+          "desired_long_bars": 1342,
+          "discrete_long_bars": 12,
+          "agreement": 0.471
+        },
+        "SPY": {
+          "desired_long_bars": 1850,
+          "discrete_long_bars": 38,
+          "agreement": 0.279
+        },
+        "VNQ": {
+          "desired_long_bars": 1594,
+          "discrete_long_bars": 10,
+          "agreement": 0.37
+        }
+      },
+      "independent_signal_check": "the emitted SPY stream agreed 100% with an independent pandas computation of the same rule, so the signal was correct and the defect was in position implementation"
+    },
+    "changed_fields": {
+      "economic_protocol.weight_to_share.max_position_notional_usd": "null -> 90000.0 (10% allocation headroom for fill-price drift and slippage; fixed mechanically before any campaign-02 result, not derived from any return)",
+      "execution_fidelity": "new fixed implementability gate, floor 0.95",
+      "experiment.real_experiment_id": "new experiment id; new trial identities because the economic protocol identity changed"
+    },
+    "unchanged": [
+      "hypothesis",
+      "native engine and lookback 50",
+      "five symbols",
+      "data window and provenance",
+      "partition and holdout",
+      "cost model",
+      "execution pricing",
+      "robustness parameters",
+      "promotion policy thresholds",
+      "scanner review policy"
+    ],
+    "trial_count_disclosure": "Ten trials in total are tested on this hypothesis family: five voided (campaign 01) and five here. The judge deflates over this campaign's five only; this disclosure is the record of the other five."
+  }
+}

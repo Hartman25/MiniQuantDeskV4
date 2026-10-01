@@ -8,7 +8,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-DECL = json.loads((HERE / "PREDECLARED_CAMPAIGN.json").read_text(encoding="utf-8"))
+import pytest
+
+CAMPAIGN_FILES = ["PREDECLARED_CAMPAIGN.json", "PREDECLARED_CAMPAIGN_02.json"]
+DECL = json.loads((HERE / "PREDECLARED_CAMPAIGN_02.json").read_text(encoding="utf-8"))
+V1 = json.loads((HERE / "PREDECLARED_CAMPAIGN.json").read_text(encoding="utf-8"))
 ENGINE_SRC = (REPO / "core-rs/crates/mqk-strategy/src/engines/trend_sma50.rs").read_text(encoding="utf-8")
 
 
@@ -54,7 +58,29 @@ def test_thresholds_are_present_and_in_range():
     assert pol["MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING"] == 1
 
 
-def test_no_result_values_in_the_predeclaration():
-    text = json.dumps(DECL).lower()
+@pytest.mark.parametrize("name", CAMPAIGN_FILES)
+def test_no_result_values_in_the_predeclaration(name):
+    text = json.dumps(json.loads((HERE / name).read_text(encoding="utf-8"))).lower()
     for banned in ("net_total_return", "net_sharpe", "total_return_pct", "dsr_result", "\"run_id\"", "economic_eval_id"):
+        assert banned not in text
+
+
+def test_campaign_02_amends_exactly_the_declared_fields_and_nothing_else():
+    a, b = V1, DECL
+    assert b["amends_campaign"] == a["campaign_id"]
+    for key in ("hypothesis", "native_engine", "universe", "partition", "robustness", "promotion_policy",
+                "scanner_review", "native_backtest", "rejection_gates"):
+        assert a[key] == b[key], key
+    assert a["data"] == {k: v for k, v in b["data"].items() if k != "reuse_verified_data_from"}
+    assert b["economic_protocol"]["weight_to_share"]["max_position_notional_usd"] == 90000.0
+    for key in ("signal_policy", "cost_model", "execution_pricing", "annualization"):
+        assert a["economic_protocol"][key] == b["economic_protocol"][key], key
+    assert b["experiment"]["real_experiment_id"] != a["experiment"]["real_experiment_id"]
+    assert b["execution_fidelity"]["floor"] == 0.95
+    assert b["stopping_rule"]["this_is_the_final_run_for_this_hypothesis_family"] is True
+
+
+def test_voiding_evidence_contains_no_return_values():
+    text = json.dumps(DECL["amendment"]).lower()
+    for banned in ("net_total_return", "net_sharpe", "total_return", "sharpe", "dsr", "drawdown"):
         assert banned not in text
