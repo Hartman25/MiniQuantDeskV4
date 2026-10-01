@@ -1,0 +1,376 @@
+{
+  "batch_id": "m1_native_hypothesis_batch_01",
+  "mission_id": "V4-M1-NATIVE-HYPOTHESIS-BATCH-01",
+  "predeclared_utc_date": "2026-10-01",
+  "wave_classification": "MULTI_HYPOTHESIS_NATIVE_DEPLOYABLE_CANDIDATE_BATCH_FIXED_SYMBOL_LIST",
+  "run_dir": "runs/run_batch_01",
+  "protocol_note": "Three new, mutually distinct long/flat daily ETF hypotheses are evaluated as ONE batch through the existing registered economic_walk_forward_v1 protocol. The decision stream of every trial is emitted by the real native Rust strategy (mqk backtest native-signals); no trading rule is re-implemented in Python. Hypothesis != trial != attempt != evaluation slice: three hypotheses, one trial per (hypothesis, symbol) = 15 trials, retries after infrastructure failure are new attempts of the same trial.",
+  "hypotheses": [
+    {
+      "hypothesis_id": "m1_batch01_absolute_momentum_252_v1",
+      "hypothesis_label": "H1",
+      "strategy_id": "absolute_momentum_252",
+      "economic_rationale": "A liquid ETF whose latest completed close exceeds its close exactly 252 completed trading bars earlier has positive trailing one-year price momentum, which tends to continue enough to justify long exposure after conservative costs; otherwise the strategy is flat.",
+      "primary_references": [
+        "Moskowitz, Ooi and Pedersen (2012), 'Time Series Momentum', Journal of Financial Economics 104(2):228-250",
+        "Jegadeesh and Titman (1993), 'Returns to Buying Winners and Selling Losers', Journal of Finance 48(1):65-91"
+      ],
+      "timeframe_secs": 86400,
+      "required_history_bars": 253,
+      "direction": "long_only_flat",
+      "rule": "For the latest completed bar t with completed closes c: reference = the close exactly 252 completed bars before t. TARGET +1 share iff c_t > reference (strict); otherwise 0. Equality is flat. Never short.",
+      "exact_integer_form": "long iff close_micros[t] > close_micros[t-252]; i64 comparison, no division",
+      "special_cases": {
+        "fewer_than_253_completed_bars": "FLAT",
+        "incomplete_latest_bar": "FLAT (an incomplete bar cannot create an action)",
+        "incomplete_or_non_positive_close_anywhere_in_the_latest_253_bar_window": "fail closed: FLAT"
+      },
+      "state": "stateless: a pure function of the latest 253 completed bars",
+      "forbidden_additions": [
+        "stop",
+        "alternate momentum horizon",
+        "confirmation rule",
+        "volatility filter",
+        "SMA filter",
+        "short side",
+        "any additional parameter"
+      ]
+    },
+    {
+      "hypothesis_id": "m1_batch01_near_high_momentum_252_3pct_v1",
+      "hypothesis_label": "H2",
+      "strategy_id": "near_high_momentum_252_3pct",
+      "economic_rationale": "Liquid ETFs that trade within 3 percent of their trailing 252-day closing high while remaining above their 50-day mean exhibit persistent momentum; otherwise the strategy is flat.",
+      "primary_references": [
+        "George and Hwang (2004), 'The 52-Week High and Momentum Investing', Journal of Finance 59(5):2145-2176"
+      ],
+      "timeframe_secs": 86400,
+      "required_history_bars": 252,
+      "direction": "long_only_flat",
+      "rule": "high252 = the maximum close over the latest 252 completed closes (including t); sum50 = the sum of the latest 50 completed closes (including t). TARGET +1 share iff BOTH 100*c_t >= 97*high252 (equality included) AND 50*c_t > sum50 (strict); otherwise 0. Never short.",
+      "exact_integer_form": "long iff 100*c >= 97*high252 and 50*c > sum50; i128 over integer micros, no division",
+      "special_cases": {
+        "fewer_than_252_completed_bars": "FLAT",
+        "incomplete_latest_bar": "FLAT",
+        "incomplete_or_non_positive_close_anywhere_in_the_latest_252_bar_window": "fail closed: FLAT"
+      },
+      "state": "stateless: a pure function of the latest 252 completed bars",
+      "forbidden_additions": [
+        "other proximity band",
+        "other lookback",
+        "exit hysteresis",
+        "stop",
+        "short side",
+        "any additional parameter"
+      ]
+    },
+    {
+      "hypothesis_id": "m1_batch01_trend_pullback_5d_4pct_hold5_v1",
+      "hypothesis_label": "H3",
+      "strategy_id": "trend_pullback_5d_4pct_hold5",
+      "economic_rationale": "A sharp five-session pullback that occurs while a liquid ETF remains in a long-term uptrend tends to mean-revert over the following several sessions; the long target persists for the five evaluation bars that follow an entry event, with no hidden mutable state.",
+      "primary_references": [
+        "Jegadeesh (1990), 'Evidence of Predictable Behavior of Security Returns', Journal of Finance 45(3):881-898",
+        "Lehmann (1990), 'Fads, Martingales, and Market Efficiency', Quarterly Journal of Economics 105(1):1-28"
+      ],
+      "timeframe_secs": 86400,
+      "required_history_bars": 204,
+      "required_history_derivation": "an entry event on bar j needs the 200 completed closes ending at j and close[j-5]; the target at t inspects j in {t-4..t}; the oldest event bar t-4 therefore needs 200 closes ending at t-4, i.e. 204 completed closes ending at t",
+      "direction": "long_only_flat",
+      "rule": "ENTRY EVENT on completed bar j iff BOTH 200*c_j > sum of the 200 completed closes ending at j (strict) AND 100*c_j <= 96*c_{j-5} (equality included; at least a 4 percent decline from the close five completed bars earlier). TARGET at t = +1 share iff at least one valid ENTRY EVENT occurred on any of the five completed bars t, t-1, t-2, t-3, t-4; otherwise 0. Overlapping events extend the target exactly by this rule. Never short.",
+      "exact_integer_form": "event(j) iff 200*c_j > sum200(j) and 100*c_j <= 96*c_{j-5}; i128 over integer micros, no division",
+      "special_cases": {
+        "fewer_than_204_completed_bars": "FLAT",
+        "incomplete_latest_bar": "FLAT",
+        "incomplete_or_non_positive_close_anywhere_in_the_latest_204_bar_window": "fail closed: FLAT"
+      },
+      "state": "stateless and restart-reconstructible: a pure function of the latest 204 completed bars; a fresh instance and a long-running instance produce the same target",
+      "forbidden_additions": [
+        "stop loss",
+        "profit target",
+        "other percentage",
+        "other trend lookback",
+        "adaptive holding period",
+        "short side",
+        "any additional parameter"
+      ]
+    }
+  ],
+  "universe": {
+    "selection_rule": "The five asset-class proxies of Faber (2007)'s GTAA list that exist as enabled ETFs in config/instruments/equities.json: US equities, foreign developed equities, 10-year Treasuries, US real estate, commodities. DBC/GSCI is not in the registry; GLD is the registry's commodity proxy.",
+    "symbols": [
+      "EFA",
+      "GLD",
+      "IEF",
+      "SPY",
+      "VNQ"
+    ],
+    "symbol_roles": {
+      "SPY": "US equities",
+      "EFA": "foreign developed equities",
+      "IEF": "10-year Treasuries",
+      "VNQ": "US real estate",
+      "GLD": "commodities proxy"
+    },
+    "universe_mode": "fixed_ex_ante",
+    "point_in_time_membership": false,
+    "survivorship_note": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean. Each symbol is its own registered trial and the judge deflates over all five, so selection among them is accounted for; residual survivorship of the list itself is a stated limitation.",
+    "max_trials": 15,
+    "additional_candidate_after_predeclaration": "forbidden",
+    "population_note": "Same fixed list as the four closed families. Their trial attempts live in their own experiment ids and registries (intraday_scalper, trend_sma50, dual_sma_50_200_trend, pullback_mean_reversion_20_2); they are disclosed by name here and are not merged into this batch's registry, which would not be the canonical scope rule (scope = experiment_id).",
+    "trials": [
+      {
+        "order": 1,
+        "hypothesis_label": "H1",
+        "strategy_id": "absolute_momentum_252",
+        "symbol": "SPY"
+      },
+      {
+        "order": 2,
+        "hypothesis_label": "H1",
+        "strategy_id": "absolute_momentum_252",
+        "symbol": "EFA"
+      },
+      {
+        "order": 3,
+        "hypothesis_label": "H1",
+        "strategy_id": "absolute_momentum_252",
+        "symbol": "IEF"
+      },
+      {
+        "order": 4,
+        "hypothesis_label": "H1",
+        "strategy_id": "absolute_momentum_252",
+        "symbol": "VNQ"
+      },
+      {
+        "order": 5,
+        "hypothesis_label": "H1",
+        "strategy_id": "absolute_momentum_252",
+        "symbol": "GLD"
+      },
+      {
+        "order": 6,
+        "hypothesis_label": "H2",
+        "strategy_id": "near_high_momentum_252_3pct",
+        "symbol": "SPY"
+      },
+      {
+        "order": 7,
+        "hypothesis_label": "H2",
+        "strategy_id": "near_high_momentum_252_3pct",
+        "symbol": "EFA"
+      },
+      {
+        "order": 8,
+        "hypothesis_label": "H2",
+        "strategy_id": "near_high_momentum_252_3pct",
+        "symbol": "IEF"
+      },
+      {
+        "order": 9,
+        "hypothesis_label": "H2",
+        "strategy_id": "near_high_momentum_252_3pct",
+        "symbol": "VNQ"
+      },
+      {
+        "order": 10,
+        "hypothesis_label": "H2",
+        "strategy_id": "near_high_momentum_252_3pct",
+        "symbol": "GLD"
+      },
+      {
+        "order": 11,
+        "hypothesis_label": "H3",
+        "strategy_id": "trend_pullback_5d_4pct_hold5",
+        "symbol": "SPY"
+      },
+      {
+        "order": 12,
+        "hypothesis_label": "H3",
+        "strategy_id": "trend_pullback_5d_4pct_hold5",
+        "symbol": "EFA"
+      },
+      {
+        "order": 13,
+        "hypothesis_label": "H3",
+        "strategy_id": "trend_pullback_5d_4pct_hold5",
+        "symbol": "IEF"
+      },
+      {
+        "order": 14,
+        "hypothesis_label": "H3",
+        "strategy_id": "trend_pullback_5d_4pct_hold5",
+        "symbol": "VNQ"
+      },
+      {
+        "order": 15,
+        "hypothesis_label": "H3",
+        "strategy_id": "trend_pullback_5d_4pct_hold5",
+        "symbol": "GLD"
+      }
+    ],
+    "trial_order_rule": "frozen: H1, H2, H3; within each, SPY, EFA, IEF, VNQ, GLD"
+  },
+  "experiment": {
+    "real_experiment_id": "M1-NATIVE-HYPOTHESIS-BATCH-01-REAL",
+    "registry_db_relative_path": "runs/run_batch_01/registry/research.sqlite3",
+    "trial_per_hypothesis_symbol": true,
+    "population_policy": "ONE experiment id holds the three hypotheses and all fifteen trials. The multiple-testing judge scope is the experiment id with hypothesis_id unset, so every trial of every hypothesis is in one selection population; its comparison key excludes strategy and hypothesis identity, so all fifteen share one comparison scope. No per-hypothesis judge is used for selection; losing and failed trials are never excluded by hand.",
+    "judge_scope": "whole experiment, never a subset",
+    "all_fifteen_trials_registered_before_first_economic_evaluation": true
+  },
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "adjustment": "all",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2026-09-01T00:00:00Z",
+    "asof": "2026-10-01",
+    "fallback_if_corporate_action_gate_refuses": {
+      "end_utc": "2025-05-01T00:00:00Z",
+      "note": "Boundary already established as corporate-action-safe by prior campaigns. Used only if the fail-closed gate refuses the primary window; declared now, before any result."
+    },
+    "completed_bars_only": true,
+    "reuse_verified_data_from": {
+      "run_dir": "runs/run_01/data",
+      "rule": "byte-identical reuse after verifying the provenance manifest artifact_sha256 and row_count against the CSV; no new provider call"
+    }
+  },
+  "partition": {
+    "evaluation_start_utc": "2016-03-01T00:00:00Z",
+    "test_months": 12,
+    "holdout_months": 6,
+    "expected_folds": 10,
+    "holdout_rule": "last 6 calendar months of the dataset, reserved_not_evaluated, never consumed by this campaign",
+    "warmup_note": "The partition is carried over unchanged from the closed campaigns. The Rust emitter receives bars from 2016-01-04; the 252/253/204-bar warm-ups end during 2016-2017, so the early part of fold 1 is structurally flat for the affected engines."
+  },
+  "economic_protocol": {
+    "protocol_id": "economic_walk_forward_v1",
+    "signal_policy": {
+      "direction_policy": "long_only_v1",
+      "entry_threshold": 0.5,
+      "long_only": true,
+      "max_gross_exposure": 1.0
+    },
+    "cost_model": {
+      "commission_bps_per_side": 10.0,
+      "slippage_bps_per_side": 0.0
+    },
+    "execution_pricing": {
+      "pricing_model_id": "rust_conservative_bar_range_v1",
+      "slippage_bps": 5,
+      "volatility_mult_bps": 0
+    },
+    "weight_to_share": {
+      "equity_usd": 100000.0,
+      "max_position_notional_usd": 50000.0
+    },
+    "annualization": {
+      "annualization_days": 252,
+      "risk_free_rate_annual": 0.0
+    }
+  },
+  "native_backtest": {
+    "initial_cash_micros": 1000000000,
+    "initial_cash_rule": "USD 1,000 for every symbol, fixed now; one share of every listed symbol costs less than this over the whole window",
+    "timeframe_secs": 86400,
+    "integrity_calendar": "us-equity-regular",
+    "bars": "the same provenance-bound research bars converted deterministically, truncated at the holdout start",
+    "evidence_root_layout": "runs/run_batch_01/backtest/<strategy_id>/<symbol>"
+  },
+  "robustness": {
+    "block_counts": [
+      8,
+      10,
+      12
+    ],
+    "dsr_max_sensitivity_range": 0.15,
+    "pbo_max_sensitivity_range": 0.15,
+    "p7a_p7b_stress": {
+      "stress_execution_slippage_bps": 15,
+      "stress_execution_volatility_mult_bps": 10,
+      "stress_max_position_notional_usd": 25000.0,
+      "max_drawdown_ceiling": 0.4
+    },
+    "source_note": "Reuses the finite values the Wave06 campaign already froze before its results; the notional cap is half the single-symbol long-only natural position (equity_usd x max_gross_exposure = 100,000)."
+  },
+  "scanner_review": {
+    "policy": "mqk_backtest::StrategyScanReviewPolicy::default (min_bars 252, min_trades 5, min_return_pct 0, min_alpha_pct 0, max_drawdown_pct 25, min_profit_factor 1.05) -- unchanged",
+    "data": "the same discovery-only converted bars (truncated at the holdout start), one registry/bars root per campaign run"
+  },
+  "promotion_policy": {
+    "note": "No canonical production threshold values exist in the deployed configuration. These are fixed now, before any result, and are supplied to the daemon only for the promotion transition.",
+    "MQK_PROMOTION_MIN_SHARPE": 0.5,
+    "MQK_PROMOTION_MAX_MDD": 0.25,
+    "MQK_PROMOTION_MIN_CAGR": 0.0,
+    "MQK_PROMOTION_MIN_PROFIT_FACTOR": 1.05,
+    "MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT": 0.4,
+    "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO": 0.5,
+    "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING": 0.5,
+    "MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING": 1
+  },
+  "rejection_gates": [
+    "economic evaluation fails or is insolvent",
+    "judge not evaluable (DSR/PBO) or DSR below promotion_policy minimum or PBO above maximum",
+    "any required robustness scenario fails or is not evaluable (canonical P9 gauntlet, genuine shuffled placebo, P7A/P7B stress, DSR/PBO block-count sensitivity)",
+    "native stress suite fails",
+    "scanner review is not paper_candidate",
+    "any promotion_policy threshold fails in canonical evaluate_promotion"
+  ],
+  "execution_fidelity": {
+    "floor": 0.95,
+    "metric": "fraction of evaluated bars on which the simulated discrete share position (held before that bar's order) agrees, long vs flat, with the executed desired weight; positions only, never P&L",
+    "enforced_by": "mqk_research.ml.native_signal_registry_integration.NATIVE_EXECUTION_FIDELITY_FLOOR; an attempt below the floor is finalized failed and kept"
+  },
+  "sizing_note": "Carried forward unchanged from campaign 03 / the dual-SMA campaign (equity_usd 100000, max_position_notional_usd 50000, stress cap 25000 = half of baseline so P7B stays strictly tighter). It was validated for execution fidelity, not chosen for profitability.",
+  "review_and_promotion_freeze": "scanner_review policy (including the min_alpha_pct 0 versus a fully invested buy-and-hold price return), promotion_policy thresholds, the baseline execution model rust_conservative_bar_range_v1 and the P9 robustness scenarios (including month_year_regime_concentration) are carried over byte-for-byte from the closed campaigns and are not reopened by any observed result.",
+  "selection_authority": {
+    "population": "all fifteen predeclared trials",
+    "eligibility": "a trial is eligible only if it clears every rejection gate in the canonical path",
+    "rule": "among eligible trials select the single trial with the highest judge DSR; ties broken by the lexicographically smallest trial_id",
+    "max_promotions_in_this_batch": 1,
+    "no_manual_selection": true,
+    "selection_made_only_after_all_fifteen_trials_and_the_batch_judge_complete": true
+  },
+  "activity_report": {
+    "gate": false,
+    "descriptive_only": true,
+    "report_per_symbol": [
+      "entries",
+      "exits",
+      "total state transitions",
+      "days long",
+      "percent time invested",
+      "position-agreement ratio",
+      "gross return",
+      "net return",
+      "execution/slippage cost drag"
+    ],
+    "rule": "measured and reported; no threshold is created from these numbers."
+  },
+  "batch_stopping_rule": {
+    "trials": 15,
+    "run_all_fifteen_regardless_of_outcome": true,
+    "no_early_selection": true,
+    "no_h4_or_further_hypothesis": true,
+    "no_parameter_variations": true,
+    "no_second_campaign": true,
+    "no_different_sizes_or_thresholds": true,
+    "no_additional_symbols": true,
+    "no_holdout_consumption": true,
+    "infrastructure_failure": "retry the same attempt/trial identity under the existing contract; an economic failure is finalized failed and never retried",
+    "if_no_trial_clears_every_gate": "record BATCH_REJECTED and stop"
+  },
+  "attempt_identity_rules": "A retry after an infrastructure failure is a new attempt of the SAME trial_id. trial_id derives from strategy_id, symbol, native semantic fingerprint, bars provenance, partition policy and economic protocol only.",
+  "forbidden_after_predeclaration": [
+    "changing the symbol list, any lookback, percentage, partition, costs, sizing, thresholds or review policy after seeing any result",
+    "registering only winning trials",
+    "defining identity from a result value",
+    "consuming the reserved holdout",
+    "promoting any candidate by hand or outside the production transition route",
+    "adding any parameter, stop, filter or confirmation rule",
+    "running a per-hypothesis judge and selecting its best result as if the other hypotheses had not been tested"
+  ]
+}
