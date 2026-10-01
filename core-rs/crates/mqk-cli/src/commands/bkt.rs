@@ -288,6 +288,99 @@ pub async fn run_backtest_csv(
 }
 
 // ---------------------------------------------------------------------------
+// M1 native Research bridge: native strategy signal stream
+// ---------------------------------------------------------------------------
+
+/// Emit the real native strategy's per-bar target stream (see
+/// `mqk_backtest::native_signals`) for one symbol over a backtest bars CSV.
+///
+/// Writes `native_signals.csv` (`symbol,decision_ts,target_qty_micros`) and
+/// `native_signals_meta.json` into `out_dir`; the meta binds the stream to
+/// the strategy semantic fingerprint and the exact bars/stream bytes.
+pub fn run_native_signals(
+    bars_path: String,
+    strategy: String,
+    symbol: String,
+    timeframe_secs: i64,
+    out_dir: String,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    if timeframe_secs <= 0 {
+        anyhow::bail!("--timeframe-secs must be > 0");
+    }
+    let bars_bytes = std::fs::read(&bars_path)
+        .with_context(|| format!("read bars csv failed: {}", bars_path))?;
+    let bars = mqk_backtest::load_csv_file(&bars_path)
+        .with_context(|| format!("load bars csv failed: {}", bars_path))?;
+    if bars.iter().any(|b| b.symbol != symbol) {
+        anyhow::bail!("bars csv contains symbols other than --symbol {}", symbol);
+    }
+
+    let mut cfg = BacktestConfig::conservative_defaults();
+    cfg.timeframe_secs = timeframe_secs;
+    cfg.integrity_enabled = false;
+
+    let mut reg = PluginRegistry::new();
+    register_builtin_strategies_with_sizing(
+        &mut reg,
+        &symbol,
+        cfg.sizing.target_qty,
+        cfg.sizing.max_target_qty,
+        cfg.sizing.max_position_notional_usd,
+    )
+    .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    let strategy_instance = reg
+        .instantiate(&strategy)
+        .with_context(|| format!("unknown strategy '{}'", strategy))?;
+
+    let stream = mqk_backtest::emit_native_signal_stream(cfg, &bars, strategy_instance)
+        .map_err(|e| anyhow::anyhow!("native signal emission failed: {e}"))?;
+
+    let mut csv = String::from(
+        "symbol,decision_ts,target_qty_micros
+",
+    );
+    for row in &stream.rows {
+        csv.push_str(&format!(
+            "{},{},{}
+",
+            stream.symbol, row.decision_ts, row.target_qty_micros
+        ));
+    }
+
+    let out = Path::new(&out_dir);
+    std::fs::create_dir_all(out).with_context(|| format!("create out dir failed: {}", out_dir))?;
+    let csv_path = out.join("native_signals.csv");
+    std::fs::write(&csv_path, csv.as_bytes()).context("write native_signals.csv failed")?;
+
+    let sha = |b: &[u8]| hex::encode(Sha256::digest(b));
+    let meta = serde_json::json!({
+        "protocol_id": mqk_backtest::NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
+        "strategy_name": stream.strategy_name,
+        "semantic_fingerprint": stream.semantic_fingerprint,
+        "symbol": stream.symbol,
+        "timeframe_secs": stream.timeframe_secs,
+        "bar_history_len": stream.bar_history_len,
+        "backtest_run_id": stream.run_id.to_string(),
+        "bars_csv_sha256": sha(&bars_bytes),
+        "signal_rows": stream.rows.len(),
+        "native_signals_csv_sha256": sha(csv.as_bytes()),
+    });
+    std::fs::write(
+        out.join("native_signals_meta.json"),
+        serde_json::to_string_pretty(&meta)?.as_bytes(),
+    )
+    .context("write native_signals_meta.json failed")?;
+
+    println!("strategy={}", stream.strategy_name);
+    println!("semantic_fingerprint={}", stream.semantic_fingerprint);
+    println!("signal_rows={}", stream.rows.len());
+    println!("native_signals_csv={}", csv_path.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Strategy Lab artifact report
 // ---------------------------------------------------------------------------
 

@@ -21,6 +21,7 @@ mod engine;
 pub mod genuine_shuffled_placebo; // P9 BKT-ROBUSTNESS-GAUNTLET-01 / FINAL-P9-ROBUSTNESS-SEMANTICS-01
 pub mod loader;
 pub mod market_frame; // BKT-MULTISYMBOL-MARKET-FRAME-01
+pub mod native_signals; // M1 native Research bridge: native strategy signal stream
 pub mod p7a_p7b_economic_replay_stress; // P9 BKT-ROBUSTNESS-GAUNTLET-01 / P7A-P7B-ECONOMIC-REPLAY-STRESS-01
 pub mod regime;
 pub mod research_replay_strategy; // W06-P9-RUST-REPLAY-STRATEGY-01
@@ -51,6 +52,10 @@ pub use market_frame::{
 pub use p7a_p7b_economic_replay_stress::{
     p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
     P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
+};
+pub use native_signals::{
+    emit_native_signal_stream, NativeSignalError, NativeSignalRow, NativeSignalStream,
+    NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
 };
 pub use regime::{
     detect_market_regime, MarketRegimeClassification, MarketRegimeConfidence, MarketRegimeFeatures,
