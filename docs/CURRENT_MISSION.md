@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -16. M1 Continuation: Deployment Removed, Promotion Path Structurally Blocked (2026-10-01, `V4-M1-PROMOTION-AUTHORITY-AND-PAPER-CLOSURE-01-CONTINUE-01`)
+
+Supersedes the "operator decision needed" bullets of §-15 where they differ. Not pushed.
+
+- **Decision 1 applied.** The only deployed-fleet authority is `MQK_STRATEGY_IDS` in the untracked, gitignored `.env.local`; process/user/machine env, the preopen task action, and `sys_dynamic_selection_plan*` (0 rows) carry none. `MQK_STRATEGY_IDS=intraday_scalper` was commented out (one line, in place). With it unset the native bootstrap is Dormant and start is refused (`routes/system.rs`), so `intraday_scalper`/AAPL/300 cannot run in Paper. The review rejection (`negative_total_return`) and the 41 registry rows are untouched. Re-set `MQK_STRATEGY_IDS` only to an identity holding an `active_paper` promotion.
+- **Decision 2 not executable on the existing machinery (hard stop: contracts conflict).** The promotion transition requires three bound evidence chains: a `paper_candidate` scanner review, a Research OOS trial whose registered `strategy_id` equals the promoted `strategy_id` (`research_evidence_gate.rs`), and a Rust `BacktestReport` whose `strategy_name` and semantic fingerprint equal the server-resolved fingerprint of a native plugin-registry engine (`backtest_evidence_gate.rs`, `strategy_config_identity.rs`). Python Research candidates (pooled classifier-rank families) have no native engine, and a research-replay strategy cannot satisfy the native-fingerprint check, so no Research-registered candidate can become a deployable identity. Separately, the 88-symbol universe is `CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME` and the frozen Wave06 policy caps such studies below `PROMOTION_READY`; no point-in-time universe exists. The only supported native/timeframe pairs (`swing_momentum` 1D, `intraday_scalper` 5m) are already rejected; `mean_reversion`/`volatility_breakout` need 1H data, which is not authorized.
+- **Operator decision needed:** authorize new engineering for a native engine plus a Research evidence path that registers under that same engine id (this is new framework work, not a campaign), or accept M1 as blocked with no deployed Paper identity.
+
+---
+
 ## -15. M1 Promotion-Authority Closure Attempt (2026-10-01, `V4-M1-PROMOTION-AUTHORITY-AND-PAPER-CLOSURE-01`)
 
 Outcome: **M1_BLOCKED, operator decision required.** Not pushed.
