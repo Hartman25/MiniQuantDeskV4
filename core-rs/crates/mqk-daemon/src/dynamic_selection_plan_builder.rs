@@ -141,7 +141,7 @@ pub async fn build_dynamic_selection_plan(
     let mut pending: Vec<PendingCandidate> = Vec::new();
     // Defect F: `true` the moment any one symbol's deduplicated candidate
     // strategy-ID set exceeds `MAX_STRATEGY_UNIVERSE` (which mirrors
-    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s five identities) --
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s six identities) --
     // checked per symbol, independently of the total-pairs bound below,
     // since a single over-loaded symbol can stay under the total while still
     // locally violating this one.
@@ -236,7 +236,7 @@ pub(crate) async fn evaluate_candidate(
     now_utc: DateTime<Utc>,
 ) -> SelectionCandidateEvidence {
     // Defect F: classify an unregistered strategy_id cheaply, against
-    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (the five-identity
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (the six-identity
     // authority) -- zero I/O, not even ephemeral registry construction --
     // and refuse immediately, before any promotion/artifact/readiness query
     // is ever dispatched. A watchlist-assigned unknown ID still gets a
@@ -704,7 +704,7 @@ pub(crate) mod tests {
         ));
         let calendar = NyseWeekdaysProvider;
         let ctx = ctx_no_db(&st, &calendar);
-        // 5 symbols x 6 strategy ids (over MAX_STRATEGY_UNIVERSE=5) = 30 > 25.
+        // 5 symbols x 7 strategy ids (over MAX_STRATEGY_UNIVERSE=6) = 35 > 30.
         let symbols = vec!["A", "B", "C", "D", "E"]
             .into_iter()
             .map(|s| SymbolStrategyAssignment {
@@ -714,7 +714,7 @@ pub(crate) mod tests {
             })
             .collect();
         let cfg = config(symbols);
-        let fleet: Vec<String> = (0..6).map(|i| format!("strategy_{i}")).collect();
+        let fleet: Vec<String> = (0..7).map(|i| format!("strategy_{i}")).collect();
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1466,7 +1466,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Defect F: six distinct strategy IDs configured for one symbol must
+    /// Defect F: seven distinct strategy IDs configured for one symbol must
     /// stop the whole plan closed *before* any candidate I/O -- proven with
     /// `ctx_no_db` (a `None` DB pool would make every candidate's promotion
     /// query fail anyway, so the *only* way this test's assertion can pass
@@ -1474,7 +1474,7 @@ pub(crate) mod tests {
     /// ever runs, since a computed plan would otherwise still be reachable
     /// via the zero-DB-refusal path).
     #[tokio::test]
-    async fn six_strategy_ids_for_one_symbol_stops_before_io() {
+    async fn over_universe_strategy_ids_for_one_symbol_stops_before_io() {
         let st = Arc::new(AppState::new_with_operator_auth(
             OperatorAuthMode::ExplicitDevNoToken,
         ));
@@ -1485,7 +1485,7 @@ pub(crate) mod tests {
             strategy_id: "assigned_only".to_string(),
             timeframe: "1D".to_string(),
         }]);
-        let fleet: Vec<String> = (0..6).map(|i| format!("strategy_{i}")).collect();
+        let fleet: Vec<String> = (0..7).map(|i| format!("strategy_{i}")).collect();
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1498,10 +1498,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// Defect F: exactly five known strategy IDs for one symbol must still
+    /// Defect F: exactly all six known strategy IDs for one symbol must still
     /// evaluate normally (the bound is `<=` MAX_STRATEGY_UNIVERSE, not `<`).
     #[tokio::test]
-    async fn five_known_strategy_ids_for_one_symbol_evaluate_normally() {
+    async fn all_known_strategy_ids_for_one_symbol_evaluate_normally() {
         let st = Arc::new(AppState::new_with_operator_auth(
             OperatorAuthMode::ExplicitDevNoToken,
         ));
@@ -1516,7 +1516,7 @@ pub(crate) mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(fleet.len(), 5);
+        assert_eq!(fleet.len(), 6);
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1524,7 +1524,7 @@ pub(crate) mod tests {
             mqk_portfolio::DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED
         );
         let aapl = &plan.symbol_results[0];
-        assert_eq!(aapl.candidates.len(), 5, "all five known IDs evaluate");
+        assert_eq!(aapl.candidates.len(), 6, "all six known IDs evaluate");
         // With no DB, every known ID reaches the promotion-query stage (the
         // stage right after the cheap registration check) -- proving each
         // one was individually evaluated, not short-circuited as unknown.

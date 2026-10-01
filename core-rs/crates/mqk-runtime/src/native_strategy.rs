@@ -750,6 +750,7 @@ mod tests {
         assert!(names.contains(&"mean_reversion"));
         assert!(names.contains(&"volatility_breakout"));
         assert!(names.contains(&"intraday_scalper"));
+        assert!(names.contains(&"trend_sma50"));
     }
 
     #[test]
