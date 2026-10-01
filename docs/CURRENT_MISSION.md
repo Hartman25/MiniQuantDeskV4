@@ -6,6 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -17. M1 Native Research Bridge Built; Campaign Produced No Candidate (2026-10-01, `V4-M1-NATIVE-RESEARCH-PROMOTION-BRIDGE-01`)
+
+Not pushed. Full record: `docs/research/M1_NATIVE_TREND_CAMPAIGN_RESULT.md`, census: `docs/research/M1_NATIVE_RESEARCH_BRIDGE_CENSUS.md`. Supersedes §-16's "structurally blocked" claim: the seam is now built.
+
+- Built: native `trend_sma50` engine (universe six), `mqk backtest native-signals`, the Research registration bridge, and native semantic-fingerprint binding in the promotion gate.
+- Campaigns 01 (voided, simulated positions did not follow the strategy) and 02 (final; four attempts failed the fixed fidelity gate, one succeeded, judge `partially_evaluable`) produced no promotable candidate. Holdout untouched.
+- M1 remains `M1_BLOCKED`. Paper fleet unset, promotion rows 0, `intraday_scalper` rejection intact.
+- Operator decision needed: authorize a third specification of this family (half-equity notional cap, exposure-scale invariant), or choose a different hypothesis. Promotion policy thresholds are still unset in the deployed daemon config.
+
+---
+
 ## -16. M1 Continuation: Deployment Removed, Promotion Path Structurally Blocked (2026-10-01, `V4-M1-PROMOTION-AUTHORITY-AND-PAPER-CLOSURE-01-CONTINUE-01`)
 
 Supersedes the "operator decision needed" bullets of §-15 where they differ. Not pushed.
