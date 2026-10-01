@@ -155,7 +155,7 @@ fn pullback_stream_through_the_real_engine_equals_its_own_sequential_decisions()
     let got: Vec<i64> = stream.rows.iter().map(|r| r.target_qty_micros).collect();
     assert_eq!(got, expect);
     assert!(
-        got.iter().any(|&q| q > 0) && got.iter().any(|&q| q == 0),
+        got.iter().any(|&q| q > 0) && got.contains(&0),
         "fixture exercises both states"
     );
     assert!(got.iter().all(|&q| q == 0 || q == 1_000_000), "never short");

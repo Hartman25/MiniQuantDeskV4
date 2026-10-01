@@ -378,7 +378,7 @@ mod tests {
         let closes = wave(200);
         let out = run(&closes);
         assert!(out.iter().all(|&q| q == 0 || q == 1));
-        assert!(out.iter().any(|&q| q == 1), "fixture must exercise LONG");
+        assert!(out.contains(&1), "fixture must exercise LONG");
         // LONG persists across calls: it is held for more than one consecutive bar somewhere.
         assert!(out.windows(2).any(|w| w[0] == 1 && w[1] == 1));
     }
@@ -398,7 +398,7 @@ mod tests {
     fn fresh_instance_replay_equals_the_sequential_state() {
         let closes = wave(260);
         let sequential = run(&closes);
-        assert!(sequential.iter().any(|&q| q == 1) && sequential.iter().any(|&q| q == 0));
+        assert!(sequential.contains(&1) && sequential.contains(&0));
         for t in 0..closes.len() {
             let mut fresh = PullbackMeanReversion202Strategy::new("SPY");
             assert_eq!(call(&mut fresh, &closes[..=t]), sequential[t], "bar {t}");
