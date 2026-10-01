@@ -93,6 +93,10 @@ impl Strategy for SignalRecorder {
         self.inner.empty_output_is_noop()
     }
 
+    fn required_history_bars(&self) -> usize {
+        self.inner.required_history_bars()
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         let out = self.inner.on_bar(ctx);
         let decision_ts = ctx.recent.bars.last().map(|b| b.end_ts).unwrap_or(0);

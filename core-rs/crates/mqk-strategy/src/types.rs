@@ -177,6 +177,16 @@ pub trait Strategy: Send + Sync {
     fn empty_output_is_noop(&self) -> bool {
         false
     }
+
+    /// Minimum number of completed bars this strategy must be shown in
+    /// `StrategyContext::recent` to evaluate its rule. `0` (the default) means
+    /// no requirement beyond whatever window the host runtime supplies. A
+    /// runtime whose window is shorter than this would otherwise leave the
+    /// strategy silently flat; the backtest engine therefore widens its history
+    /// window to at least this value. Wrappers must forward it.
+    fn required_history_bars(&self) -> usize {
+        0
+    }
 }
 
 /// Host-level policy errors (Tier A).

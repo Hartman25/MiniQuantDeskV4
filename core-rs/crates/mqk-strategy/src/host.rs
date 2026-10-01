@@ -69,6 +69,15 @@ impl StrategyHost {
             .unwrap_or(false)
     }
 
+    /// The registered strategy's `Strategy::required_history_bars()` (`0` if
+    /// none is registered).
+    pub fn required_history_bars(&self) -> usize {
+        self.strategy
+            .as_ref()
+            .map(|s| s.required_history_bars())
+            .unwrap_or(0)
+    }
+
     /// Run one bar evaluation. Validates timeframe and returns LIVE/SHADOW intents.
     pub fn on_bar(
         &mut self,

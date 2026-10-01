@@ -258,6 +258,10 @@ impl Strategy for DelayedStrategy {
         self.inner.spec()
     }
 
+    fn required_history_bars(&self) -> usize {
+        self.inner.required_history_bars()
+    }
+
     /// STRESS-TRANSFORM-SEMANTIC-IDENTITY-01: execution delay changes the
     /// EFFECTIVE semantics actually executed (decisions are re-emitted
     /// `delay_bars` bars late) -- this must have its own fingerprint,
@@ -360,6 +364,10 @@ impl TimestampBatchDelayedStrategy {
 impl Strategy for TimestampBatchDelayedStrategy {
     fn spec(&self) -> StrategySpec {
         self.inner.spec()
+    }
+
+    fn required_history_bars(&self) -> usize {
+        self.inner.required_history_bars()
     }
 
     /// See `DelayedStrategy::semantic_fingerprint` -- same
@@ -2515,5 +2523,31 @@ mod stress_transform_semantic_identity_tests {
             "the wrapper's fingerprint must be fixed at construction, never influenced by \
              execution/result state accumulated via on_bar"
         );
+    }
+}
+
+#[cfg(test)]
+mod required_history_forwarding_tests {
+    use super::*;
+
+    struct Needs200;
+    impl Strategy for Needs200 {
+        fn spec(&self) -> StrategySpec {
+            StrategySpec::new("needs_200", 86_400)
+        }
+        fn required_history_bars(&self) -> usize {
+            200
+        }
+        fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+            StrategyOutput::new(Vec::new())
+        }
+    }
+
+    #[test]
+    fn both_delay_wrappers_forward_required_history_bars() {
+        let delayed = DelayedStrategy::new(Box::new(Needs200), 1);
+        assert_eq!(delayed.required_history_bars(), 200);
+        let batch = TimestampBatchDelayedStrategy::new(Box::new(Needs200), 1, &[]);
+        assert_eq!(batch.required_history_bars(), 200);
     }
 }

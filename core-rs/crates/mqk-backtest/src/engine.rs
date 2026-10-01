@@ -629,14 +629,18 @@ impl BacktestEngine {
                 bar.volume,
             );
             self.recent_bars.push(stub);
-            let max_len = self.config.bar_history_len;
-            if self.recent_bars.len() > max_len {
-                let start = self.recent_bars.len() - max_len;
+            // The window is at least what the registered strategy declares it
+            // needs, so a longer-lookback rule is never silently starved.
+            let history_len = self
+                .config
+                .bar_history_len
+                .max(self.host.required_history_bars());
+            if self.recent_bars.len() > history_len {
+                let start = self.recent_bars.len() - history_len;
                 self.recent_bars = self.recent_bars.split_off(start);
             }
 
-            let recent =
-                RecentBarsWindow::new(self.config.bar_history_len, self.recent_bars.clone());
+            let recent = RecentBarsWindow::new(history_len, self.recent_bars.clone());
             let ctx = StrategyContext::new(self.config.timeframe_secs, self.bar_count, recent);
 
             let bar_result = self
