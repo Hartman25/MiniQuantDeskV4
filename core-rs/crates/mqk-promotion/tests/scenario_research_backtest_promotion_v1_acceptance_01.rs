@@ -366,7 +366,8 @@ fn build_real_research_evidence(
             trial_id text primary key,
             experiment_id text not null,
             hypothesis_id text not null,
-            strategy_id text not null
+            strategy_id text not null,
+            identity_json text
         );
         create table research_attempts (
             attempt_id text primary key,

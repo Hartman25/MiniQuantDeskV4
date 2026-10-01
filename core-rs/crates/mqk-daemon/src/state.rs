@@ -834,6 +834,12 @@ pub struct AppState {
     /// Sourced ONLY from `MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING`;
     /// no hidden default.
     pub research_max_probability_backtest_overfitting: Option<f64>,
+    /// M1 native Research bridge: when `true`, Research evidence whose trial
+    /// carries no native semantic fingerprint (legacy classifier trial,
+    /// bound by `strategy_id` label only) is refused for promotion. Sourced
+    /// ONLY from `MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING` (`1`/`true`);
+    /// defaults to `false` so accepted legacy evidence paths are unchanged.
+    pub research_require_native_semantic_binding: bool,
     /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: root directory
     /// `mqk_promotion::resolve_backtest_evidence` searches for a candidate's
     /// canonical `BacktestReport`/`ArtifactLock`/`StressSuiteResult`
@@ -2289,6 +2295,11 @@ impl AppState {
             )
             .ok()
             .and_then(|s| s.trim().parse::<f64>().ok()),
+            research_require_native_semantic_binding: std::env::var(
+                "MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING",
+            )
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+            .unwrap_or(false),
             backtest_evidence_artifact_root: std::env::var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT")
                 .ok(),
             promotion_min_sharpe: std::env::var("MQK_PROMOTION_MIN_SHARPE")

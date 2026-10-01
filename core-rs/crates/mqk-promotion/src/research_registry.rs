@@ -113,6 +113,51 @@ pub(crate) struct VerifiedResearchAuthority {
     /// promotion candidate being decided, closing the cross-candidate
     /// authority gap independent review found in `242cb7c3`.
     pub(crate) strategy_id: String,
+    /// M1 native Research bridge: the exact native strategy semantic
+    /// fingerprint the trial's signal stream was emitted under, read from the
+    /// registered trial identity (`signal_source.semantic_fingerprint`).
+    /// `None` for a trial that declares no native signal source (legacy
+    /// classifier trial: bound to the promotion identity by `strategy_id`
+    /// label only).
+    pub(crate) native_semantic_fingerprint: Option<String>,
+}
+
+/// Registered `signal_source.kind` of a native-signal trial -- see
+/// `mqk_research.ml.native_signal_registry_integration`.
+const NATIVE_SIGNAL_SOURCE_KIND: &str = "native_strategy_signal_stream_v1";
+
+/// Read the native semantic fingerprint a trial's registered identity binds
+/// (`Ok(None)` when no `signal_source` is declared). A declared but malformed
+/// `signal_source` fails closed: it is never treated as "no binding".
+fn native_fingerprint_from_identity(identity_json: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = identity_json else {
+        return Ok(None);
+    };
+    let identity: Value = serde_json::from_str(raw)
+        .map_err(|e| format!("registered trial identity_json is not valid JSON: {e}"))?;
+    let Some(source) = identity.get("signal_source") else {
+        return Ok(None);
+    };
+    if source.get("kind").and_then(Value::as_str) != Some(NATIVE_SIGNAL_SOURCE_KIND) {
+        return Err(format!(
+            "registered trial declares an unsupported signal_source.kind: {:?}",
+            source.get("kind")
+        ));
+    }
+    let fp = source
+        .get("semantic_fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if fp.len() != 64
+        || !fp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+    {
+        return Err(
+            "registered native trial's semantic_fingerprint is not 64 lowercase hex".to_string(),
+        );
+    }
+    Ok(Some(fp.to_string()))
 }
 
 /// Open the registry read-only and establish authority for `trial_id`
@@ -162,6 +207,32 @@ pub(crate) fn load_research_authority(
             return Err(errs);
         }
     };
+
+    // ---- 1b. native semantic binding (M1 native Research bridge) ----
+    let identity_json: Option<String> = match conn
+        .query_row(
+            "select identity_json from research_trials where trial_id = ?1",
+            [trial_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+    {
+        Ok(v) => v.flatten(),
+        Err(e) => {
+            errs.push(format!(
+                "OOS evidence rejected: research registry query against research_trials                  identity_json failed (missing/incompatible schema?): {e}"
+            ));
+            None
+        }
+    };
+    let native_semantic_fingerprint =
+        match native_fingerprint_from_identity(identity_json.as_deref()) {
+            Ok(v) => v,
+            Err(reason) => {
+                errs.push(format!("OOS evidence rejected: {reason}"));
+                None
+            }
+        };
 
     // ---- 2. a succeeded attempt for trial_id whose result_id matches ----
     let attempt_exists = row_exists(
@@ -232,6 +303,7 @@ pub(crate) fn load_research_authority(
         judge_artifact_sha256: registered_judge_sha256
             .expect("no errs means the judge row was matched and scope-verified above"),
         strategy_id,
+        native_semantic_fingerprint,
     })
 }
 
@@ -415,6 +487,47 @@ fn row_exists<P: ToSql, const N: usize>(
                 "OOS evidence rejected: research registry query against {table_name} failed: {e}"
             ));
             false
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_binding_tests {
+    use super::native_fingerprint_from_identity;
+
+    const FP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn identity(kind: &str, fp: &str) -> String {
+        format!(r#"{{"signal_source":{{"kind":"{kind}","semantic_fingerprint":"{fp}"}}}}"#)
+    }
+
+    #[test]
+    fn absent_identity_or_signal_source_is_legacy_none() {
+        assert_eq!(native_fingerprint_from_identity(None), Ok(None));
+        assert_eq!(native_fingerprint_from_identity(Some("{}")), Ok(None));
+    }
+
+    #[test]
+    fn declared_native_source_yields_the_exact_fingerprint() {
+        let id = identity("native_strategy_signal_stream_v1", FP);
+        assert_eq!(
+            native_fingerprint_from_identity(Some(&id)),
+            Ok(Some(FP.to_string()))
+        );
+    }
+
+    #[test]
+    fn declared_but_malformed_source_fails_closed_never_none() {
+        for bad in [
+            identity("native_strategy_signal_stream_v1", "short"),
+            identity("native_strategy_signal_stream_v1", &FP.to_uppercase()),
+            identity("other_kind", FP),
+            "{not json".to_string(),
+        ] {
+            assert!(
+                native_fingerprint_from_identity(Some(&bad)).is_err(),
+                "{bad}"
+            );
         }
     }
 }

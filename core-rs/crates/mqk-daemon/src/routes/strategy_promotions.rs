@@ -1001,6 +1001,7 @@ pub(crate) async fn strategy_promotion_transition(
         let oos_evidence = match crate::research_evidence_gate::evaluate_research_evidence_gate(
             &st,
             &strategy_id,
+            config_identity_result.as_deref().ok(),
             research_trial_id,
             research_evidence_dir,
             research_judge_artifact_path,

@@ -83,6 +83,7 @@ fn reject(msg: impl Into<String>) -> ResearchEvidenceGateOutcome {
 pub fn evaluate_research_evidence_gate(
     st: &AppState,
     strategy_id: &str,
+    expected_semantic_fingerprint: Option<&str>,
     trial_id: &str,
     research_evidence_dir: &str,
     research_judge_artifact_path: &str,
@@ -207,6 +208,35 @@ pub fn evaluate_research_evidence_gate(
         ));
     }
 
+    // M1 native Research bridge: semantic binding. A trial whose registered
+    // identity binds a native strategy fingerprint authorizes ONLY the exact
+    // semantic configuration the server resolves for the promotion candidate
+    // -- evidence for strategy A / fingerprint X never authorizes A / Y.
+    // Legacy classifier trials carry no fingerprint (label-only binding);
+    // `MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING` refuses them outright.
+    match (
+        verified.native_semantic_fingerprint(),
+        expected_semantic_fingerprint,
+    ) {
+        (Some(bound), Some(expected)) if bound == expected => {}
+        (Some(bound), Some(expected)) => {
+            return reject(format!(
+                "research-evidence gate rejected: the Research trial is bound to native semantic                  fingerprint {bound:?}, not the promotion candidate's server-resolved                  fingerprint {expected:?} -- evidence for a different semantic configuration is                  never accepted"
+            ));
+        }
+        (Some(_), None) => {
+            return reject(
+                "research-evidence gate rejected: the Research trial is bound to a native                  semantic fingerprint but the server could not resolve the promotion candidate's                  own semantic fingerprint",
+            );
+        }
+        (None, _) if st.research_require_native_semantic_binding => {
+            return reject(
+                "research-evidence gate rejected: this daemon requires native semantic binding                  (MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING) and the Research trial carries                  no native semantic fingerprint -- a strategy_id label alone is not accepted",
+            );
+        }
+        (None, _) => {}
+    }
+
     // DSR/PBO threshold acceptance is no longer decided here --
     // PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: the route now
     // feeds this verified evidence into `mqk_promotion::PromotionInput.
@@ -270,6 +300,17 @@ mod tests {
     /// strategy identity (to prove a mismatch against a different promotion
     /// candidate's strategy_id is rejected).
     fn build_fixture_with_strategy(seed: &str, strategy_id: &str) -> Fixture {
+        build_fixture_with_identity(seed, strategy_id, None)
+    }
+
+    /// Variant that also registers the trial's `identity_json` (a native
+    /// signal-source binding, or a malformed one) -- see
+    /// `research_registry::native_fingerprint_from_identity`.
+    fn build_fixture_with_identity(
+        seed: &str,
+        strategy_id: &str,
+        identity_json: Option<&str>,
+    ) -> Fixture {
         let dir = tempfile::tempdir().expect("create temp root");
         let root = dir.path().to_path_buf();
 
@@ -310,7 +351,8 @@ mod tests {
                 trial_id text primary key,
                 experiment_id text not null,
                 hypothesis_id text not null,
-                strategy_id text not null
+                strategy_id text not null,
+                identity_json text
             );
             create table research_attempts (
                 attempt_id text primary key,
@@ -329,9 +371,16 @@ mod tests {
         )
         .expect("create registry schema");
         conn.execute(
-            "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id) \
-             values (?1, ?2, ?3, ?4)",
-            rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}"), strategy_id],
+            "insert into research_trials \
+             (trial_id, experiment_id, hypothesis_id, strategy_id, identity_json) \
+             values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                trial_id,
+                experiment_id,
+                format!("hyp_{seed}"),
+                strategy_id,
+                identity_json
+            ],
         )
         .expect("insert research_trials row");
         conn.execute(
@@ -388,6 +437,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &f.st,
             &f.strategy_id,
+            None,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -410,6 +460,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &f.st,
             "Some_Other_Strategy",
+            None,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -435,6 +486,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &st,
             &f.strategy_id,
+            None,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -458,6 +510,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &st,
             &f.strategy_id,
+            None,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -475,6 +528,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &f.st,
             &f.strategy_id,
+            None,
             "trial_that_was_never_registered",
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -503,6 +557,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &f.st,
             &f.strategy_id,
+            None,
             &f.trial_id,
             outside.path().to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -527,6 +582,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &f.st,
             &f.strategy_id,
+            None,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             outside_judge.to_str().unwrap(),
@@ -552,6 +608,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &f.st,
             &f.strategy_id,
+            None,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -569,6 +626,7 @@ mod tests {
         let outcome = evaluate_research_evidence_gate(
             &f.st,
             &f.strategy_id,
+            None,
             "   ",
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -577,6 +635,105 @@ mod tests {
             outcome,
             ResearchEvidenceGateOutcome::Rejected { .. }
         ));
+        unset_all_research_env();
+    }
+
+    const FP_X: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const FP_Y: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn native_identity(fp: &str) -> String {
+        format!(
+            r#"{{"signal_source":{{"kind":"native_strategy_signal_stream_v1","semantic_fingerprint":"{fp}"}}}}"#
+        )
+    }
+
+    fn run_gate(
+        f: &Fixture,
+        strategy_id: &str,
+        expected: Option<&str>,
+    ) -> ResearchEvidenceGateOutcome {
+        evaluate_research_evidence_gate(
+            &f.st,
+            strategy_id,
+            expected,
+            &f.trial_id,
+            f.evidence_dir.to_str().unwrap(),
+            f.judge_path.to_str().unwrap(),
+        )
+    }
+
+    #[test]
+    fn native_bound_evidence_authorizes_only_the_exact_fingerprint() {
+        let f =
+            build_fixture_with_identity("native_fp", "trend_sma50", Some(&native_identity(FP_X)));
+        match run_gate(&f, "trend_sma50", Some(FP_X)) {
+            ResearchEvidenceGateOutcome::Passed { oos_evidence } => {
+                assert_eq!(oos_evidence.native_semantic_fingerprint(), Some(FP_X));
+            }
+            other => panic!("expected Passed, got {other:?}"),
+        }
+        // Strategy A / fingerprint X must NOT authorize A / fingerprint Y ...
+        match run_gate(&f, "trend_sma50", Some(FP_Y)) {
+            ResearchEvidenceGateOutcome::Rejected { blockers } => {
+                assert!(blockers
+                    .iter()
+                    .any(|b| b.contains("different semantic configuration")));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        // ... nor B / fingerprint X.
+        match run_gate(&f, "swing_momentum", Some(FP_X)) {
+            ResearchEvidenceGateOutcome::Rejected { blockers } => {
+                assert!(blockers.iter().any(|b| b.contains("cross-candidate")));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        // An unresolvable server fingerprint can never match a bound one.
+        assert!(matches!(
+            run_gate(&f, "trend_sma50", None),
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
+        unset_all_research_env();
+    }
+
+    #[test]
+    fn malformed_native_binding_fails_closed() {
+        for (seed, identity) in [
+            ("bad_fp", native_identity("not-hex")),
+            (
+                "bad_kind",
+                r#"{"signal_source":{"kind":"something_else"}}"#.to_string(),
+            ),
+            ("bad_json", "{not json".to_string()),
+        ] {
+            let f = build_fixture_with_identity(seed, "trend_sma50", Some(&identity));
+            assert!(
+                matches!(
+                    run_gate(&f, "trend_sma50", Some(FP_X)),
+                    ResearchEvidenceGateOutcome::Rejected { .. }
+                ),
+                "{seed}"
+            );
+        }
+        unset_all_research_env();
+    }
+
+    #[test]
+    fn label_only_evidence_is_refused_when_native_binding_is_required() {
+        let mut f = build_fixture("label_only");
+        assert!(matches!(
+            run_gate(&f, &f.strategy_id.clone(), Some(FP_X)),
+            ResearchEvidenceGateOutcome::Passed { .. }
+        ));
+        f.st.research_require_native_semantic_binding = true;
+        match run_gate(&f, &f.strategy_id.clone(), Some(FP_X)) {
+            ResearchEvidenceGateOutcome::Rejected { blockers } => {
+                assert!(blockers
+                    .iter()
+                    .any(|b| b.contains("no native semantic fingerprint")));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
         unset_all_research_env();
     }
 }

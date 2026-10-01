@@ -174,9 +174,18 @@ pub struct VerifiedPromotionOosEvidence {
     /// hash, so durable promotion lineage can record exactly which judge
     /// artifact judged this trial.
     judge_artifact_sha256: String,
+    /// M1 native Research bridge: the native strategy semantic fingerprint the
+    /// trial's registered identity binds, or `None` for a legacy classifier
+    /// trial bound to the promotion identity by `strategy_id` label only. The
+    /// production gate compares this to the server-resolved fingerprint.
+    native_semantic_fingerprint: Option<String>,
 }
 
 impl VerifiedPromotionOosEvidence {
+    pub fn native_semantic_fingerprint(&self) -> Option<&str> {
+        self.native_semantic_fingerprint.as_deref()
+    }
+
     pub fn trial_id(&self) -> &str {
         &self.trial_id
     }
@@ -470,10 +479,12 @@ pub fn verify_promotion_oos_evidence(
     // PARSED JSON VALUES using a single (Rust-side) canonicalization.
     let mut research_strategy_id: Option<String> = None;
     let mut research_judge_artifact_sha256: Option<String> = None;
+    let mut research_native_fingerprint: Option<String> = None;
     match load_research_authority(registry_db_path, trial_id, &economic_eval_id, &judge) {
         Ok(authority) => {
             research_strategy_id = Some(authority.strategy_id);
             research_judge_artifact_sha256 = Some(authority.judge_artifact_sha256);
+            research_native_fingerprint = authority.native_semantic_fingerprint;
         }
         Err(authority_errs) => errs.extend(authority_errs),
     }
@@ -670,5 +681,6 @@ pub fn verify_promotion_oos_evidence(
             .expect("no errs means load_research_authority returned Ok above"),
         judge_artifact_sha256: research_judge_artifact_sha256
             .expect("no errs means load_research_authority returned Ok above"),
+        native_semantic_fingerprint: research_native_fingerprint,
     })
 }
