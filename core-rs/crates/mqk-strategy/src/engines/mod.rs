@@ -115,7 +115,9 @@ pub fn register_builtin_strategies(
 
     let nearhigh_symbol = symbol.clone();
     registry.register(near_high_momentum_252_3pct::meta(), move || {
-        Box::new(NearHighMomentum2523PctStrategy::new(nearhigh_symbol.clone())) as Box<dyn Strategy>
+        Box::new(NearHighMomentum2523PctStrategy::new(
+            nearhigh_symbol.clone(),
+        )) as Box<dyn Strategy>
     })?;
 
     let tpb_symbol = symbol.clone();
@@ -227,7 +229,9 @@ fn register_with_sizing(
 
         let nearhigh_symbol = symbol.clone();
         registry.register(near_high_momentum_252_3pct::meta(), move || {
-            Box::new(NearHighMomentum2523PctStrategy::new(nearhigh_symbol.clone())) as Box<dyn Strategy>
+            Box::new(NearHighMomentum2523PctStrategy::new(
+                nearhigh_symbol.clone(),
+            )) as Box<dyn Strategy>
         })?;
 
         let tpb_symbol = symbol.clone();
