@@ -49,13 +49,13 @@ pub use market_frame::{
     build_market_frames, evaluate_market_frames, strategy_context_for_symbol, MarketFrame,
     MarketFrameError, MarketFrameEvaluator, MarketFrameView,
 }; // BKT-MULTISYMBOL-MARKET-FRAME-01
-pub use p7a_p7b_economic_replay_stress::{
-    p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
-    P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
-};
 pub use native_signals::{
     emit_native_signal_stream, NativeSignalError, NativeSignalRow, NativeSignalStream,
     NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
+};
+pub use p7a_p7b_economic_replay_stress::{
+    p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
+    P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
 };
 pub use regime::{
     detect_market_regime, MarketRegimeClassification, MarketRegimeConfidence, MarketRegimeFeatures,
