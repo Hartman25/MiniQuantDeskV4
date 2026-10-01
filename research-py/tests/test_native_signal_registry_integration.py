@@ -66,14 +66,14 @@ def _bars(symbols=(SYMBOL, "EFA")) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _spec() -> EconomicWalkForwardSpec:
+def _spec(max_position_notional_usd: float | None = 90_000.0) -> EconomicWalkForwardSpec:
     return EconomicWalkForwardSpec(
         signal_policy=SignalPolicySpec(),
         cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
         execution_pricing=ExecutionPricingSpec(
             pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1, slippage_bps=5, volatility_mult_bps=0),
         annualization=AnnualizationSpec(),
-        weight_to_share=WeightToShareSpec(equity_usd=100_000.0),
+        weight_to_share=WeightToShareSpec(equity_usd=100_000.0, max_position_notional_usd=max_position_notional_usd),
     )
 
 
@@ -154,6 +154,22 @@ def test_registers_trial_attempt_and_holdout_and_never_scores_holdout(tmp_path):
     holdout_start = pd.Timestamp(wf["holdout"]["start_utc"])
     assert pd.to_datetime(oos["decision_ts"], utc=True).max() < holdout_start
     assert holdout_start == pd.Timestamp("2021-07-01", tz="UTC")
+
+
+def test_a_spec_that_cannot_implement_the_targets_is_refused_by_the_fidelity_gate(tmp_path):
+    env = Env(tmp_path)
+    # Sizing the position at the allocation cap rejects entries at the
+    # conservative fill price: the evaluation would not measure the strategy.
+    with pytest.raises(NativeSignalError, match="execution fidelity"):
+        env.run(economic_spec=_spec(max_position_notional_usd=None))
+    store = ResearchResultStore(env.db)
+    (trial,) = store.list_trials(experiment_id=EXPERIMENT)
+    (attempt,) = store.list_attempts(trial["trial_id"])
+    assert attempt["status"] == "failed" and "execution fidelity" in attempt["failure_reason"]
+    # The amended, implementable spec is a NEW trial identity, not a retry.
+    ok = json.loads(env.run(run_name="r2").read_text())
+    assert ok["registry"]["trial_id"] != trial["trial_id"]
+    assert ok["registry"]["execution_fidelity"] >= 0.95
 
 
 def test_retry_is_a_new_attempt_of_the_same_trial(tmp_path):

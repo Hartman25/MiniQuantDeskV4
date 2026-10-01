@@ -49,8 +49,18 @@ NATIVE_SIGNAL_STREAM_PROTOCOL_ID = "native_strategy_signal_stream_v1"
 NATIVE_SIGNAL_SOURCE_KIND = "native_strategy_signal_stream_v1"
 _MICROS = 1_000_000
 
+# An evaluation only measures the hypothesis if the discrete share positions it
+# simulates actually follow the strategy's target. The economic engine rejects
+# a fill whose notional would exceed the allocation cap at the conservative
+# fill price, so a spec that sizes a position AT the cap (e.g. one fully
+# weighted symbol) silently skips most entries. This floor is a fixed,
+# outcome-independent implementability check, applied to every native trial.
+NATIVE_EXECUTION_FIDELITY_FLOOR = 0.95
+
 __all__ = [
+    "NATIVE_EXECUTION_FIDELITY_FLOOR",
     "NATIVE_SIGNAL_STREAM_PROTOCOL_ID",
+    "native_execution_fidelity",
     "NativeSignalError",
     "build_native_signal_trial_identity",
     "native_holdout_start",
@@ -139,6 +149,29 @@ def plan_native_folds(
     if not folds:
         raise NativeSignalError("no evaluation fold fits before the reserved holdout")
     return folds, holdout_start, dataset_end
+
+
+def native_execution_fidelity(economic_out: Dict[str, Any], symbol: str) -> Tuple[float, int, int]:
+    """Fraction of evaluated bars on which the simulated discrete share
+    position (held before that bar's own order) agrees, long vs flat, with the
+    executed desired weight. Returns (agreement, desired_long_bars,
+    discrete_long_bars). Depends only on positions, never on any P&L."""
+    returns = pd.read_csv(economic_out["outputs"]["economic_returns_csv"]["path"])
+    held: List[Any] = []
+    desired: List[Any] = []
+    for fold in economic_out["folds"]:
+        events = pd.DataFrame(fold["weight_to_share_evidence"][symbol])
+        sign = events["side"].map({"buy": 1, "sell": -1}).fillna(0)
+        position = (events["qty"].fillna(0).astype(int) * sign).cumsum().shift(1).fillna(0)
+        rows = returns[returns["fold"] == fold["fold"]].reset_index(drop=True)
+        if len(rows) != len(events):
+            raise NativeSignalError("economic rows and discrete evidence disagree on length")
+        held.extend((position > 0).tolist())
+        desired.extend((rows["interval_exposure"] > 0).tolist())
+    if not held:
+        raise NativeSignalError("no evaluated bars to measure execution fidelity on")
+    agree = sum(1 for h, d in zip(held, desired) if h == d) / len(held)
+    return float(agree), int(sum(desired)), int(sum(held))
 
 
 def native_holdout_start(bars_csv: Path, symbol: str, holdout_months: int) -> pd.Timestamp:
@@ -376,6 +409,15 @@ def run_registered_native_signal_economic_eval(
         )
         economic_out = json.loads(economic_out_path.read_text(encoding="utf-8"))
 
+        fidelity, desired_bars, held_bars = native_execution_fidelity(economic_out, symbol)
+        if fidelity < NATIVE_EXECUTION_FIDELITY_FLOOR:
+            raise NativeSignalError(
+                f"execution fidelity {fidelity:.3f} < floor {NATIVE_EXECUTION_FIDELITY_FLOOR} "
+                f"(desired long bars={desired_bars}, discrete long bars={held_bars}): the economic "
+                "protocol did not implement the strategy's target positions (e.g. sizing at the "
+                "allocation cap rejects entries at the conservative fill price)"
+            )
+
         holdout_id = compute_holdout_id(
             dataset_identity=identity["data_identity"],
             holdout_start_utc=wf_out["holdout"]["start_utc"],
@@ -399,6 +441,7 @@ def run_registered_native_signal_economic_eval(
         "holdout_id": holdout_id,
         "signal_source": NATIVE_SIGNAL_SOURCE_KIND,
         "semantic_fingerprint": meta["semantic_fingerprint"],
+        "execution_fidelity": round(fidelity, 6),
     }
     economic_out_path.write_text(json.dumps(economic_out, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     store.finalize_attempt(
