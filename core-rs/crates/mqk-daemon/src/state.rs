@@ -289,8 +289,40 @@ const ACCOUNT_RISK_FRESHNESS_BOUND_SECS: i64 =
 pub const STRATEGY_MD_TIMEFRAME_ENV: &str = "MQK_STRATEGY_MD_TIMEFRAME";
 
 /// AUTON-SIGNAL-CONTEXT-01: Number of recent completed bars to load per dispatch.
-/// 30 covers every built-in strategy's maximum lookback (20) with headroom.
-const STRATEGY_CONTEXT_LOAD_LIMIT: i64 = 30;
+/// Must be at least every registered engine's `minimum_completed_bars`: a
+/// shorter window leaves a longer-lookback rule silently flat (a false,
+/// truthful-looking no-trade). Guarded by `strategy_context_load_limit_tests`.
+const STRATEGY_CONTEXT_LOAD_LIMIT: i64 = 256;
+
+#[cfg(test)]
+mod strategy_context_load_limit_tests {
+    use super::STRATEGY_CONTEXT_LOAD_LIMIT;
+
+    #[test]
+    fn load_limit_covers_every_registered_engine_lookback() {
+        let mut registry = mqk_strategy::PluginRegistry::new();
+        mqk_strategy::engines::register_builtin_strategies(&mut registry, "SPY".to_string())
+            .expect("builtin registration");
+        let mut widest = 0usize;
+        for meta in registry.list() {
+            let need = meta
+                .data_requirements
+                .as_ref()
+                .map(|r| r.minimum_completed_bars)
+                .unwrap_or_else(|| panic!("engine {} declares no data requirement", meta.name));
+            assert!(
+                STRATEGY_CONTEXT_LOAD_LIMIT as usize >= need,
+                "engine {} needs {need} completed bars but the load limit is {STRATEGY_CONTEXT_LOAD_LIMIT}",
+                meta.name
+            );
+            widest = widest.max(need);
+        }
+        assert!(
+            widest >= 200,
+            "the dual SMA engine's 200-bar requirement must be covered"
+        );
+    }
+}
 
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
