@@ -1,0 +1,21 @@
+{
+  "_comment": "Binding subset of a native v2 trial identity as produced by build_native_signal_trial_identity. test_native_exact_quantity_integrated_proof asserts the live builder still equals it; the Rust verifier test consumes it.",
+  "economic_protocol": {
+    "signal_policy": {
+      "capacity_policy": "reduce_first_defer_increase_batch_v1",
+      "direction_policy": "native_exact_target_qty_v1",
+      "entry_threshold": 0.5,
+      "fold_end_policy": "force_flat_last_bar",
+      "long_only": true,
+      "max_gross_exposure": 1.0,
+      "sizing": "exact_native_target_qty_v1"
+    }
+  },
+  "signal_source": {
+    "kind": "native_strategy_signal_stream_v2",
+    "required_history_bars": 50,
+    "semantic_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "symbol": "SPY",
+    "target_semantics": "absolute_whole_share_target_v1"
+  }
+}

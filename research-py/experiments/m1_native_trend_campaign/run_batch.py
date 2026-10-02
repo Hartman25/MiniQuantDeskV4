@@ -102,6 +102,12 @@ def _require_exact_target_protocol() -> None:
             f"bridge); its evidence is historical and not promotion authority. A rerun needs a new "
             f"predeclaration under {EXACT_TARGET_DIRECTION_POLICY!r} and separate authorization"
         )
+    equity_micros = round(float(DECL["economic_protocol"]["weight_to_share"]["equity_usd"]) * 1_000_000)
+    if int(DECL["native_backtest"]["initial_cash_micros"]) != equity_micros:
+        raise SystemExit(
+            "fail-closed: native_backtest.initial_cash_micros must equal the Research equity_usd "
+            f"({equity_micros} micros): Research and Backtest evidence share one capital basis"
+        )
 
 
 def stage_check(_args) -> None:

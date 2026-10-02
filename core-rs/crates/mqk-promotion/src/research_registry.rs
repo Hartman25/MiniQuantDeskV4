@@ -573,6 +573,21 @@ mod native_binding_tests {
         );
     }
 
+    /// The identity shape the Python bridge actually produces (golden fixture, kept
+    /// equal to the live builder by `test_native_exact_quantity_integrated_proof`).
+    #[test]
+    fn the_golden_identity_the_python_bridge_produces_is_accepted() {
+        let golden = include_str!("../tests/fixtures/native_v2_identity_binding.json");
+        let value: serde_json::Value = serde_json::from_str(golden).unwrap();
+        let fp = value["signal_source"]["semantic_fingerprint"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            native_fingerprint_from_identity(Some(golden)),
+            Ok(Some(fp.to_string()))
+        );
+    }
+
     /// The superseded v1 bridge (binary-weight economics) can never authorize.
     #[test]
     fn superseded_v1_binding_is_not_authority() {

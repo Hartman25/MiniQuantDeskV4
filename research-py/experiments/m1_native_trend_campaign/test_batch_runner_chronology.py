@@ -77,6 +77,7 @@ def runner(tmp_path, monkeypatch):
     (data / "research_bars_provenance.json").write_text(
         json.dumps(_manifest(pd.read_csv(data / "research_bars.csv"), data / "research_bars.csv")), encoding="utf-8")
     decl["partition"]["evaluation_start_utc"] = "2018-04-01T00:00:00Z"
+    decl["native_backtest"]["initial_cash_micros"] = 100_000_000_000  # = equity_usd 100,000
 
     calls: list[tuple] = []
 
@@ -162,3 +163,12 @@ def test_stage_register_has_no_emitter_invocation_in_its_source():
     emit_stage = ast.parse(inspect.getsource(rb.stage_trials))
     funcs = [n for n in ast.walk(emit_stage) if isinstance(n, ast.FunctionDef) and n.name == "emit"]
     assert len(funcs) == 1, "the emitter is only ever wrapped in a closure passed into the attempt"
+
+
+def test_a_capital_basis_mismatch_between_research_and_backtest_is_refused(runner):
+    r, calls = runner
+    r.DECL["native_backtest"]["initial_cash_micros"] = 1_000_000_000  # USD 1,000 vs equity 100,000
+    for stage in (r.stage_check, r.stage_register, r.stage_trials):
+        with pytest.raises(SystemExit, match="one capital basis"):
+            stage(None)
+    assert calls == []
