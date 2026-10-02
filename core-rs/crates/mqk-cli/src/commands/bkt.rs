@@ -362,7 +362,7 @@ pub fn run_native_signals(
 
     let strategy_instance = native_strategy_instance(&strategy, &symbol, &cfg)?;
 
-    let stream = mqk_backtest::emit_native_signal_stream(cfg, &bars, strategy_instance)
+    let stream = mqk_backtest::emit_native_signal_stream(cfg.clone(), &bars, strategy_instance)
         .map_err(|e| anyhow::anyhow!("native signal emission failed: {e}"))?;
 
     let mut csv = String::from(
@@ -405,6 +405,68 @@ pub fn run_native_signals(
         serde_json::to_string_pretty(&meta)?.as_bytes(),
     )
     .context("write native_signals_meta.json failed")?;
+
+    // Benchmark V2 (capital-matched exact-target passive benchmark): additive,
+    // non-fatal. A strategy/symbol/window combination that never emitted a
+    // positive target (or is otherwise outside this policy's long/flat,
+    // single-quantity supported boundary) legitimately has no comparable
+    // benchmark -- this never fails the signal emission itself, which has
+    // already fully succeeded above.
+    let candidate_report = {
+        let fresh_instance = native_strategy_instance(&strategy, &symbol, &cfg)?;
+        let mut engine = BacktestEngine::new(cfg.clone());
+        engine
+            .add_strategy(fresh_instance)
+            .map_err(|e| anyhow::anyhow!("candidate engine run failed: {e:?}"))?;
+        engine
+            .run(&bars)
+            .map_err(|e| anyhow::anyhow!("candidate engine run failed: {e}"))?
+    };
+    let candidate_total_return_pct = {
+        let starting = cfg.initial_cash_micros;
+        let ending = candidate_report
+            .equity_curve
+            .last()
+            .map(|(_, eq)| *eq)
+            .unwrap_or(starting);
+        if starting != 0 {
+            (ending - starting) as f64 / starting as f64 * 100.0
+        } else {
+            0.0
+        }
+    };
+    match mqk_backtest::benchmark_v2::compute_benchmark_v2(
+        &stream,
+        &bars,
+        cfg,
+        candidate_total_return_pct,
+    ) {
+        Ok(bench) => {
+            let bench_json = serde_json::json!({
+                "policy_id": bench.policy_id,
+                "symbol": bench.symbol,
+                "target_qty_micros": bench.target_qty_micros,
+                "eligibility_bar_index": bench.eligibility_bar_index,
+                "eligibility_decision_ts": bench.eligibility_decision_ts,
+                "initial_cash_micros": bench.initial_cash_micros,
+                "execution_model_id": bench.execution_model_id,
+                "benchmark_run_id": bench.benchmark_run_id,
+                "account_return_pct": bench.account_return_pct,
+                "candidate_total_return_pct": candidate_total_return_pct,
+                "alpha_pct": bench.alpha_pct,
+            });
+            std::fs::write(
+                out.join("benchmark_v2.json"),
+                serde_json::to_string_pretty(&bench_json)?.as_bytes(),
+            )
+            .context("write benchmark_v2.json failed")?;
+            println!("benchmark_v2_policy_id={}", bench.policy_id);
+            println!("benchmark_v2_alpha_pct={}", bench.alpha_pct);
+        }
+        Err(e) => {
+            eprintln!("benchmark_v2=unavailable reason={e}");
+        }
+    }
 
     println!("strategy={}", stream.strategy_name);
     println!("semantic_fingerprint={}", stream.semantic_fingerprint);
