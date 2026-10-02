@@ -124,7 +124,16 @@ pub(crate) struct VerifiedResearchAuthority {
 
 /// Registered `signal_source.kind` of a native-signal trial -- see
 /// `mqk_research.ml.native_signal_registry_integration`.
-const NATIVE_SIGNAL_SOURCE_KIND: &str = "native_strategy_signal_stream_v1";
+const NATIVE_SIGNAL_SOURCE_KIND: &str = "native_strategy_signal_stream_v2";
+/// The superseded bridge reinterpreted a native absolute target as a direction
+/// and re-sized it from a weight. Its trials are historical evidence only and
+/// are never promotion authority.
+const SUPERSEDED_NATIVE_SIGNAL_SOURCE_KIND: &str = "native_strategy_signal_stream_v1";
+/// Quantity contract a native trial must declare: the target is an absolute
+/// whole-share quantity, evaluated exactly.
+const NATIVE_TARGET_SEMANTICS: &str = "absolute_whole_share_target_v1";
+const NATIVE_EXACT_TARGET_DIRECTION_POLICY: &str = "native_exact_target_qty_v1";
+const NATIVE_EXACT_TARGET_SIZING: &str = "exact_native_target_qty_v1";
 
 /// Read the native semantic fingerprint a trial's registered identity binds
 /// (`Ok(None)` when no `signal_source` is declared). A declared but malformed
@@ -138,10 +147,47 @@ fn native_fingerprint_from_identity(identity_json: Option<&str>) -> Result<Optio
     let Some(source) = identity.get("signal_source") else {
         return Ok(None);
     };
-    if source.get("kind").and_then(Value::as_str) != Some(NATIVE_SIGNAL_SOURCE_KIND) {
+    let kind = source.get("kind").and_then(Value::as_str);
+    if kind == Some(SUPERSEDED_NATIVE_SIGNAL_SOURCE_KIND) {
+        return Err(format!(
+            "registered trial binds the superseded native bridge {SUPERSEDED_NATIVE_SIGNAL_SOURCE_KIND:?} \
+             (its economics re-sized the native target from a weight): historical evidence, not \
+             promotion authority"
+        ));
+    }
+    if kind != Some(NATIVE_SIGNAL_SOURCE_KIND) {
         return Err(format!(
             "registered trial declares an unsupported signal_source.kind: {:?}",
             source.get("kind")
+        ));
+    }
+    if source.get("target_semantics").and_then(Value::as_str) != Some(NATIVE_TARGET_SEMANTICS) {
+        return Err(format!(
+            "registered native trial does not declare target_semantics {NATIVE_TARGET_SEMANTICS:?}"
+        ));
+    }
+    if source
+        .get("required_history_bars")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
+    {
+        return Err(
+            "registered native trial does not declare a positive required_history_bars".to_string(),
+        );
+    }
+    // The economic identity must be the exact-target protocol: a native v2 source
+    // evaluated under any weight-based policy would re-size the target.
+    let policy = identity
+        .pointer("/economic_protocol/signal_policy")
+        .unwrap_or(&Value::Null);
+    if policy.get("direction_policy").and_then(Value::as_str)
+        != Some(NATIVE_EXACT_TARGET_DIRECTION_POLICY)
+        || policy.get("sizing").and_then(Value::as_str) != Some(NATIVE_EXACT_TARGET_SIZING)
+    {
+        return Err(format!(
+            "registered native trial is not evaluated under direction_policy \
+             {NATIVE_EXACT_TARGET_DIRECTION_POLICY:?} / sizing {NATIVE_EXACT_TARGET_SIZING:?}"
         ));
     }
     let fp = source
@@ -498,7 +544,18 @@ mod native_binding_tests {
     const FP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn identity(kind: &str, fp: &str) -> String {
-        format!(r#"{{"signal_source":{{"kind":"{kind}","semantic_fingerprint":"{fp}"}}}}"#)
+        full_identity(
+            kind,
+            fp,
+            "native_exact_target_qty_v1",
+            "exact_native_target_qty_v1",
+        )
+    }
+
+    fn full_identity(kind: &str, fp: &str, direction: &str, sizing: &str) -> String {
+        format!(
+            r#"{{"signal_source":{{"kind":"{kind}","semantic_fingerprint":"{fp}","target_semantics":"absolute_whole_share_target_v1","required_history_bars":253}},"economic_protocol":{{"signal_policy":{{"direction_policy":"{direction}","sizing":"{sizing}"}}}}}}"#
+        )
     }
 
     #[test]
@@ -509,18 +566,65 @@ mod native_binding_tests {
 
     #[test]
     fn declared_native_source_yields_the_exact_fingerprint() {
-        let id = identity("native_strategy_signal_stream_v1", FP);
+        let id = identity("native_strategy_signal_stream_v2", FP);
         assert_eq!(
             native_fingerprint_from_identity(Some(&id)),
             Ok(Some(FP.to_string()))
         );
     }
 
+    /// The superseded v1 bridge (binary-weight economics) can never authorize.
+    #[test]
+    fn superseded_v1_binding_is_not_authority() {
+        let id = identity("native_strategy_signal_stream_v1", FP);
+        let err = native_fingerprint_from_identity(Some(&id)).unwrap_err();
+        assert!(err.contains("superseded"), "{err}");
+        // v1-shaped identity (no exact-target economics, no target semantics) likewise.
+        let legacy = format!(
+            r#"{{"signal_source":{{"kind":"native_strategy_signal_stream_v1","semantic_fingerprint":"{FP}"}}}}"#
+        );
+        assert!(native_fingerprint_from_identity(Some(&legacy)).is_err());
+    }
+
+    /// A v2 source must be evaluated under the exact-target economics.
+    #[test]
+    fn v2_source_with_weight_based_economics_or_missing_quantity_contract_fails_closed() {
+        for bad in [
+            full_identity(
+                "native_strategy_signal_stream_v2",
+                FP,
+                "long_only_v1",
+                "equal_weight_active",
+            ),
+            full_identity(
+                "native_strategy_signal_stream_v2",
+                FP,
+                "native_exact_target_qty_v1",
+                "equal_weight_active",
+            ),
+            full_identity("native_strategy_signal_stream_v2", FP, "", ""),
+            identity("native_strategy_signal_stream_v2", FP)
+                .replace("absolute_whole_share_target_v1", "direction_only"),
+            identity("native_strategy_signal_stream_v2", FP).replace(
+                "\"required_history_bars\":253",
+                "\"required_history_bars\":0",
+            ),
+            format!(
+                r#"{{"signal_source":{{"kind":"native_strategy_signal_stream_v2","semantic_fingerprint":"{FP}"}}}}"#
+            ),
+        ] {
+            assert!(
+                native_fingerprint_from_identity(Some(&bad)).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
     #[test]
     fn declared_but_malformed_source_fails_closed_never_none() {
         for bad in [
-            identity("native_strategy_signal_stream_v1", "short"),
-            identity("native_strategy_signal_stream_v1", &FP.to_uppercase()),
+            identity("native_strategy_signal_stream_v2", "short"),
+            identity("native_strategy_signal_stream_v2", &FP.to_uppercase()),
             identity("other_kind", FP),
             "{not json".to_string(),
         ] {

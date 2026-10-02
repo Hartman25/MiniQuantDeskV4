@@ -2,16 +2,30 @@
 
 The executable strategy (Rust) stays the single source of truth for decisions:
 `mqk backtest native-signals` runs it through the real BacktestEngine and
-emits its per-bar targets. This module registers that stream as the OOS
-decision series of a predeclared Research trial and evaluates it with the
-unmodified `run_economic_walkforward` -- the same economic protocol, official
-execution-pricing/weight-to-share parity and holdout reservation as every
-classifier trial. Nothing here re-implements a trading rule.
+emits its per-bar ABSOLUTE target quantities. This module registers that
+stream as the OOS decision series of a predeclared Research trial and
+evaluates it with the unmodified `run_economic_walkforward` -- the same
+economic protocol, official execution-pricing/weight-to-share parity and
+holdout reservation as every classifier trial. Nothing here re-implements a
+trading rule.
+
+Quantity contract (`native_strategy_signal_stream_v2`): a native
+`TargetPosition.qty` is an absolute portfolio target and production derives
+`delta = target - current` from it. Research therefore executes the EXACT
+whole-share target under `direction_policy=native_exact_target_qty_v1`; it
+never reduces the target to a direction and re-derives a size from a weight.
+The earlier `native_strategy_signal_stream_v1` bridge did exactly that and its
+evidence is superseded: it cannot be registered, loaded or promoted here.
+
+Chronology: hypothesis -> trial registration -> attempt -> signal emission ->
+economic evaluation. The trial must already be registered when an attempt
+begins, and the emitter runs INSIDE the attempt, so an emission failure is a
+failed attempt of the same trial, never a new trial. Trial identity is
+result-independent; a retry is a new attempt of the SAME trial.
 
 Evaluation is out-of-sample by construction only because the rule has no fitted
 parameters: its constants are predeclared (and bound into the native semantic
-fingerprint) before any result exists. Trial identity is result-independent;
-a retry is a new attempt of the SAME trial.
+fingerprint) before any result exists.
 """
 
 from __future__ import annotations
@@ -20,8 +34,9 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from mqk_research.data.bars_provenance import (
@@ -37,34 +52,47 @@ from mqk_research.ml.economic_registry_integration import (
     require_official_weight_to_share_parity,
 )
 from mqk_research.ml.economic_walkforward import (
+    SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1,
     EconomicWalkForwardSpec,
     economic_protocol_identity,
     run_economic_walkforward,
 )
 from mqk_research.ml.eval_walkforward import compute_holdout_boundary
+from mqk_research.ml.execution_pricing import to_micros
 from mqk_research.ml.holdout_ledger import compute_holdout_id
 from mqk_research.ml.util_hash import file_record, sha256_file
 
-NATIVE_SIGNAL_STREAM_PROTOCOL_ID = "native_strategy_signal_stream_v1"
-NATIVE_SIGNAL_SOURCE_KIND = "native_strategy_signal_stream_v1"
+NATIVE_SIGNAL_STREAM_PROTOCOL_ID = "native_strategy_signal_stream_v2"
+NATIVE_SIGNAL_SOURCE_KIND = "native_strategy_signal_stream_v2"
+NATIVE_QUANTITY_SEMANTICS_ID = "absolute_target_qty_micros_v1"
+NATIVE_TARGET_SEMANTICS_ID = "absolute_whole_share_target_v1"
+# Protocol ids whose economics reinterpreted a native target as a direction
+# and re-sized it from a weight. Historical evidence only; never accepted.
+SUPERSEDED_NATIVE_PROTOCOL_IDS = frozenset({"native_strategy_signal_stream_v1"})
 _MICROS = 1_000_000
 
 # An evaluation only measures the hypothesis if the discrete share positions it
-# simulates actually follow the strategy's target. The economic engine rejects
-# a fill whose notional would exceed the allocation cap at the conservative
-# fill price, so a spec that sizes a position AT the cap (e.g. one fully
-# weighted symbol) silently skips most entries. This floor is a fixed,
-# outcome-independent implementability check, applied to every native trial.
+# simulates actually equal the strategy's target quantities. The floor is a
+# fixed, outcome-independent implementability check, applied to every native
+# trial; it tolerates only causal admission rejections, never a different
+# quantity.
 NATIVE_EXECUTION_FIDELITY_FLOOR = 0.95
 
 __all__ = [
     "NATIVE_EXECUTION_FIDELITY_FLOOR",
+    "NATIVE_QUANTITY_SEMANTICS_ID",
+    "NATIVE_SIGNAL_SOURCE_KIND",
     "NATIVE_SIGNAL_STREAM_PROTOCOL_ID",
-    "native_execution_fidelity",
+    "NATIVE_TARGET_SEMANTICS_ID",
+    "SUPERSEDED_NATIVE_PROTOCOL_IDS",
+    "NativeFidelity",
     "NativeSignalError",
     "build_native_signal_trial_identity",
+    "native_exact_target_fidelity",
     "native_holdout_start",
     "plan_native_folds",
+    "register_native_signal_trial",
+    "require_native_exact_target_spec",
     "research_bars_to_backtest_csv",
     "run_registered_native_signal_economic_eval",
 ]
@@ -79,6 +107,14 @@ class NativeFold:
     fold: int
     test_start: pd.Timestamp
     test_end: pd.Timestamp
+
+
+class NativeFidelity(NamedTuple):
+    agreement: float
+    evaluated_bars: int
+    matched_bars: int
+    max_abs_qty_gap: int
+    desired_nonzero_bars: int
 
 
 def research_bars_to_backtest_csv(
@@ -151,27 +187,49 @@ def plan_native_folds(
     return folds, holdout_start, dataset_end
 
 
-def native_execution_fidelity(economic_out: Dict[str, Any], symbol: str) -> Tuple[float, int, int]:
-    """Fraction of evaluated bars on which the simulated discrete share
-    position (held before that bar's own order) agrees, long vs flat, with the
-    executed desired weight. Returns (agreement, desired_long_bars,
-    discrete_long_bars). Depends only on positions, never on any P&L."""
-    returns = pd.read_csv(economic_out["outputs"]["economic_returns_csv"]["path"])
-    held: List[Any] = []
-    desired: List[Any] = []
+def native_exact_target_fidelity(
+    economic_out: Dict[str, Any], symbol: str, signals: pd.DataFrame
+) -> NativeFidelity:
+    """Exact-quantity agreement between the strategy's absolute target and the
+    economic simulator's discrete position.
+
+    For every evaluated bar of every fold (the fold's forced fold-end flatten
+    row excluded), the desired quantity is the native `target_qty` of the
+    latest decision of that fold strictly before the bar (the causal rule the
+    simulator itself applies), and the held quantity is the simulator's
+    post-order discrete position. Agreement requires EQUAL quantities: desired
+    1 / held 1 matches, desired 1 / held 250 does not. A signal-time target the
+    simulator reports for a bar must also equal the desired quantity. Depends
+    only on positions, never on any P&L."""
+    # Timestamp.value is nanoseconds whatever the frame's datetime resolution is
+    # (pandas 3 defaults to microseconds), so never compare it to astype("int64").
+    ts_ns = np.array([pd.Timestamp(t).value for t in signals["decision_ts_utc"]], dtype="int64")
+    qty = signals["target_qty"].astype("int64").to_numpy()
+    order = np.argsort(ts_ns, kind="mergesort")
+    sig_ns = ts_ns[order]
+    sig_qty = qty[order]
+
+    evaluated = matched = max_gap = desired_nonzero = 0
     for fold in economic_out["folds"]:
-        events = pd.DataFrame(fold["weight_to_share_evidence"][symbol])
-        sign = events["side"].map({"buy": 1, "sell": -1}).fillna(0)
-        position = (events["qty"].fillna(0).astype(int) * sign).cumsum().shift(1).fillna(0)
-        rows = returns[returns["fold"] == fold["fold"]].reset_index(drop=True)
-        if len(rows) != len(events):
-            raise NativeSignalError("economic rows and discrete evidence disagree on length")
-        held.extend((position > 0).tolist())
-        desired.extend((rows["interval_exposure"] > 0).tolist())
-    if not held:
+        lo = pd.Timestamp(fold["test_start_utc"]).value
+        hi = pd.Timestamp(fold["test_end_utc"]).value
+        in_fold = (sig_ns >= lo) & (sig_ns < hi)
+        f_ns, f_qty = sig_ns[in_fold], sig_qty[in_fold]
+        events = fold["weight_to_share_evidence"][symbol]
+        for event in events[:-1]:
+            t = pd.Timestamp(event["timestamp"]).value
+            i = int(np.searchsorted(f_ns, t, side="left")) - 1
+            desired = int(f_qty[i]) if i >= 0 else 0
+            held = int(event["target_qty"])
+            intended = event.get("signal_target_qty")
+            ok = held == desired and (intended is None or int(intended) == desired)
+            evaluated += 1
+            matched += int(ok)
+            max_gap = max(max_gap, abs(held - desired))
+            desired_nonzero += int(desired != 0)
+    if evaluated == 0:
         raise NativeSignalError("no evaluated bars to measure execution fidelity on")
-    agree = sum(1 for h, d in zip(held, desired) if h == d) / len(held)
-    return float(agree), int(sum(desired)), int(sum(held))
+    return NativeFidelity(matched / evaluated, evaluated, matched, max_gap, desired_nonzero)
 
 
 def native_holdout_start(bars_csv: Path, symbol: str, holdout_months: int) -> pd.Timestamp:
@@ -183,6 +241,22 @@ def native_holdout_start(bars_csv: Path, symbol: str, holdout_months: int) -> pd
     return compute_holdout_boundary(ts.min(), ts.max(), int(holdout_months))[1]
 
 
+def require_native_exact_target_spec(economic_spec: EconomicWalkForwardSpec) -> EconomicWalkForwardSpec:
+    """A native absolute target is only evaluated under the exact-target policy
+    with the discrete economics engaged. Any other policy would re-size the
+    target from a weight and is refused. Returns the normalized spec."""
+    spec = economic_spec.normalized()
+    if spec.signal_policy.direction_policy != SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1:
+        raise NativeSignalError(
+            "native strategy targets are absolute quantities and require "
+            f"direction_policy={SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1!r}; got "
+            f"{spec.signal_policy.direction_policy!r}, which would re-size the target from a weight"
+        )
+    if spec.weight_to_share is None:
+        raise NativeSignalError("native exact-target evaluation requires the discrete weight_to_share economics")
+    return spec
+
+
 def _load_signals(
     signals_csv: Path,
     meta_json: Path,
@@ -191,11 +265,24 @@ def _load_signals(
     symbol: str,
     backtest_bars_sha256: str,
     expected_timeframe_secs: int,
-    expected_semantic_fingerprint: Optional[str],
+    expected_semantic_fingerprint: str,
+    expected_required_history_bars: int,
+    equity_usd: float,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     meta = json.loads(Path(meta_json).read_text(encoding="utf-8"))
-    if meta.get("protocol_id") != NATIVE_SIGNAL_STREAM_PROTOCOL_ID:
-        raise NativeSignalError(f"unsupported native signal protocol: {meta.get('protocol_id')!r}")
+    protocol = meta.get("protocol_id")
+    if protocol in SUPERSEDED_NATIVE_PROTOCOL_IDS:
+        raise NativeSignalError(
+            f"native signal protocol {protocol!r} is superseded (it reinterpreted the target as a "
+            f"direction and re-sized it from a weight) and is not promotion authority; "
+            f"expected {NATIVE_SIGNAL_STREAM_PROTOCOL_ID!r}"
+        )
+    if protocol != NATIVE_SIGNAL_STREAM_PROTOCOL_ID:
+        raise NativeSignalError(f"unsupported native signal protocol: {protocol!r}")
+    if meta.get("quantity_semantics") != NATIVE_QUANTITY_SEMANTICS_ID:
+        raise NativeSignalError(
+            f"signal stream quantity_semantics {meta.get('quantity_semantics')!r} != {NATIVE_QUANTITY_SEMANTICS_ID!r}"
+        )
     if meta.get("strategy_name") != strategy_id:
         raise NativeSignalError(
             f"signal stream strategy {meta.get('strategy_name')!r} != trial strategy_id {strategy_id!r}"
@@ -209,7 +296,7 @@ def _load_signals(
         raise NativeSignalError(
             f"signal stream timeframe_secs {meta.get('timeframe_secs')!r} != expected {expected_timeframe_secs}"
         )
-    if expected_semantic_fingerprint is not None and fp != expected_semantic_fingerprint:
+    if fp != expected_semantic_fingerprint:
         raise NativeSignalError(
             "signal stream semantic_fingerprint does not equal the expected native fingerprint"
         )
@@ -219,21 +306,55 @@ def _load_signals(
         raise NativeSignalError(
             "signals were not emitted over the bars derived from this trial's research bars"
         )
+
+    # History provenance must describe the window the strategy actually received.
+    try:
+        configured = int(meta["configured_bar_history_len"])
+        required = int(meta["required_history_bars"])
+        effective = int(meta["effective_bar_history_len"])
+        observed = int(meta["observed_max_window_len"])
+        emitter_cash = int(meta["initial_cash_micros"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise NativeSignalError(f"signal stream meta lacks truthful history/cash provenance: {exc!r}") from exc
+    if required != int(expected_required_history_bars):
+        raise NativeSignalError(
+            f"signal stream required_history_bars {required} != the registered {expected_required_history_bars}"
+        )
+    if effective != max(configured, required):
+        raise NativeSignalError(
+            f"signal stream effective_bar_history_len {effective} != max(configured {configured}, required {required})"
+        )
+    rows = int(meta.get("signal_rows", -1))
+    if observed > effective or (rows >= effective and observed != effective):
+        raise NativeSignalError(
+            f"signal stream observed_max_window_len {observed} contradicts effective_bar_history_len {effective}"
+        )
+    if emitter_cash != to_micros(equity_usd):
+        raise NativeSignalError(
+            f"emitter/Backtest initial_cash_micros {emitter_cash} != Research equity_usd {equity_usd} "
+            "-- Research and Backtest evidence must share one capital basis"
+        )
+
     df = pd.read_csv(signals_csv)
     if list(df.columns) != ["symbol", "decision_ts", "target_qty_micros"]:
         raise NativeSignalError("unexpected native signal csv columns")
-    if int(meta.get("signal_rows", -1)) != len(df) or df.empty:
+    if rows != len(df) or df.empty:
         raise NativeSignalError("signal row count disagrees with meta or is empty")
     if (df["symbol"].astype(str) != symbol).any():
         raise NativeSignalError("signal stream contains a different symbol")
     if df["decision_ts"].duplicated().any():
         raise NativeSignalError("duplicate decision_ts in signal stream")
     q = df["target_qty_micros"].astype("int64")
-    if ((q != 0) & (q != _MICROS)).any():
-        raise NativeSignalError("protocol v1 research bridge supports only flat/+1 share targets")
+    if (q < 0).any():
+        raise NativeSignalError("native exact-target protocol supports only non-negative targets")
+    if (q % _MICROS != 0).any():
+        raise NativeSignalError("native exact-target protocol supports only whole-share targets")
     df = df.sort_values("decision_ts", kind="mergesort").reset_index(drop=True)
     df["decision_ts_utc"] = pd.to_datetime(df["decision_ts"].astype("int64"), unit="s", utc=True)
-    df["ml_score"] = (df["target_qty_micros"].astype("int64") > 0).astype(float)
+    df["target_qty"] = (df["target_qty_micros"].astype("int64") // _MICROS).astype("int64")
+    # `ml_score` is only the loader's required column; the exact-target policy
+    # never reads it.
+    df["ml_score"] = (df["target_qty"] > 0).astype(float)
     return df, meta
 
 
@@ -244,16 +365,19 @@ def build_native_signal_trial_identity(
     strategy_id: str,
     symbol: str,
     semantic_fingerprint: str,
+    required_history_bars: int,
     bars_provenance: Dict[str, Any],
     evaluation_start_utc: pd.Timestamp,
     test_months: int,
     holdout_months: int,
     economic_spec: EconomicWalkForwardSpec,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Result-independent identity: strategy semantics, data provenance,
-    partition policy and economic protocol only. Mirrors the keys the judge's
-    comparison scope reads for classifier trials."""
-    spec = economic_spec.normalized()
+    """Result-independent identity: strategy semantics, quantity contract, data
+    provenance, partition policy and economic protocol only. The signal source
+    kind, the exact-target policy inside the economic identity and the capital
+    basis all differ from the superseded v1 bridge, so no v1 trial id can equal
+    a v2 one."""
+    spec = require_native_exact_target_spec(economic_spec)
     identity: Dict[str, Any] = {
         "experiment_id": experiment_id,
         "hypothesis_id": hypothesis_id,
@@ -266,6 +390,8 @@ def build_native_signal_trial_identity(
             "kind": NATIVE_SIGNAL_SOURCE_KIND,
             "symbol": symbol,
             "semantic_fingerprint": semantic_fingerprint,
+            "target_semantics": NATIVE_TARGET_SEMANTICS_ID,
+            "required_history_bars": int(required_history_bars),
         },
         "evaluation_spec": {
             "signal_source": NATIVE_SIGNAL_SOURCE_KIND,
@@ -282,6 +408,57 @@ def build_native_signal_trial_identity(
     return short_hash(identity, length=32), identity
 
 
+def _require_inputs(**named: Any) -> None:
+    for name, value in named.items():
+        if not str(value).strip():
+            raise ValueError(f"{name} is required")
+
+
+def register_native_signal_trial(
+    *,
+    experiment_id: str,
+    hypothesis_id: str,
+    strategy_id: str,
+    symbol: str,
+    semantic_fingerprint: str,
+    required_history_bars: int,
+    bars_provenance: Dict[str, Any],
+    economic_spec: EconomicWalkForwardSpec,
+    evaluation_start_utc: pd.Timestamp,
+    test_months: int = 12,
+    holdout_months: int = 6,
+    hypothesis_text: Optional[str] = None,
+    registry_db: Optional[Path] = None,
+) -> str:
+    """Register the hypothesis and the trial and NOTHING else: no emission, no
+    market data, no attempt, no evaluation. The fingerprint comes from the
+    native registry (`mqk backtest native-fingerprint`), not from a run."""
+    _require_inputs(
+        experiment_id=experiment_id, hypothesis_id=hypothesis_id, strategy_id=strategy_id, symbol=symbol,
+    )
+    if len(semantic_fingerprint) != 64 or any(c not in "0123456789abcdef" for c in semantic_fingerprint):
+        raise NativeSignalError("semantic_fingerprint is not 64 lowercase hex")
+    require_registered_bars_provenance(bars_provenance)
+    spec = require_native_exact_target_spec(economic_spec)
+    require_official_execution_pricing_parity(spec)
+    require_official_weight_to_share_parity(spec)
+    trial_id, identity = build_native_signal_trial_identity(
+        experiment_id=experiment_id, hypothesis_id=hypothesis_id, strategy_id=strategy_id, symbol=symbol,
+        semantic_fingerprint=semantic_fingerprint, required_history_bars=required_history_bars,
+        bars_provenance=bars_provenance, evaluation_start_utc=evaluation_start_utc,
+        test_months=test_months, holdout_months=holdout_months, economic_spec=spec,
+    )
+    store = ResearchResultStore(registry_db or default_db_path(default_root()))
+    store.register_hypothesis(
+        hypothesis_id=hypothesis_id, experiment_id=experiment_id, hypothesis_text=hypothesis_text
+    )
+    store.register_trial(
+        trial_id=trial_id, experiment_id=experiment_id, hypothesis_id=hypothesis_id,
+        strategy_id=strategy_id, protocol_id=ECONOMIC_PROTOCOL_ID, identity=identity,
+    )
+    return trial_id
+
+
 def run_registered_native_signal_economic_eval(
     run_dir: Path,
     *,
@@ -292,34 +469,37 @@ def run_registered_native_signal_economic_eval(
     bars_csv: Path,
     bars_provenance: Dict[str, Any],
     backtest_bars_csv: Path,
+    emit_signals: Callable[[], None],
     signals_csv: Path,
     signals_meta_json: Path,
     economic_spec: EconomicWalkForwardSpec,
     evaluation_start_utc: pd.Timestamp,
+    expected_semantic_fingerprint: str,
+    required_history_bars: int,
     test_months: int = 12,
     holdout_months: int = 6,
-    hypothesis_text: Optional[str] = None,
     registry_db: Optional[Path] = None,
     expected_timeframe_secs: int = 86_400,
-    expected_semantic_fingerprint: Optional[str] = None,
 ) -> Path:
-    """Official registered entry point for a native strategy's signals.
-    Order mirrors the classifier path: identity -> trial -> attempt (BEFORE
-    evaluation) -> economic evaluation -> holdout reservation -> attempt
-    finalized. Any failure after the attempt starts finalizes it `failed`."""
-    for name, value in (("experiment_id", experiment_id), ("hypothesis_id", hypothesis_id),
-                        ("strategy_id", strategy_id), ("symbol", symbol)):
-        if not str(value).strip():
-            raise ValueError(f"{name} is required")
+    """Official registered entry point for a native strategy's signals. The
+    trial must ALREADY be registered (`register_native_signal_trial`); order is
+    trial -> attempt (BEFORE emission) -> `emit_signals()` -> signal load ->
+    economic evaluation -> holdout reservation -> attempt finalized. Any
+    failure after the attempt starts -- including a failed emission --
+    finalizes it `failed`; the trial is never re-registered or replaced."""
+    _require_inputs(
+        experiment_id=experiment_id, hypothesis_id=hypothesis_id, strategy_id=strategy_id, symbol=symbol,
+    )
     require_registered_bars_provenance(bars_provenance)
-    spec = economic_spec.normalized()
+    spec = require_native_exact_target_spec(economic_spec)
     require_official_execution_pricing_parity(spec)
     require_official_weight_to_share_parity(spec)
+    wts = spec.weight_to_share.normalized()
 
     run_dir = Path(run_dir)
     bars_csv = Path(bars_csv)
     backtest_bars_csv = Path(backtest_bars_csv)
-    for p in (bars_csv, backtest_bars_csv, Path(signals_csv), Path(signals_meta_json)):
+    for p in (bars_csv, backtest_bars_csv):
         if not p.exists():
             raise FileNotFoundError(f"Missing required native-signal input: {p}")
 
@@ -344,34 +524,41 @@ def run_registered_native_signal_economic_eval(
             "backtest bars csv is not the holdout-truncated conversion of the research bars"
         )
 
-    signals, meta = _load_signals(
-        signals_csv, signals_meta_json, strategy_id=strategy_id, symbol=symbol,
-        backtest_bars_sha256=expected_sha,
-        expected_timeframe_secs=expected_timeframe_secs,
-        expected_semantic_fingerprint=expected_semantic_fingerprint,
-    )
-
     trial_id, identity = build_native_signal_trial_identity(
         experiment_id=experiment_id, hypothesis_id=hypothesis_id, strategy_id=strategy_id,
-        symbol=symbol, semantic_fingerprint=meta["semantic_fingerprint"],
-        bars_provenance=bars_provenance, evaluation_start_utc=evaluation_start_utc,
-        test_months=test_months, holdout_months=holdout_months, economic_spec=spec,
+        symbol=symbol, semantic_fingerprint=expected_semantic_fingerprint,
+        required_history_bars=required_history_bars, bars_provenance=bars_provenance,
+        evaluation_start_utc=evaluation_start_utc, test_months=test_months,
+        holdout_months=holdout_months, economic_spec=spec,
     )
 
     store = ResearchResultStore(registry_db or default_db_path(default_root()))
-    store.register_hypothesis(
-        hypothesis_id=hypothesis_id, experiment_id=experiment_id, hypothesis_text=hypothesis_text
-    )
-    store.register_trial(
-        trial_id=trial_id, experiment_id=experiment_id, hypothesis_id=hypothesis_id,
-        strategy_id=strategy_id, protocol_id=ECONOMIC_PROTOCOL_ID, identity=identity,
-    )
+    try:
+        registered = store.get_trial(trial_id)
+    except KeyError as exc:
+        raise NativeSignalError(
+            f"trial {trial_id} is not registered: register every trial before any attempt or emission"
+        ) from exc
+    if registered["strategy_id"] != strategy_id or registered["experiment_id"] != experiment_id:
+        raise NativeSignalError(f"registered trial {trial_id} does not match this evaluation's strategy/experiment")
+
     attempt_id, attempt_index = store.begin_attempt(
         trial_id=trial_id, origin="mqk-native-signal-economic-wf",
-        metadata={"native_signals_csv_sha256": meta["native_signals_csv_sha256"]},
+        metadata={"native_signal_protocol": NATIVE_SIGNAL_STREAM_PROTOCOL_ID},
     )
 
     try:
+        emit_signals()
+        for p in (Path(signals_csv), Path(signals_meta_json)):
+            if not p.exists():
+                raise NativeSignalError(f"emitter did not produce the required native-signal artifact: {p}")
+        signals, meta = _load_signals(
+            signals_csv, signals_meta_json, strategy_id=strategy_id, symbol=symbol,
+            backtest_bars_sha256=expected_sha, expected_timeframe_secs=expected_timeframe_secs,
+            expected_semantic_fingerprint=expected_semantic_fingerprint,
+            expected_required_history_bars=required_history_bars, equity_usd=wts.equity_usd,
+        )
+
         eval_dir = run_dir / "eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
 
@@ -384,12 +571,15 @@ def run_registered_native_signal_economic_eval(
                 rows.append({
                     "fold": f.fold, "symbol": symbol,
                     "decision_ts": r["decision_ts_utc"].isoformat(), "ml_score": float(r["ml_score"]),
+                    "target_qty": int(r["target_qty"]),
                 })
             if in_fold.empty:
                 raise NativeSignalError(f"no native signals inside fold {f.fold}")
         oos_path = eval_dir / "walk_forward_oos_predictions.csv"
         with open(oos_path, "w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=["fold", "symbol", "decision_ts", "ml_score"], lineterminator="\n")
+            w = csv.DictWriter(
+                fh, fieldnames=["fold", "symbol", "decision_ts", "ml_score", "target_qty"], lineterminator="\n"
+            )
             w.writeheader()
             w.writerows(rows)
 
@@ -423,13 +613,13 @@ def run_registered_native_signal_economic_eval(
         )
         economic_out = json.loads(economic_out_path.read_text(encoding="utf-8"))
 
-        fidelity, desired_bars, held_bars = native_execution_fidelity(economic_out, symbol)
-        if fidelity < NATIVE_EXECUTION_FIDELITY_FLOOR:
+        fidelity = native_exact_target_fidelity(economic_out, symbol, signals)
+        if fidelity.agreement < NATIVE_EXECUTION_FIDELITY_FLOOR:
             raise NativeSignalError(
-                f"execution fidelity {fidelity:.3f} < floor {NATIVE_EXECUTION_FIDELITY_FLOOR} "
-                f"(desired long bars={desired_bars}, discrete long bars={held_bars}): the economic "
-                "protocol did not implement the strategy's target positions (e.g. sizing at the "
-                "allocation cap rejects entries at the conservative fill price)"
+                f"execution fidelity {fidelity.agreement:.3f} < floor {NATIVE_EXECUTION_FIDELITY_FLOOR} "
+                f"({fidelity.matched_bars}/{fidelity.evaluated_bars} bars held exactly the native target "
+                f"quantity; max quantity gap {fidelity.max_abs_qty_gap}): the economic protocol did not "
+                "implement the strategy's exact target positions"
             )
 
         holdout_id = compute_holdout_id(
@@ -455,7 +645,9 @@ def run_registered_native_signal_economic_eval(
         "holdout_id": holdout_id,
         "signal_source": NATIVE_SIGNAL_SOURCE_KIND,
         "semantic_fingerprint": meta["semantic_fingerprint"],
-        "execution_fidelity": round(fidelity, 6),
+        "execution_fidelity": round(fidelity.agreement, 6),
+        "max_abs_target_qty_gap": int(fidelity.max_abs_qty_gap),
+        "effective_bar_history_len": int(meta["effective_bar_history_len"]),
     }
     economic_out_path.write_text(json.dumps(economic_out, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     store.finalize_attempt(

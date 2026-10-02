@@ -643,7 +643,7 @@ mod tests {
 
     fn native_identity(fp: &str) -> String {
         format!(
-            r#"{{"signal_source":{{"kind":"native_strategy_signal_stream_v1","semantic_fingerprint":"{fp}"}}}}"#
+            r#"{{"signal_source":{{"kind":"native_strategy_signal_stream_v2","semantic_fingerprint":"{fp}","target_semantics":"absolute_whole_share_target_v1","required_history_bars":50}},"economic_protocol":{{"signal_policy":{{"direction_policy":"native_exact_target_qty_v1","sizing":"exact_native_target_qty_v1"}}}}}}"#
         )
     }
 
@@ -691,6 +691,21 @@ mod tests {
         // An unresolvable server fingerprint can never match a bound one.
         assert!(matches!(
             run_gate(&f, "trend_sma50", None),
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
+        unset_all_research_env();
+    }
+
+    /// Evidence from the superseded v1 bridge (binary-weight economics) is
+    /// historical only: it is rejected even with a matching fingerprint.
+    #[test]
+    fn superseded_v1_native_evidence_is_never_promotion_authority() {
+        let v1 = format!(
+            r#"{{"signal_source":{{"kind":"native_strategy_signal_stream_v1","semantic_fingerprint":"{FP_X}"}}}}"#
+        );
+        let f = build_fixture_with_identity("v1_native", "trend_sma50", Some(&v1));
+        assert!(matches!(
+            run_gate(&f, "trend_sma50", Some(FP_X)),
             ResearchEvidenceGateOutcome::Rejected { .. }
         ));
         unset_all_research_env();

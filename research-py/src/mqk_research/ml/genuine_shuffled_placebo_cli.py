@@ -231,6 +231,11 @@ def _shuffle_oos_predictions(
             idx = df.loc[mask].sort_values(["symbol", "decision_ts"], kind="mergesort").index.to_numpy()
             permuted_idx = rng.permutation(idx)
             shuffled.loc[idx, "ml_score"] = df.loc[permuted_idx, "ml_score"].to_numpy()
+            if "target_qty" in df.columns:
+                # native_exact_target_qty_v1 reads `target_qty`, not `ml_score`:
+                # permute it with the same row assignment so the placebo
+                # decouples the exact targets from time, not just the scores.
+                shuffled.loc[idx, "target_qty"] = df.loc[permuted_idx, "target_qty"].to_numpy()
             groups_permuted += 1
             rows_permuted += len(idx)
 

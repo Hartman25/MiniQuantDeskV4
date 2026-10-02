@@ -134,12 +134,24 @@ SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1 = "long_short_threshold_v1"
 SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1 = "cross_sectional_rank_long_only_v1"
 SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1 = "cross_sectional_rank_long_short_v1"
 
+# M1 NATIVE EXACT-TARGET POLICY: a native Strategy emits an ABSOLUTE portfolio
+# target quantity (`TargetPosition.qty`; production derives
+# `delta = target - current`). This policy carries that exact whole-share
+# target through the economic simulation in the OOS `target_qty` column instead
+# of reducing it to a direction and re-deriving a size from a weight.
+# `ml_score` is ignored under it. It is a distinct identity from
+# `long_only_v1`, so evidence produced by the earlier binary-weight
+# reinterpretation can never be mistaken for it.
+SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1 = "native_exact_target_qty_v1"
+SIGNAL_SIZING_EXACT_NATIVE_TARGET_QTY_V1 = "exact_native_target_qty_v1"
+
 KNOWN_SIGNAL_DIRECTION_POLICY_IDS = frozenset(
     {
         SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1,
         SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1,
         SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
         SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1,
+        SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1,
     }
 )
 RANK_DIRECTION_POLICY_IDS = frozenset(
@@ -364,6 +376,32 @@ class SignalPolicySpec:
                 raise ValueError("economic_walk_forward_v1 supports only sizing='equal_weight_active'")
             sizing = self.sizing
             rank_side_count = None
+        elif self.direction_policy == SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1:
+            if not self.long_only:
+                raise ValueError(
+                    "native_exact_target_qty_v1 direction_policy supports only non-negative "
+                    "whole-share targets and requires long_only=True"
+                )
+            if entry_threshold != 0.5:
+                raise ValueError(
+                    "native_exact_target_qty_v1 direction_policy has no probability threshold and "
+                    "requires entry_threshold=0.5 exactly"
+                )
+            if self.short_threshold is not None:
+                raise ValueError("native_exact_target_qty_v1 direction_policy does not accept short_threshold")
+            if self.borrow_model is not None:
+                raise ValueError("native_exact_target_qty_v1 direction_policy does not accept borrow_model")
+            if self.rank_side_count is not None:
+                raise ValueError("native_exact_target_qty_v1 direction_policy does not accept rank_side_count")
+            if self.sizing != SIGNAL_SIZING_EXACT_NATIVE_TARGET_QTY_V1:
+                raise ValueError(
+                    "native_exact_target_qty_v1 direction_policy requires "
+                    f"sizing={SIGNAL_SIZING_EXACT_NATIVE_TARGET_QTY_V1!r}"
+                )
+            short_threshold = None
+            borrow_model = None
+            sizing = self.sizing
+            rank_side_count = None
         else:
             # DIRECT-SIGNED-RANK-RESEARCH-POLICY-01: the two cross-sectional
             # rank direction policies (see SignalPolicySpec docstring
@@ -432,6 +470,10 @@ class SignalPolicySpec:
     @property
     def is_rank_long_short(self) -> bool:
         return self.direction_policy == SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1
+
+    @property
+    def is_exact_target(self) -> bool:
+        return self.direction_policy == SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1
 
 
 @dataclass(frozen=True)
@@ -587,6 +629,15 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
                 if spec.signal_policy.is_rank
                 else {}
             ),
+            # M1 native exact-target policy: ADDITIVE ONLY, same
+            # absence-not-None rationale as above -- every legacy identity is
+            # byte-for-byte unchanged, while an exact-target candidate can
+            # never share a trial_id with a binary-weight one.
+            **(
+                {"direction_policy": spec.signal_policy.direction_policy}
+                if spec.signal_policy.is_exact_target
+                else {}
+            ),
         },
         "cost_model": {
             "commission_bps_per_side": spec.cost_model.commission_bps_per_side,
@@ -732,6 +783,20 @@ def load_oos_predictions(oos_predictions_csv: Path) -> pd.DataFrame:
     if ((score < 0.0) | (score > 1.0)).any():
         raise RuntimeError("Fail-closed: OOS predictions ml_score outside expected [0,1] range")
     df["ml_score"] = score.astype(float)
+
+    if "target_qty" in df.columns:
+        # Exact native target quantity (whole shares). Only the
+        # native_exact_target_qty_v1 policy reads it; every other policy
+        # refuses its presence (see run_economic_walkforward).
+        target_qty = pd.to_numeric(df["target_qty"], errors="coerce")
+        values = target_qty.to_numpy(dtype=float)
+        if target_qty.isna().any() or not np.isfinite(values).all():
+            raise RuntimeError("Fail-closed: OOS predictions target_qty contains missing/non-finite values")
+        if (values < 0.0).any():
+            raise RuntimeError("Fail-closed: OOS predictions target_qty must be non-negative whole shares")
+        if (values != np.floor(values)).any():
+            raise RuntimeError("Fail-closed: OOS predictions target_qty must be whole shares")
+        df["target_qty"] = target_qty.astype("int64")
 
     dup_mask = df.duplicated(subset=["fold", "symbol", "decision_ts"], keep=False)
     if dup_mask.any():
@@ -926,6 +991,84 @@ def _build_pending_events(
                 pending_events[s].append((signal_ts, new_weight, target_qty))
                 last_issued_weight[s] = new_weight
 
+    return pending_events
+
+
+def _build_exact_target_pending_events(
+    oos_fold: pd.DataFrame,
+    symbols: List[str],
+    signal_policy: SignalPolicySpec,
+    *,
+    close_frame: pd.DataFrame,
+    wts_spec: Optional[WeightToShareSpec],
+) -> Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]]:
+    """Pending events for `native_exact_target_qty_v1`: the discrete target of
+    each event IS the native `target_qty` of that decision, never derived from
+    a weight. The event weight (`qty * signal_close / equity_usd`) exists only
+    so the shared gross-exposure/capacity machinery keeps working; it can never
+    change the quantity. A target the allocation could not fund (notional above
+    `max_gross_exposure * equity_usd`, or above an explicit cap) is refused
+    rather than silently resized."""
+    if wts_spec is None:
+        raise RuntimeError(
+            "Fail-closed: native_exact_target_qty_v1 requires the discrete weight_to_share economics"
+        )
+    if "target_qty" not in oos_fold.columns:
+        raise RuntimeError(
+            "Fail-closed: native_exact_target_qty_v1 requires the exact `target_qty` column in the "
+            "OOS predictions; `ml_score` alone is never reinterpreted as a quantity"
+        )
+    max_gross = float(signal_policy.max_gross_exposure)
+    equity = float(wts_spec.equity_usd)
+    decisions = oos_fold.pivot_table(
+        index="decision_ts", columns="symbol", values="target_qty", aggfunc="last"
+    )
+    decisions = decisions.reindex(columns=symbols).sort_index(kind="mergesort")
+
+    last_qty: Dict[str, int] = {s: 0 for s in symbols}
+    pending_events: Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]] = {s: [] for s in symbols}
+    for ts, row in decisions.iterrows():
+        signal_ts = pd.Timestamp(ts)
+        for s in symbols:
+            raw = row[s]
+            if pd.isna(raw):
+                continue
+            qty = int(raw)
+            if qty != raw or qty < 0:
+                raise RuntimeError(
+                    f"Fail-closed: exact native target must be a non-negative whole share count, got {raw!r}"
+                )
+            if qty == last_qty[s]:
+                continue
+            weight = 0.0
+            if qty != 0:
+                price = None
+                if signal_ts in close_frame.index:
+                    value = close_frame.at[signal_ts, s]
+                    price = float(value) if pd.notna(value) else None
+                if price is None or price <= 0.0:
+                    raise RuntimeError(
+                        f"Fail-closed: exact native target for {s} at {signal_ts.isoformat()} has no "
+                        "positive signal-time close to size admission against"
+                    )
+                notional = qty * price
+                if wts_spec.max_target_qty is not None and qty > wts_spec.max_target_qty:
+                    raise RuntimeError(
+                        f"Fail-closed: exact native target {qty} exceeds max_target_qty={wts_spec.max_target_qty}"
+                    )
+                if wts_spec.max_position_notional_usd is not None and notional > wts_spec.max_position_notional_usd:
+                    raise RuntimeError(
+                        f"Fail-closed: exact native target notional {notional:.2f} exceeds "
+                        f"max_position_notional_usd={wts_spec.max_position_notional_usd}"
+                    )
+                weight = notional / equity
+                if weight > max_gross + 1e-9:
+                    raise RuntimeError(
+                        f"Fail-closed: exact native target notional {notional:.2f} exceeds the allocation "
+                        f"capacity max_gross_exposure*equity_usd={max_gross * equity:.2f}"
+                    )
+            pending_events[s].append((signal_ts, weight, qty))
+            last_qty[s] = qty
     return pending_events
 
 
@@ -2183,7 +2326,18 @@ def run_economic_walkforward(
                 bars, symbols, boundaries["test_start"], boundaries["test_end"]
             )
         wts_spec_for_signal_pricing = spec.weight_to_share.normalized() if spec.weight_to_share is not None else None
-        if spec.signal_policy.is_rank:
+        if "target_qty" in oos_fold.columns and not spec.signal_policy.is_exact_target:
+            raise RuntimeError(
+                "Fail-closed: an OOS `target_qty` column is only valid under "
+                f"direction_policy={SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1!r}; it is never "
+                "silently ignored"
+            )
+        if spec.signal_policy.is_exact_target:
+            pending_events = _build_exact_target_pending_events(
+                oos_fold, symbols, spec.signal_policy,
+                close_frame=close_frame, wts_spec=wts_spec_for_signal_pricing,
+            )
+        elif spec.signal_policy.is_rank:
             pending_events = _build_rank_pending_events(
                 oos_fold, symbols, spec.signal_policy,
                 close_frame=close_frame, wts_spec=wts_spec_for_signal_pricing,

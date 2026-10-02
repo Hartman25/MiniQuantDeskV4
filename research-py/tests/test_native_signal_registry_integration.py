@@ -1,14 +1,13 @@
-"""Native strategy signal stream -> registered Research trial (M1 bridge).
+"""Native strategy signal stream (v2, exact absolute targets) -> registered Research trial.
 
-Signal content here is synthetic (the bridge's logic is independent of it);
-the cross-language Rust-emitter -> Python path is exercised separately by
+Signal content here is synthetic (the bridge's logic is independent of it); the
+cross-language Rust-emitter -> Python path is exercised separately by
 `test_real_rust_emitter_roundtrip`, which skips when the CLI binary is absent.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -25,6 +24,8 @@ from mqk_research.data.bars_provenance import (
 )
 from mqk_research.exp_distributed.storage import ResearchResultStore
 from mqk_research.ml.economic_walkforward import (
+    SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1,
+    SIGNAL_SIZING_EXACT_NATIVE_TARGET_QTY_V1,
     AnnualizationSpec,
     CostModelSpec,
     EconomicWalkForwardSpec,
@@ -35,10 +36,14 @@ from mqk_research.ml.execution_pricing import (
     ExecutionPricingSpec,
 )
 from mqk_research.ml.native_signal_registry_integration import (
+    NATIVE_SIGNAL_SOURCE_KIND,
     NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
     NativeSignalError,
     build_native_signal_trial_identity,
+    native_exact_target_fidelity,
     plan_native_folds,
+    register_native_signal_trial,
+    require_native_exact_target_spec,
     research_bars_to_backtest_csv,
     run_registered_native_signal_economic_eval,
 )
@@ -49,8 +54,10 @@ SYMBOL = "SPY"
 STRATEGY = "trend_sma50"
 FP_X = "a" * 64
 FP_Y = "b" * 64
+REQUIRED = 50
 EVAL_START = pd.Timestamp("2018-04-01", tz="UTC")
 EXPERIMENT = "NATIVE-TEST-EXP"
+EQUITY = 100_000.0
 
 
 def _bars(symbols=(SYMBOL, "EFA")) -> pd.DataFrame:
@@ -66,14 +73,22 @@ def _bars(symbols=(SYMBOL, "EFA")) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _spec(max_position_notional_usd: float | None = 90_000.0) -> EconomicWalkForwardSpec:
+def _spec(*, max_position_notional_usd: float | None = None, exact: bool = True) -> EconomicWalkForwardSpec:
+    policy = (
+        SignalPolicySpec(
+            direction_policy=SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1,
+            sizing=SIGNAL_SIZING_EXACT_NATIVE_TARGET_QTY_V1,
+        )
+        if exact
+        else SignalPolicySpec()
+    )
     return EconomicWalkForwardSpec(
-        signal_policy=SignalPolicySpec(),
+        signal_policy=policy,
         cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
         execution_pricing=ExecutionPricingSpec(
             pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1, slippage_bps=5, volatility_mult_bps=0),
         annualization=AnnualizationSpec(),
-        weight_to_share=WeightToShareSpec(equity_usd=100_000.0, max_position_notional_usd=max_position_notional_usd),
+        weight_to_share=WeightToShareSpec(equity_usd=EQUITY, max_position_notional_usd=max_position_notional_usd),
     )
 
 
@@ -95,43 +110,70 @@ def _manifest(bars: pd.DataFrame, bars_path: Path) -> dict:
         universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE, bars=bars, artifact_path=bars_path)
 
 
-def _write_stream(tmp: Path, bars_csv: Path, *, strategy=STRATEGY, fingerprint=FP_X, qty_one=1_000_000):
-    bt = research_bars_to_backtest_csv(
-        bars_csv, SYMBOL, tmp / "bt_bars.csv", end_exclusive_utc=pd.Timestamp("2021-07-01", tz="UTC"))
-    spy = pd.read_csv(bt)
-    stream = pd.DataFrame({
-        "symbol": SYMBOL, "decision_ts": spy["end_ts"],
-        "target_qty_micros": [qty_one if (i // 40) % 2 == 0 else 0 for i in range(len(spy))],
-    })
-    csv_path = tmp / "native_signals.csv"
-    stream.to_csv(csv_path, index=False, lineterminator="\n")
-    meta = {"protocol_id": NATIVE_SIGNAL_STREAM_PROTOCOL_ID, "strategy_name": strategy,
-            "semantic_fingerprint": fingerprint, "symbol": SYMBOL, "timeframe_secs": 86400,
-            "bar_history_len": 50, "bars_csv_sha256": sha256_file(bt), "signal_rows": len(stream),
-            "native_signals_csv_sha256": sha256_file(csv_path)}
-    meta_path = tmp / "native_signals_meta.json"
-    meta_path.write_text(json.dumps(meta), encoding="utf-8")
-    return bt, csv_path, meta_path
-
-
 class Env:
-    def __init__(self, tmp: Path, **stream_kw):
-        self.tmp = tmp
-        self.bars = _bars()
-        self.bars_csv = tmp / "bars.csv"
-        self.bars.to_csv(self.bars_csv, index=False)
-        self.manifest = _manifest(pd.read_csv(self.bars_csv), self.bars_csv)
-        self.bt, self.signals, self.meta = _write_stream(tmp, self.bars_csv, **stream_kw)
-        self.db = tmp / "registry.sqlite3"
+    """Synthetic emitter: `emit()` writes a v2 stream + meta. Every defect a test
+    wants is applied by overriding `meta_overrides` / `qty_one` / `fingerprint`."""
 
-    def run(self, *, strategy_id=STRATEGY, hypothesis="H1", run_name="r1", **over):
+    def __init__(self, tmp: Path, *, qty_one: int = 1_000_000, fingerprint: str = FP_X, meta_overrides=None):
+        self.tmp = tmp
+        self.bars_csv = tmp / "bars.csv"
+        _bars().to_csv(self.bars_csv, index=False)
+        self.manifest = _manifest(pd.read_csv(self.bars_csv), self.bars_csv)
+        self.bt = research_bars_to_backtest_csv(
+            self.bars_csv, SYMBOL, tmp / "bt_bars.csv", end_exclusive_utc=pd.Timestamp("2021-07-01", tz="UTC"))
+        self.signals = tmp / "native_signals.csv"
+        self.meta = tmp / "native_signals_meta.json"
+        self.db = tmp / "registry.sqlite3"
+        self.qty_one = qty_one
+        self.fingerprint = fingerprint
+        self.meta_overrides = dict(meta_overrides or {})
+        self.emit_calls = 0
+        self.on_emit = None
+
+    def emit(self) -> None:
+        self.emit_calls += 1
+        if self.on_emit is not None:
+            self.on_emit()
+        spy = pd.read_csv(self.bt)
+        stream = pd.DataFrame({
+            "symbol": SYMBOL, "decision_ts": spy["end_ts"],
+            "target_qty_micros": [self.qty_one if (i // 40) % 2 == 0 else 0 for i in range(len(spy))],
+        })
+        stream.to_csv(self.signals, index=False, lineterminator="\n")
+        meta = {"protocol_id": NATIVE_SIGNAL_STREAM_PROTOCOL_ID, "quantity_semantics": "absolute_target_qty_micros_v1",
+                "strategy_name": STRATEGY, "semantic_fingerprint": self.fingerprint, "symbol": SYMBOL,
+                "timeframe_secs": 86400, "configured_bar_history_len": 50, "required_history_bars": REQUIRED,
+                "effective_bar_history_len": max(50, REQUIRED), "observed_max_window_len": max(50, REQUIRED),
+                "initial_cash_micros": int(EQUITY * 1_000_000), "bars_csv_sha256": sha256_file(self.bt),
+                "signal_rows": len(stream), "native_signals_csv_sha256": sha256_file(self.signals)}
+        meta.update(self.meta_overrides)
+        self.meta.write_text(json.dumps(meta), encoding="utf-8")
+
+    def reg_kwargs(self, hypothesis="H1", strategy_id=STRATEGY, **over):
+        kw = dict(experiment_id=EXPERIMENT, hypothesis_id=hypothesis, strategy_id=strategy_id, symbol=SYMBOL,
+                  semantic_fingerprint=FP_X, required_history_bars=REQUIRED, bars_provenance=self.manifest,
+                  economic_spec=_spec(), evaluation_start_utc=EVAL_START, test_months=12, holdout_months=6,
+                  registry_db=self.db)
+        kw.update(over)
+        return kw
+
+    def register(self, **over) -> str:
+        return register_native_signal_trial(**self.reg_kwargs(**over))
+
+    def run(self, *, hypothesis="H1", strategy_id=STRATEGY, run_name="r1", register=True, **over):
+        if register:
+            self.register(hypothesis=hypothesis, strategy_id=strategy_id)
         kw = dict(
             experiment_id=EXPERIMENT, hypothesis_id=hypothesis, strategy_id=strategy_id, symbol=SYMBOL,
             bars_csv=self.bars_csv, bars_provenance=self.manifest, backtest_bars_csv=self.bt,
-            signals_csv=self.signals, signals_meta_json=self.meta, economic_spec=_spec(),
-            evaluation_start_utc=EVAL_START, test_months=12, holdout_months=6, registry_db=self.db)
+            emit_signals=self.emit, signals_csv=self.signals, signals_meta_json=self.meta,
+            economic_spec=_spec(), evaluation_start_utc=EVAL_START, expected_semantic_fingerprint=FP_X,
+            required_history_bars=REQUIRED, test_months=12, holdout_months=6, registry_db=self.db)
         kw.update(over)
         return run_registered_native_signal_economic_eval(self.tmp / run_name, **kw)
+
+    def store(self) -> ResearchResultStore:
+        return ResearchResultStore(self.db)
 
 
 def test_registers_trial_attempt_and_holdout_and_never_scores_holdout(tmp_path):
@@ -140,14 +182,16 @@ def test_registers_trial_attempt_and_holdout_and_never_scores_holdout(tmp_path):
     econ = json.loads(out.read_text(encoding="utf-8"))
     assert econ["protocol"]["protocol_id"] == "economic_walk_forward_v1"
     assert econ["holdout"] == {"status": "reserved_not_evaluated"}
+    assert econ["signal_policy"]["direction_policy"] == SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1
     reg = econ["registry"]
-    store = ResearchResultStore(env.db)
+    store = env.store()
     trial = store.get_trial(reg["trial_id"])
     assert trial["strategy_id"] == STRATEGY
     attempts = store.list_attempts(reg["trial_id"])
     assert [a["status"] for a in attempts] == ["succeeded"]
     assert attempts[0]["result_id"] == econ["ids"]["economic_eval_id"]
     assert store.get_holdout(reg["holdout_id"])["status"] == "reserved"
+    assert reg["effective_bar_history_len"] == 50 and reg["max_abs_target_qty_gap"] == 0
 
     oos = pd.read_csv(tmp_path / "r1" / "eval" / "walk_forward_oos_predictions.csv")
     wf = json.loads((tmp_path / "r1" / "eval" / "walk_forward_eval.json").read_text())
@@ -156,90 +200,223 @@ def test_registers_trial_attempt_and_holdout_and_never_scores_holdout(tmp_path):
     assert holdout_start == pd.Timestamp("2021-07-01", tz="UTC")
 
 
-def test_a_spec_that_cannot_implement_the_targets_is_refused_by_the_fidelity_gate(tmp_path):
+@pytest.mark.parametrize("qty", [1, 3])
+def test_the_exact_native_quantity_is_what_the_simulator_holds(tmp_path, qty):
+    env = Env(tmp_path, qty_one=qty * 1_000_000)
+    econ = json.loads(env.run().read_text(encoding="utf-8"))
+    held = set()
+    for fold in econ["folds"]:
+        held |= {e["target_qty"] for e in fold["weight_to_share_evidence"][SYMBOL]}
+    assert held == {0, qty}, "never a re-sized position (the superseded bridge held hundreds of shares)"
+    assert econ["registry"]["execution_fidelity"] == 1.0
+
+
+def test_a_target_the_allocation_cannot_fund_fails_the_attempt_instead_of_being_resized(tmp_path):
+    env = Env(tmp_path, qty_one=5_000_000_000)  # 5,000 shares ~ $500k against $100k equity
+    with pytest.raises(RuntimeError, match="allocation capacity"):
+        env.run()
+    (trial,) = env.store().list_trials(experiment_id=EXPERIMENT)
+    assert [a["status"] for a in env.store().list_attempts(trial["trial_id"])] == ["failed"]
+
+
+def _fidelity_fixture(held_qty: int, desired_qty: int):
+    ts = pd.Timestamp("2020-01-01", tz="UTC")
+    bars = [ts + pd.Timedelta(days=i) for i in range(6)]
+    signals = pd.DataFrame({
+        "decision_ts_utc": [bars[0]], "target_qty": [desired_qty],
+    })
+    events = [{"timestamp": b.isoformat(), "target_qty": (held_qty if i >= 1 else 0),
+               "signal_target_qty": None, "side": None, "qty": 0} for i, b in enumerate(bars)]
+    out = {"folds": [{"fold": 1, "test_start_utc": bars[0].isoformat(),
+                      "test_end_utc": (bars[-1] + pd.Timedelta(days=1)).isoformat(),
+                      "weight_to_share_evidence": {SYMBOL: events}}]}
+    return out, signals
+
+
+def _fidelity(held_qty: int, desired_qty: int):
+    out, signals = _fidelity_fixture(held_qty, desired_qty)
+    return native_exact_target_fidelity(out, SYMBOL, signals)
+
+
+def test_fidelity_distinguishes_one_share_from_two_hundred_fifty():
+    ok = _fidelity(1, 1)
+    assert (ok.agreement, ok.max_abs_qty_gap, ok.evaluated_bars) == (1.0, 0, 5)
+    bad = _fidelity(250, 1)
+    assert bad.agreement == 1 / 5 and bad.max_abs_qty_gap == 249  # only the flat bar before the decision agrees
+    off_by_one = _fidelity(2, 1)
+    assert off_by_one.agreement == 1 / 5 and off_by_one.max_abs_qty_gap == 1
+
+
+def test_the_old_binary_weight_spec_is_refused_and_nothing_is_registered(tmp_path):
     env = Env(tmp_path)
-    # Sizing the position at the allocation cap rejects entries at the
-    # conservative fill price: the evaluation would not measure the strategy.
-    with pytest.raises(NativeSignalError, match="execution fidelity"):
-        env.run(economic_spec=_spec(max_position_notional_usd=None))
-    store = ResearchResultStore(env.db)
-    (trial,) = store.list_trials(experiment_id=EXPERIMENT)
-    (attempt,) = store.list_attempts(trial["trial_id"])
-    assert attempt["status"] == "failed" and "execution fidelity" in attempt["failure_reason"]
-    # The amended, implementable spec is a NEW trial identity, not a retry.
-    ok = json.loads(env.run(run_name="r2").read_text())
-    assert ok["registry"]["trial_id"] != trial["trial_id"]
-    assert ok["registry"]["execution_fidelity"] >= 0.95
+    with pytest.raises(NativeSignalError, match="re-size the target from a weight"):
+        require_native_exact_target_spec(_spec(exact=False))
+    with pytest.raises(NativeSignalError, match="re-size the target from a weight"):
+        register_native_signal_trial(**env.reg_kwargs(economic_spec=_spec(exact=False)))
+    with pytest.raises(NativeSignalError, match="re-size the target from a weight"):
+        env.run(register=False, economic_spec=_spec(exact=False))
+    assert env.emit_calls == 0
+    if env.db.exists():
+        assert env.store().list_trials(experiment_id=EXPERIMENT) == []
+
+
+def test_old_bridge_v1_stream_is_not_accepted_as_evidence(tmp_path):
+    env = Env(tmp_path, meta_overrides={"protocol_id": "native_strategy_signal_stream_v1"})
+    with pytest.raises(NativeSignalError, match="superseded"):
+        env.run()
+    (trial,) = env.store().list_trials(experiment_id=EXPERIMENT)
+    (attempt,) = env.store().list_attempts(trial["trial_id"])
+    assert attempt["status"] == "failed" and "superseded" in attempt["failure_reason"]
 
 
 def test_retry_is_a_new_attempt_of_the_same_trial(tmp_path):
     env = Env(tmp_path)
     t1 = json.loads(env.run(run_name="r1").read_text())["registry"]
-    t2 = json.loads(env.run(run_name="r2").read_text())["registry"]
+    t2 = json.loads(env.run(run_name="r2", register=False).read_text())["registry"]
     assert t1["trial_id"] == t2["trial_id"]
     assert (t1["attempt_index"], t2["attempt_index"]) == (1, 2)
-    assert len(ResearchResultStore(env.db).list_trials(experiment_id=EXPERIMENT)) == 1
+    assert len(env.store().list_trials(experiment_id=EXPERIMENT)) == 1
 
 
-def test_identity_binds_strategy_and_fingerprint_and_ignores_results(tmp_path):
+def test_identity_binds_strategy_fingerprint_history_and_quantity_contract(tmp_path):
     env = Env(tmp_path)
-    kw = dict(experiment_id=EXPERIMENT, hypothesis_id="H1", strategy_id=STRATEGY, symbol=SYMBOL,
-              semantic_fingerprint=FP_X, bars_provenance=env.manifest, evaluation_start_utc=EVAL_START,
-              test_months=12, holdout_months=6, economic_spec=_spec())
-    base, _ = build_native_signal_trial_identity(**kw)
+    kw = {k: v for k, v in env.reg_kwargs().items() if k not in ("hypothesis_text", "registry_db")}
+    base, identity = build_native_signal_trial_identity(**kw)
     assert base == build_native_signal_trial_identity(**kw)[0]
+    assert identity["signal_source"]["kind"] == NATIVE_SIGNAL_SOURCE_KIND == "native_strategy_signal_stream_v2"
+    assert identity["signal_source"]["target_semantics"] == "absolute_whole_share_target_v1"
+    assert identity["economic_protocol"]["signal_policy"]["direction_policy"] == SIGNAL_DIRECTION_POLICY_NATIVE_EXACT_TARGET_QTY_V1
     assert build_native_signal_trial_identity(**{**kw, "semantic_fingerprint": FP_Y})[0] != base
     assert build_native_signal_trial_identity(**{**kw, "strategy_id": "other_engine"})[0] != base
     assert build_native_signal_trial_identity(**{**kw, "symbol": "EFA"})[0] != base
     assert build_native_signal_trial_identity(**{**kw, "test_months": 6})[0] != base
+    assert build_native_signal_trial_identity(**{**kw, "required_history_bars": REQUIRED + 1})[0] != base
+    # The capital basis is part of the economic identity too.
+    other = _spec()
+    other = EconomicWalkForwardSpec(
+        signal_policy=other.signal_policy, cost_model=other.cost_model, execution_pricing=other.execution_pricing,
+        annualization=other.annualization, weight_to_share=WeightToShareSpec(equity_usd=50_000.0))
+    assert build_native_signal_trial_identity(**{**kw, "economic_spec": other})[0] != base
 
 
-@pytest.mark.parametrize("mutate", ["strategy", "csv_bytes", "bars_mismatch", "qty", "fingerprint"])
-def test_refuses_before_registering_anything(tmp_path, mutate):
-    env = Env(tmp_path, qty_one=2_000_000 if mutate == "qty" else 1_000_000,
-              fingerprint="zz" if mutate == "fingerprint" else FP_X)
-    kw = {}
-    if mutate == "strategy":
-        kw["strategy_id"] = "some_other_engine"
-    if mutate == "csv_bytes":
-        env.signals.write_text(env.signals.read_text() + "\n", encoding="utf-8")
-    if mutate == "bars_mismatch":
-        env.bt.write_text(env.bt.read_text().replace("\n", "\n", 1) + "", encoding="utf-8")
-        bad = pd.read_csv(env.bt)
-        bad.loc[0, "close_micros"] += 1
-        bad.to_csv(env.bt, index=False, lineterminator="\n")
-    with pytest.raises((NativeSignalError, RuntimeError)):
-        env.run(**kw)
-    if env.db.exists():
-        assert ResearchResultStore(env.db).list_trials(experiment_id=EXPERIMENT) == []
+# Defects detected after the attempt began: the trial stays registered, the attempt is failed.
+@pytest.mark.parametrize("name,kw,msg", [
+    ("fractional_qty", dict(qty_one=500_000), "whole-share"),
+    ("fingerprint", dict(fingerprint="zz"), "64 lowercase hex"),
+    ("other_fingerprint", dict(fingerprint=FP_Y), "expected native fingerprint"),
+    ("semantics", dict(meta_overrides={"quantity_semantics": "direction_only"}), "quantity_semantics"),
+    ("meta_requires_more_than_registered", dict(meta_overrides={"required_history_bars": 253}), "required_history_bars"),
+    ("effective_below_required", dict(meta_overrides={"effective_bar_history_len": 40}), "effective_bar_history_len"),
+    # Self-consistent lie (observed == effective) that only the max(configured, required) rule exposes.
+    ("effective_not_the_engine_rule", dict(meta_overrides={"effective_bar_history_len": 60, "observed_max_window_len": 60}),
+     "effective_bar_history_len 60 != max"),
+    ("observed_window_lies", dict(meta_overrides={"observed_max_window_len": 49}), "observed_max_window_len"),
+    ("history_meta_missing", dict(meta_overrides={"effective_bar_history_len": None}), "history/cash provenance"),
+    ("capital_basis", dict(meta_overrides={"initial_cash_micros": 1_000_000_000}), "capital basis"),
+    ("wrong_timeframe", dict(meta_overrides={"timeframe_secs": 3600}), "timeframe_secs"),
+])
+def test_stream_defects_fail_the_attempt_of_a_registered_trial(tmp_path, name, kw, msg):
+    env = Env(tmp_path, **kw)
+    with pytest.raises((NativeSignalError, RuntimeError), match=msg):
+        env.run()
+    (trial,) = env.store().list_trials(experiment_id=EXPERIMENT)
+    attempts = env.store().list_attempts(trial["trial_id"])
+    assert [a["status"] for a in attempts] == ["failed"], name
 
 
-def test_wrong_timeframe_or_wrong_expected_fingerprint_is_refused_before_registering(tmp_path):
+def test_csv_tampering_and_strategy_mismatch_fail_the_attempt(tmp_path):
     env = Env(tmp_path)
-    with pytest.raises(NativeSignalError, match="timeframe_secs"):
-        env.run(expected_timeframe_secs=3_600)
-    with pytest.raises(NativeSignalError, match="semantic_fingerprint"):
-        env.run(expected_semantic_fingerprint=FP_Y)
+    env.on_emit = None
+    original_emit = env.emit
+
+    def tampered():
+        original_emit()
+        env.signals.write_text(env.signals.read_text() + "\n", encoding="utf-8")
+
+    env.emit = tampered
+    with pytest.raises(NativeSignalError, match="sha256"):
+        env.run()
+    env2 = Env(tmp_path / "b" if (tmp_path / "b").mkdir() is None else tmp_path / "b")
+    with pytest.raises(NativeSignalError, match="strategy"):
+        env2.run(strategy_id="some_other_engine")
+
+
+def test_backtest_bars_mismatch_is_refused_before_any_attempt(tmp_path):
+    env = Env(tmp_path)
+    env.register()
+    bad = pd.read_csv(env.bt)
+    bad.loc[0, "close_micros"] += 1
+    bad.to_csv(env.bt, index=False, lineterminator="\n")
+    with pytest.raises(NativeSignalError, match="holdout-truncated"):
+        env.run(register=False)
+    (trial,) = env.store().list_trials(experiment_id=EXPERIMENT)
+    assert env.store().list_attempts(trial["trial_id"]) == []
+    assert env.emit_calls == 0
+
+
+# --- chronology: trial -> attempt -> emission ---------------------------------
+
+def test_an_unregistered_trial_is_refused_before_the_emitter_runs(tmp_path):
+    env = Env(tmp_path)
+    with pytest.raises(NativeSignalError, match="not registered"):
+        env.run(register=False)
+    assert env.emit_calls == 0, "no market data may be evaluated before the trial exists"
     if env.db.exists():
-        assert ResearchResultStore(env.db).list_trials(experiment_id=EXPERIMENT) == []
-    # The matching expectations register normally.
-    out = json.loads(env.run(expected_timeframe_secs=86_400, expected_semantic_fingerprint=FP_X).read_text())
-    assert out["registry"]["semantic_fingerprint"] == FP_X
+        assert env.store().list_trials(experiment_id=EXPERIMENT) == []
+
+
+def test_the_emitter_runs_inside_the_attempt_of_an_already_registered_trial(tmp_path):
+    env = Env(tmp_path)
+    seen = {}
+
+    def probe():
+        trials = env.store().list_trials(experiment_id=EXPERIMENT)
+        seen["trials"] = len(trials)
+        seen["attempts"] = [a["status"] for a in env.store().list_attempts(trials[0]["trial_id"])]
+
+    env.on_emit = probe
+    env.run()
+    assert seen == {"trials": 1, "attempts": ["started"]}
+
+
+def test_an_emitter_failure_is_a_failed_attempt_never_a_new_trial(tmp_path):
+    env = Env(tmp_path)
+
+    def boom():
+        raise RuntimeError("emitter crashed")
+
+    env.on_emit = boom
+    with pytest.raises(RuntimeError, match="emitter crashed"):
+        env.run()
+    store = env.store()
+    (trial,) = store.list_trials(experiment_id=EXPERIMENT)
+    (attempt,) = store.list_attempts(trial["trial_id"])
+    assert attempt["status"] == "failed" and "emitter crashed" in attempt["failure_reason"]
+    # Infrastructure retry: the SAME trial, the next attempt.
+    env.on_emit = None
+    out = json.loads(env.run(register=False, run_name="r2").read_text())["registry"]
+    assert out["trial_id"] == trial["trial_id"] and out["attempt_index"] == 2
+    assert len(store.list_trials(experiment_id=EXPERIMENT)) == 1
 
 
 def test_failure_after_attempt_start_is_preserved_as_failed(tmp_path):
     env = Env(tmp_path)
-    # A start date that leaves a fold without any signals fails after the attempt begins.
-    stream = pd.read_csv(env.signals)
-    stream = stream[pd.to_datetime(stream["decision_ts"], unit="s", utc=True) < pd.Timestamp("2019-01-01", tz="UTC")]
-    stream.to_csv(env.signals, index=False, lineterminator="\n")
-    meta = json.loads(env.meta.read_text())
-    meta["signal_rows"] = len(stream)
-    meta["native_signals_csv_sha256"] = sha256_file(env.signals)
-    env.meta.write_text(json.dumps(meta), encoding="utf-8")
+    original_emit = env.emit
+
+    def short_stream():
+        original_emit()
+        stream = pd.read_csv(env.signals)
+        stream = stream[pd.to_datetime(stream["decision_ts"], unit="s", utc=True) < pd.Timestamp("2019-01-01", tz="UTC")]
+        stream.to_csv(env.signals, index=False, lineterminator="\n")
+        meta = json.loads(env.meta.read_text())
+        meta["signal_rows"] = len(stream)
+        meta["native_signals_csv_sha256"] = sha256_file(env.signals)
+        env.meta.write_text(json.dumps(meta), encoding="utf-8")
+
+    env.emit = short_stream
     with pytest.raises(NativeSignalError):
         env.run()
-    store = ResearchResultStore(env.db)
+    store = env.store()
     (trial,) = store.list_trials(experiment_id=EXPERIMENT)
     attempts = store.list_attempts(trial["trial_id"])
     assert [a["status"] for a in attempts] == ["failed"]
@@ -251,10 +428,10 @@ def test_no_holdout_bar_reaches_the_emitter_input(tmp_path):
     bt = pd.read_csv(env.bt)
     holdout_start = int(pd.Timestamp("2021-07-01", tz="UTC").timestamp())
     assert bt["end_ts"].max() < holdout_start
-    # An untruncated conversion is refused as the backtest input.
     full = research_bars_to_backtest_csv(env.bars_csv, SYMBOL, tmp_path / "full.csv")
     with pytest.raises(NativeSignalError, match="holdout-truncated"):
         env.run(backtest_bars_csv=full)
+    assert env.emit_calls == 0
 
 
 def test_plan_native_folds_never_reaches_the_holdout():
@@ -275,15 +452,35 @@ def _cli() -> Path | None:
     return None
 
 
-@pytest.mark.skipif(_cli() is None, reason="mqk-cli binary not built")
-def test_real_rust_emitter_roundtrip(tmp_path):
+def _cli_has_v2() -> bool:
+    cli = _cli()
+    return cli is not None and b"native_strategy_signal_stream_v2" in cli.read_bytes()
+
+
+@pytest.mark.skipif(not _cli_has_v2(), reason="mqk-cli binary with the v2 emitter not built")
+def test_real_rust_emitter_roundtrip_and_no_data_fingerprint(tmp_path):
     env = Env(tmp_path)
+    # Fingerprint/history identity is resolved with NO market data, before any trial exists.
+    resolved = subprocess.run([str(_cli()), "backtest", "native-fingerprint", "--strategy", STRATEGY,
+                               "--symbol", SYMBOL], check=True, capture_output=True, text=True).stdout
+    info = dict(line.split("=", 1) for line in resolved.splitlines() if "=" in line)
+    fp, required = info["semantic_fingerprint"], int(info["required_history_bars"])
+    assert len(fp) == 64 and int(info["timeframe_secs"]) == 86400
+    assert int(info["initial_cash_micros"]) == int(EQUITY * 1_000_000)
+
     out_dir = tmp_path / "emit"
-    subprocess.run([str(_cli()), "backtest", "native-signals", "--bars-path", str(env.bt), "--strategy", STRATEGY,
-                    "--symbol", SYMBOL, "--timeframe-secs", "86400", "--out-dir", str(out_dir)],
-                   check=True, capture_output=True, text=True)
+
+    def emit():
+        subprocess.run([str(_cli()), "backtest", "native-signals", "--bars-path", str(env.bt), "--strategy", STRATEGY,
+                        "--symbol", SYMBOL, "--timeframe-secs", "86400", "--out-dir", str(out_dir)],
+                       check=True, capture_output=True, text=True)
+
+    env.register(semantic_fingerprint=fp, required_history_bars=required)
+    out = env.run(register=False, emit_signals=emit, signals_csv=out_dir / "native_signals.csv",
+                  signals_meta_json=out_dir / "native_signals_meta.json",
+                  expected_semantic_fingerprint=fp, required_history_bars=required)
     meta = json.loads((out_dir / "native_signals_meta.json").read_text())
-    assert meta["strategy_name"] == STRATEGY and len(meta["semantic_fingerprint"]) == 64
-    out = env.run(signals_csv=out_dir / "native_signals.csv", signals_meta_json=out_dir / "native_signals_meta.json")
-    econ = json.loads(out.read_text())
-    assert econ["registry"]["semantic_fingerprint"] == meta["semantic_fingerprint"]
+    assert meta["protocol_id"] == NATIVE_SIGNAL_STREAM_PROTOCOL_ID
+    assert meta["effective_bar_history_len"] == max(meta["configured_bar_history_len"], required)
+    assert meta["observed_max_window_len"] == meta["effective_bar_history_len"]
+    assert json.loads(out.read_text())["registry"]["semantic_fingerprint"] == fp
