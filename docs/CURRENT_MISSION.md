@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -22. Independent-Review Correction 01 (2026-10-02, `V4-M1-NATIVE-RESEARCH-INDEPENDENT-REVIEW-CORRECTION-01`)
+
+Not pushed. Record: `docs/research/M1_INDEPENDENT_REVIEW_CORRECTION_01.md`.
+
+- Native bridge v1 evidence (campaigns 01-03, dual-SMA, pullback, Batch 01) is HISTORICAL / SUPERSEDED_PROTOCOL / NOT_PROMOTION_AUTHORITY: it re-sized a native +1-share absolute target into a ~$50k position. Corrected protocol `native_exact_target_qty_v1` + stream v2 execute the exact whole-share target on one capital basis; the Rust promotion verifier accepts only v2.
+- `pullback_mean_reversion_20_2` is refused by `instantiate_verified` (restart-unsafe); signal-stream history provenance is truthful; the batch runner registers all trials before any emitter runs and the emitter runs inside the attempt.
+- Review alpha vs a fully invested buy-and-hold remains an OPEN GOVERNANCE QUESTION. Promotion rows 0; Paper fleet unset; holdout untouched; no Batch 02.
+
+---
+
 ## -21. Native Hypothesis Batch 01 Rejected (2026-10-01, `V4-M1-NATIVE-HYPOTHESIS-BATCH-01`)
 
 Not pushed. Record: `docs/research/M1_BATCH01_RESULT.md`; census `docs/research/M1_BATCH01_CENSUS.md`.

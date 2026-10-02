@@ -1,5 +1,7 @@
 # M1 native hypothesis batch 01 — Result
 
+> **EVIDENCE STATUS: HISTORICAL — SUPERSEDED_PROTOCOL — NOT_PROMOTION_AUTHORITY.** The Research economics below were produced by native bridge v1, which turned the native +1-share absolute target into a binary weight and re-sized it (hundreds of shares) while Backtest/scanner evidence used a different capital basis. The numbers are preserved unchanged as an observed result only. See `M1_INDEPENDENT_REVIEW_CORRECTION_01.md`.
+
 Mission `V4-M1-NATIVE-HYPOTHESIS-BATCH-01`. Definition: `research-py/experiments/m1_native_trend_campaign/PREDECLARED_BATCH_01.json` (commit `952a6d70`, committed before the engines and before any batch economics). Census: `M1_BATCH01_CENSUS.md`. Run evidence is local and untracked (`runs/run_batch_01`).
 
 ## Verdict

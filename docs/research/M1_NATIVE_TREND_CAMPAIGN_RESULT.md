@@ -1,5 +1,7 @@
 # M1 Native Trend Campaign — Result
 
+> **EVIDENCE STATUS: HISTORICAL — SUPERSEDED_PROTOCOL — NOT_PROMOTION_AUTHORITY.** The Research economics below were produced by native bridge v1, which turned the native +1-share absolute target into a binary weight and re-sized it (hundreds of shares) while Backtest/scanner evidence used a different capital basis. The numbers are preserved unchanged as an observed result only. See `M1_INDEPENDENT_REVIEW_CORRECTION_01.md`.
+
 Mission `V4-M1-NATIVE-RESEARCH-PROMOTION-BRIDGE-01`. Definitions: `research-py/experiments/m1_native_trend_campaign/PREDECLARED_CAMPAIGN.json` (01) and `PREDECLARED_CAMPAIGN_02.json` (02). Run evidence is local and untracked (`runs/run_01`, `runs/run_02`, per the repo's `runs/` convention).
 
 ## Verdict

@@ -29,14 +29,12 @@ pub use trend_sma50::TrendSma50Strategy;
 pub use volatility_breakout::VolatilityBreakoutStrategy;
 
 /// IR9: the single authoritative list of every strategy identity
-/// [`register_builtin_strategies`] registers, in registration order. Five
-/// engine *implementations* (`swing_momentum`, `mean_reversion`,
-/// `volatility_breakout`, `intraday_scalper`, `trend_sma50`,
-/// `dual_sma_50_200_trend`, `pullback_mean_reversion_20_2`, `absolute_momentum_252`,
-/// `near_high_momentum_252_3pct`, `trend_pullback_5d_4pct_hold5`) back eleven registered strategy
-/// *identities* — `intraday_scalper`'s short-only variant
-/// (`intraday_short_scalper`) is a distinct registered identity sharing the
-/// same engine implementation. Any bound or guard elsewhere in the
+/// [`register_builtin_strategies`] registers, in registration order. Each
+/// engine implementation backs one registered strategy *identity*, except
+/// `intraday_scalper`, whose short-only variant (`intraday_short_scalper`) is
+/// a distinct identity sharing the same implementation, so the identity count
+/// is one more than the implementation count. This constant is the only place
+/// the membership is stated; do not copy a count into prose. Any bound or guard elsewhere in the
 /// workspace that needs to know the size or membership of the built-in
 /// strategy universe (e.g. `mqk_portfolio::MAX_STRATEGY_UNIVERSE`) must
 /// consume or cross-check against this list, not a hand-maintained count —
@@ -340,7 +338,7 @@ mod semantic_identity_tests {
     use super::*;
 
     /// Every built-in engine explicitly overrides `semantic_fingerprint` —
-    /// none of the five registered identities silently falls back to the
+    /// none of the registered identities silently falls back to the
     /// trait's spec-only default (which would carry forward exactly the
     /// defect S1 exists to fix). Detected by comparing against two
     /// deliberately mismatched-config instances of the SAME registered

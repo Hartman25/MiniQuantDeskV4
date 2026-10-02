@@ -1,5 +1,7 @@
 # M1 dual_sma_50_200_trend Campaign 01 — Result
 
+> **EVIDENCE STATUS: HISTORICAL — SUPERSEDED_PROTOCOL — NOT_PROMOTION_AUTHORITY.** The Research economics below were produced by native bridge v1, which turned the native +1-share absolute target into a binary weight and re-sized it (hundreds of shares) while Backtest/scanner evidence used a different capital basis. The numbers are preserved unchanged as an observed result only. See `M1_INDEPENDENT_REVIEW_CORRECTION_01.md`.
+
 Mission `V4-M1-DUAL-SMA-50-200-CAMPAIGN-01`. Definition: `research-py/experiments/m1_native_trend_campaign/PREDECLARED_CAMPAIGN_DUAL_SMA_01.json`, committed before the engine was implemented and before any campaign economics. Census: `M1_DUAL_SMA_CENSUS.md`. Run evidence is local and untracked (`runs/run_dual_sma_01`).
 
 ## Verdict
