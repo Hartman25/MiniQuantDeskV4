@@ -39,3 +39,29 @@ OPEN GOVERNANCE QUESTION, unchanged: review alpha compares account return with a
 ## Stale text
 
 The "five engine implementations" wording in `engines/mod.rs` no longer carries a count.
+
+## Defect census and second sweep (`7dd31e5d..HEAD`, correction-relevant concerns only)
+
+| Check | Disposition | Evidence |
+|---|---|---|
+| Exact native quantity preserved | FIXED+PROVEN | Exact-target economics tests (1 and 3 shares held exactly); real-engine integrated proof; fidelity 1/1 passes, 1/250 and 1/2 fail. |
+| Research cannot resize +1 into a larger position | FIXED+PROVEN | Negative control: the old policy at the campaign sizing holds >400 shares, the exact policy holds 1; an unfundable target fails the attempt instead of being scaled; mutation `qty*250` killed. |
+| Scanner / Backtest / Research economics agree | FIXED+PROVEN | Scanner base is `conservative_defaults()` (100,000 USD, 1-share default sizing); emitter cash must equal Research `equity_usd` (loader check + runner guard); integrated proof shows the same +1 share and starting equity in Research and Backtest. |
+| Corrected identity cannot consume v1 evidence | FIXED+PROVEN | Different source kind, policy and equity in the identity; Python loader rejects v1 streams; Rust verifier rejects v1 as superseded and v2 without exact-target economics (golden shared by both languages); daemon gate rejects v1 evidence. |
+| Pullback restart truthful or refused | FIXED+PROVEN | Red counterexample; `instantiate_verified` refuses `NotRecoverable` (registry, runtime bootstrap, daemon fingerprint resolver tests). |
+| History metadata truthful | FIXED+PROVEN | Engine/emitter share `effective_history_len`; observed window measured; tests for 253/252/204/200 and below-default; mutation killed. |
+| Trials precede evaluation; attempts own emissions | FIXED+PROVEN | Runner behavioral and AST guards plus three mutations; bridge refuses an unregistered trial before the emitter runs; emitter crash = failed attempt, retry = next attempt of the same trial. |
+| Stale v1 executable paths | FIXED+PROVEN | `run_campaign.py` fails closed with a clear message (guard test); `run_batch.py` refuses the binary-weight predeclaration and a capital-basis mismatch; v1 protocol id exists only as a rejected constant. |
+| Failed/historical evidence durable | ALREADY_CORRECT+PROVEN | The Batch 01 registry and run tree are untouched (registry mtime/hash unchanged since the run); nothing was rerun. |
+| Holdout untouched | ALREADY_CORRECT+PROVEN | No economic trial was executed in this correction. |
+| No threshold change / no alpha-gate rescue | ALREADY_CORRECT+PROVEN | No policy key, review policy or PREDECLARED file appears in the correction diff; old review states untouched. |
+| Promotion bypass; Paper activation; Live; secrets | ALREADY_CORRECT+PROVEN | The verifier only became stricter; `MQK_STRATEGY_IDS` and the promotion-policy keys are ABSENT; no `.env`/Live/secret pattern in the diff; no Paper or broker operation. |
+| Duplicate authority for the quantity rule | ALREADY_CORRECT+PROVEN | The absolute-target rule lives in `bar_result_to_decisions`; Research only carries it; the window rule lives only in `effective_history_len`. |
+| Tests that only compare direction | FIXED+PROVEN | `native_execution_fidelity` (direction-only) replaced; the previous bridge test suite was rewritten around exact quantities and chronology. |
+| Commit message of `2d52c2fd` (stray `@` lines) | NOTED | Cosmetic, from the previous controller; amend is forbidden. |
+
+Remaining ordinary deterministic in-scope defects: NONE.
+
+## Batch 01 status after correction
+
+Historical result preserved exactly (BATCH_REJECTED, best DSR 0.214, PBO 0.238, 0/15 `paper_candidate`). Promotion-authoritative under the corrected protocol: NO. Nothing was rerun; a rerun needs a new predeclaration, new trial identities and separate authorization.

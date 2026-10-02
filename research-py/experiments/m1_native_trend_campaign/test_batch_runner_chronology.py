@@ -172,3 +172,11 @@ def test_a_capital_basis_mismatch_between_research_and_backtest_is_refused(runne
         with pytest.raises(SystemExit, match="one capital basis"):
             stage(None)
     assert calls == []
+
+
+def test_the_closed_campaign_runner_cannot_drive_the_superseded_bridge():
+    spec = importlib.util.spec_from_file_location("run_campaign_under_test", HERE / "run_campaign.py")
+    legacy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(legacy)
+    with pytest.raises(SystemExit, match="superseded native bridge v1"):
+        legacy.main()

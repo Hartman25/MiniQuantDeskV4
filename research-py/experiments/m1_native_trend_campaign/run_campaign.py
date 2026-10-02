@@ -268,6 +268,14 @@ STAGES = {"check": stage_check, "fetch": stage_fetch, "reuse_data": stage_reuse_
 
 
 def main() -> None:
+    # This runner drove native bridge v1 (the native +1-share target turned into a binary weight and
+    # re-sized) for the closed campaigns. Their evidence is HISTORICAL / SUPERSEDED_PROTOCOL /
+    # NOT_PROMOTION_AUTHORITY, and the v1 bridge entry point no longer exists.
+    raise SystemExit(
+        "fail-closed: run_campaign.py drove the superseded native bridge v1; its evidence is historical and "
+        "not promotion authority. Use run_batch.py with a new predeclaration under native_exact_target_qty_v1 "
+        "and separate authorization."
+    )
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=sorted(STAGES))
     ap.add_argument("--execute", action="store_true")
