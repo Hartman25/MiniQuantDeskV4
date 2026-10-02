@@ -8,6 +8,7 @@ use mqk_execution::{AssetClass, QtyMicros, QTY_MICROS_SCALE};
 use mqk_strategy::engines::intraday_scalper::{IntradayScalperStrategy, SHORT_NAME};
 use mqk_strategy::engines::{
     register_builtin_strategies_with_sizing, register_builtin_strategies_with_target_sizing,
+    REGISTERED_STRATEGY_IDS,
 };
 const NAME: &str = "intraday_scalper";
 
@@ -163,7 +164,17 @@ fn non_equity_registration_excludes_fixed_one_share_engines() {
         TargetSizing::equity_default(),
     )
     .unwrap();
-    assert_eq!(equity.list().len(), 5);
+    // Equity target-sizing registration must carry the full canonical
+    // built-in universe (membership derived from the single authority, not
+    // a hand-maintained count that drifts as engines are added).
+    let mut equity_names: Vec<&str> = equity.list().iter().map(|m| m.name.as_str()).collect();
+    equity_names.sort_unstable();
+    let mut canonical: Vec<&str> = REGISTERED_STRATEGY_IDS.to_vec();
+    canonical.sort_unstable();
+    assert_eq!(
+        equity_names, canonical,
+        "Equity target-sizing registration must match REGISTERED_STRATEGY_IDS membership exactly"
+    );
 
     let mut reg = PluginRegistry::new();
     register_builtin_strategies_with_target_sizing(
@@ -187,7 +198,14 @@ fn non_equity_registration_excludes_fixed_one_share_engines() {
 fn legacy_whole_unit_registration_is_unchanged() {
     let mut reg = PluginRegistry::new();
     register_builtin_strategies_with_sizing(&mut reg, "SPY", 2, None, None).unwrap();
-    assert_eq!(reg.list().len(), 5);
+    let mut reg_names: Vec<&str> = reg.list().iter().map(|m| m.name.as_str()).collect();
+    reg_names.sort_unstable();
+    let mut canonical: Vec<&str> = REGISTERED_STRATEGY_IDS.to_vec();
+    canonical.sort_unstable();
+    assert_eq!(
+        reg_names, canonical,
+        "Equity whole-unit registration must match REGISTERED_STRATEGY_IDS membership exactly"
+    );
     let mut inst = reg.instantiate(NAME).unwrap();
     let out = inst.on_bar(&ctx(bullish(200_000_000)));
     assert_eq!(out.targets[0].qty, QtyMicros::new(2 * QTY_MICROS_SCALE));

@@ -331,7 +331,17 @@ fn equity_bootstrap_is_unchanged_by_the_registry_seam() {
             "{id}"
         );
     }
-    assert_eq!(built.list().len(), 5);
+    // Equity target-sizing registration must carry the full canonical
+    // built-in universe, not a hand-maintained count that drifts as new
+    // engines are added to REGISTERED_STRATEGY_IDS.
+    let mut built_names: Vec<&str> = built.list().iter().map(|m| m.name.as_str()).collect();
+    built_names.sort_unstable();
+    let mut canonical: Vec<&str> = mqk_strategy::engines::REGISTERED_STRATEGY_IDS.to_vec();
+    canonical.sort_unstable();
+    assert_eq!(
+        built_names, canonical,
+        "Equity target-sizing registration must match REGISTERED_STRATEGY_IDS membership exactly"
+    );
 }
 
 /// The real production entry point: process env -> bootstrap -> strategy ->
