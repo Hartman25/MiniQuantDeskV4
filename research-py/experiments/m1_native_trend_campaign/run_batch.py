@@ -1,11 +1,21 @@
-"""M1 native hypothesis batch 01 runner. Every parameter is read from
+"""M1 native hypothesis batch runner. Every parameter is read from
 PREDECLARED_BATCH_01.json; nothing result-dependent is chosen here.
 
 Stages (each once, in order): check | reuse_data | register | trials | judge |
-backtest | finalize | review | summary. `register` emits the native signal
-streams and registers every hypothesis and all fifteen trials BEFORE any
-economic evaluation exists; `trials` then runs the fifteen attempts in the
-frozen order and an economic failure never stops the batch.
+backtest | finalize | review | summary.
+
+Chronology (hypothesis -> trial registration -> attempt -> evaluation):
+`register` resolves every strategy's semantic identity WITHOUT market data
+(`mqk backtest native-fingerprint`) and registers the hypotheses and ALL trials;
+it never runs an emitter or Backtest. `trials` then runs the attempts in the
+frozen order; the native signal emitter is invoked INSIDE each attempt, so an
+emission failure is a failed attempt of the same trial. An economic failure
+never stops the batch.
+
+Batch 01 itself was run by an earlier version of this runner (emitter before
+registration, binary-weight economics). Its evidence is historical and
+superseded; `check` refuses to run any predeclaration that is not under the
+exact-target protocol.
 """
 
 from __future__ import annotations
@@ -35,6 +45,7 @@ BARS = RUN / "data" / "research_bars.csv"
 MANIFEST = RUN / "data" / "research_bars_provenance.json"
 INDEX = RUN / "trials_index.json"
 GAP_TOLERANCE_BARS = 3
+EXACT_TARGET_DIRECTION_POLICY = "native_exact_target_qty_v1"
 
 
 def tdir(strategy: str, symbol: str) -> Path:
@@ -79,11 +90,23 @@ def _load_index() -> dict:
 
 
 def _save_index(index: dict) -> None:
+    INDEX.parent.mkdir(parents=True, exist_ok=True)
     INDEX.write_text(json.dumps(index, indent=1, sort_keys=True), encoding="utf-8")
 
 
+def _require_exact_target_protocol() -> None:
+    policy = DECL["economic_protocol"]["signal_policy"].get("direction_policy")
+    if policy != EXACT_TARGET_DIRECTION_POLICY:
+        raise SystemExit(
+            f"fail-closed: this predeclaration uses direction_policy={policy!r} (the superseded binary-weight "
+            f"bridge); its evidence is historical and not promotion authority. A rerun needs a new "
+            f"predeclaration under {EXACT_TARGET_DIRECTION_POLICY!r} and separate authorization"
+        )
+
+
 def stage_check(_args) -> None:
-    assert len(TRIALS) == DECL["universe"]["max_trials"] == 15
+    _require_exact_target_protocol()
+    assert len(TRIALS) == DECL["universe"]["max_trials"]
     print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()}")
 
 
@@ -104,63 +127,71 @@ def stage_reuse_data(_args) -> None:
 
 
 def stage_register(_args) -> None:
-    """Emit each trial's native signal stream (no economics) and register every hypothesis and trial."""
+    """Register every hypothesis and trial. Resolves the native fingerprint from the
+    strategy registry only -- no emitter, no Backtest, no market data."""
     from mqk_research.exp_distributed.storage import ResearchResultStore
-    from mqk_research.ml.economic_registry_integration import ECONOMIC_PROTOCOL_ID
-    from mqk_research.ml.native_signal_registry_integration import (
-        build_native_signal_trial_identity, native_holdout_start, research_bars_to_backtest_csv)
+    from mqk_research.ml.native_signal_registry_integration import register_native_signal_trial
+    _require_exact_target_protocol()
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     store = ResearchResultStore(REGISTRY)
-    index = _load_index()
+    if store.list_trials(experiment_id=EXPERIMENT):
+        raise SystemExit("fail-closed: the batch registry already holds trials; registration runs once")
+    index = {}
     for strategy, sym in TRIALS:
         h = HYP[strategy]
-        sdir = tdir(strategy, sym)
-        sdir.mkdir(parents=True, exist_ok=True)
-        hold = native_holdout_start(BARS, sym, part["holdout_months"])
-        bt = research_bars_to_backtest_csv(BARS, sym, sdir / "bt_bars.csv", end_exclusive_utc=hold)
-        _run_cli("backtest", "native-signals", "--bars-path", str(bt), "--strategy", strategy, "--symbol", sym,
-                 "--timeframe-secs", str(h["timeframe_secs"]), "--out-dir", str(sdir / "emit"))
-        meta = json.loads((sdir / "emit" / "native_signals_meta.json").read_text(encoding="utf-8"))
-        trial_id, identity = build_native_signal_trial_identity(
+        info = _run_cli("backtest", "native-fingerprint", "--strategy", strategy, "--symbol", sym)
+        fingerprint = _parse(info, "semantic_fingerprint")
+        required = int(_parse(info, "required_history_bars"))
+        if int(_parse(info, "timeframe_secs")) != h["timeframe_secs"] or required != h["required_history_bars"]:
+            raise SystemExit(f"fail-closed: {strategy} disagrees with its predeclared timeframe/history requirement")
+        trial_id = register_native_signal_trial(
             experiment_id=EXPERIMENT, hypothesis_id=h["hypothesis_id"], strategy_id=strategy, symbol=sym,
-            semantic_fingerprint=meta["semantic_fingerprint"], bars_provenance=manifest,
-            evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]), test_months=part["test_months"],
-            holdout_months=part["holdout_months"], economic_spec=_economic_spec().normalized())
-        store.register_hypothesis(hypothesis_id=h["hypothesis_id"], experiment_id=EXPERIMENT,
-                                  hypothesis_text=h["economic_rationale"])
-        store.register_trial(trial_id=trial_id, experiment_id=EXPERIMENT, hypothesis_id=h["hypothesis_id"],
-                             strategy_id=strategy, protocol_id=ECONOMIC_PROTOCOL_ID, identity=identity)
+            semantic_fingerprint=fingerprint, required_history_bars=required, bars_provenance=manifest,
+            economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
+            test_months=part["test_months"], holdout_months=part["holdout_months"],
+            hypothesis_text=h["economic_rationale"], registry_db=REGISTRY)
         index[key(strategy, sym)] = {"trial_id": trial_id, "hypothesis_id": h["hypothesis_id"],
-                                     "semantic_fingerprint": meta["semantic_fingerprint"]}
-        print(key(strategy, sym), trial_id, meta["semantic_fingerprint"][:12])
+                                     "semantic_fingerprint": fingerprint, "required_history_bars": required}
+        print(key(strategy, sym), trial_id, fingerprint[:12])
     _save_index(index)
     registered = store.list_trials(experiment_id=EXPERIMENT)
-    if len(registered) != 15:
-        raise SystemExit(f"fail-closed: {len(registered)} registered trials, expected 15")
-    print("registered_unique_trials", len(registered), "attempts", sum(len(store.list_attempts(t["trial_id"])) for t in registered))
+    attempts = sum(len(store.list_attempts(t["trial_id"])) for t in registered)
+    if len(registered) != len(TRIALS) or attempts != 0:
+        raise SystemExit(f"fail-closed: {len(registered)} registered trials / {attempts} attempts after registration")
+    print("registered_unique_trials", len(registered), "attempts", attempts)
 
 
 def stage_trials(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.native_signal_registry_integration import (
-        NativeSignalError, run_registered_native_signal_economic_eval)
+        NativeSignalError, native_holdout_start, research_bars_to_backtest_csv,
+        run_registered_native_signal_economic_eval)
+    _require_exact_target_protocol()
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     store = ResearchResultStore(REGISTRY)
-    if len(store.list_trials(experiment_id=EXPERIMENT)) != 15:
-        raise SystemExit("fail-closed: all fifteen trials must be registered before any economic evaluation")
+    if len(store.list_trials(experiment_id=EXPERIMENT)) != len(TRIALS):
+        raise SystemExit("fail-closed: every predeclared trial must be registered before any attempt or emission")
     index = _load_index()
     for strategy, sym in TRIALS:  # frozen order; failures never stop the batch
         h, sdir, rec = HYP[strategy], tdir(strategy, sym), index[key(strategy, sym)]
+        sdir.mkdir(parents=True, exist_ok=True)
+        hold = native_holdout_start(BARS, sym, part["holdout_months"])
+        bt = research_bars_to_backtest_csv(BARS, sym, sdir / "bt_bars.csv", end_exclusive_utc=hold)
+
+        def emit(bt=bt, strategy=strategy, sym=sym, sdir=sdir, h=h):
+            _run_cli("backtest", "native-signals", "--bars-path", str(bt), "--strategy", strategy, "--symbol", sym,
+                     "--timeframe-secs", str(h["timeframe_secs"]), "--out-dir", str(sdir / "emit"))
+
         try:
             out = run_registered_native_signal_economic_eval(
                 sdir / "run", experiment_id=EXPERIMENT, hypothesis_id=h["hypothesis_id"], strategy_id=strategy,
-                symbol=sym, bars_csv=BARS, bars_provenance=manifest, backtest_bars_csv=sdir / "bt_bars.csv",
+                symbol=sym, bars_csv=BARS, bars_provenance=manifest, backtest_bars_csv=bt, emit_signals=emit,
                 signals_csv=sdir / "emit" / "native_signals.csv", signals_meta_json=sdir / "emit" / "native_signals_meta.json",
                 economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
-                test_months=part["test_months"], holdout_months=part["holdout_months"],
-                hypothesis_text=h["economic_rationale"], registry_db=REGISTRY,
-                expected_timeframe_secs=h["timeframe_secs"], expected_semantic_fingerprint=rec["semantic_fingerprint"])
+                test_months=part["test_months"], holdout_months=part["holdout_months"], registry_db=REGISTRY,
+                expected_timeframe_secs=h["timeframe_secs"], expected_semantic_fingerprint=rec["semantic_fingerprint"],
+                required_history_bars=rec["required_history_bars"])
         except NativeSignalError as exc:  # the failed attempt is already durable
             rec["failed"] = str(exc)
             print(key(strategy, sym), "FAILED attempt kept:", str(exc)[:200])
@@ -180,8 +211,8 @@ def stage_judge(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge
     registered = ResearchResultStore(REGISTRY).list_trials(experiment_id=EXPERIMENT)
-    if len(registered) != 15:
-        raise SystemExit(f"fail-closed: {len(registered)} registered trials, expected 15")
+    if len(registered) != len(TRIALS):
+        raise SystemExit(f"fail-closed: {len(registered)} registered trials, expected {len(TRIALS)}")
     art = build_multiple_testing_judge(experiment_id=EXPERIMENT, registry_db=REGISTRY)  # whole experiment, hypothesis_id unset
     (RUN / "judge").mkdir(parents=True, exist_ok=True)
     (RUN / "judge" / "judge.json").write_text(json.dumps(art, sort_keys=True, separators=(",", ":")), encoding="utf-8")
