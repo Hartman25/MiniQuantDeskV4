@@ -14,6 +14,7 @@
 //! - Risk enforcement via mqk-risk (daily loss, drawdown, PDT, reject storm)
 //! - FIFO portfolio accounting via mqk-portfolio
 
+pub mod benchmark_v2; // capital-matched exact-target passive benchmark (Benchmark V2)
 pub mod corporate_actions; // Patch B4
 pub mod dsr_pbo_sensitivity; // P9 BKT-ROBUSTNESS-GAUNTLET-01 / PROMOTION-STRESS-AUTHORITY-REPAIR-01
 mod economics; // BACKTEST-MULTIPLIER-MARGIN-01
