@@ -758,6 +758,19 @@ mod tests {
         assert!(names.contains(&"trend_pullback_5d_4pct_hold5"));
     }
 
+    /// IR-2: a restart-unsafe stateful engine can never become an Active Paper host.
+    #[test]
+    fn bootstrap_fails_closed_for_a_restart_unsafe_strategy() {
+        let registry = build_daemon_plugin_registry_for_symbol("AAPL");
+        let boot = NativeStrategyBootstrap::bootstrap(
+            Some(&["pullback_mean_reversion_20_2".to_string()]),
+            &registry,
+        );
+        assert!(boot.is_failed());
+        assert!(!boot.is_active());
+        assert!(boot.failure_reason().unwrap().contains("restart"));
+    }
+
     #[test]
     fn build_daemon_plugin_registry_for_symbol_ignores_env_var() {
         // The narrow constructor must never read MQK_STRATEGY_SYMBOL -- prove

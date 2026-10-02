@@ -19,7 +19,8 @@ pub mod sizing;
 
 pub use host::*;
 pub use plugin_registry::{
-    PluginRegistry, RegistryError, StrategyDataRequirements, StrategyFactory, StrategyMeta,
+    PluginRegistry, RegistryError, RestartRecovery, StrategyDataRequirements, StrategyFactory,
+    StrategyMeta,
 };
 pub use semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 pub use sizing::{parse_positive_qty, SizingError, TargetSizing};

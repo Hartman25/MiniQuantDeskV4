@@ -193,6 +193,15 @@ mod tests {
         assert_eq!(result, Ok(expected));
     }
 
+    /// IR-2: a restart-unsafe engine has no promotion-resolvable fingerprint, so
+    /// the promotion transition and the dispatch gate can never bind to it.
+    #[test]
+    fn restart_unsafe_engine_has_no_server_semantic_fingerprint() {
+        let result =
+            resolve_server_semantic_fingerprint("pullback_mean_reversion_20_2", "AAPL", 86_400);
+        assert_eq!(result, Err(ConfigIdentityError::UnsupportedStrategyPlugin));
+    }
+
     #[test]
     fn unknown_strategy_id_fails_closed() {
         let result = resolve_server_semantic_fingerprint("does_not_exist", "AAPL", 300);

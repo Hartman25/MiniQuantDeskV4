@@ -299,6 +299,31 @@ mod registered_strategy_ids_tests {
         assert_eq!(REGISTERED_STRATEGY_IDS.len(), 11);
     }
 
+    /// IR-2: the production seam `instantiate_verified` must refuse any engine
+    /// whose state cannot be reconstructed from the bounded history Paper loads,
+    /// while Backtest/Research (`instantiate`) keep using it. Every other
+    /// registered identity stays deployable.
+    #[test]
+    fn restart_unsafe_engine_is_refused_by_the_verified_production_seam() {
+        let mut registry = PluginRegistry::new();
+        register_builtin_strategies(&mut registry, "SPY".to_string()).unwrap();
+        let name = pullback_mean_reversion_20_2::NAME;
+
+        assert!(registry.instantiate(name).is_ok(), "research/backtest path");
+        let err = registry
+            .instantiate_verified(name)
+            .err()
+            .expect("verified production instantiation must refuse the engine");
+        assert!(err.to_string().contains("restart"), "{err}");
+
+        for id in REGISTERED_STRATEGY_IDS.iter().filter(|id| **id != name) {
+            assert!(
+                registry.instantiate_verified(id).is_ok(),
+                "{id} must stay deployable"
+            );
+        }
+    }
+
     #[test]
     fn short_scalper_identity_is_present_and_distinct_from_long() {
         assert!(REGISTERED_STRATEGY_IDS.contains(&"intraday_scalper"));

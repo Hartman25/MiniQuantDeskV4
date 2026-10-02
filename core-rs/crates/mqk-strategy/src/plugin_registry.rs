@@ -75,6 +75,23 @@ pub struct StrategyDataRequirements {
     pub minimum_completed_bars: usize,
 }
 
+/// Whether a strategy's decision state can be rebuilt after a process
+/// restart from the bounded completed-bar history the runtime loads.
+///
+/// `NotRecoverable` marks an engine whose state depends on an unbounded
+/// history (for example a hold that lasts until an exit condition). Such an
+/// engine is valid for Backtest and Research, which feed one continuous
+/// instance, but is refused by [`PluginRegistry::instantiate_verified`], the
+/// seam every production path (Paper bootstrap, promotion fingerprint
+/// resolution, dynamic selection) goes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestartRecovery {
+    /// Every decision is a pure function of the bounded history window.
+    BoundedHistoryReconstructible,
+    /// A restart cannot prove the instance's state from a finite window.
+    NotRecoverable,
+}
+
 /// Static metadata for a registered strategy.
 ///
 /// Metadata is stored separately from the strategy instance so it can be
@@ -101,6 +118,10 @@ pub struct StrategyMeta {
     /// unknown/undeclared — callers must fail closed
     /// (`strategy_requirement_unknown`), never assume a default.
     pub data_requirements: Option<StrategyDataRequirements>,
+
+    /// Restart-recovery class. Defaults to
+    /// [`RestartRecovery::BoundedHistoryReconstructible`].
+    pub restart_recovery: RestartRecovery,
 }
 
 impl StrategyMeta {
@@ -129,6 +150,7 @@ impl StrategyMeta {
             timeframe_secs,
             description: description.into(),
             data_requirements: None,
+            restart_recovery: RestartRecovery::BoundedHistoryReconstructible,
         }
     }
 
@@ -146,12 +168,19 @@ impl StrategyMeta {
             timeframe_secs: spec.timeframe_secs,
             description: description.into(),
             data_requirements: None,
+            restart_recovery: RestartRecovery::BoundedHistoryReconstructible,
         }
     }
 
     /// Declare this strategy's minimum completed-bar history requirement.
     pub fn with_data_requirements(mut self, requirements: StrategyDataRequirements) -> Self {
         self.data_requirements = Some(requirements);
+        self
+    }
+
+    /// Declare this strategy's restart-recovery class.
+    pub fn with_restart_recovery(mut self, recovery: RestartRecovery) -> Self {
+        self.restart_recovery = recovery;
         self
     }
 }
@@ -177,6 +206,9 @@ pub enum RegistryError {
     },
     /// The supplied sizing could not be represented / validated.
     InvalidSizing(String),
+    /// The strategy's state cannot be reconstructed after a restart from the
+    /// bounded history the runtime loads, so no production path may run it.
+    NotRestartRecoverable { name: String },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -198,6 +230,10 @@ impl std::fmt::Display for RegistryError {
                 "strategy '{name}': metadata timeframe {meta_secs}s != spec timeframe {spec_secs}s"
             ),
             Self::InvalidSizing(reason) => write!(f, "invalid strategy sizing: {reason}"),
+            Self::NotRestartRecoverable { name } => write!(
+                f,
+                "strategy '{name}' is not restart-recoverable: its state cannot be rebuilt from                  bounded history, so it is refused for production use"
+            ),
         }
     }
 }
@@ -321,6 +357,8 @@ impl PluginRegistry {
     /// # Errors
     /// - [`RegistryError::UnknownStrategy`] if the name is not found.
     /// - [`RegistryError::TimeframeMismatch`] if the spec doesn't match.
+    /// - [`RegistryError::NotRestartRecoverable`] if the strategy's state
+    ///   cannot be rebuilt from bounded history after a restart.
     pub fn instantiate_verified(&self, name: &str) -> Result<Box<dyn Strategy>, RegistryError> {
         let entry = self
             .entries
@@ -329,6 +367,12 @@ impl PluginRegistry {
             .ok_or_else(|| RegistryError::UnknownStrategy {
                 name: name.to_string(),
             })?;
+
+        if entry.meta.restart_recovery == RestartRecovery::NotRecoverable {
+            return Err(RegistryError::NotRestartRecoverable {
+                name: name.to_string(),
+            });
+        }
 
         let strategy = (entry.factory)();
         let spec = strategy.spec();
@@ -451,9 +495,40 @@ mod tests {
             timeframe_secs: 60,
             description: "bad".to_string(),
             data_requirements: None,
+            restart_recovery: RestartRecovery::BoundedHistoryReconstructible,
         };
         let err = reg.register(meta, make_factory("x", 60, 1));
         assert_eq!(err, Err(RegistryError::EmptyName));
+    }
+
+    // --- restart recovery ---
+
+    #[test]
+    fn default_meta_is_reconstructible_and_not_recoverable_is_refused_when_verified() {
+        let default_meta = StrategyMeta::new("alpha", "1.0.0", 60, "d");
+        assert_eq!(
+            default_meta.restart_recovery,
+            RestartRecovery::BoundedHistoryReconstructible
+        );
+
+        let mut reg = PluginRegistry::new();
+        reg.register(default_meta, make_factory("alpha", 60, 1))
+            .unwrap();
+        reg.register(
+            StrategyMeta::new("beta", "1.0.0", 60, "d")
+                .with_restart_recovery(RestartRecovery::NotRecoverable),
+            make_factory("beta", 60, 1),
+        )
+        .unwrap();
+
+        assert!(reg.instantiate_verified("alpha").is_ok());
+        assert!(reg.instantiate("beta").is_ok(), "research/backtest path");
+        assert_eq!(
+            reg.instantiate_verified("beta").err(),
+            Some(RegistryError::NotRestartRecoverable {
+                name: "beta".to_string()
+            })
+        );
     }
 
     // --- contains / len / is_empty ---

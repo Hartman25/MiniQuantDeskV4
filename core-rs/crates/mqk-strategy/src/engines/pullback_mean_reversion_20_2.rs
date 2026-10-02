@@ -1,7 +1,7 @@
 use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 use crate::{
-    BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
-    StrategySpec, TargetPosition,
+    BarStub, RestartRecovery, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta,
+    StrategyOutput, StrategySpec, TargetPosition,
 };
 use mqk_execution::QtyMicros;
 
@@ -24,6 +24,11 @@ pub fn meta() -> StrategyMeta {
     .with_data_requirements(StrategyDataRequirements {
         minimum_completed_bars: LOOKBACK,
     })
+    // A LONG lasts until the close reaches the mean, with no bound on its
+    // duration, so a restart cannot prove the state from a finite history
+    // window. Valid for Backtest and Research (one continuous instance);
+    // refused by every production path.
+    .with_restart_recovery(RestartRecovery::NotRecoverable)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -497,5 +502,41 @@ mod tests {
         let out = PullbackMeanReversion202Strategy::new("SPY").on_bar(&ctx(bars(&entry_window(L))));
         assert_eq!(out.targets.len(), 1);
         assert_eq!(out.targets[0].symbol, "SPY");
+    }
+
+    /// IR-2 counterexample: a valid entry far older than any finite restart
+    /// window, then a shallow linear decline that never re-triggers entry and
+    /// never lets the close reach the trailing mean. The continuous instance
+    /// stays LONG; a fresh instance replaying only a Paper-sized window starts
+    /// FLAT and never re-enters. Finite-window replay therefore cannot recover
+    /// this state, which is why the engine is refused by the production
+    /// `instantiate_verified` seam (see `plugin_registry::RestartRecovery`).
+    #[test]
+    fn finite_window_restart_cannot_recover_a_long_that_outlives_the_window() {
+        const PAPER_WINDOW: usize = 256;
+        let mut closes: Vec<i64> = vec![100_000_000; 19];
+        closes.push(90_000_000); // 2-sigma entry
+        closes.extend((1..=400).map(|k| 90_000_000 - 50_000 * k));
+
+        let bars: Vec<BarStub> = closes.iter().map(|&c| bar(c, true)).collect();
+        let window_at = |t: usize| {
+            let lo = (t + 1).saturating_sub(PAPER_WINDOW);
+            bars[lo..=t].to_vec()
+        };
+        let target = |s: &mut PullbackMeanReversion202Strategy, w: Vec<BarStub>| {
+            s.on_bar(&ctx(w)).targets[0].qty.raw()
+        };
+
+        let mut continuous = PullbackMeanReversion202Strategy::new("SPY");
+        let mut last = 0;
+        for t in 0..bars.len() {
+            last = target(&mut continuous, window_at(t));
+        }
+        assert_eq!(last, 1_000_000, "the continuous run is still LONG");
+
+        let mut restarted = PullbackMeanReversion202Strategy::new("SPY");
+        let restarted_target = target(&mut restarted, window_at(bars.len() - 1));
+        assert_eq!(restarted_target, 0, "the restarted instance derives FLAT");
+        assert_ne!(last, restarted_target);
     }
 }
