@@ -39,6 +39,7 @@ pub use economics::{
     mark_to_market_value_micros, notional_micros, notional_micros_qty, realized_pnl_micros,
     BacktestEconomicsReport, BacktestInstrumentEconomics, EconomicsError,
 }; // BACKTEST-MULTIPLIER-MARGIN-01 / BACKTEST-REPORT-ECONOMICS-ARTIFACT-01 / D6-A2
+pub use engine::effective_history_len;
 pub use engine::{BacktestEngine, BacktestError};
 pub use genuine_shuffled_placebo::{
     genuine_shuffled_placebo_scenario, GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID,
@@ -51,7 +52,7 @@ pub use market_frame::{
 }; // BKT-MULTISYMBOL-MARKET-FRAME-01
 pub use native_signals::{
     emit_native_signal_stream, NativeSignalError, NativeSignalRow, NativeSignalStream,
-    NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
+    NATIVE_SIGNAL_QUANTITY_SEMANTICS_ID, NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
 };
 pub use p7a_p7b_economic_replay_stress::{
     p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,

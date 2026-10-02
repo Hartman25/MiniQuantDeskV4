@@ -216,6 +216,13 @@ struct PendingBacktestOrder {
     signal_ts: i64,
 }
 
+/// The history window length the engine actually supplies to strategies: the
+/// configured length, widened to whatever the registered strategy declares it
+/// needs. The single definition of this rule; provenance records it verbatim.
+pub fn effective_history_len(configured: usize, required: usize) -> usize {
+    configured.max(required)
+}
+
 /// The backtest engine: event-sourced, deterministic replay.
 ///
 /// See the module docs for the per-bar pipeline and BKT-FUTURE-EXECUTION-01's
@@ -631,10 +638,10 @@ impl BacktestEngine {
             self.recent_bars.push(stub);
             // The window is at least what the registered strategy declares it
             // needs, so a longer-lookback rule is never silently starved.
-            let history_len = self
-                .config
-                .bar_history_len
-                .max(self.host.required_history_bars());
+            let history_len = effective_history_len(
+                self.config.bar_history_len,
+                self.host.required_history_bars(),
+            );
             if self.recent_bars.len() > history_len {
                 let start = self.recent_bars.len() - history_len;
                 self.recent_bars = self.recent_bars.split_off(start);

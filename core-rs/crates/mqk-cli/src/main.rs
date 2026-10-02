@@ -10,8 +10,9 @@ use commands::{
     bkt::{
         run_backtest_csv, run_backtest_db, run_finalize_genuine_shuffled_placebo,
         run_finalize_p7a_p7b_replay_stress, run_finalize_robustness_sensitivity,
-        run_native_signals, run_regime_detect, run_review_scan, run_strategy_lab_evaluate,
-        run_strategy_lab_rank, run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
+        run_native_fingerprint, run_native_signals, run_regime_detect, run_review_scan,
+        run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
+        IntegrityCalendarArg,
     },
     daemon::{daemon_arm, daemon_clear_halted_run, daemon_disarm, daemon_halt, daemon_status},
     load_payload,
@@ -756,6 +757,19 @@ enum BacktestCmd {
         /// Output directory for the stream and its meta.
         #[arg(long)]
         out_dir: String,
+    },
+
+    /// Print a native strategy's semantic identity (fingerprint, timeframe,
+    /// required history) with NO market data, so a Research trial can be
+    /// registered before any evaluation runs.
+    NativeFingerprint {
+        /// Native strategy name (see `mqk backtest list-strategies`).
+        #[arg(long)]
+        strategy: String,
+
+        /// Symbol the strategy trades.
+        #[arg(long)]
+        symbol: String,
     },
 
     /// W06-P9-CANONICAL-RESEARCH-REPLAY-CLI-01: produce a REAL canonical
@@ -1849,6 +1863,9 @@ async fn run_cli() -> Result<()> {
                 out_dir,
             } => {
                 run_native_signals(bars_path, strategy, symbol, timeframe_secs, out_dir)?;
+            }
+            BacktestCmd::NativeFingerprint { strategy, symbol } => {
+                run_native_fingerprint(strategy, symbol)?;
             }
             BacktestCmd::ResearchReplay {
                 registry_db,

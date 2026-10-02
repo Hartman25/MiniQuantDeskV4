@@ -297,6 +297,45 @@ pub async fn run_backtest_csv(
 /// Writes `native_signals.csv` (`symbol,decision_ts,target_qty_micros`) and
 /// `native_signals_meta.json` into `out_dir`; the meta binds the stream to
 /// the strategy semantic fingerprint and the exact bars/stream bytes.
+/// The native strategy instance a Research trial is registered against, built
+/// from the same conservative defaults the emitter runs with.
+fn native_strategy_instance(
+    strategy: &str,
+    symbol: &str,
+    cfg: &BacktestConfig,
+) -> Result<Box<dyn mqk_strategy::Strategy>> {
+    let mut reg = PluginRegistry::new();
+    register_builtin_strategies_with_sizing(
+        &mut reg,
+        symbol,
+        cfg.sizing.target_qty,
+        cfg.sizing.max_target_qty,
+        cfg.sizing.max_position_notional_usd,
+    )
+    .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    reg.instantiate(strategy)
+        .with_context(|| format!("unknown strategy '{}'", strategy))
+}
+
+/// Resolve a native strategy's semantic identity WITHOUT any market data, so a
+/// Research trial can be registered before any evaluation exists.
+pub fn run_native_fingerprint(strategy: String, symbol: String) -> Result<()> {
+    let cfg = BacktestConfig::conservative_defaults();
+    let instance = native_strategy_instance(&strategy, &symbol, &cfg)?;
+    let required = instance.required_history_bars();
+    println!("strategy={}", instance.spec().name);
+    println!("symbol={}", symbol);
+    println!("timeframe_secs={}", instance.spec().timeframe_secs);
+    println!("semantic_fingerprint={}", instance.semantic_fingerprint());
+    println!("required_history_bars={}", required);
+    println!(
+        "effective_bar_history_len={}",
+        mqk_backtest::effective_history_len(cfg.bar_history_len, required)
+    );
+    println!("initial_cash_micros={}", cfg.initial_cash_micros);
+    Ok(())
+}
+
 pub fn run_native_signals(
     bars_path: String,
     strategy: String,
@@ -321,18 +360,7 @@ pub fn run_native_signals(
     cfg.timeframe_secs = timeframe_secs;
     cfg.integrity_enabled = false;
 
-    let mut reg = PluginRegistry::new();
-    register_builtin_strategies_with_sizing(
-        &mut reg,
-        &symbol,
-        cfg.sizing.target_qty,
-        cfg.sizing.max_target_qty,
-        cfg.sizing.max_position_notional_usd,
-    )
-    .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
-    let strategy_instance = reg
-        .instantiate(&strategy)
-        .with_context(|| format!("unknown strategy '{}'", strategy))?;
+    let strategy_instance = native_strategy_instance(&strategy, &symbol, &cfg)?;
 
     let stream = mqk_backtest::emit_native_signal_stream(cfg, &bars, strategy_instance)
         .map_err(|e| anyhow::anyhow!("native signal emission failed: {e}"))?;
@@ -361,7 +389,12 @@ pub fn run_native_signals(
         "semantic_fingerprint": stream.semantic_fingerprint,
         "symbol": stream.symbol,
         "timeframe_secs": stream.timeframe_secs,
-        "bar_history_len": stream.bar_history_len,
+        "quantity_semantics": mqk_backtest::NATIVE_SIGNAL_QUANTITY_SEMANTICS_ID,
+        "configured_bar_history_len": stream.configured_bar_history_len,
+        "required_history_bars": stream.required_history_bars,
+        "effective_bar_history_len": stream.effective_bar_history_len,
+        "observed_max_window_len": stream.observed_max_window_len,
+        "initial_cash_micros": stream.initial_cash_micros,
         "backtest_run_id": stream.run_id.to_string(),
         "bars_csv_sha256": sha(&bars_bytes),
         "signal_rows": stream.rows.len(),
