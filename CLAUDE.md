@@ -147,7 +147,7 @@ STOP and report the smallest exact defect.
 A patch = ONE coherent invariant.
 
 A Claude session MAY contain multiple patches when the mission explicitly
-defines an autonomous wave, but execute them sequentially:
+authorizes a multi-patch controller, but execute them sequentially:
 
 NARROW INSPECTION
 → DEFINE INVARIANT
@@ -170,7 +170,18 @@ Do not perform unrelated cleanup/refactoring.
 If an unrelated defect appears, record it. Repair it only if the mission
 authorizes it.
 
-At a defined wave checkpoint, STOP for independent review.
+Continue the authorized controller across sequential coherent commits.
+Do not stop merely because a wave or checkpoint label was reached, and do not
+ask the operator pacing questions because a mission is large.
+
+Stop only at:
+
+- mission completion, or an independent-review boundary the CURRENT
+  controller explicitly requires;
+- a genuine hard stop;
+- a session/context boundary, after safely committing the current invariant.
+
+At a session/context boundary: split sessions, not mission scope.
 
 ## 8. Progressive discovery
 
@@ -308,7 +319,39 @@ While developing:
 1. run the single load-bearing test
 2. run its test file
 3. run adjacent regressions
-4. run subsystem/full suite once at the acceptance boundary.
+4. run the affected subsystem suite once at the acceptance boundary
+   (Rust workspace-wide acceptance: see the laptop rule below).
+
+LAPTOP RESOURCE SAFETY — MANDATORY
+
+Do NOT run locally unless the operator explicitly authorizes that exact run:
+
+- `cargo test --workspace`
+- `cargo test --all`
+- full-workspace `--all-targets` build/test
+- full-workspace clippy/build/test-target sweeps
+- other known high-memory monolithic Rust acceptance sweeps.
+
+This laptop has repeatedly become unstable/crashed under those workloads.
+
+Use locally:
+
+- focused load-bearing tests
+- affected-crate tests
+- direct dependents
+- negative/mutation proof
+- targeted check/clippy
+- constrained parallelism such as `-j 2` where useful.
+
+Broad Rust workspace acceptance belongs to GitHub CI by default.
+
+Resource pressure is not authority to reduce mission scope. Split sessions or
+use narrower proof commands instead.
+
+Substantial mission final reports state exactly:
+
+Full local workspace acceptance: NOT RUN — prohibited by laptop
+resource-safety rule; broad workspace proof delegated to GitHub CI.
 
 Prefer concise output:
 
@@ -322,21 +365,23 @@ Do not rerun an unchanged full green suite without reason.
 
 ## 16. Subagents
 
-Use subagents only when work is genuinely independent and substantial.
+Default: do NOT use
 
-Good:
+- Agent
+- Task
+- fork
+- autonomous subagents
+- background-agent loops
 
-- broad multi-domain audit
-- primary-paper research independent of repo inspection
-- independent review of a high-risk patch.
+unless the CURRENT authorized mission/controller explicitly permits it.
 
-Bad:
+Do not independently decide that a broad audit, research task, or review
+justifies launching agents.
 
-- multiple agents reading the same files
-- focused three-file repairs
-- duplicate searches/tests.
+If a mission explicitly authorizes agents, they are evidence producers, not
+acceptance authority, and must not become parallel writers.
 
-Prefer one primary implementation agent for focused patches.
+One primary implementation agent performs all edits and commits.
 
 ## 17. Tool / MCP routing
 
@@ -647,3 +692,76 @@ Skills:
 - do not reopen accepted work without deterministic contradiction;
 - do not assign independent acceptance/closure states;
 - stop/report conflicts.
+
+## 32. Minimal implementation discipline
+
+Minimalism applies AFTER understanding. First trace the real
+production/data/authority flow and the complete invariant. Then choose the
+smallest COMPLETE correct solution.
+
+The target is the smallest complete correct solution, not the smallest diff.
+
+Decision ladder:
+
+1. Must new code/config exist to satisfy the CURRENT authorized mission or
+   milestone exit gate? If not, defer it.
+2. Does an accepted seam/helper/type/authority already exist? Reuse/extend it.
+3. Can the language standard library solve it correctly? Use it.
+4. Can an existing platform/DB/runtime capability solve it correctly? Use it.
+5. Can an already-installed dependency solve it without changing authority?
+   Use it.
+6. Can a shared authority be corrected once instead of patching several
+   callers? Fix the root cause there.
+7. Only then add the minimum new code that satisfies the FULL invariant.
+
+Root cause: a reported symptom is not automatically the correct edit location.
+Inspect the affected definition, callers, callees, duplicate authority, and
+sibling executable paths. Prefer one correction at the narrowest shared
+authoritative seam over repeated caller-specific patches. This is not license
+for broad refactoring.
+
+Prefer:
+
+- reuse over duplication
+- deletion over unnecessary addition
+- boring explicit deterministic code over clever abstraction
+- existing types/protocols/manifests/tables over parallel frameworks
+- standard library/native mechanisms over new dependencies
+- one authority instead of duplicated authority
+- fewer files only when the invariant genuinely fits in fewer files.
+
+Avoid:
+
+- speculative abstractions or "for later" frameworks
+- configuration for genuinely invariant values
+- new dependencies for trivial behavior
+- duplicate economic/sizing/provenance authority
+- wrappers that add no invariant.
+
+Minimalism is subordinate to the CURRENT mission, accepted contracts, trading
+safety, correctness, fail-closed behavior, determinism, auditability,
+restart/crash/idempotency safety, identity/provenance, causal execution,
+Research governance, and required proof.
+
+Never use minimalism/YAGNI to skip:
+
+- caller/callee coverage, defect census, or the second adversarial sweep
+- trust-boundary validation
+- schema/query/bind/round-trip correctness
+- restart/recovery or retry/idempotency proof
+- concurrency/chronology proof
+- negative controls, mutation proof, or relevant regression proof
+- durable provenance/identity or holdout protection
+- trial/attempt separation
+- broker/account/deployment authority
+- fail-closed refusal.
+
+"Fewest files" does not hide a real cross-module invariant. "Shortest diff"
+does not leave duplicate or contradictory truth. A single passing check is not
+a test ceiling. Do not narrow an operator-authorized mission because a smaller
+one would be simpler; use small commits, not artificially small missions.
+
+External minimal-code guidance (for example the upstream Ponytail project) is
+design inspiration only. It is not repository authority, and its
+plugin/hook/mode behavior is neither installed nor assumed. The mission/controller
+and accepted contracts outrank it.
