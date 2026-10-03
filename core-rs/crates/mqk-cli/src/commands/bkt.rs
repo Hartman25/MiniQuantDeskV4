@@ -504,13 +504,10 @@ pub fn run_native_fingerprint(
         mqk_backtest::effective_history_len(cfg.bar_history_len, required)
     );
     println!("initial_cash_micros={}", cfg.initial_cash_micros);
-    if cfg.sizing_policy.is_capital_fraction() {
+    if let Some(bps) = cfg.sizing_policy.allocation_fraction_bps() {
         println!("inner_semantic_fingerprint={}", inner_fingerprint);
         println!("sizing_policy_id={}", cfg.sizing_policy.policy_id());
-        println!(
-            "allocation_fraction_bps={}",
-            cfg.sizing_policy.allocation_fraction_bps().unwrap_or(0)
-        );
+        println!("allocation_fraction_bps={}", bps);
     }
     Ok(())
 }
