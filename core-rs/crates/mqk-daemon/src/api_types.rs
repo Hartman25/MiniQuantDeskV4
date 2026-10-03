@@ -5994,6 +5994,16 @@ pub struct BacktestJobRequest {
     /// `source="md_bars"`. Must be `>= start`.
     #[serde(default)]
     pub end: Option<String>,
+    /// Sizing-policy selection is NOT supported by this route (it only runs the
+    /// historical fixed-quantity policy). The field exists solely so a request
+    /// that names a sizing policy is refused explicitly instead of the unknown
+    /// field being ignored and the job silently running fixed-quantity
+    /// economics. Any value, of any type, is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizing_policy: Option<serde_json::Value>,
+    /// See [`Self::sizing_policy`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation_fraction_bps: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

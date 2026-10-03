@@ -52,6 +52,24 @@ pub(crate) async fn backtest_job_submit(
     // --- Input validation (fail truthfully, never optimistically pass) ---
     // BACKTEST-DB-BARS-SOURCE-01: source must be a recognized value before any
     // other check — never silently coerced to csv.
+    // A sizing-policy selection can never be honored here: refuse it rather than
+    // run fixed-quantity economics for a request that declared otherwise.
+    if req.sizing_policy.is_some() || req.allocation_fraction_bps.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(BacktestJobAcceptedResponse {
+                accepted: false,
+                job_id: Uuid::nil(),
+                status: "refused".to_string(),
+                artifact_dir: None,
+                error: Some(
+                    "sizing policy selection is not supported by this route (fixed-quantity                      only); run capital-fraction backtests with `mqk backtest csv`"
+                        .to_string(),
+                ),
+            }),
+        )
+            .into_response();
+    }
     let source = req.source.trim().to_ascii_lowercase();
     if source != "csv" && source != "md_bars" {
         return (

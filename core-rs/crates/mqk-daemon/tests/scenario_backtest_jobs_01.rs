@@ -172,6 +172,40 @@ async fn bj01_empty_bars_path_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// BJ-01b: a sizing-policy selection is refused, never ignored (IR-SZ census)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bj01b_sizing_policy_selection_is_refused_not_ignored() {
+    for extra in [
+        serde_json::json!({"sizing_policy": "fixed_initial_capital_fraction_v1", "allocation_fraction_bps": 1000}),
+        serde_json::json!({"sizing_policy": "fixed_quantity_v1"}),
+        serde_json::json!({"allocation_fraction_bps": 1000}),
+        serde_json::json!({"sizing_policy": 7}),
+    ] {
+        let mut payload = serde_json::json!({
+            "bars_path": fixture_bars_path(),
+            "strategy": "swing_momentum",
+            "symbol": "TEST",
+            "timeframe_secs": 60,
+            "initial_cash_micros": 100_000_000_000i64
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, resp) = call(make_router(), post_json_body(payload.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+        let json = parse_json(resp);
+        assert!(!json_bool(&json, "accepted"), "{payload}");
+        assert!(
+            json_str(&json, "error").contains("sizing policy selection"),
+            "{payload}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BJ-02: timeframe_secs=0 → 400
 // ---------------------------------------------------------------------------
 

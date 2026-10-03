@@ -383,3 +383,189 @@ fn legacy_v2_scan_still_carries_v2_evidence_not_capital_fraction() -> anyhow::Re
     assert!(cands[0]["metrics"]["benchmark_capital_fraction"].is_null());
     Ok(())
 }
+
+/// Census classification: `backtest csv-sweep`, `backtest db` and the daemon job
+/// route are not on the capital-fraction path and carry no sizing flags, so a
+/// declared capital-fraction candidate cannot be run through them under
+/// different (fixed-quantity) economics: the flag is refused, never ignored.
+#[test]
+fn routes_without_a_capital_fraction_bridge_refuse_the_sizing_flags() -> anyhow::Result<()> {
+    let fx = fixture()?;
+    let bars = bars_path(&fx.0);
+    for (cmd, base) in [
+        (
+            "csv-sweep",
+            vec![
+                "backtest",
+                "csv-sweep",
+                "--bars",
+                bars.as_str(),
+                "--strategy",
+                STRATEGY,
+                "--symbol",
+                "SPY",
+            ],
+        ),
+        (
+            "db",
+            vec![
+                "backtest",
+                "db",
+                "--strategy",
+                STRATEGY,
+                "--symbol",
+                "SPY",
+                "--timeframe",
+                "1D",
+                "--start-end-ts",
+                "1",
+                "--end-end-ts",
+                "2",
+            ],
+        ),
+    ] {
+        for flags in [
+            vec!["--sizing-policy", CF, "--allocation-fraction-bps", "1000"],
+            vec!["--allocation-fraction-bps", "1000"],
+        ] {
+            let mut a = base.clone();
+            a.extend(flags.iter().copied());
+            let out = run(&a);
+            assert!(!out.status.success(), "{cmd} must refuse {flags:?}");
+            assert!(
+                stderr(&out).contains("unexpected argument"),
+                "{cmd} {flags:?}: {}",
+                stderr(&out)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn native_flags(bps: &str) -> Vec<String> {
+    [
+        "--sizing-policy",
+        CF,
+        "--allocation-fraction-bps",
+        bps,
+        "--initial-cash-micros",
+        "100000000000",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// The Research bridge CLI: fingerprint (no market data) and signal emission agree on one
+/// wrapper identity, emitted quantities are capital sized (not +1), and every missing or
+/// malformed sizing input is refused without emitting a stream.
+#[test]
+fn native_bridge_carries_capital_fraction_identity_and_quantities() -> anyhow::Result<()> {
+    let fx = fixture()?;
+    let bars = bars_path(&fx.0);
+    let fp = |extra: &[String]| -> String {
+        let mut a: Vec<String> = [
+            "backtest",
+            "native-fingerprint",
+            "--strategy",
+            STRATEGY,
+            "--symbol",
+            "SPY",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        a.extend_from_slice(extra);
+        let refs: Vec<&str> = a.iter().map(String::as_str).collect();
+        kv(&run_ok(&refs), "semantic_fingerprint")
+    };
+    let fixed = fp(&[]);
+    let cf = fp(&native_flags("1000"));
+    assert_ne!(fixed, cf);
+    assert_ne!(cf, fp(&native_flags("2000")), "fraction is identity");
+    let out_dir = fx.0.join("emit");
+    let out = out_dir.display().to_string();
+    let mut a: Vec<String> = [
+        "backtest",
+        "native-signals",
+        "--bars-path",
+        bars.as_str(),
+        "--strategy",
+        STRATEGY,
+        "--symbol",
+        "SPY",
+        "--timeframe-secs",
+        "86400",
+        "--out-dir",
+        out.as_str(),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    a.extend(native_flags("1000"));
+    let refs: Vec<&str> = a.iter().map(String::as_str).collect();
+    let stdout = run_ok(&refs);
+    assert_eq!(
+        kv(&stdout, "semantic_fingerprint"),
+        cf,
+        "stream bound to the registered identity"
+    );
+    let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+        out_dir.join("native_signals_meta.json"),
+    )?)?;
+    assert_eq!(meta["sizing"]["allocation_fraction_bps"], 1000);
+    let csv = std::fs::read_to_string(out_dir.join("native_signals.csv"))?;
+    let max_q = csv
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split(',').nth(2)?.parse::<i64>().ok())
+        .max()
+        .unwrap();
+    assert!(
+        max_q > 1_000_000,
+        "10% of 100k buys more than one share, got {max_q}"
+    );
+
+    for bad in [
+        vec![
+            "--sizing-policy",
+            CF,
+            "--initial-cash-micros",
+            "100000000000",
+        ],
+        vec!["--sizing-policy", CF, "--allocation-fraction-bps", "1000"],
+        vec![
+            "--sizing-policy",
+            CF,
+            "--allocation-fraction-bps",
+            "0",
+            "--initial-cash-micros",
+            "1",
+        ],
+        vec!["--initial-cash-micros", "100000000000"],
+        vec!["--max-target-qty", "5"],
+    ] {
+        let _ = std::fs::remove_dir_all(&out_dir);
+        let mut a = vec![
+            "backtest",
+            "native-signals",
+            "--bars-path",
+            bars.as_str(),
+            "--strategy",
+            STRATEGY,
+            "--symbol",
+            "SPY",
+            "--timeframe-secs",
+            "86400",
+            "--out-dir",
+            out.as_str(),
+        ];
+        a.extend(bad.iter().copied());
+        assert!(!run(&a).status.success(), "{bad:?}");
+        assert!(
+            !out_dir.join("native_signals.csv").exists(),
+            "{bad:?} emitted a stream"
+        );
+    }
+    Ok(())
+}
