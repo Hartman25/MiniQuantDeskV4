@@ -6,13 +6,21 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
-## -25. Native Capital-Fraction Sizing V1 (2026-10-03, `V4-M1-NATIVE-SIZING-V1-01`)
+## -26. Native Sizing V1 Independent-Review Correction (2026-10-03, `V4-M1-NATIVE-SIZING-V1-INDEPENDENT-REVIEW-CORRECTION-01`)
+
+Not pushed. Records: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`, `docs/research/NATIVE_SIZING_V1_CENSUS.md`, ledger G2.15. Supersedes the "locally complete / deferred" wording of the entry below.
+
+- IR-SZ-01 Research economic bridge, IR-SZ-02 restart-recoverable runtime/deployment seam (+ runtime == canonical Backtest wrapper fingerprint) and IR-SZ-03 benchmark run-id identity are FIXED + PROVEN; daemon backtest job route and CLI routes without a bridge refuse a sizing selection.
+- Operator decision recorded as a FUTURE campaign parameter only (not a code default, not executed): next M1 hypothesis campaign sizing = `fixed_initial_capital_fraction_v1`, `allocation_fraction_bps = 1000` (10% of immutable initial capital; USD 100,000 -> USD 10,000 entry budget). Batch 02: NOT STARTED, no hypotheses/trials/results.
+- M1 remains `M1_BLOCKED`; Batch 01 `BATCH_REJECTED`; holdout RESERVED / UNCONSUMED; Promotion NONE; Paper NOT ACTIVATED; Live NOT TOUCHED. Full local workspace acceptance NOT RUN (resource-safety rule); delegated to GitHub CI after independent review and an authorized push.
+
+## -25. Native Capital-Fraction Sizing V1 (2026-10-03, `V4-M1-NATIVE-SIZING-V1-01`) — superseded in part by -26
 
 Not pushed. Records: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`, `docs/research/NATIVE_SIZING_V1_CENSUS.md`.
 
 - Added the explicit, versioned sizing policy `fixed_initial_capital_fraction_v1` (integer `allocation_fraction_bps` 1..=10000, immutable initial capital, floor whole shares at the causal completed-bar close, refuse instead of a one-share fallback, quantity held for the position lifetime, caps reduce/refuse only) with one shared pure resolver used by Backtest, scanner and the Paper contract. The historical fixed-quantity policy and every historical identity are unchanged.
 - New benchmark `capital_fraction_matched_passive_buy_hold_v1` (Benchmark V2 untouched); scanner, review and Promotion fail closed on cross-substitution; `backtest csv`/`scan-strategies` and the batch declaration select the policy explicitly. Paper/runtime: contract only, refused at registry build (no restart-recoverable seam yet); NOT ACTIVATED.
-- Capital-fraction production value: NOT SELECTED (future operator economic-policy decision). Batch 02: NOT STARTED. Batch 01 stays `BATCH_REJECTED`, M1 stays `M1_BLOCKED`; holdout RESERVED / UNCONSUMED; no Live. Full local workspace acceptance not run (laptop resource-safety rule); broad proof delegated to GitHub CI.
+- Capital-fraction production value: NOT SELECTED when this entry was written (superseded by -26: the operator froze 1000 bps for the next campaign only; still no code default). Batch 02: NOT STARTED. Batch 01 stays `BATCH_REJECTED`, M1 stays `M1_BLOCKED`; holdout RESERVED / UNCONSUMED; no Live. Full local workspace acceptance not run (laptop resource-safety rule); broad proof delegated to GitHub CI.
 
 ## -24. Benchmark V2 Promotion Economic Binding (2026-10-02, `V4-M1-BENCHMARK-V2-PROMOTION-BINDING-CORRECTION-01`)
 
