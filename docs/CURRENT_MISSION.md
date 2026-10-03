@@ -6,6 +6,13 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -24. Benchmark V2 Promotion Economic Binding (2026-10-02, `V4-M1-BENCHMARK-V2-PROMOTION-BINDING-CORRECTION-01`)
+
+Not pushed. Record: `docs/research/BENCHMARK_V2_PROMOTION_ECONOMIC_BINDING.md`.
+
+- Independent review finding IR-BV2-01 confirmed and closed: Promotion now requires the Benchmark V2 review row's candidate `config_id`/`run_id` (and execution model, semantic fingerprint) to equal the canonical Backtest evidence's; the scanner ran with integrity off/120/0/AlwaysOn while canonical `backtest csv` ran on/259200/3/us-equity-regular (14/14 rows, `c043…` vs `a694…`). The V2 scan can now run under the canonical config via `scan-strategies` flags that mirror `backtest csv`.
+- No candidate was falsely promoted; corrected Batch 01 stays `BATCH_REJECTED` (14 rejected, 1 blocked, 0 `paper_candidate`), not rerun. Old review rows cannot authorize corrected native promotion. No hypothesis/result/threshold changed; holdout RESERVED / UNCONSUMED; no Paper/Live.
+
 ## -23. Benchmark V2 Review Authority + Corrected Batch 01 Reevaluation (2026-10-02, `V4-M1-BENCHMARK-V2-REVIEW-AND-REEVALUATION-01`)
 
 Not pushed. Records: `docs/research/BENCHMARK_V2_REVIEW_AUTHORITY.md`, `docs/research/M1_BATCH01_CORRECTED_RESULT.md`.
