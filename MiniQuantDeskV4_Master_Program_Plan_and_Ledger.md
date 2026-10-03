@@ -691,6 +691,10 @@ Verification in this continuation (local, resource-bounded, not CI): targeted DB
 
 Out-of-scope finding, recorded not repaired: `scenario_native_strategy_bridge_b1c::b1c_c14_loop_path_creates_durable_outbox_row` (ignored, not in any CI lane) fails at an earlier gate with `promotion_config_mismatch` — its promotion fixture carries no semantic config fingerprint, which RUNTIME-PROMOTION-EVIDENCE-BINDING-01 now requires. It predates PR #73 and is independent of RC-1; once repaired it would also need the canonical registry anchor (it reaches Gate 7 via the CWD-relative default).
 
+### G2.14 Native capital-fraction sizing V1 (`V4-M1-NATIVE-SIZING-V1-01`, 2026-10-03)
+
+Infrastructure and proof only; local, not pushed. Adds the explicit `fixed_initial_capital_fraction_v1` sizing policy, its capital-fraction-matched benchmark, scanner/review/Promotion binding and an explicit CLI/declaration selection; Paper/runtime activation is NOT enabled (contract only, refused at registry build). Defect census, second sweep and mutation proof: `docs/research/NATIVE_SIZING_V1_CENSUS.md`; contract: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`. No G2 status above changes; M1 remains `M1_BLOCKED` (Batch 01 `BATCH_REJECTED`), no production fraction is selected and no campaign was run.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).
