@@ -89,9 +89,9 @@ pub use strategy_scanner::{
     evaluate_scan_candidate_with_emission, execute_strategy_scan,
     execute_strategy_scan_with_benchmark, execute_strategy_scan_with_policy, rank_scan_candidates,
     resolve_timeframe_secs, write_scan_artifacts, ScanBenchmarkPolicy, ScanBenchmarkV2Evidence,
-    ScanCapitalFractionBenchmarkEvidence, ScanManifest, ScanRunOutput, ScanRunRequest, ScanSkipReasonCount, ScanSummary,
-    StrategyScanCandidate, StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode,
-    StrategyScanTruthState, DEFAULT_MIN_BARS,
+    ScanCapitalFractionBenchmarkEvidence, ScanManifest, ScanRunOutput, ScanRunRequest,
+    ScanSkipReasonCount, ScanSummary, StrategyScanCandidate, StrategyScanMetrics,
+    StrategyScanPolicy, StrategyScanReasonCode, StrategyScanTruthState, DEFAULT_MIN_BARS,
 };
 pub use stress_suite::{
     run_backtest_stress_suite, StressScenarioOutcome, StressSuiteRunOutput,
@@ -107,7 +107,6 @@ pub use types::{
     derive_run_id_with_semantic_identity, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder,
     BacktestOrderSide, BacktestOrderV2, BacktestReport, CommissionModel, LiquidityConfig,
     OrderStatus, QuantitySemanticsId, SizingEntryProvenance, SizingPolicy, SizingProvenance,
-    SizingRefusalProvenance, StrategySizingConfig, StressProfile,
+    SizingRefusalProvenance, StrategySizingConfig, StressProfile, BACKTEST_EXECUTION_MODEL_ID,
     SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1, SIZING_POLICY_FIXED_QUANTITY_V1,
-    BACKTEST_EXECUTION_MODEL_ID,
 };

@@ -29,15 +29,15 @@ pub use sized_strategy::{
     capital_fraction_semantic_fingerprint, CapitalFractionSizedStrategy, SizedEntryRecord,
     SizingAudit, SizingAuditHandle, SizingRefusalRecord, SizingStateHandle,
 };
-pub use sizing_state::{
-    HeldSizingContract, HeldSizingRecord, HeldSizingRecoveryError, HeldSizingScope,
-    HeldSizingStatus, HeldSizingTransition, HELD_SIZING_STATE_VERSION,
-};
 pub use sizing::{
     parse_positive_qty, resolve_capital_fraction_target, CapitalFractionRefusal,
     CapitalFractionResolution, SizingError, SizingPolicy, TargetSizing,
     ALLOCATION_FRACTION_BPS_DENOMINATOR, SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1,
     SIZING_POLICY_FIXED_QUANTITY_V1,
+};
+pub use sizing_state::{
+    HeldSizingContract, HeldSizingRecord, HeldSizingRecoveryError, HeldSizingScope,
+    HeldSizingStatus, HeldSizingTransition, HELD_SIZING_STATE_VERSION,
 };
 pub use types::*;
 

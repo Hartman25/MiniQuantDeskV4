@@ -50,7 +50,10 @@ fn reference_is_the_most_recent_completed_bar_close() {
         BarStub::new(3, true, 125 * USD, 1),
     ]));
     // budget 25_000 / 125 = 200 shares (not 500 from the oldest bar, not 250 from the middle one)
-    assert_eq!(out.targets[0].qty, QtyMicros::from_whole_units(200).unwrap());
+    assert_eq!(
+        out.targets[0].qty,
+        QtyMicros::from_whole_units(200).unwrap()
+    );
     let a = audit.snapshot();
     assert_eq!(a.entries[0].reference_bar_end_ts, 3);
     assert!(a.refusals.is_empty());
