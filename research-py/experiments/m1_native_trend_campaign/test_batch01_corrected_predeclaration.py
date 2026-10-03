@@ -82,3 +82,34 @@ def test_no_result_values_in_the_predeclaration():
     for banned in ("net_total_return", "net_sharpe", "total_return_pct", "dsr_result", '"run_id"', "economic_eval_id",
                    "trial_id\":", '"alpha_pct":'):
         assert banned not in text
+
+
+def _runner_view(declaration: str | None) -> dict:
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env.pop("MQK_M1_BATCH_DECLARATION", None)
+    if declaration:
+        env["MQK_M1_BATCH_DECLARATION"] = declaration
+    code = (
+        "import json, run_batch as r; "
+        "print(json.dumps({'decl': r.DECL_FILE, 'run': str(r.RUN.name), 'exp': r.EXPERIMENT}))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], cwd=HERE, env=env, capture_output=True, text=True, check=True)
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_runner_selects_the_corrected_declaration_only_when_named_and_defaults_to_historical():
+    assert _runner_view(None)["run"] == "run_batch_01"
+    corrected = _runner_view("PREDECLARED_BATCH_01_CORRECTED.json")
+    assert corrected["run"] == "run_batch_01_corrected"
+    assert corrected["exp"] == "M1-NATIVE-HYPOTHESIS-BATCH-01-CORRECTED-REAL"
+
+
+def test_runner_review_stage_passes_the_declared_benchmark_policy_to_scan_and_review():
+    src = (HERE / "run_batch.py").read_text(encoding="utf-8")
+    stage = src[src.index("def stage_review"): src.index("def stage_summary")]
+    assert 'DECL["scanner_review"].get("benchmark_policy")' in stage
+    assert stage.count("*bench_args") == 2, "both scan-strategies and review-scan must carry the policy"

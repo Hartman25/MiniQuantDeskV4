@@ -1,5 +1,6 @@
-"""M1 native hypothesis batch runner. Every parameter is read from
-PREDECLARED_BATCH_01.json; nothing result-dependent is chosen here.
+"""M1 native hypothesis batch runner. Every parameter is read from the declaration
+named by MQK_M1_BATCH_DECLARATION (default PREDECLARED_BATCH_01.json, which this runner
+refuses); nothing result-dependent is chosen here.
 
 Stages (each once, in order): check | reuse_data | register | trials | judge |
 backtest | finalize | review | summary.
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,7 +35,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "research-py" / "src"))
 
-DECL = json.loads((HERE / "PREDECLARED_BATCH_01.json").read_text(encoding="utf-8"))
+DECL_FILE = os.environ.get("MQK_M1_BATCH_DECLARATION", "PREDECLARED_BATCH_01.json")
+DECL = json.loads((HERE / DECL_FILE).read_text(encoding="utf-8"))
 RUN = HERE / DECL["run_dir"]
 REGISTRY = HERE / DECL["experiment"]["registry_db_relative_path"]
 EXPERIMENT = DECL["experiment"]["real_experiment_id"]
@@ -125,6 +128,13 @@ def stage_reuse_data(_args) -> None:
     rows = len(pd.read_csv(csv_path))
     if sha256_file(csv_path) != manifest["artifact_sha256"] or rows != manifest["row_count"]:
         raise SystemExit("fail-closed: source bars do not match their provenance manifest")
+    pin = DECL["data"]["reuse_verified_data_from"]
+    for declared, actual in (("expected_artifact_sha256", manifest["artifact_sha256"]),
+                             ("expected_row_count", manifest["row_count"]),
+                             ("expected_canonical_semantic_bars_hash", manifest["canonical_semantic_bars_hash"]),
+                             ("expected_source_attestation_id", manifest["source_attestation_id"])):
+        if declared in pin and pin[declared] != actual:
+            raise SystemExit(f"fail-closed: reused data {declared} differs from the predeclared data identity")
     (RUN / "data").mkdir(parents=True, exist_ok=True)
     for name in ("research_bars.csv", "research_bars_provenance.json", "corporate_actions.json",
                  "corporate_actions_provenance.json"):
@@ -292,10 +302,13 @@ def stage_review(_args) -> None:
         root.mkdir(parents=True, exist_ok=True)
         for sym in symbols:
             (root / f"{sym}_1D.csv").write_bytes((tdir(strategy, sym) / "bt_bars.csv").read_bytes())
+        bench = DECL["scanner_review"].get("benchmark_policy")
+        bench_args = ["--benchmark-policy", bench] if bench else []
         out = _run_cli("backtest", "scan-strategies", "--registry", str(reg_path), "--bars-root", str(base / "bars"),
-                       "--timeframe", "1D", "--strategy", strategy, "--out-dir", str(base / "scans"))
+                       "--timeframe", "1D", "--strategy", strategy, "--out-dir", str(base / "scans"), *bench_args)
         scan_dir = _parse(out, "artifacts_dir")
-        out = _run_cli("backtest", "review-scan", "--artifact-dir", scan_dir, "--out-dir", str(base / "reviews"))
+        out = _run_cli("backtest", "review-scan", "--artifact-dir", scan_dir, "--out-dir", str(base / "reviews"),
+                       *bench_args)
         print(strategy, out)
 
 
