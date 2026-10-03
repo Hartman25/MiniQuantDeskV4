@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use mqk_integrity::CalendarSpec;
 use mqk_portfolio::{Fill, QtyMicros};
+pub use mqk_strategy::SizingPolicy;
 use uuid::Uuid;
 
 use crate::corporate_actions::CorporateActionPolicy;
@@ -624,6 +625,11 @@ pub struct BacktestConfig {
     /// `WholeUnitsV1`. Defaults to `WholeUnitsV1`, preserving every existing
     /// backtest byte-for-byte.
     pub quantity_semantics: QuantitySemanticsId,
+
+    /// Versioned sizing policy. `FixedQuantityV1` (default) is the legacy
+    /// `sizing` behavior and adds nothing to `config_id()`. The capital-fraction
+    /// policy resolves quantity at entry; `sizing` then supplies only its caps.
+    pub sizing_policy: SizingPolicy,
 }
 
 impl BacktestConfig {
@@ -672,6 +678,7 @@ impl BacktestConfig {
             // D6/A1: historical whole-unit domain, unchanged for every
             // existing test.
             quantity_semantics: QuantitySemanticsId::WholeUnitsV1,
+            sizing_policy: SizingPolicy::FixedQuantityV1,
         }
     }
 
@@ -755,6 +762,7 @@ impl BacktestConfig {
             // D6/A1: historical whole-unit domain, unchanged for every
             // existing caller.
             quantity_semantics: QuantitySemanticsId::WholeUnitsV1,
+            sizing_policy: SizingPolicy::FixedQuantityV1,
         }
     }
 
@@ -796,11 +804,12 @@ impl BacktestConfig {
             QuantitySemanticsId::WholeUnitsV1 => String::new(),
             other => format!("|qty_sem={}", other.canonical_str()),
         };
+        let policy_suffix = self.sizing_policy.canonical_suffix();
         let canonical = format!(
             "v2|ts={ts}|hist={hist}|cash={cash}|shadow={shadow}|dll={dll}|mdd={mdd}|\
              rs={rs}|pdt={pdt}|ks={ks}|exp={exp}|slip={slip}|vol={vol}|impact={impact}|\
              comm_ps={comm_ps}|comm_bps={comm_bps}|liq={liq}|\
-             int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}|{sz}{qty_sem_suffix}",
+             int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}|{sz}{qty_sem_suffix}{policy_suffix}",
             ts = self.timeframe_secs,
             hist = self.bar_history_len,
             cash = self.initial_cash_micros,

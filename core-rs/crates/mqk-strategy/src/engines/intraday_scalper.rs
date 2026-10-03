@@ -59,7 +59,7 @@ use crate::{
     BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
     StrategySpec, TargetPosition,
 };
-use mqk_execution::{AssetClass, QtyMicros, QTY_MICROS_SCALE};
+use mqk_execution::{AssetClass, QtyMicros};
 
 // ── Decision vocabulary (STRATEGY-DECISION-OBSERVABILITY-01) ─────────────────
 pub const DECISION_SIGNAL_LONG: &str = "signal_long";
@@ -445,45 +445,8 @@ impl IntradayScalperStrategy {
     /// diagnostic label: `"none"`, `"max_qty"`, `"max_notional"`, or
     /// `"max_notional_no_price"` (fail-closed when close is zero).
     fn apply_caps(&self, requested: QtyMicros, bars: &[BarStub]) -> (QtyMicros, &'static str) {
-        // Cap 1: hard max quantity.
-        let (after_qty_cap, qty_cap_fired) = match self.sizing.max_target_qty() {
-            Some(max_qty) if requested > max_qty => (max_qty, true),
-            _ => (requested, false),
-        };
-
-        // Cap 2: hard max notional (USD).
-        let (effective, capped_by) = match self.sizing.max_notional_usd() {
-            None => (
-                after_qty_cap,
-                if qty_cap_fired { "max_qty" } else { "none" },
-            ),
-            Some(max_notional_usd) => {
-                let last_close_micros = bars.last().map(|b| b.close_micros).unwrap_or(0);
-                if last_close_micros <= 0 {
-                    // Fail-closed: cannot compute notional without price reference.
-                    return (QtyMicros::ZERO, "max_notional_no_price");
-                }
-                // max qty (raw micros) = usd * 1e6 (usd micros) * QTY_MICROS_SCALE
-                //                        / close_micros, floored to the asset
-                // class's cap granularity (whole shares for Equity), never up.
-                // Example: max=$1000, close=$200 → 5 shares (5_000_000 micros).
-                let raw = (max_notional_usd as i128 * 1_000_000i128 * QTY_MICROS_SCALE as i128)
-                    / last_close_micros as i128;
-                let floor = self.sizing.notional_cap_floor_micros() as i128;
-                let floored = (raw / floor) * floor;
-                let max_from_notional =
-                    QtyMicros::new(i64::try_from(floored).unwrap_or(i64::MAX)).max(QtyMicros::ZERO);
-                if after_qty_cap > max_from_notional {
-                    (max_from_notional, "max_notional")
-                } else if qty_cap_fired {
-                    (after_qty_cap, "max_qty")
-                } else {
-                    (after_qty_cap, "none")
-                }
-            }
-        };
-
-        (effective.max(QtyMicros::ZERO), capped_by)
+        let last_close_micros = bars.last().map(|b| b.close_micros).unwrap_or(0);
+        self.sizing.apply_caps(requested, last_close_micros)
     }
 }
 
