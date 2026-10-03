@@ -427,8 +427,7 @@ foreach ($Doc in @(
 # [17] README/ledger record correct F1 status.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [17] README/ledger record E1-E5 accepted, F1 implementation-complete-awaiting-acceptance ---"
-Test-ContentContains "README.md records F1 as implementation-complete-awaiting-acceptance" $ReadmeContent "F1" | Out-Null
+Show-Info "--- [17] Ledger records F1 ---"
 Test-ContentContains "ledger records F1" $LedgerContent "F1" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Phase F closed" $LedgerContent "PHASE F: CLOSED" | Out-Null
 

@@ -428,20 +428,6 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
         Test-ContentDoesNotContain "$($Doc.Name) does not contain forbidden claim '$Phrase'" $Doc.Content $Phrase | Out-Null
     }
 }
-Test-ContentContains "README.md records E1 as accepted" $ReadmeContent "E1 is now accepted" | Out-Null
-Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
-Test-ContentContains "README.md records E2B as accepted" $ReadmeContent "E2B is now accepted" | Out-Null
-Test-ContentContains "README.md records E3 as accepted" $ReadmeContent "E3 is now accepted" | Out-Null
-Test-ContentContains "README.md records E4 as accepted" $ReadmeContent "E4 (plus both repairs and their test suites) is now accepted" | Out-Null
-Test-ContentContains "README.md mentions Phase E5" $ReadmeContent "Phase E5 (" | Out-Null
-# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-
-# INTEGRITY-REPAIR: E5 is now genuinely accepted (Phase E accepted complete
-# in full) -- the prior needle ("is implementation complete, awaiting
-# ChatGPT and operator acceptance") was calibrated while E5 itself was still
-# open, and coincidentally also matched unrelated F2/F3 status prose
-# elsewhere in README.md rather than actually asserting E5's own status. The
-# durable check going forward requires the truthful, current wording.
-Test-ContentContains "README.md records E5 as accepted" $ReadmeContent "E5 (plus this" | Out-Null
 
 # -----------------------------------------------------------------------
 # [22] Ledger truth.
@@ -453,6 +439,11 @@ if (Test-FileExists "Master patch ledger" $PathLedger) {
     $LedgerContent = Get-Content -Raw -Path $PathLedger
 }
 Test-ContentContains "ledger records E4 as accepted" $LedgerContent "E4: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records E1 as accepted" $LedgerContent "E1: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records E2A as accepted" $LedgerContent "E2A: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records E2B as accepted" $LedgerContent "E2B: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records E3 as accepted" $LedgerContent "E3: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records E5 as accepted" $LedgerContent "E5: ACCEPTED" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Phase E closed" $LedgerContent "PHASE E: CLOSED" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Phase E closed (alt phrasing)" $LedgerContent "PHASE E: COMPLETE" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Bundle 3 closed" $LedgerContent "BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): CLOSED" | Out-Null

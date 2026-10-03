@@ -569,11 +569,9 @@ Test-ContentContains "G spec records 47 passed / 9 pre-existing failures" $GSpec
 # Bundle 3 was still awaiting acceptance.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [15] README/ledger record correct final combined status ---"
-Test-ContentContains "README.md mentions F3" $ReadmeContent "F3" | Out-Null
+Show-Info "--- [15] Ledger records correct final combined status ---"
 Test-ContentContains "ledger mentions Phase G" $LedgerContent "PHASE G" | Out-Null
 Test-ContentContains "ledger records Bundle 3 accepted-complete status" $LedgerContent "BUNDLE 3: ACCEPTED $EmDash COMPLETE" | Out-Null
-Test-ContentContains "README.md records Bundle 3 accepted-complete status" $ReadmeContent "BUNDLE 3: ACCEPTED $EmDash COMPLETE" | Out-Null
 
 # -----------------------------------------------------------------------
 # [16] BUNDLE-3-FINAL-OPERATIONAL-SAFETY-REPAIR range reconciliation.

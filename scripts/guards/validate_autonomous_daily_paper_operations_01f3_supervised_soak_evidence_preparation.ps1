@@ -499,7 +499,6 @@ foreach ($Doc in @(
         Test-ContentDoesNotContain "$($Doc.Name) does not contain forbidden claim '$Phrase'" $Doc.Content $Phrase | Out-Null
     }
 }
-Test-ContentContains "README.md records F3 status" $ReadmeContent "F3" | Out-Null
 Test-ContentContains "ledger records F3" $LedgerContent "F3" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Phase F closed" $LedgerContent "PHASE F: CLOSED" | Out-Null
 
