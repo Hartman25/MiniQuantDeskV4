@@ -41,8 +41,8 @@ use mqk_risk::{
     RiskState,
 };
 use mqk_strategy::{
-    BarStub, RecentBarsWindow, ShadowMode, Strategy, StrategyContext, StrategyHost,
-    StrategyHostError,
+    BarStub, CapitalFractionSizedStrategy, RecentBarsWindow, ShadowMode, SizingAuditHandle,
+    Strategy, StrategyContext, StrategyHost, StrategyHostError, TargetSizing,
 };
 
 use crate::economics::{
@@ -52,7 +52,8 @@ use crate::economics::{
 use crate::types::{
     derive_input_data_hash, derive_run_id_with_quantity_semantics, BacktestBar, BacktestConfig,
     BacktestFill, BacktestOrder, BacktestOrderSide, BacktestOrderV2, BacktestReport, OrderStatus,
-    QuantitySemanticsId, BACKTEST_EXECUTION_MODEL_ID,
+    QuantitySemanticsId, SizingEntryProvenance, SizingProvenance, SizingRefusalProvenance,
+    BACKTEST_EXECUTION_MODEL_ID,
 };
 
 /// Backtest error variants.
@@ -81,6 +82,10 @@ pub enum BacktestError {
     /// fields are public, so a caller could construct an invalid value
     /// without going through the validating `::new()` constructor.
     InvalidEconomics { multiplier: i64 },
+    /// The configured sizing policy cannot be applied to this run (invalid
+    /// fraction, unsupported quantity semantics, invalid caps, or a second
+    /// strategy). Fails closed before any bar is processed.
+    InvalidSizingPolicy { reason: String },
     /// D6/A2 -- `QuantitySemanticsId::FractionalQtyMicrosV1` was configured
     /// with a `contract_multiplier != 1`. Fractional quantities are Crypto
     /// (spot, multiplier-less) only -- no fractional futures/options
@@ -154,6 +159,9 @@ impl core::fmt::Display for BacktestError {
                 "invalid economics rejected: contract_multiplier = {} (must be > 0)",
                 multiplier
             ),
+            BacktestError::InvalidSizingPolicy { reason } => {
+                write!(f, "invalid sizing policy rejected: {}", reason)
+            }
             BacktestError::InvalidQuantitySemantics { contract_multiplier } => write!(
                 f,
                 "invalid quantity semantics rejected: FractionalQtyMicrosV1 requires contract_multiplier == 1, got {} (no fractional futures/options contracts)",
@@ -288,6 +296,8 @@ pub struct BacktestEngine {
     /// Multiplier-aware equity curve, parallel to `equity_curve`. Identical to
     /// `equity_curve` when `economics.contract_multiplier == 1`.
     economics_equity_curve: Vec<(i64, i64)>,
+    /// Audit handle of the capital-fraction sizing wrapper, when selected.
+    sizing_audit: Option<SizingAuditHandle>,
 }
 
 impl BacktestEngine {
@@ -349,6 +359,7 @@ impl BacktestEngine {
             last_bar_close_micros: None,
             economics,
             economics_ledger,
+            sizing_audit: None,
             economics_equity_curve: Vec::new(),
         }
     }
@@ -387,7 +398,38 @@ impl BacktestEngine {
 
     /// Register a strategy. Must be called before run().
     pub fn add_strategy(&mut self, s: Box<dyn Strategy>) -> Result<(), BacktestError> {
-        self.host.register(s).map_err(BacktestError::StrategyHost)
+        if !self.config.sizing_policy.is_capital_fraction() {
+            return self.host.register(s).map_err(BacktestError::StrategyHost);
+        }
+        let invalid = |reason: String| BacktestError::InvalidSizingPolicy { reason };
+        if self.config.quantity_semantics != QuantitySemanticsId::WholeUnitsV1 {
+            return Err(invalid(
+                "capital-fraction sizing requires whole-unit Equity quantity semantics".into(),
+            ));
+        }
+        if self.sizing_audit.is_some() {
+            return Err(BacktestError::StrategyHost(
+                StrategyHostError::MultiStrategyNotAllowed,
+            ));
+        }
+        let caps = TargetSizing::equity_whole_units(
+            self.config.sizing.target_qty,
+            self.config.sizing.max_target_qty,
+            self.config.sizing.max_position_notional_usd,
+        )
+        .map_err(|e| invalid(format!("invalid sizing caps: {e}")))?;
+        let (wrapped, audit) = CapitalFractionSizedStrategy::new(
+            s,
+            self.config.sizing_policy,
+            self.config.initial_cash_micros,
+            caps,
+        )
+        .map_err(|e| invalid(e.reason_code().to_string()))?;
+        self.host
+            .register(Box::new(wrapped))
+            .map_err(BacktestError::StrategyHost)?;
+        self.sizing_audit = Some(audit);
+        Ok(())
     }
 
     /// PATCH 22: Returns true if integrity has blocked execution (disarm or halt).
@@ -983,7 +1025,43 @@ impl BacktestEngine {
             economics: economics_report,
             execution_model_id: BACKTEST_EXECUTION_MODEL_ID.to_string(),
             quantity_semantics: self.config.quantity_semantics,
+            sizing_provenance: self.sizing_provenance(),
         })
+    }
+
+    fn sizing_provenance(&self) -> SizingProvenance {
+        let audit = self
+            .sizing_audit
+            .as_ref()
+            .map(|h| h.snapshot())
+            .unwrap_or_default();
+        SizingProvenance {
+            policy: self.config.sizing_policy,
+            entries: audit
+                .entries
+                .into_iter()
+                .map(|e| SizingEntryProvenance {
+                    symbol: e.symbol,
+                    reference_bar_end_ts: e.reference_bar_end_ts,
+                    allocation_fraction_bps: e.resolution.allocation_fraction_bps,
+                    initial_allocated_capital_micros: e.resolution.initial_allocated_capital_micros,
+                    position_budget_micros: e.resolution.position_budget_micros,
+                    causal_reference_price_micros: e.resolution.causal_reference_price_micros,
+                    uncapped_target_qty_micros: e.resolution.uncapped_target_qty.raw(),
+                    resolved_target_qty_micros: e.resolution.resolved_target_qty.raw(),
+                    capped_by: e.resolution.capped_by.to_string(),
+                })
+                .collect(),
+            refusals: audit
+                .refusals
+                .into_iter()
+                .map(|r| SizingRefusalProvenance {
+                    symbol: r.symbol,
+                    reference_bar_end_ts: r.reference_bar_end_ts,
+                    reason_code: r.refusal.reason_code().to_string(),
+                })
+                .collect(),
+        }
     }
 
     /// BKT-FUTURE-EXECUTION-01-REPAIR-02: validate every bar in a

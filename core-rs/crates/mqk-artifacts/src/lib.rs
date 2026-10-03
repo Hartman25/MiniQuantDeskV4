@@ -1545,6 +1545,35 @@ fn build_report_md(
     ));
     out.push('\n');
 
+    if report.sizing_provenance.policy.is_capital_fraction() {
+        let p = &report.sizing_provenance;
+        out.push_str("## Capital-Fraction Sizing\n\n");
+        out.push_str(&format!(
+            "Policy: {} ({} bps of initial allocated capital)\n\n",
+            p.policy.policy_id(),
+            p.policy.allocation_fraction_bps().unwrap_or_default()
+        ));
+        out.push_str("| Symbol | Reference Bar End | Reference Close (micros) | Budget (micros) | Resolved Qty (micros) | Capped By |\n|---|---|---|---|---|---|\n");
+        for e in &p.entries {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                e.symbol,
+                e.reference_bar_end_ts,
+                e.causal_reference_price_micros,
+                e.position_budget_micros,
+                e.resolved_target_qty_micros,
+                e.capped_by
+            ));
+        }
+        for r in &p.refusals {
+            out.push_str(&format!(
+                "\nRefused entry: {} ({})\n",
+                r.symbol, r.reason_code
+            ));
+        }
+        out.push('\n');
+    }
+
     // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: instrument economics section.
     out.push_str("## Instrument Economics\n\n");
     out.push_str("| Parameter | Value |\n|---|---|\n");

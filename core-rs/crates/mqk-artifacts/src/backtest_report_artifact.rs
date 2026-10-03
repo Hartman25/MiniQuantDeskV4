@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mqk_backtest::{
     BacktestEconomicsReport, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestOrderV2,
-    BacktestReport, OrderStatus, QuantitySemanticsId, StrategySizingConfig,
+    BacktestReport, OrderStatus, QuantitySemanticsId, SizingEntryProvenance, SizingPolicy,
+    SizingProvenance, SizingRefusalProvenance, StrategySizingConfig,
+    SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1, SIZING_POLICY_FIXED_QUANTITY_V1,
 };
 use mqk_portfolio::{Fill, QtyMicros, Side};
 use serde::{Deserialize, Serialize};
@@ -386,6 +388,144 @@ impl From<BacktestEconomicsReportDto> for BacktestEconomicsReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SizingEntryDto {
+    symbol: String,
+    reference_bar_end_ts: i64,
+    allocation_fraction_bps: i64,
+    initial_allocated_capital_micros: i64,
+    position_budget_micros: i64,
+    causal_reference_price_micros: i64,
+    uncapped_target_qty_micros: i64,
+    resolved_target_qty_micros: i64,
+    capped_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SizingRefusalDto {
+    symbol: String,
+    reference_bar_end_ts: Option<i64>,
+    reason_code: String,
+}
+
+/// Sizing-policy provenance. Absent in every artifact written before the
+/// capital-fraction policy existed (decoded as legacy `fixed_quantity_v1`) and
+/// omitted again on write for a legacy run, so legacy artifact bytes are
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SizingProvenanceDto {
+    #[serde(default = "legacy_sizing_policy_id")]
+    sizing_policy_id: String,
+    #[serde(default)]
+    allocation_fraction_bps: Option<i64>,
+    #[serde(default)]
+    entries: Vec<SizingEntryDto>,
+    #[serde(default)]
+    refusals: Vec<SizingRefusalDto>,
+}
+
+fn legacy_sizing_policy_id() -> String {
+    SIZING_POLICY_FIXED_QUANTITY_V1.to_string()
+}
+
+impl Default for SizingProvenanceDto {
+    fn default() -> Self {
+        Self {
+            sizing_policy_id: legacy_sizing_policy_id(),
+            allocation_fraction_bps: None,
+            entries: Vec::new(),
+            refusals: Vec::new(),
+        }
+    }
+}
+
+impl SizingProvenanceDto {
+    fn is_legacy_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl From<&SizingProvenance> for SizingProvenanceDto {
+    fn from(p: &SizingProvenance) -> Self {
+        Self {
+            sizing_policy_id: p.policy.policy_id().to_string(),
+            allocation_fraction_bps: p.policy.allocation_fraction_bps(),
+            entries: p
+                .entries
+                .iter()
+                .map(|e| SizingEntryDto {
+                    symbol: e.symbol.clone(),
+                    reference_bar_end_ts: e.reference_bar_end_ts,
+                    allocation_fraction_bps: e.allocation_fraction_bps,
+                    initial_allocated_capital_micros: e.initial_allocated_capital_micros,
+                    position_budget_micros: e.position_budget_micros,
+                    causal_reference_price_micros: e.causal_reference_price_micros,
+                    uncapped_target_qty_micros: e.uncapped_target_qty_micros,
+                    resolved_target_qty_micros: e.resolved_target_qty_micros,
+                    capped_by: e.capped_by.clone(),
+                })
+                .collect(),
+            refusals: p
+                .refusals
+                .iter()
+                .map(|r| SizingRefusalDto {
+                    symbol: r.symbol.clone(),
+                    reference_bar_end_ts: r.reference_bar_end_ts,
+                    reason_code: r.reason_code.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<SizingProvenanceDto> for SizingProvenance {
+    type Error = String;
+
+    fn try_from(d: SizingProvenanceDto) -> Result<Self, String> {
+        let policy = match (d.sizing_policy_id.as_str(), d.allocation_fraction_bps) {
+            (SIZING_POLICY_FIXED_QUANTITY_V1, None) => SizingPolicy::FixedQuantityV1,
+            (SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1, Some(bps)) => {
+                SizingPolicy::capital_fraction_v1(bps).map_err(|e| e.to_string())?
+            }
+            (id, bps) => {
+                return Err(format!(
+                    "unsupported or inconsistent sizing policy: id={id:?} allocation_fraction_bps={bps:?}"
+                ))
+            }
+        };
+        if !policy.is_capital_fraction() && (!d.entries.is_empty() || !d.refusals.is_empty()) {
+            return Err("legacy fixed-quantity policy cannot carry sizing entries".to_string());
+        }
+        Ok(SizingProvenance {
+            policy,
+            entries: d
+                .entries
+                .into_iter()
+                .map(|e| SizingEntryProvenance {
+                    symbol: e.symbol,
+                    reference_bar_end_ts: e.reference_bar_end_ts,
+                    allocation_fraction_bps: e.allocation_fraction_bps,
+                    initial_allocated_capital_micros: e.initial_allocated_capital_micros,
+                    position_budget_micros: e.position_budget_micros,
+                    causal_reference_price_micros: e.causal_reference_price_micros,
+                    uncapped_target_qty_micros: e.uncapped_target_qty_micros,
+                    resolved_target_qty_micros: e.resolved_target_qty_micros,
+                    capped_by: e.capped_by,
+                })
+                .collect(),
+            refusals: d
+                .refusals
+                .into_iter()
+                .map(|r| SizingRefusalProvenance {
+                    symbol: r.symbol,
+                    reference_bar_end_ts: r.reference_bar_end_ts,
+                    reason_code: r.reason_code,
+                })
+                .collect(),
+        })
+    }
+}
+
 /// Canonical, schema-versioned, lossless mirror of [`BacktestReport`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BacktestReportArtifact {
@@ -424,6 +564,11 @@ pub struct BacktestReportArtifact {
     /// every artifact written before this field existed.
     #[serde(default)]
     quantity_semantics: QuantitySemanticsIdDto,
+    #[serde(
+        default,
+        skip_serializing_if = "SizingProvenanceDto::is_legacy_default"
+    )]
+    sizing_provenance: SizingProvenanceDto,
 }
 
 impl From<&BacktestReport> for BacktestReportArtifact {
@@ -449,13 +594,16 @@ impl From<&BacktestReport> for BacktestReportArtifact {
             economics: (&r.economics).into(),
             execution_model_id: r.execution_model_id.clone(),
             quantity_semantics: r.quantity_semantics.into(),
+            sizing_provenance: (&r.sizing_provenance).into(),
         }
     }
 }
 
-impl From<BacktestReportArtifact> for BacktestReport {
-    fn from(a: BacktestReportArtifact) -> Self {
-        BacktestReport {
+impl TryFrom<BacktestReportArtifact> for BacktestReport {
+    type Error = String;
+
+    fn try_from(a: BacktestReportArtifact) -> Result<Self, String> {
+        Ok(BacktestReport {
             strategy_name: a.strategy_name,
             strategy_semantic_fingerprint: a.strategy_semantic_fingerprint,
             run_id: a.run_id,
@@ -475,7 +623,8 @@ impl From<BacktestReportArtifact> for BacktestReport {
             economics: a.economics.into(),
             execution_model_id: a.execution_model_id,
             quantity_semantics: a.quantity_semantics.into(),
-        }
+            sizing_provenance: a.sizing_provenance.try_into()?,
+        })
     }
 }
 
@@ -516,6 +665,9 @@ pub enum BacktestReportArtifactError {
     /// `manifest.json`'s (only checked once the manifest carries a
     /// non-empty value -- see [`RunManifest::execution_model_id`]).
     ExecutionModelMismatch { manifest: String, report: String },
+    /// The canonical report's sizing-policy provenance is unsupported or
+    /// internally inconsistent.
+    InvalidSizingProvenance(String),
 }
 
 impl std::fmt::Display for BacktestReportArtifactError {
@@ -550,6 +702,9 @@ impl std::fmt::Display for BacktestReportArtifactError {
                 f,
                 "execution_model_id mismatch: manifest={manifest:?} backtest_report.json={report:?}"
             ),
+            Self::InvalidSizingProvenance(e) => {
+                write!(f, "backtest_report.json sizing provenance invalid: {e}")
+            }
         }
     }
 }
@@ -648,5 +803,5 @@ pub fn load_canonical_backtest_report(
         });
     }
 
-    Ok(artifact.into())
+    BacktestReport::try_from(artifact).map_err(BacktestReportArtifactError::InvalidSizingProvenance)
 }

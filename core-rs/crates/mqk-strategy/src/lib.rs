@@ -15,6 +15,7 @@ mod types;
 pub mod engines;
 pub mod plugin_registry;
 pub mod semantic_identity;
+pub mod sized_strategy;
 pub mod sizing;
 
 pub use host::*;
@@ -23,6 +24,10 @@ pub use plugin_registry::{
     StrategyMeta,
 };
 pub use semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
+pub use sized_strategy::{
+    CapitalFractionSizedStrategy, SizedEntryRecord, SizingAudit, SizingAuditHandle,
+    SizingRefusalRecord,
+};
 pub use sizing::{
     parse_positive_qty, resolve_capital_fraction_target, CapitalFractionRefusal,
     CapitalFractionResolution, SizingError, SizingPolicy, TargetSizing,

@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use mqk_integrity::CalendarSpec;
 use mqk_portfolio::{Fill, QtyMicros};
-pub use mqk_strategy::SizingPolicy;
+pub use mqk_strategy::{
+    SizingPolicy, SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1, SIZING_POLICY_FIXED_QUANTITY_V1,
+};
 use uuid::Uuid;
 
 use crate::corporate_actions::CorporateActionPolicy;
@@ -1292,6 +1294,39 @@ pub struct BacktestReport {
     /// configured with (copied from `BacktestConfig.quantity_semantics`).
     /// `WholeUnitsV1` for every historical/default backtest.
     pub quantity_semantics: QuantitySemanticsId,
+    /// Sizing-policy provenance for this run. Default (legacy fixed-quantity,
+    /// no entries) for every run that never selected a capital-fraction policy.
+    pub sizing_provenance: SizingProvenance,
+}
+
+/// One policy-resolved flat->long entry, as recorded by the sizing wrapper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SizingEntryProvenance {
+    pub symbol: String,
+    /// `end_ts` of the completed bar whose close was the causal reference.
+    pub reference_bar_end_ts: i64,
+    pub allocation_fraction_bps: i64,
+    pub initial_allocated_capital_micros: i64,
+    pub position_budget_micros: i64,
+    pub causal_reference_price_micros: i64,
+    pub uncapped_target_qty_micros: i64,
+    pub resolved_target_qty_micros: i64,
+    pub capped_by: String,
+}
+
+/// One refused entry (the strategy stayed flat; no fallback quantity).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SizingRefusalProvenance {
+    pub symbol: String,
+    pub reference_bar_end_ts: Option<i64>,
+    pub reason_code: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SizingProvenance {
+    pub policy: SizingPolicy,
+    pub entries: Vec<SizingEntryProvenance>,
+    pub refusals: Vec<SizingRefusalProvenance>,
 }
 
 impl BacktestReport {
@@ -1325,6 +1360,7 @@ impl BacktestReport {
             economics: BacktestEconomicsReport::equity(),
             execution_model_id: String::new(),
             quantity_semantics: QuantitySemanticsId::WholeUnitsV1,
+            sizing_provenance: SizingProvenance::default(),
         }
     }
 }

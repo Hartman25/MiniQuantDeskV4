@@ -350,7 +350,8 @@ impl StrategyScanCandidate {
 // ---------------------------------------------------------------------------
 
 /// Deterministic scan policy. `base_config` seeds every candidate's
-/// [`BacktestConfig`] (sizing/timeframe are overwritten per candidate);
+/// [`BacktestConfig`] (timeframe is overwritten per candidate; sizing resets to
+/// the legacy default unless a capital-fraction policy is selected);
 /// all other fields (risk limits, commission, stress) are preserved as-is.
 ///
 /// `base_config.integrity_enabled` is forced off by [`StrategyScanPolicy::default`]:
@@ -547,7 +548,9 @@ pub fn evaluate_scan_candidate_with_emission(
 
     let mut cfg = policy.base_config.clone();
     cfg.timeframe_secs = required_secs;
-    cfg.sizing = StrategySizingConfig::default_sizing();
+    if !cfg.sizing_policy.is_capital_fraction() {
+        cfg.sizing = StrategySizingConfig::default_sizing();
+    }
 
     let mut engine = BacktestEngine::new(cfg.clone());
     if let Err(e) = engine.add_strategy(strategy) {
@@ -1119,6 +1122,17 @@ pub fn execute_strategy_scan_with_policy(
     }
 
     let scan_id = match benchmark_policy.policy_id() {
+        None if policy.base_config.sizing_policy.is_capital_fraction() => {
+            derive_scan_id_with_benchmark(
+                &req.registry_path,
+                &req.bars_root,
+                &req.timeframe,
+                &req.strategies,
+                &universe,
+                "legacy_fully_invested",
+                &policy.base_config.config_id(),
+            )
+        }
         None => derive_scan_id(
             &req.registry_path,
             &req.bars_root,

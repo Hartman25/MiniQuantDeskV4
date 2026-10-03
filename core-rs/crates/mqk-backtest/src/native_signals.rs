@@ -142,6 +142,13 @@ pub fn emit_native_signal_stream(
     bars: &[BacktestBar],
     strategy: Box<dyn Strategy>,
 ) -> Result<NativeSignalStream, NativeSignalError> {
+    if config.sizing_policy.is_capital_fraction() {
+        return Err(NativeSignalError::Backtest(
+            BacktestError::InvalidSizingPolicy {
+                reason: "native signal streams carry fixed-quantity targets and cannot describe a capital-fraction run".to_string(),
+            },
+        ));
+    }
     let spec = strategy.spec();
     let semantic_fingerprint = strategy.semantic_fingerprint();
     let timeframe_secs = config.timeframe_secs;

@@ -103,6 +103,8 @@ pub use types::{
     derive_run_id_with_execution_model, derive_run_id_with_quantity_semantics,
     derive_run_id_with_semantic_identity, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder,
     BacktestOrderSide, BacktestOrderV2, BacktestReport, CommissionModel, LiquidityConfig,
-    OrderStatus, QuantitySemanticsId, SizingPolicy, StrategySizingConfig, StressProfile,
+    OrderStatus, QuantitySemanticsId, SizingEntryProvenance, SizingPolicy, SizingProvenance,
+    SizingRefusalProvenance, StrategySizingConfig, StressProfile,
+    SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1, SIZING_POLICY_FIXED_QUANTITY_V1,
     BACKTEST_EXECUTION_MODEL_ID,
 };
