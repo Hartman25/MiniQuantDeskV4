@@ -49,6 +49,7 @@ fn temp_dir(label: &str) -> PathBuf {
 fn sample_decisions(count: usize) -> Vec<StrategyScanReviewDecision> {
     let mut decisions = vec![
         StrategyScanReviewDecision {
+            benchmark_v2: None,
             symbol: "AAPL".to_string(),
             timeframe: "1D".to_string(),
             strategy_id: "swing_momentum".to_string(),
@@ -60,6 +61,7 @@ fn sample_decisions(count: usize) -> Vec<StrategyScanReviewDecision> {
             warnings: Vec::new(),
         },
         StrategyScanReviewDecision {
+            benchmark_v2: None,
             symbol: "MSFT".to_string(),
             timeframe: "1D".to_string(),
             strategy_id: "swing_momentum".to_string(),
@@ -74,6 +76,7 @@ fn sample_decisions(count: usize) -> Vec<StrategyScanReviewDecision> {
     let mut i = decisions.len();
     while decisions.len() < count {
         decisions.push(StrategyScanReviewDecision {
+            benchmark_v2: None,
             symbol: format!("SYM{i}"),
             timeframe: "1D".to_string(),
             strategy_id: "swing_momentum".to_string(),
@@ -117,6 +120,7 @@ fn write_fixture_review_artifact(out_dir: &Path, decision_count: usize) -> PathB
     ];
 
     let manifest = ReviewManifest {
+        benchmark_policy_id: None,
         schema_version: 1,
         review_id: review_id.to_string(),
         scanner_scan_id: scanner_scan_id.clone(),

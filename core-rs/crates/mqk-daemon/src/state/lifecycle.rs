@@ -8555,6 +8555,7 @@ mod explicit_multi_strategy_start_snapshot_tests {
         std::env::set_var("MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT", "0.0");
 
         let decision = mqk_backtest::StrategyScanReviewDecision {
+            benchmark_v2: None,
             symbol: symbol.clone(),
             timeframe: "1D".to_string(),
             strategy_id: strategy_id.clone(),
@@ -8567,6 +8568,7 @@ mod explicit_multi_strategy_start_snapshot_tests {
         };
         let review_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"c3-01-review");
         let manifest = mqk_backtest::ReviewManifest {
+            benchmark_policy_id: None,
             schema_version: 1,
             review_id: review_id.to_string(),
             scanner_scan_id: "scan-fixture".to_string(),

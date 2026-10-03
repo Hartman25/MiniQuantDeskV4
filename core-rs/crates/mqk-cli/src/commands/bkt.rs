@@ -450,6 +450,7 @@ pub fn run_native_signals(
                 "eligibility_decision_ts": bench.eligibility_decision_ts,
                 "initial_cash_micros": bench.initial_cash_micros,
                 "execution_model_id": bench.execution_model_id,
+                "config_id": bench.config_id,
                 "benchmark_run_id": bench.benchmark_run_id,
                 "account_return_pct": bench.account_return_pct,
                 "candidate_total_return_pct": candidate_total_return_pct,
@@ -1270,6 +1271,20 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
 // derivation are unchanged.
 // ---------------------------------------------------------------------------
 
+/// Resolve `--benchmark-policy`: omitted = legacy; otherwise only the exact
+/// accepted policy id (never a fuzzy/legacy-looking string).
+fn parse_benchmark_policy(raw: Option<&str>) -> Result<mqk_backtest::ScanBenchmarkPolicy> {
+    match raw {
+        None => Ok(mqk_backtest::ScanBenchmarkPolicy::LegacyFullyInvested),
+        Some(id) => mqk_backtest::ScanBenchmarkPolicy::from_policy_id(id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--benchmark-policy '{id}' is not an accepted policy; the only accepted value is '{}'",
+                mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID
+            )
+        }),
+    }
+}
+
 /// Scan the enabled-equity registry universe against local bar CSVs only.
 ///
 /// No provider call, no broker call, no live/paper order, no DB
@@ -1287,7 +1302,9 @@ pub fn run_strategy_scan(
     out_dir: String,
     dry_run: bool,
     json: bool,
+    benchmark_policy: Option<String>,
 ) -> Result<()> {
+    let benchmark_policy = parse_benchmark_policy(benchmark_policy.as_deref())?;
     let strategies: Vec<String> = strategy_ids
         .split(',')
         .map(|s| s.trim().to_string())
@@ -1310,7 +1327,7 @@ pub fn run_strategy_scan(
         git_hash: bkt_git_hash(),
         created_at_utc: Utc::now().to_rfc3339(), // allow: operational manifest timestamp
     };
-    let output = mqk_backtest::execute_strategy_scan(&req)
+    let output = mqk_backtest::execute_strategy_scan_with_benchmark(&req, benchmark_policy)
         .map_err(|e| anyhow::anyhow!("strategy scan failed: {e}"))?;
 
     let mut artifacts_written = false;
@@ -1388,15 +1405,20 @@ pub fn run_review_scan(
     out_dir: String,
     top: usize,
     json: bool,
+    benchmark_policy: Option<String>,
 ) -> Result<()> {
     if top == 0 {
         anyhow::bail!("--top must be > 0");
     }
+    let benchmark_policy = parse_benchmark_policy(benchmark_policy.as_deref())?;
 
     let req = mqk_backtest::ReviewRunRequest {
         artifact_dir: artifact_dir.clone(),
         top,
-        policy: mqk_backtest::StrategyScanReviewPolicy::default(),
+        policy: mqk_backtest::StrategyScanReviewPolicy {
+            benchmark_policy,
+            ..mqk_backtest::StrategyScanReviewPolicy::default()
+        },
         git_hash: bkt_git_hash(),
         created_at_utc: Utc::now().to_rfc3339(), // allow: operational manifest timestamp
     };

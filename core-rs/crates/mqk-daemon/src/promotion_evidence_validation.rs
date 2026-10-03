@@ -417,6 +417,87 @@ pub struct ValidatedEvidence {
     pub blockers: Vec<String>,
     /// Defect B: the matched row's `warnings`, carried through unvalidated.
     pub warnings: Vec<String>,
+    /// The review manifest's required benchmark policy (`None` = legacy).
+    pub benchmark_policy_id: Option<String>,
+    /// The matched row's verified-at-review Benchmark V2 evidence (`None`
+    /// for a legacy review row).
+    pub benchmark_v2: Option<mqk_backtest::ScanBenchmarkV2Evidence>,
+}
+
+/// Server-resolved identity a Benchmark V2 review row must be bound to before
+/// it can authorize a corrected native (exact-target) promotion.
+#[derive(Debug, Clone, Copy)]
+pub struct BenchmarkV2PromotionExpectation<'a> {
+    pub strategy_id: &'a str,
+    pub symbol: &'a str,
+    pub timeframe_secs: i64,
+    /// The native semantic fingerprint the verified Research trial binds
+    /// (already proven equal to the server-resolved fingerprint).
+    pub native_semantic_fingerprint: &'a str,
+    /// The canonical Backtest evidence's starting capital.
+    pub capital_basis_micros: i64,
+    /// The canonical Backtest evidence report's `input_data_hash`.
+    pub backtest_input_data_hash: &'a str,
+}
+
+/// Promotion binding for corrected native evidence: the review that made the
+/// candidate a `paper_candidate` MUST have judged alpha against Benchmark V2,
+/// for exactly this strategy / symbol / timeframe / semantic fingerprint /
+/// capital basis / bars. A legacy review (or a V2 review of anything else) is
+/// refused -- there is no fallback to the legacy alpha.
+pub fn verify_review_benchmark_v2_binding(
+    ev: &ValidatedEvidence,
+    exp: &BenchmarkV2PromotionExpectation<'_>,
+) -> Result<(), String> {
+    use mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID;
+    let refuse = |what: String| {
+        Err(format!(
+            "corrected native evidence requires a Benchmark V2 review ({BENCHMARK_V2_POLICY_ID}): {what}"
+        ))
+    };
+    if ev.benchmark_policy_id.as_deref() != Some(BENCHMARK_V2_POLICY_ID) {
+        return refuse(format!(
+            "the review artifact's benchmark policy is {:?}, not the required policy",
+            ev.benchmark_policy_id
+        ));
+    }
+    let Some(b) = ev.benchmark_v2.as_ref() else {
+        return refuse("the matched review row carries no Benchmark V2 evidence".to_string());
+    };
+    if let Err(e) = b.verify_internal() {
+        return refuse(e);
+    }
+    if b.strategy_id != exp.strategy_id {
+        return refuse("evidence strategy_id differs from the promotion candidate".to_string());
+    }
+    if b.symbol.trim().to_ascii_uppercase() != exp.symbol {
+        return refuse("evidence symbol differs from the promotion candidate".to_string());
+    }
+    if scanner_timeframe_label_to_secs(&b.timeframe) != Some(exp.timeframe_secs) {
+        return refuse("evidence timeframe differs from the promotion candidate".to_string());
+    }
+    if b.strategy_semantic_fingerprint != exp.native_semantic_fingerprint {
+        return refuse(
+            "evidence strategy semantic fingerprint differs from the Research trial's".to_string(),
+        );
+    }
+    if b.candidate_initial_cash_micros != exp.capital_basis_micros {
+        return refuse(format!(
+            "evidence capital basis {} differs from the Backtest evidence's {}",
+            b.candidate_initial_cash_micros, exp.capital_basis_micros
+        ));
+    }
+    if exp.backtest_input_data_hash.trim().is_empty()
+        || b.input_data_hash != exp.backtest_input_data_hash
+    {
+        return refuse("evidence data identity differs from the Backtest evidence's".to_string());
+    }
+    // The ranking score the promotion fingerprint covers must be the V2 alpha.
+    match ev.scanner_score {
+        Some(score) if (score - b.alpha_pct).abs() <= 1e-9 => {}
+        _ => return refuse("the review row's score is not the Benchmark V2 alpha".to_string()),
+    }
+    Ok(())
 }
 
 /// Root-bounded, content-validated read of a review artifact directory,
@@ -496,6 +577,7 @@ pub fn validate_paper_candidate_evidence(
     hasher.update(canonical_json.as_bytes());
     let fingerprint = hex::encode(hasher.finalize());
 
+    let benchmark_policy_id = manifest.benchmark_policy_id.clone();
     Ok(ValidatedEvidence {
         review_id: manifest.review_id,
         scanner_scan_id: manifest.scanner_scan_id,
@@ -513,7 +595,44 @@ pub fn validate_paper_candidate_evidence(
         reason_codes: matched.reason_codes.clone(),
         blockers: matched.blockers.clone(),
         warnings: matched.warnings.clone(),
+        benchmark_policy_id,
+        benchmark_v2: matched.benchmark_v2.clone(),
     })
+}
+
+/// Route-level gate: a verified Research trial that binds a native semantic
+/// fingerprint is corrected native (exact-target) evidence, and then the
+/// review evidence MUST satisfy [`verify_review_benchmark_v2_binding`]. A
+/// trial with no native binding (legacy classifier evidence) is unaffected.
+pub fn enforce_native_review_benchmark_binding(
+    native_semantic_fingerprint: Option<&str>,
+    review_evidence: Option<&ValidatedEvidence>,
+    strategy_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+    capital_basis_micros: i64,
+    backtest_input_data_hash: &str,
+) -> Result<(), String> {
+    let Some(fingerprint) = native_semantic_fingerprint else {
+        return Ok(());
+    };
+    let Some(ev) = review_evidence else {
+        return Err(
+            "corrected native evidence requires validated review evidence carrying Benchmark V2"
+                .to_string(),
+        );
+    };
+    verify_review_benchmark_v2_binding(
+        ev,
+        &BenchmarkV2PromotionExpectation {
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            native_semantic_fingerprint: fingerprint,
+            capital_basis_micros,
+            backtest_input_data_hash,
+        },
+    )
 }
 
 /// Defect 4: bounded, single-open-handle JSON read -- see

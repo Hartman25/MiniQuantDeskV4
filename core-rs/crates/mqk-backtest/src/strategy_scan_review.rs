@@ -26,7 +26,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::strategy_scanner::{ScanManifest, StrategyScanCandidate, StrategyScanTruthState};
+use crate::strategy_scanner::{
+    ScanBenchmarkPolicy, ScanBenchmarkV2Evidence, ScanManifest, StrategyScanCandidate,
+    StrategyScanTruthState,
+};
 
 // ---------------------------------------------------------------------------
 // Review state
@@ -81,6 +84,10 @@ pub struct StrategyScanReviewPolicy {
     pub min_alpha_pct: f64,
     pub max_drawdown_pct: f64,
     pub min_profit_factor: f64,
+    /// Benchmark policy the reviewed scan must have been evaluated under.
+    /// `LegacyFullyInvested` keeps historical behavior; the V2 policy makes
+    /// bound Benchmark V2 evidence REQUIRED for every ranked candidate.
+    pub benchmark_policy: ScanBenchmarkPolicy,
 }
 
 impl Default for StrategyScanReviewPolicy {
@@ -92,6 +99,7 @@ impl Default for StrategyScanReviewPolicy {
             min_alpha_pct: 0.0,
             max_drawdown_pct: 25.0,
             min_profit_factor: 1.05,
+            benchmark_policy: ScanBenchmarkPolicy::LegacyFullyInvested,
         }
     }
 }
@@ -112,6 +120,11 @@ pub struct StrategyScanReviewDecision {
     pub reason_codes: Vec<String>,
     pub blockers: Vec<String>,
     pub warnings: Vec<String>,
+    /// The verified Benchmark V2 evidence this decision's alpha was judged
+    /// against. Present only under the V2 review policy and only when the
+    /// binding verified; omitted from legacy rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_v2: Option<ScanBenchmarkV2Evidence>,
 }
 
 fn decision(
@@ -131,6 +144,7 @@ fn decision(
         reason_codes,
         blockers,
         warnings,
+        benchmark_v2: None,
     }
 }
 
@@ -138,10 +152,97 @@ fn decision(
 // evaluate_scan_review_decision — pure, no IO
 // ---------------------------------------------------------------------------
 
+/// Verify that a ranked candidate carries Benchmark V2 evidence, that the
+/// evidence is internally consistent and bound to this exact candidate, and
+/// that the candidate's metrics were derived from it (never from the legacy
+/// benchmark). `Err((reason_code, blocker))` on any violation.
+fn verify_candidate_benchmark_v2_binding(
+    candidate: &StrategyScanCandidate,
+) -> Result<&ScanBenchmarkV2Evidence, (&'static str, String)> {
+    const MISMATCH: &str = "benchmark_binding_mismatch";
+    let m = &candidate.metrics;
+    let Some(ev) = m.benchmark_v2.as_ref() else {
+        return Err((
+            "missing_benchmark_v2",
+            "Benchmark V2 evidence is required by this review policy but absent".to_string(),
+        ));
+    };
+    if ev.policy_id != crate::benchmark_v2::BENCHMARK_V2_POLICY_ID {
+        return Err((
+            "benchmark_policy_mismatch",
+            format!(
+                "benchmark policy '{}' is not the required '{}'",
+                ev.policy_id,
+                crate::benchmark_v2::BENCHMARK_V2_POLICY_ID
+            ),
+        ));
+    }
+    ev.verify_internal().map_err(|e| (MISMATCH, e))?;
+    if ev.symbol != candidate.symbol
+        || ev.timeframe != candidate.timeframe
+        || ev.strategy_id != candidate.strategy_id
+    {
+        return Err((
+            MISMATCH,
+            "benchmark evidence strategy/symbol/timeframe differ from the candidate".to_string(),
+        ));
+    }
+    if m.total_return_pct != Some(ev.candidate_total_return_pct)
+        || m.benchmark_return_pct != Some(ev.benchmark_account_return_pct)
+        || m.alpha_pct != Some(ev.alpha_pct)
+    {
+        return Err((
+            MISMATCH,
+            "candidate return/benchmark/alpha metrics were not derived from the Benchmark V2 evidence"
+                .to_string(),
+        ));
+    }
+    if m.data_end_ts != Some(ev.evaluation_end_ts) {
+        return Err((
+            MISMATCH,
+            "benchmark evaluation endpoint differs from the candidate's data endpoint".to_string(),
+        ));
+    }
+    if ev.benchmark_eligibility_bar_index >= m.bars_used {
+        return Err((
+            MISMATCH,
+            "benchmark eligibility bar lies outside the evaluated bars".to_string(),
+        ));
+    }
+    Ok(ev)
+}
+
 /// Classify one already-evaluated scanner candidate. Pure and deterministic:
 /// identical `(candidate, policy)` inputs always produce an identical
 /// `StrategyScanReviewDecision`.
+///
+/// Under [`ScanBenchmarkPolicy::CapitalMatchedExactTargetV2`] a ranked
+/// candidate is `Blocked` unless its Benchmark V2 evidence verifies; there is
+/// no fallback to the legacy alpha.
 pub fn evaluate_scan_review_decision(
+    candidate: &StrategyScanCandidate,
+    policy: &StrategyScanReviewPolicy,
+) -> StrategyScanReviewDecision {
+    if policy.benchmark_policy == ScanBenchmarkPolicy::CapitalMatchedExactTargetV2
+        && candidate.truth_state == StrategyScanTruthState::CandidateRanked
+    {
+        if let Err((code, blocker)) = verify_candidate_benchmark_v2_binding(candidate) {
+            return decision(
+                candidate,
+                StrategyScanReviewState::Blocked,
+                vec![code.to_string()],
+                vec![blocker],
+                Vec::new(),
+            );
+        }
+        let mut d = classify_scan_candidate(candidate, policy);
+        d.benchmark_v2 = candidate.metrics.benchmark_v2.clone();
+        return d;
+    }
+    classify_scan_candidate(candidate, policy)
+}
+
+fn classify_scan_candidate(
     candidate: &StrategyScanCandidate,
     policy: &StrategyScanReviewPolicy,
 ) -> StrategyScanReviewDecision {
@@ -382,6 +483,9 @@ pub struct ReviewManifest {
     pub policy_min_alpha_pct: f64,
     pub policy_max_drawdown_pct: f64,
     pub policy_min_profit_factor: f64,
+    /// Benchmark policy this review required. `None` = legacy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_policy_id: Option<String>,
     pub candidate_count: usize,
     pub blocked_count: usize,
     pub needs_review_count: usize,
@@ -443,7 +547,7 @@ pub struct ReviewRunOutput {
 /// scanner `scan_id` with an identical policy always produces the same
 /// `review_id`. Never `Uuid::new_v4()`.
 pub fn derive_review_id(scan_id: &str, policy: &StrategyScanReviewPolicy) -> uuid::Uuid {
-    let canonical = format!(
+    let mut canonical = format!(
         "mqk-scan-review.v1|scan_id={scan_id}|min_bars_used={}|min_trade_count={}|\
          min_total_return_pct={}|min_alpha_pct={}|max_drawdown_pct={}|min_profit_factor={}",
         policy.min_bars_used,
@@ -453,6 +557,10 @@ pub fn derive_review_id(scan_id: &str, policy: &StrategyScanReviewPolicy) -> uui
         policy.max_drawdown_pct,
         policy.min_profit_factor,
     );
+    // Legacy ids are byte-for-byte unchanged; a V2 review never shares one.
+    if let Some(policy_id) = policy.benchmark_policy.policy_id() {
+        canonical.push_str(&format!("|benchmark_policy={policy_id}"));
+    }
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, canonical.as_bytes())
 }
 
@@ -517,6 +625,19 @@ pub fn execute_strategy_scan_review(req: &ReviewRunRequest) -> Result<ReviewRunO
         read_scanner_artifact_json(&summary_path)?;
     let candidates: Vec<StrategyScanCandidate> = read_scanner_artifact_json(&candidates_path)?;
 
+    // The review policy and the scan it reads must agree on the benchmark
+    // policy exactly: a legacy scan can never be reviewed as V2 authority,
+    // and a V2 scan is never reviewed under the legacy contract.
+    let scan_policy =
+        ScanBenchmarkPolicy::from_manifest_id(scanner_manifest.benchmark_policy_id.as_deref())?;
+    if scan_policy != req.policy.benchmark_policy {
+        return Err(format!(
+            "review benchmark policy {:?} does not match the scan's benchmark policy {:?}",
+            req.policy.benchmark_policy.policy_id(),
+            scan_policy.policy_id()
+        ));
+    }
+
     let decisions = build_review_decisions(&candidates, &req.policy);
 
     let mut blocked_count = 0usize;
@@ -550,6 +671,7 @@ pub fn execute_strategy_scan_review(req: &ReviewRunRequest) -> Result<ReviewRunO
         policy_min_alpha_pct: req.policy.min_alpha_pct,
         policy_max_drawdown_pct: req.policy.max_drawdown_pct,
         policy_min_profit_factor: req.policy.min_profit_factor,
+        benchmark_policy_id: req.policy.benchmark_policy.policy_id().map(str::to_string),
         candidate_count: decisions.len(),
         blocked_count,
         needs_review_count,

@@ -36,6 +36,7 @@ fn good_candidate(symbol: &str) -> StrategyScanCandidate {
             data_start_ts: Some(1_700_000_000),
             data_end_ts: Some(1_735_000_000),
             halted: false,
+            benchmark_v2: None,
         },
         warnings: Vec::new(),
         blockers: Vec::new(),

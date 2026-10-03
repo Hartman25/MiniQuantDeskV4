@@ -82,8 +82,10 @@ pub use strategy_scan_review::{
     StrategyScanReviewPolicy, StrategyScanReviewState,
 };
 pub use strategy_scanner::{
-    candidates_to_csv, derive_scan_id, evaluate_scan_candidate, execute_strategy_scan,
-    rank_scan_candidates, resolve_timeframe_secs, write_scan_artifacts, ScanManifest,
+    candidates_to_csv, derive_scan_id, derive_scan_id_with_benchmark, evaluate_scan_candidate,
+    evaluate_scan_candidate_with_emission, execute_strategy_scan,
+    execute_strategy_scan_with_benchmark, rank_scan_candidates, resolve_timeframe_secs,
+    write_scan_artifacts, ScanBenchmarkPolicy, ScanBenchmarkV2Evidence, ScanManifest,
     ScanRunOutput, ScanRunRequest, ScanSkipReasonCount, ScanSummary, StrategyScanCandidate,
     StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode, StrategyScanTruthState,
     DEFAULT_MIN_BARS,

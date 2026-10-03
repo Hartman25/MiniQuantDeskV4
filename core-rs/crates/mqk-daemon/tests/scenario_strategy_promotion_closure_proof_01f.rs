@@ -119,6 +119,7 @@ fn write_paper_candidate_fixture(
     symbol: &str,
 ) -> PathBuf {
     let decision = StrategyScanReviewDecision {
+        benchmark_v2: None,
         symbol: symbol.to_string(),
         timeframe: "1D".to_string(),
         strategy_id: strategy_id.to_string(),
@@ -131,6 +132,7 @@ fn write_paper_candidate_fixture(
     };
     let review_id = Uuid::new_v4();
     let manifest = ReviewManifest {
+        benchmark_policy_id: None,
         schema_version: 1,
         review_id: review_id.to_string(),
         scanner_scan_id: "closure-proof-scan".to_string(),

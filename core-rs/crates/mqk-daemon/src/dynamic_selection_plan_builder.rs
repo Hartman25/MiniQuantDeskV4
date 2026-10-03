@@ -1252,6 +1252,7 @@ pub(crate) mod tests {
         std::env::set_var("MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT", "0.0");
 
         let decision = mqk_backtest::StrategyScanReviewDecision {
+            benchmark_v2: None,
             symbol: symbol.clone(),
             timeframe: "1D".to_string(),
             strategy_id: strategy_id.clone(),
@@ -1264,6 +1265,7 @@ pub(crate) mod tests {
         };
         let review_id = det_uuid("dynamic_selection_plan_builder::full_evidence_chain_passes_refused_only_on_data_readiness::review_id");
         let manifest = mqk_backtest::ReviewManifest {
+            benchmark_policy_id: None,
             schema_version: 1,
             review_id: review_id.to_string(),
             scanner_scan_id: "scan-fixture".to_string(),

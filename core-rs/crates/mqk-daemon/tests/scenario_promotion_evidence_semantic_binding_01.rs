@@ -410,6 +410,7 @@ fn shared_evidence() -> &'static SharedEvidence {
 
 fn write_paper_candidate_fixture(out_dir: &Path, strategy_id: &str, symbol: &str) -> PathBuf {
     let decision = StrategyScanReviewDecision {
+        benchmark_v2: None,
         symbol: symbol.to_string(),
         timeframe: "1D".to_string(),
         strategy_id: strategy_id.to_string(),
@@ -425,6 +426,7 @@ fn write_paper_candidate_fixture(out_dir: &Path, strategy_id: &str, symbol: &str
         out_dir.display()
     ));
     let manifest = ReviewManifest {
+        benchmark_policy_id: None,
         schema_version: 1,
         review_id: review_id.to_string(),
         scanner_scan_id: "sem-binding-scan".to_string(),

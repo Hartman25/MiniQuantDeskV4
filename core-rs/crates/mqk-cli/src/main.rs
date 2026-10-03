@@ -512,6 +512,15 @@ enum BacktestCmd {
         /// Print a deterministic JSON report instead of key=value lines.
         #[arg(long, default_value_t = false)]
         json: bool,
+
+        /// Explicit alpha benchmark policy. Omit for the legacy fully-invested
+        /// benchmark. The only accepted value is
+        /// `capital_matched_exact_target_buy_hold_v1` (Benchmark V2): alpha is
+        /// the candidate's account return minus a same-quantity, same-capital,
+        /// same-eligibility passive account return; a candidate whose
+        /// benchmark cannot be computed fails closed.
+        #[arg(long)]
+        benchmark_policy: Option<String>,
     },
 
     /// STRATEGY-SCANNER-PROMOTION-01C: research-review classification over
@@ -537,6 +546,12 @@ enum BacktestCmd {
         /// Print a deterministic JSON report instead of key=value lines.
         #[arg(long, default_value_t = false)]
         json: bool,
+
+        /// Benchmark policy the reviewed scan must have been evaluated under
+        /// (see `scan-strategies --benchmark-policy`). Omit for a legacy scan.
+        /// The review refuses a scan recorded under a different policy.
+        #[arg(long)]
+        benchmark_policy: Option<String>,
     },
 
     /// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: merge the real DSR/PBO
@@ -1757,6 +1772,7 @@ async fn run_cli() -> Result<()> {
                 out_dir,
                 dry_run,
                 json,
+                benchmark_policy,
             } => {
                 run_strategy_scan(
                     registry,
@@ -1768,6 +1784,7 @@ async fn run_cli() -> Result<()> {
                     out_dir,
                     dry_run,
                     json,
+                    benchmark_policy,
                 )?;
             }
             BacktestCmd::ReviewScan {
@@ -1775,8 +1792,9 @@ async fn run_cli() -> Result<()> {
                 out_dir,
                 top,
                 json,
+                benchmark_policy,
             } => {
-                run_review_scan(artifact_dir, out_dir, top, json)?;
+                run_review_scan(artifact_dir, out_dir, top, json, benchmark_policy)?;
             }
             BacktestCmd::FinalizeRobustnessSensitivity {
                 artifact_root,

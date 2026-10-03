@@ -93,6 +93,7 @@ fn write_fixture(out_dir: &Path, decisions: Vec<StrategyScanReviewDecision>) -> 
         out_dir.display()
     ));
     let manifest = ReviewManifest {
+        benchmark_policy_id: None,
         schema_version: 1,
         review_id: review_id.to_string(),
         scanner_scan_id: "scan-fixture".to_string(),
@@ -139,6 +140,7 @@ fn write_fixture(out_dir: &Path, decisions: Vec<StrategyScanReviewDecision>) -> 
 
 fn paper_candidate(strategy_id: &str, symbol: &str, timeframe: &str) -> StrategyScanReviewDecision {
     StrategyScanReviewDecision {
+        benchmark_v2: None,
         symbol: symbol.to_string(),
         timeframe: timeframe.to_string(),
         strategy_id: strategy_id.to_string(),
@@ -157,6 +159,7 @@ fn paper_candidate_no_score(
     timeframe: &str,
 ) -> StrategyScanReviewDecision {
     StrategyScanReviewDecision {
+        benchmark_v2: None,
         symbol: symbol.to_string(),
         timeframe: timeframe.to_string(),
         strategy_id: strategy_id.to_string(),

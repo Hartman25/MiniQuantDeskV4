@@ -1025,6 +1025,34 @@ pub(crate) async fn strategy_promotion_transition(
             }
         };
 
+        // Corrected native (exact-target) evidence must have been reviewed
+        // against Benchmark V2 for exactly this candidate; a legacy-alpha
+        // review can never authorize it.
+        if let Err(msg) =
+            crate::promotion_evidence_validation::enforce_native_review_benchmark_binding(
+                oos_evidence.native_semantic_fingerprint(),
+                evidence.as_ref(),
+                &strategy_id,
+                &symbol,
+                timeframe_secs,
+                backtest_bundle.initial_equity_micros,
+                &backtest_bundle.report.input_data_hash,
+            )
+        {
+            return transition_response(TransitionResponseArgs {
+                status: StatusCode::BAD_REQUEST,
+                accepted: false,
+                disposition: "evidence_invalid",
+                strategy_id,
+                symbol,
+                timeframe_secs,
+                previous_state,
+                target_state,
+                transition_id: None,
+                blockers: vec![msg],
+            });
+        }
+
         // Canonical promotion policy config -- trusted daemon config ONLY.
         let policy = match (
             st.promotion_min_sharpe,

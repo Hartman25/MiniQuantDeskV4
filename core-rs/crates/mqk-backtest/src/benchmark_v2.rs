@@ -84,6 +84,11 @@ pub struct BenchmarkV2Section {
     /// candidate's own, since both ran through the same `BacktestEngine`
     /// configuration.
     pub execution_model_id: String,
+    /// `BacktestReport::config_id` of the benchmark's own engine run -- the
+    /// UUIDv5 over every `BacktestConfig` parameter (capital, commission,
+    /// slippage, liquidity, sizing). Equal to the candidate run's
+    /// `config_id` exactly when both ran under the same cost/capital config.
+    pub config_id: String,
     /// The benchmark's own engine run identity (distinct from the
     /// candidate's `run_id`: different strategy, same bars/config).
     pub benchmark_run_id: String,
@@ -255,6 +260,7 @@ pub fn compute_benchmark_v2(
         eligibility_decision_ts,
         initial_cash_micros,
         execution_model_id: report.execution_model_id.clone(),
+        config_id: report.config_id.to_string(),
         benchmark_run_id: report.run_id.to_string(),
         account_return_pct,
         alpha_pct: candidate_total_return_pct - account_return_pct,

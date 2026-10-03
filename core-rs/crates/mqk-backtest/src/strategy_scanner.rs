@@ -84,6 +84,9 @@ pub enum StrategyScanReasonCode {
     TimeframeNotSupportedByScanner,
     BacktestError,
     MetricsParseError,
+    /// The policy-required benchmark could not be computed or bound (fail
+    /// closed; never substituted by another benchmark).
+    BenchmarkUnavailable,
 }
 
 impl StrategyScanReasonCode {
@@ -96,6 +99,7 @@ impl StrategyScanReasonCode {
             Self::TimeframeNotSupportedByScanner => "timeframe_not_supported_by_scanner",
             Self::BacktestError => "backtest_error",
             Self::MetricsParseError => "metrics_parse_error",
+            Self::BenchmarkUnavailable => "benchmark_unavailable",
         }
     }
 }
@@ -129,6 +133,171 @@ pub struct StrategyScanMetrics {
     pub data_start_ts: Option<i64>,
     pub data_end_ts: Option<i64>,
     pub halted: bool,
+    /// Present only for a candidate scanned under
+    /// [`ScanBenchmarkPolicy::CapitalMatchedExactTargetV2`]; absent in every
+    /// legacy artifact (and omitted from serialization when `None`, so
+    /// legacy artifacts keep their exact historical bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_v2: Option<ScanBenchmarkV2Evidence>,
+}
+
+/// Benchmark policy a scan run (and the review of it) evaluates alpha against.
+///
+/// `LegacyFullyInvested` is the historical raw fully-invested price return
+/// from [`crate::sweep::sweep_row_from_report`]. `CapitalMatchedExactTargetV2`
+/// is [`crate::benchmark_v2::BENCHMARK_V2_POLICY_ID`]: a candidate-quantity,
+/// candidate-capital, candidate-eligibility passive benchmark. There is no
+/// fallback between the two: a V2 scan that cannot compute Benchmark V2
+/// fails the candidate closed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScanBenchmarkPolicy {
+    #[default]
+    LegacyFullyInvested,
+    CapitalMatchedExactTargetV2,
+}
+
+impl ScanBenchmarkPolicy {
+    /// `None` for the legacy policy (historical artifacts carry no id).
+    pub fn policy_id(&self) -> Option<&'static str> {
+        match self {
+            Self::LegacyFullyInvested => None,
+            Self::CapitalMatchedExactTargetV2 => Some(crate::benchmark_v2::BENCHMARK_V2_POLICY_ID),
+        }
+    }
+
+    /// Parse an explicit CLI/policy id. Only the V2 id is accepted; the
+    /// legacy policy is selected by omission, never by a string.
+    pub fn from_policy_id(id: &str) -> Option<Self> {
+        (id == crate::benchmark_v2::BENCHMARK_V2_POLICY_ID)
+            .then_some(Self::CapitalMatchedExactTargetV2)
+    }
+
+    /// Resolve a manifest-recorded policy id (`None` = legacy).
+    pub fn from_manifest_id(id: Option<&str>) -> Result<Self, String> {
+        match id {
+            None => Ok(Self::LegacyFullyInvested),
+            Some(s) => Self::from_policy_id(s)
+                .ok_or_else(|| format!("unrecognized benchmark_policy_id '{s}'")),
+        }
+    }
+}
+
+/// Provenance of one Benchmark V2 alpha evaluation, carried on a candidate
+/// scanned under [`ScanBenchmarkPolicy::CapitalMatchedExactTargetV2`]. Binds
+/// the candidate run and the benchmark run to the same strategy semantics,
+/// capital, quantity, cost config, bars and evaluation endpoint, so a
+/// reviewer (and promotion) can verify the alpha without re-running either.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScanBenchmarkV2Evidence {
+    pub policy_id: String,
+    pub strategy_id: String,
+    pub strategy_semantic_fingerprint: String,
+    pub symbol: String,
+    pub timeframe: String,
+    pub candidate_run_id: String,
+    pub candidate_config_id: String,
+    pub candidate_initial_cash_micros: i64,
+    pub candidate_target_qty_micros: i64,
+    pub candidate_execution_model_id: String,
+    /// `(ending - initial_cash) / initial_cash * 100`, the same formula as
+    /// `benchmark_account_return_pct`.
+    pub candidate_total_return_pct: f64,
+    pub required_history_bars: usize,
+    pub benchmark_run_id: String,
+    pub benchmark_config_id: String,
+    pub benchmark_target_qty_micros: i64,
+    pub benchmark_eligibility_bar_index: usize,
+    pub benchmark_eligibility_decision_ts: i64,
+    pub benchmark_initial_cash_micros: i64,
+    pub benchmark_execution_model_id: String,
+    pub benchmark_account_return_pct: f64,
+    pub alpha_pct: f64,
+    /// `derive_input_data_hash` over the exact bars both runs consumed.
+    pub input_data_hash: String,
+    /// `end_ts` of the last evaluated bar.
+    pub evaluation_end_ts: i64,
+    /// INFORMATIONAL ONLY: the legacy fully-invested price return. Never an
+    /// input to alpha or to any review decision under this policy.
+    pub legacy_buy_and_hold_return_pct: Option<f64>,
+}
+
+impl ScanBenchmarkV2Evidence {
+    /// Self-consistency of the evidence, independent of any scanner metrics
+    /// row. Fails closed on any field that would let a mismatched benchmark
+    /// pass as capital/quantity/eligibility/cost matched.
+    pub fn verify_internal(&self) -> Result<(), String> {
+        let bad = |what: &str| Err(format!("benchmark_v2 evidence inconsistent: {what}"));
+        if self.policy_id != crate::benchmark_v2::BENCHMARK_V2_POLICY_ID {
+            return bad("policy_id is not the accepted Benchmark V2 policy");
+        }
+        for (name, v) in [
+            ("strategy_id", &self.strategy_id),
+            (
+                "strategy_semantic_fingerprint",
+                &self.strategy_semantic_fingerprint,
+            ),
+            ("symbol", &self.symbol),
+            ("timeframe", &self.timeframe),
+            ("candidate_run_id", &self.candidate_run_id),
+            ("benchmark_run_id", &self.benchmark_run_id),
+            ("candidate_config_id", &self.candidate_config_id),
+            ("benchmark_config_id", &self.benchmark_config_id),
+            (
+                "candidate_execution_model_id",
+                &self.candidate_execution_model_id,
+            ),
+            (
+                "benchmark_execution_model_id",
+                &self.benchmark_execution_model_id,
+            ),
+            ("input_data_hash", &self.input_data_hash),
+        ] {
+            if v.trim().is_empty() {
+                return bad(&format!("{name} is empty"));
+            }
+        }
+        if self.candidate_run_id == self.benchmark_run_id {
+            return bad("benchmark_run_id equals candidate_run_id");
+        }
+        if uuid::Uuid::parse_str(&self.candidate_run_id).is_err()
+            || uuid::Uuid::parse_str(&self.benchmark_run_id).is_err()
+        {
+            return bad("candidate/benchmark run id is not a UUID");
+        }
+        if self.candidate_initial_cash_micros <= 0
+            || self.candidate_initial_cash_micros != self.benchmark_initial_cash_micros
+        {
+            return bad("candidate and benchmark initial cash differ or are not positive");
+        }
+        if self.candidate_target_qty_micros <= 0
+            || self.candidate_target_qty_micros != self.benchmark_target_qty_micros
+        {
+            return bad("candidate and benchmark target quantity differ or are not positive");
+        }
+        if self.candidate_execution_model_id != self.benchmark_execution_model_id {
+            return bad("candidate and benchmark execution model differ");
+        }
+        if self.candidate_config_id != self.benchmark_config_id {
+            return bad("candidate and benchmark cost/capital config differ");
+        }
+        if self.required_history_bars == 0
+            || self.benchmark_eligibility_bar_index != self.required_history_bars - 1
+        {
+            return bad("benchmark eligibility is not the candidate's first causally eligible bar");
+        }
+        if !self.candidate_total_return_pct.is_finite()
+            || !self.benchmark_account_return_pct.is_finite()
+            || !self.alpha_pct.is_finite()
+            || (self.candidate_total_return_pct
+                - self.benchmark_account_return_pct
+                - self.alpha_pct)
+                .abs()
+                > 1e-9
+        {
+            return bad("alpha_pct is not candidate return minus benchmark return");
+        }
+        Ok(())
+    }
 }
 
 /// One evaluated `(symbol, timeframe, strategy_id)` candidate.
@@ -196,6 +365,7 @@ impl StrategyScanCandidate {
 pub struct StrategyScanPolicy {
     pub min_bars: usize,
     pub base_config: BacktestConfig,
+    pub benchmark_policy: ScanBenchmarkPolicy,
 }
 
 impl Default for StrategyScanPolicy {
@@ -205,6 +375,7 @@ impl Default for StrategyScanPolicy {
         Self {
             min_bars: DEFAULT_MIN_BARS,
             base_config,
+            benchmark_policy: ScanBenchmarkPolicy::LegacyFullyInvested,
         }
     }
 }
@@ -250,6 +421,36 @@ pub fn evaluate_scan_candidate(
     strategy_id: &str,
     strategy_supported_timeframe_secs: Option<i64>,
     strategy: Option<Box<dyn Strategy>>,
+    bars: Option<&[BacktestBar]>,
+    policy: &StrategyScanPolicy,
+) -> StrategyScanCandidate {
+    evaluate_scan_candidate_with_emission(
+        symbol,
+        timeframe,
+        strategy_id,
+        strategy_supported_timeframe_secs,
+        strategy,
+        None,
+        bars,
+        policy,
+    )
+}
+
+/// As [`evaluate_scan_candidate`], additionally taking a SECOND, independent
+/// instance of the same strategy. Under
+/// [`ScanBenchmarkPolicy::CapitalMatchedExactTargetV2`] that instance is
+/// consumed to emit the candidate's exact native target stream (the engine
+/// consumes the first instance for the candidate run itself). Under the
+/// legacy policy it is ignored. A V2 policy with no emission instance fails
+/// the candidate closed -- it never degrades to the legacy benchmark.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_scan_candidate_with_emission(
+    symbol: &str,
+    timeframe: &str,
+    strategy_id: &str,
+    strategy_supported_timeframe_secs: Option<i64>,
+    strategy: Option<Box<dyn Strategy>>,
+    emission_strategy: Option<Box<dyn Strategy>>,
     bars: Option<&[BacktestBar]>,
     policy: &StrategyScanPolicy,
 ) -> StrategyScanCandidate {
@@ -389,7 +590,7 @@ pub fn evaluate_scan_candidate(
     let data_start_ts = bars.first().map(|b| b.end_ts);
     let data_end_ts = bars.last().map(|b| b.end_ts);
 
-    let metrics = StrategyScanMetrics {
+    let mut metrics = StrategyScanMetrics {
         total_return_pct: Some(row.total_return_pct),
         benchmark_return_pct: row.buy_and_hold_return_pct,
         alpha_pct: row.alpha_pct,
@@ -402,7 +603,45 @@ pub fn evaluate_scan_candidate(
         data_start_ts,
         data_end_ts,
         halted: row.halted,
+        benchmark_v2: None,
     };
+
+    if policy.benchmark_policy == ScanBenchmarkPolicy::CapitalMatchedExactTargetV2 {
+        // Alpha authority for this policy is Benchmark V2 ONLY. The legacy
+        // fully-invested return is retained as informational evidence and
+        // never feeds alpha, score or review.
+        match benchmark_v2_evidence(
+            symbol,
+            timeframe,
+            strategy_id,
+            &cfg,
+            bars,
+            &report,
+            emission_strategy,
+            row.buy_and_hold_return_pct,
+        ) {
+            Ok(evidence) => {
+                metrics.total_return_pct = Some(evidence.candidate_total_return_pct);
+                metrics.benchmark_return_pct = Some(evidence.benchmark_account_return_pct);
+                metrics.alpha_pct = Some(evidence.alpha_pct);
+                metrics.benchmark_v2 = Some(evidence);
+            }
+            Err(reason) => {
+                return StrategyScanCandidate::skipped(
+                    symbol,
+                    timeframe,
+                    strategy_id,
+                    bars.len(),
+                    StrategyScanTruthState::MetricsUnavailable,
+                    StrategyScanReasonCode::BenchmarkUnavailable,
+                    vec![format!(
+                        "{} unavailable: {reason}",
+                        crate::benchmark_v2::BENCHMARK_V2_POLICY_ID
+                    )],
+                );
+            }
+        }
+    }
 
     let mut warnings = Vec::new();
     if row.halted {
@@ -427,6 +666,97 @@ pub fn evaluate_scan_candidate(
         warnings,
         blockers: Vec::new(),
     }
+}
+
+/// Compute the Benchmark V2 evidence for one already-run candidate. Every
+/// failure is an `Err(reason)`; the caller fails the candidate closed.
+#[allow(clippy::too_many_arguments)]
+fn benchmark_v2_evidence(
+    symbol: &str,
+    timeframe: &str,
+    strategy_id: &str,
+    cfg: &BacktestConfig,
+    bars: &[BacktestBar],
+    report: &crate::types::BacktestReport,
+    emission_strategy: Option<Box<dyn Strategy>>,
+    legacy_buy_and_hold_return_pct: Option<f64>,
+) -> Result<ScanBenchmarkV2Evidence, String> {
+    let emission = emission_strategy
+        .ok_or_else(|| "no emission strategy instance was provided".to_string())?;
+    let stream = crate::native_signals::emit_native_signal_stream(cfg.clone(), bars, emission)
+        .map_err(|e| format!("native signal emission failed: {e}"))?;
+
+    // The emitting run must be the same strategy/config/bars/execution model
+    // as the candidate run (documented equal to a plain run of the unwrapped
+    // strategy); otherwise the stream does not describe this candidate.
+    if stream.run_id != report.run_id {
+        return Err(format!(
+            "emission run_id {} != candidate run_id {}",
+            stream.run_id, report.run_id
+        ));
+    }
+    if stream.semantic_fingerprint != report.strategy_semantic_fingerprint {
+        return Err("emission semantic fingerprint != candidate semantic fingerprint".to_string());
+    }
+    if stream.symbol != symbol {
+        return Err(format!(
+            "emitted target symbol '{}' != candidate symbol '{symbol}'",
+            stream.symbol
+        ));
+    }
+    let candidate_target_qty_micros = stream
+        .rows
+        .iter()
+        .map(|r| r.target_qty_micros)
+        .find(|q| *q > 0)
+        .ok_or_else(|| "candidate never emitted a positive target quantity".to_string())?;
+
+    // Candidate return on the SAME initial-cash basis Benchmark V2 uses.
+    let initial = cfg.initial_cash_micros;
+    if initial <= 0 {
+        return Err("initial_cash_micros must be positive".to_string());
+    }
+    let ending = report
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial);
+    let candidate_total_return_pct = (ending - initial) as f64 / initial as f64 * 100.0;
+
+    let bench = crate::benchmark_v2::compute_benchmark_v2(
+        &stream,
+        bars,
+        cfg.clone(),
+        candidate_total_return_pct,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(ScanBenchmarkV2Evidence {
+        policy_id: bench.policy_id.clone(),
+        strategy_id: strategy_id.to_string(),
+        strategy_semantic_fingerprint: report.strategy_semantic_fingerprint.clone(),
+        symbol: symbol.to_string(),
+        timeframe: timeframe.to_string(),
+        candidate_run_id: report.run_id.to_string(),
+        candidate_config_id: report.config_id.to_string(),
+        candidate_initial_cash_micros: initial,
+        candidate_target_qty_micros,
+        candidate_execution_model_id: report.execution_model_id.clone(),
+        candidate_total_return_pct,
+        required_history_bars: stream.required_history_bars,
+        benchmark_run_id: bench.benchmark_run_id.clone(),
+        benchmark_config_id: bench.config_id.clone(),
+        benchmark_target_qty_micros: bench.target_qty_micros,
+        benchmark_eligibility_bar_index: bench.eligibility_bar_index,
+        benchmark_eligibility_decision_ts: bench.eligibility_decision_ts,
+        benchmark_initial_cash_micros: bench.initial_cash_micros,
+        benchmark_execution_model_id: bench.execution_model_id.clone(),
+        benchmark_account_return_pct: bench.account_return_pct,
+        alpha_pct: bench.alpha_pct,
+        input_data_hash: report.input_data_hash.clone(),
+        evaluation_end_ts: bars.last().map(|b| b.end_ts).unwrap_or(0),
+        legacy_buy_and_hold_return_pct,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +839,10 @@ pub struct ScanManifest {
     pub skipped_count: usize,
     pub blockers: Vec<String>,
     pub warnings: Vec<String>,
+    /// Benchmark policy this scan evaluated alpha under. `None` = the legacy
+    /// fully-invested policy (every historical artifact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_policy_id: Option<String>,
 }
 
 /// Count of skipped candidates sharing one `reason_code`.
@@ -585,6 +919,25 @@ pub fn derive_scan_id(
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, canonical.as_bytes())
 }
 
+/// [`derive_scan_id`] with the benchmark policy bound into the identity, so a
+/// V2 scan can never share a `scan_id` (and artifact directory) with a legacy
+/// scan of the same universe.
+pub fn derive_scan_id_with_benchmark(
+    registry_path: &str,
+    bars_root: &str,
+    timeframe: &str,
+    strategies: &[String],
+    universe: &[String],
+    benchmark_policy_id: &str,
+) -> uuid::Uuid {
+    let canonical = format!(
+        "mqk-scan.v2|registry={registry_path}|bars_root={bars_root}|timeframe={timeframe}|strategies={}|universe={}|benchmark_policy={benchmark_policy_id}",
+        strategies.join(","),
+        universe.join(","),
+    );
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, canonical.as_bytes())
+}
+
 fn csv_field(value: &str) -> String {
     if value.contains(',') || value.contains('"') || value.contains('\n') {
         format!("\"{}\"", value.replace('"', "\"\""))
@@ -653,6 +1006,16 @@ pub fn candidates_to_csv(candidates: &[StrategyScanCandidate]) -> String {
 /// `{req.bars_root}/{req.timeframe}/{symbol}_{req.timeframe}.csv` files.
 /// Does not write any artifact file — see [`write_scan_artifacts`].
 pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, String> {
+    execute_strategy_scan_with_benchmark(req, ScanBenchmarkPolicy::LegacyFullyInvested)
+}
+
+/// As [`execute_strategy_scan`], evaluating alpha under an explicit benchmark
+/// policy. The policy is recorded in the scan manifest and bound into
+/// `scan_id` (legacy ids are unchanged).
+pub fn execute_strategy_scan_with_benchmark(
+    req: &ScanRunRequest,
+    benchmark_policy: ScanBenchmarkPolicy,
+) -> Result<ScanRunOutput, String> {
     if req.strategies.is_empty() {
         return Err("strategies must name at least one strategy_id".to_string());
     }
@@ -671,7 +1034,10 @@ pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, Stri
         universe.truncate(limit);
     }
 
-    let policy = StrategyScanPolicy::default();
+    let policy = StrategyScanPolicy {
+        benchmark_policy,
+        ..StrategyScanPolicy::default()
+    };
     let bars_root_path = Path::new(&req.bars_root);
     let timeframe_dir = bars_root_path.join(&req.timeframe);
 
@@ -699,12 +1065,20 @@ pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, Stri
             } else {
                 None
             };
-            candidates.push(evaluate_scan_candidate(
+            let emission_instance = if strategy_timeframe_secs.is_some()
+                && benchmark_policy == ScanBenchmarkPolicy::CapitalMatchedExactTargetV2
+            {
+                reg.instantiate(strategy_id).ok()
+            } else {
+                None
+            };
+            candidates.push(evaluate_scan_candidate_with_emission(
                 symbol,
                 &req.timeframe,
                 strategy_id,
                 strategy_timeframe_secs,
                 strategy_instance,
+                emission_instance,
                 bars.as_deref(),
                 &policy,
             ));
@@ -727,13 +1101,23 @@ pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, Stri
         ));
     }
 
-    let scan_id = derive_scan_id(
-        &req.registry_path,
-        &req.bars_root,
-        &req.timeframe,
-        &req.strategies,
-        &universe,
-    );
+    let scan_id = match benchmark_policy.policy_id() {
+        None => derive_scan_id(
+            &req.registry_path,
+            &req.bars_root,
+            &req.timeframe,
+            &req.strategies,
+            &universe,
+        ),
+        Some(policy_id) => derive_scan_id_with_benchmark(
+            &req.registry_path,
+            &req.bars_root,
+            &req.timeframe,
+            &req.strategies,
+            &universe,
+            policy_id,
+        ),
+    };
     let manifest = ScanManifest {
         schema_version: 1,
         scan_id: scan_id.to_string(),
@@ -748,6 +1132,7 @@ pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, Stri
         skipped_count,
         blockers: Vec::new(),
         warnings,
+        benchmark_policy_id: benchmark_policy.policy_id().map(str::to_string),
     };
 
     let top_ranked: Vec<StrategyScanCandidate> = candidates
