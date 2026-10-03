@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -23. Benchmark V2 Review Authority + Corrected Batch 01 Reevaluation (2026-10-02, `V4-M1-BENCHMARK-V2-REVIEW-AND-REEVALUATION-01`)
+
+Not pushed. Records: `docs/research/BENCHMARK_V2_REVIEW_AUTHORITY.md`, `docs/research/M1_BATCH01_CORRECTED_RESULT.md`.
+
+- Scanner/review alpha for exact-target native candidates is now Benchmark V2 (`capital_matched_exact_target_buy_hold_v1`) under an explicit `--benchmark-policy` on `scan-strategies`/`review-scan`; missing/malformed/mismatched evidence and scan/review policy mismatch fail closed; legacy artifacts and ids are unchanged; `min_alpha_pct` stays 0. Promotion refuses corrected native Research evidence unless the review row is Benchmark V2 bound to the same strategy, symbol, timeframe, fingerprint, capital and data identity.
+- Corrected reevaluation of the same 3 hypotheses x 5 symbols (15) ran under a predeclaration committed before any result: 14 evaluable, 1 excluded (zero-variance returns), PBO 0.2024, effective independent trials 12.36, **0 `paper_candidate`** (alpha vs Benchmark V2 negative on every evaluable row). Verdict `BATCH_REJECTED`; the superseded v1 Batch 01 stays HISTORICAL / NOT_PROMOTION_AUTHORITY.
+- M1 remains `M1_BLOCKED`. Promotion rows 0; Paper fleet unset; holdout RESERVED / UNCONSUMED; no Live; no Batch 02.
+
+---
+
 ## -22. Independent-Review Correction 01 (2026-10-02, `V4-M1-NATIVE-RESEARCH-INDEPENDENT-REVIEW-CORRECTION-01`)
 
 Not pushed. Record: `docs/research/M1_INDEPENDENT_REVIEW_CORRECTION_01.md`.
