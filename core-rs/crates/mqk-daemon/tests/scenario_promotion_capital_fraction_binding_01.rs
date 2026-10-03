@@ -419,6 +419,45 @@ fn tampered_review_evidence_is_refused_field_by_field() {
 }
 
 #[test]
+fn mixed_benchmark_evidence_and_a_self_consistent_other_fraction_are_refused_with_their_own_reason()
+{
+    let bars = bars();
+    let cfg = cf_cfg(BPS);
+    let (_fx, good) = cf_fixture(&cfg, &bars);
+    let report = backtest_report(&cfg, &bars);
+    let cap = cfg.initial_cash_micros;
+    promote(&good, &report, cap).expect("control");
+    let fp = fingerprint(&good);
+
+    // Capital-fraction evidence that also carries Benchmark V2 evidence is ambiguous authority.
+    let legacy_cfg = canonical_cfg(SizingPolicy::FixedQuantityV1);
+    let v2_fx = fixture(
+        v2_candidate(&legacy_cfg, &bars),
+        ScanBenchmarkPolicy::CapitalMatchedExactTargetV2,
+    );
+    let mut mixed = good.clone();
+    mixed.benchmark_v2 = validated(&v2_fx).benchmark_v2;
+    assert!(mixed.benchmark_v2.is_some());
+    let err = promote_with_fp(&fp, &mixed, &report, cap).unwrap_err();
+    assert!(err.contains("carries Benchmark V2 evidence"), "{err}");
+
+    // A different fraction whose budget is recomputed passes internal consistency; only the
+    // policy/fraction agreement with the canonical run can refuse it.
+    let other = (BPS + 1..BPS + 400)
+        .find_map(|bps| {
+            let mut e = good.clone();
+            let b = e.benchmark_capital_fraction.as_mut().unwrap();
+            b.allocation_fraction_bps = bps;
+            b.position_budget_micros =
+                (b.initial_allocated_capital_micros as i128 * bps as i128 / 10_000) as i64;
+            b.verify_internal().is_ok().then_some(e)
+        })
+        .expect("a self-consistent other fraction exists");
+    let err = promote_with_fp(&fp, &other, &report, cap).unwrap_err();
+    assert!(err.contains("sizing policy/fraction"), "{err}");
+}
+
+#[test]
 fn legacy_fixed_quantity_canonical_run_still_requires_benchmark_v2() {
     let bars = bars();
     let cfg = canonical_cfg(SizingPolicy::FixedQuantityV1);

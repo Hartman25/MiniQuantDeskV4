@@ -266,6 +266,107 @@ fn insufficient_budget_candidate_is_unavailable_never_one_share() {
     assert!(c.metrics.alpha_pct.is_none());
 }
 
+// ------------------------------------------- independent economic oracle
+
+struct OracleBuyHold {
+    target: mqk_execution::QtyMicros,
+    from_idx: usize,
+    seen: usize,
+}
+
+impl Strategy for OracleBuyHold {
+    fn spec(&self) -> mqk_strategy::StrategySpec {
+        mqk_strategy::StrategySpec::new("oracle_buy_hold", DAY)
+    }
+    fn required_history_bars(&self) -> usize {
+        0
+    }
+    fn on_bar(&mut self, _ctx: &mqk_strategy::StrategyContext) -> mqk_execution::StrategyOutput {
+        let i = self.seen;
+        self.seen += 1;
+        let q = if i >= self.from_idx {
+            self.target
+        } else {
+            mqk_execution::QtyMicros::ZERO
+        };
+        mqk_execution::StrategyOutput::new(vec![mqk_execution::TargetPosition::new("SPY", q)])
+    }
+}
+
+fn oracle_return_pct(
+    cfg: &BacktestConfig,
+    bars: &[BacktestBar],
+    q_micros: i64,
+    from: usize,
+) -> f64 {
+    let mut c = cfg.clone();
+    c.sizing_policy = SizingPolicy::FixedQuantityV1;
+    let mut e = BacktestEngine::new(c);
+    e.add_strategy(Box::new(OracleBuyHold {
+        target: mqk_execution::QtyMicros::new(q_micros),
+        from_idx: from,
+        seen: 0,
+    }))
+    .unwrap();
+    let r = e.run(bars).unwrap();
+    let end = r.equity_curve.last().unwrap().1;
+    (end - cfg.initial_cash_micros) as f64 / cfg.initial_cash_micros as f64 * 100.0
+}
+
+fn reentry_bars() -> Vec<BacktestBar> {
+    let mut closes: Vec<i64> = (0..300).map(|i| 100_000_000 + i * 10_000).collect();
+    closes.extend((0..100).map(|i| 103_000_000 - i * 830_000));
+    closes.extend(std::iter::repeat(20_000_000).take(300));
+    closes.extend((1..40).map(|i| 20_000_000 + i * 200_000));
+    bars_from_closes(&closes)
+}
+
+#[test]
+fn benchmark_return_equals_an_independent_passive_buy_hold_of_the_first_entry() {
+    let bars = rising(320);
+    let c = cf_candidate(&bars, 2_500);
+    assert_eq!(c.truth_state, StrategyScanTruthState::CandidateRanked);
+    let ev = cf_ev(&c);
+    let oracle = oracle_return_pct(
+        &cf_cfg(2_500),
+        &bars,
+        ev.benchmark_target_qty_micros,
+        ev.benchmark_entry_bar_index,
+    );
+    assert!(oracle != 0.0, "oracle must be a live position");
+    assert_eq!(ev.benchmark_account_return_pct, oracle);
+    let cand = c.metrics.total_return_pct.expect("candidate return");
+    assert!((ev.alpha_pct - (cand - oracle)).abs() < 1e-9);
+}
+
+#[test]
+fn benchmark_uses_the_first_entry_when_the_candidate_re_enters_at_a_different_size() {
+    let bars = reentry_bars();
+    let cfg = cf_cfg(2_500);
+    let mut e = BacktestEngine::new(cfg.clone());
+    e.add_strategy(instance()).unwrap();
+    let direct = e.run(&bars).unwrap();
+    let entries = &direct.sizing_provenance.entries;
+    assert!(
+        entries.len() >= 2,
+        "fixture must re-enter: {}",
+        entries.len()
+    );
+    assert_ne!(
+        entries[0].resolved_target_qty_micros, entries[1].resolved_target_qty_micros,
+        "fixture re-entry must resolve a different size"
+    );
+
+    let c = cf_candidate(&bars, 2_500);
+    assert_eq!(c.truth_state, StrategyScanTruthState::CandidateRanked);
+    let ev = cf_ev(&c);
+    assert_eq!(
+        ev.benchmark_target_qty_micros,
+        entries[0].resolved_target_qty_micros
+    );
+    assert_eq!(ev.reference_bar_end_ts, entries[0].reference_bar_end_ts);
+}
+
 // ------------------------------------------------- V2 / legacy untouched
 
 #[test]
@@ -344,10 +445,9 @@ fn direct_function_refuses_non_cf_config_wrong_bars_and_empty_provenance() {
     let mut e = BacktestEngine::new(cfg.clone());
     e.add_strategy(instance()).unwrap();
     let report = e.run(&bars).unwrap();
-    assert!(
-        compute_capital_fraction_benchmark(&report, &bars, &cfg, DAY, 1.0).is_ok(),
-        "control"
-    );
+    let section =
+        compute_capital_fraction_benchmark(&report, &bars, &cfg, DAY, 7.5).expect("control");
+    assert_eq!(section.alpha_pct, 7.5 - section.account_return_pct);
 
     let mut legacy = cfg.clone();
     legacy.sizing_policy = SizingPolicy::FixedQuantityV1;
