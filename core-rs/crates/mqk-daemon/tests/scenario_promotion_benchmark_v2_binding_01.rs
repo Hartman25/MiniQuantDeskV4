@@ -12,12 +12,13 @@
 
 use mqk_backtest::{
     evaluate_scan_candidate, evaluate_scan_candidate_with_emission, execute_strategy_scan_review,
-    write_review_artifacts, write_scan_artifacts, BacktestBar, ReviewRunRequest,
-    ScanBenchmarkPolicy, ScanManifest, ScanRunOutput, ScanSummary, StrategyScanCandidate,
-    StrategyScanPolicy, StrategyScanReviewPolicy, StrategyScanReviewState,
+    write_review_artifacts, write_scan_artifacts, BacktestBar, BacktestEngine, BacktestReport,
+    ReviewRunRequest, ScanBenchmarkPolicy, ScanManifest, ScanRunOutput, ScanSummary,
+    StrategyScanCandidate, StrategyScanPolicy, StrategyScanReviewPolicy, StrategyScanReviewState,
 };
 use mqk_daemon::promotion_evidence_validation::{
-    enforce_native_review_benchmark_binding, validate_paper_candidate_evidence, ValidatedEvidence,
+    enforce_native_review_benchmark_binding, validate_paper_candidate_evidence,
+    BacktestEvidenceIdentity, ValidatedEvidence,
 };
 use mqk_daemon::state::{AppState, OperatorAuthMode};
 use mqk_strategy::engines::register_builtin_strategies_with_sizing;
@@ -173,6 +174,19 @@ fn expect_for(cand: &StrategyScanCandidate) -> Expect {
     }
 }
 
+/// The canonical Backtest evidence for the fixture candidate: a real engine
+/// run under the SAME config the scanned candidate used (the scanner's
+/// default base config at the strategy's timeframe, default sizing).
+fn canonical_report() -> BacktestReport {
+    let mut cfg = StrategyScanPolicy::default().base_config;
+    cfg.timeframe_secs = DAY;
+    let mut engine = BacktestEngine::new(cfg);
+    engine.add_strategy(instance()).unwrap();
+    engine.run(&bars()).expect("canonical backtest run")
+}
+
+/// The binding exactly as the promotion route calls it; `capital` and `hash`
+/// let a case perturb the canonical evidence's capital / data identity.
 fn enforce(
     ev: Option<&ValidatedEvidence>,
     fp: Option<&str>,
@@ -182,7 +196,10 @@ fn enforce(
     capital: i64,
     hash: &str,
 ) -> Result<(), String> {
-    enforce_native_review_benchmark_binding(fp, ev, strategy, symbol, tf, capital, hash)
+    let mut report = canonical_report();
+    report.input_data_hash = hash.to_string();
+    let identity = BacktestEvidenceIdentity::from_report(&report, capital);
+    enforce_native_review_benchmark_binding(fp, ev, strategy, symbol, tf, &identity)
 }
 
 /// REQUIRED POSITIVE 7: a correctly bound Benchmark V2 review is accepted
@@ -417,8 +434,8 @@ fn promotion_route_enforces_the_native_review_binding_before_evaluate_promotion(
         .expect("canonical promotion decision");
     assert!(research < enforce && enforce < decide);
     let call = &src[enforce..decide];
+    let call: String = call.split_whitespace().collect();
     assert!(call.contains("oos_evidence.native_semantic_fingerprint()"));
-    assert!(call.contains("backtest_bundle.initial_equity_micros"));
-    assert!(call.contains("backtest_bundle.report.input_data_hash"));
+    assert!(call.contains("BacktestEvidenceIdentity::from_bundle(&backtest_bundle"));
     assert!(call.contains("evidence.as_ref()"));
 }

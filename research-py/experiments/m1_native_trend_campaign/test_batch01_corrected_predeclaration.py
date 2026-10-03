@@ -113,3 +113,16 @@ def test_runner_review_stage_passes_the_declared_benchmark_policy_to_scan_and_re
     stage = src[src.index("def stage_review"): src.index("def stage_summary")]
     assert 'DECL["scanner_review"].get("benchmark_policy")' in stage
     assert stage.count("*bench_args") == 2, "both scan-strategies and review-scan must carry the policy"
+
+
+def test_runner_scans_under_the_same_integrity_config_as_the_canonical_backtest():
+    # IR-BV2-01: the V2 scan and the canonical `backtest csv` must be built from
+    # ONE integrity argument list, or Promotion refuses the review row.
+    src = (HERE / "run_batch.py").read_text(encoding="utf-8")
+    backtest = src[src.index("def stage_backtest"): src.index("def stage_finalize")]
+    review = src[src.index("def stage_review"): src.index("def stage_summary")]
+    assert "*INTEGRITY_ARGS" in backtest
+    assert "*INTEGRITY_ARGS" in review and "*scan_cfg_args" in review
+    assert '"--integrity-calendar"' not in backtest and '"--integrity-calendar"' not in review
+    # Config flags are accepted only under the V2 policy, so legacy runs send none.
+    assert "if bench else []" in review

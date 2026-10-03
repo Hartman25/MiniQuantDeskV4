@@ -424,6 +424,44 @@ pub struct ValidatedEvidence {
     pub benchmark_v2: Option<mqk_backtest::ScanBenchmarkV2Evidence>,
 }
 
+/// The identity of the canonical Backtest evidence Promotion consumes, as
+/// verified by `resolve_backtest_evidence`. `run_id` is the UUIDv5 over the
+/// strategy, full `BacktestConfig` identity (`config_id`), bars, instrument
+/// economics, execution model, semantic fingerprint and quantity semantics, so
+/// matching it proves the review row's candidate ran under the same
+/// execution/economic contract. `config_id` is also compared on its own to
+/// give an actionable refusal.
+#[derive(Debug, Clone, Copy)]
+pub struct BacktestEvidenceIdentity<'a> {
+    pub run_id: uuid::Uuid,
+    pub config_id: uuid::Uuid,
+    pub execution_model_id: &'a str,
+    pub strategy_semantic_fingerprint: &'a str,
+    /// The run's starting capital.
+    pub initial_equity_micros: i64,
+    pub input_data_hash: &'a str,
+}
+
+impl<'a> BacktestEvidenceIdentity<'a> {
+    pub fn from_report(
+        report: &'a mqk_backtest::BacktestReport,
+        initial_equity_micros: i64,
+    ) -> Self {
+        Self {
+            run_id: report.run_id,
+            config_id: report.config_id,
+            execution_model_id: report.execution_model_id.as_str(),
+            strategy_semantic_fingerprint: report.strategy_semantic_fingerprint.as_str(),
+            initial_equity_micros,
+            input_data_hash: report.input_data_hash.as_str(),
+        }
+    }
+
+    pub fn from_bundle(bundle: &'a mqk_promotion::BacktestEvidenceBundle) -> Self {
+        Self::from_report(&bundle.report, bundle.initial_equity_micros)
+    }
+}
+
 /// Server-resolved identity a Benchmark V2 review row must be bound to before
 /// it can authorize a corrected native (exact-target) promotion.
 #[derive(Debug, Clone, Copy)]
@@ -434,17 +472,17 @@ pub struct BenchmarkV2PromotionExpectation<'a> {
     /// The native semantic fingerprint the verified Research trial binds
     /// (already proven equal to the server-resolved fingerprint).
     pub native_semantic_fingerprint: &'a str,
-    /// The canonical Backtest evidence's starting capital.
-    pub capital_basis_micros: i64,
-    /// The canonical Backtest evidence report's `input_data_hash`.
-    pub backtest_input_data_hash: &'a str,
+    /// The canonical Backtest evidence Promotion consumes.
+    pub backtest: BacktestEvidenceIdentity<'a>,
 }
 
 /// Promotion binding for corrected native evidence: the review that made the
 /// candidate a `paper_candidate` MUST have judged alpha against Benchmark V2,
 /// for exactly this strategy / symbol / timeframe / semantic fingerprint /
-/// capital basis / bars. A legacy review (or a V2 review of anything else) is
-/// refused -- there is no fallback to the legacy alpha.
+/// capital basis / bars, AND the reviewed candidate must have run under the
+/// same execution/economic contract (config, instrument economics, execution
+/// model) as the canonical Backtest evidence. A legacy review (or a V2 review
+/// of anything else) is refused -- there is no fallback to the legacy alpha.
 pub fn verify_review_benchmark_v2_binding(
     ev: &ValidatedEvidence,
     exp: &BenchmarkV2PromotionExpectation<'_>,
@@ -481,16 +519,48 @@ pub fn verify_review_benchmark_v2_binding(
             "evidence strategy semantic fingerprint differs from the Research trial's".to_string(),
         );
     }
-    if b.candidate_initial_cash_micros != exp.capital_basis_micros {
+    let bt = &exp.backtest;
+    if b.candidate_initial_cash_micros != bt.initial_equity_micros {
         return refuse(format!(
             "evidence capital basis {} differs from the Backtest evidence's {}",
-            b.candidate_initial_cash_micros, exp.capital_basis_micros
+            b.candidate_initial_cash_micros, bt.initial_equity_micros
         ));
     }
-    if exp.backtest_input_data_hash.trim().is_empty()
-        || b.input_data_hash != exp.backtest_input_data_hash
-    {
+    if bt.input_data_hash.trim().is_empty() || b.input_data_hash != bt.input_data_hash {
         return refuse("evidence data identity differs from the Backtest evidence's".to_string());
+    }
+    // Execution/economic contract (IR-BV2-01): the scanner candidate whose
+    // alpha was judged must be the same run configuration as the canonical
+    // Backtest evidence -- full `BacktestConfig` (costs, sizing, quantity
+    // semantics, risk and integrity gates), then the whole run identity
+    // (which also folds instrument economics, execution model and bars).
+    // Both ids must be real (parseable, non-nil) AND equal: two unusable ids
+    // never "match".
+    let same_id = |candidate: &str, canonical: uuid::Uuid| matches!(uuid::Uuid::parse_str(candidate), Ok(c) if !c.is_nil() && c == canonical);
+    if !same_id(&b.candidate_config_id, bt.config_id) {
+        return refuse(
+            "evidence candidate config_id differs from the canonical Backtest evidence's \
+             (cost/risk/integrity/sizing configuration not proven identical)"
+                .to_string(),
+        );
+    }
+    if b.candidate_execution_model_id != bt.execution_model_id {
+        return refuse(
+            "evidence candidate execution model differs from the Backtest evidence's".to_string(),
+        );
+    }
+    if b.strategy_semantic_fingerprint != bt.strategy_semantic_fingerprint {
+        return refuse(
+            "evidence strategy semantic fingerprint differs from the Backtest evidence's"
+                .to_string(),
+        );
+    }
+    if !same_id(&b.candidate_run_id, bt.run_id) {
+        return refuse(
+            "evidence candidate run_id differs from the canonical Backtest evidence's \
+             (instrument economics / execution contract not proven identical)"
+                .to_string(),
+        );
     }
     // The ranking score the promotion fingerprint covers must be the V2 alpha.
     match ev.scanner_score {
@@ -610,8 +680,7 @@ pub fn enforce_native_review_benchmark_binding(
     strategy_id: &str,
     symbol: &str,
     timeframe_secs: i64,
-    capital_basis_micros: i64,
-    backtest_input_data_hash: &str,
+    backtest: &BacktestEvidenceIdentity<'_>,
 ) -> Result<(), String> {
     let Some(fingerprint) = native_semantic_fingerprint else {
         return Ok(());
@@ -629,8 +698,7 @@ pub fn enforce_native_review_benchmark_binding(
             symbol,
             timeframe_secs,
             native_semantic_fingerprint: fingerprint,
-            capital_basis_micros,
-            backtest_input_data_hash,
+            backtest: *backtest,
         },
     )
 }

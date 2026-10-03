@@ -48,6 +48,12 @@ BARS = RUN / "data" / "research_bars.csv"
 MANIFEST = RUN / "data" / "research_bars_provenance.json"
 INDEX = RUN / "trials_index.json"
 GAP_TOLERANCE_BARS = 3
+# The canonical Backtest integrity configuration. `backtest csv` and the
+# Benchmark V2 `scan-strategies` MUST receive the identical values so the
+# scanner/review candidate and the canonical Backtest evidence share one
+# BacktestConfig identity (IR-BV2-01); Promotion refuses a mismatch.
+INTEGRITY_ARGS = ["--integrity-calendar", "us-equity-regular", "--integrity-stale-threshold-ticks", "259200",
+                  "--integrity-gap-tolerance-bars", str(GAP_TOLERANCE_BARS)]
 EXACT_TARGET_DIRECTION_POLICY = "native_exact_target_qty_v1"
 
 
@@ -249,8 +255,7 @@ def stage_backtest(_args) -> None:
         out = _run_cli("backtest", "csv", "--bars", str(tdir(strategy, sym) / "bt_bars.csv"), "--strategy", strategy,
                        "--symbol", sym, "--timeframe-secs", str(nb["timeframe_secs"]),
                        "--initial-cash-micros", str(nb["initial_cash_micros"]),
-                       "--integrity-calendar", "us-equity-regular", "--integrity-stale-threshold-ticks", "259200",
-                       "--integrity-gap-tolerance-bars", str(GAP_TOLERANCE_BARS),
+                       *INTEGRITY_ARGS,
                        "--out-dir", str(RUN / "backtest" / strategy / sym))
         rec["backtest_run_id"] = _parse(out, "run_id")
         rec["execution_blocked"] = _parse(out, "execution_blocked")
@@ -304,8 +309,11 @@ def stage_review(_args) -> None:
             (root / f"{sym}_1D.csv").write_bytes((tdir(strategy, sym) / "bt_bars.csv").read_bytes())
         bench = DECL["scanner_review"].get("benchmark_policy")
         bench_args = ["--benchmark-policy", bench] if bench else []
+        # Config flags are accepted only under the V2 policy.
+        scan_cfg_args = ([*INTEGRITY_ARGS, "--initial-cash-micros", str(DECL["native_backtest"]["initial_cash_micros"])]
+                         if bench else [])
         out = _run_cli("backtest", "scan-strategies", "--registry", str(reg_path), "--bars-root", str(base / "bars"),
-                       "--timeframe", "1D", "--strategy", strategy, "--out-dir", str(base / "scans"), *bench_args)
+                       "--timeframe", "1D", "--strategy", strategy, "--out-dir", str(base / "scans"), *bench_args, *scan_cfg_args)
         scan_dir = _parse(out, "artifacts_dir")
         out = _run_cli("backtest", "review-scan", "--artifact-dir", scan_dir, "--out-dir", str(base / "reviews"),
                        *bench_args)

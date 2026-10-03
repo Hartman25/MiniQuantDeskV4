@@ -29,6 +29,41 @@ impl From<IntegrityCalendarArg> for CalendarSpec {
     }
 }
 
+/// `backtest csv` defaults for the config-bearing flags; `scan-strategies
+/// --benchmark-policy` mirrors them so identical flags yield an identical
+/// `BacktestConfig` (and `config_id`) on both commands.
+pub const CSV_DEFAULT_INITIAL_CASH_MICROS: i64 = 100_000_000_000;
+pub const CSV_DEFAULT_INTEGRITY_ENABLED: bool = true;
+pub const CSV_DEFAULT_INTEGRITY_STALE_THRESHOLD_TICKS: u64 = 120;
+pub const CSV_DEFAULT_INTEGRITY_GAP_TOLERANCE_BARS: u32 = 0;
+
+/// The one construction of the canonical `backtest csv` [`BacktestConfig`].
+/// Shared by `run_backtest_csv` and the Benchmark V2 scan so a scanned
+/// candidate and the canonical Backtest evidence are built from the same
+/// execution/economic contract (IR-BV2-01).
+#[allow(clippy::too_many_arguments)]
+fn canonical_csv_backtest_config(
+    timeframe_secs: i64,
+    initial_cash_micros: i64,
+    shadow: bool,
+    integrity_enabled: bool,
+    integrity_stale_threshold_ticks: u64,
+    integrity_gap_tolerance_bars: u32,
+    integrity_calendar: IntegrityCalendarArg,
+    sizing: StrategySizingConfig,
+) -> BacktestConfig {
+    let mut cfg = BacktestConfig::conservative_defaults();
+    cfg.timeframe_secs = timeframe_secs;
+    cfg.initial_cash_micros = initial_cash_micros;
+    cfg.shadow_mode = shadow;
+    cfg.integrity_enabled = integrity_enabled;
+    cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
+    cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
+    cfg.integrity_calendar = integrity_calendar.into();
+    cfg.sizing = sizing;
+    cfg
+}
+
 // ---------------------------------------------------------------------------
 // Shared economics flag wiring (CSV + DB backtest CLI entry points)
 // ---------------------------------------------------------------------------
@@ -134,19 +169,20 @@ pub async fn run_backtest_csv(
         anyhow::bail!("--target-qty must be > 0");
     }
 
-    let mut cfg = BacktestConfig::conservative_defaults();
-    cfg.timeframe_secs = timeframe_secs;
-    cfg.initial_cash_micros = initial_cash_micros;
-    cfg.shadow_mode = shadow;
-    cfg.integrity_enabled = integrity_enabled;
-    cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
-    cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
-    cfg.integrity_calendar = integrity_calendar.into();
-    cfg.sizing = StrategySizingConfig {
-        target_qty,
-        max_target_qty,
-        max_position_notional_usd,
-    };
+    let cfg = canonical_csv_backtest_config(
+        timeframe_secs,
+        initial_cash_micros,
+        shadow,
+        integrity_enabled,
+        integrity_stale_threshold_ticks,
+        integrity_gap_tolerance_bars,
+        integrity_calendar,
+        StrategySizingConfig {
+            target_qty,
+            max_target_qty,
+            max_position_notional_usd,
+        },
+    );
 
     // BACKTEST-CONFIG-DETERMINISM-SIZING-01: use sizing-aware registration so
     // the strategy is constructed from cfg.sizing, not ambient env vars.
@@ -1285,6 +1321,61 @@ fn parse_benchmark_policy(raw: Option<&str>) -> Result<mqk_backtest::ScanBenchma
     }
 }
 
+/// Execution/economic config flags of `scan-strategies`. Meaningful only
+/// under the Benchmark V2 policy, where they select the SAME `BacktestConfig`
+/// the canonical `backtest csv` evidence was run under (IR-BV2-01); the
+/// legacy scan keeps its own scanner-default config and refuses them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScanConfigFlags {
+    pub initial_cash_micros: Option<i64>,
+    pub integrity_enabled: Option<bool>,
+    pub integrity_stale_threshold_ticks: Option<u64>,
+    pub integrity_gap_tolerance_bars: Option<u32>,
+    pub integrity_calendar: Option<IntegrityCalendarArg>,
+}
+
+impl ScanConfigFlags {
+    fn any_set(&self) -> bool {
+        self.initial_cash_micros.is_some()
+            || self.integrity_enabled.is_some()
+            || self.integrity_stale_threshold_ticks.is_some()
+            || self.integrity_gap_tolerance_bars.is_some()
+            || self.integrity_calendar.is_some()
+    }
+
+    /// The V2 scan policy: the canonical `backtest csv` config (flag defaults
+    /// mirror `backtest csv`'s) so scanned candidates share its `config_id`.
+    fn v2_policy(&self, timeframe: &str) -> Result<mqk_backtest::StrategyScanPolicy> {
+        let timeframe_secs = mqk_backtest::resolve_timeframe_secs(timeframe)
+            .with_context(|| format!("unsupported --timeframe '{timeframe}'"))?;
+        let initial_cash_micros = self
+            .initial_cash_micros
+            .unwrap_or(CSV_DEFAULT_INITIAL_CASH_MICROS);
+        if initial_cash_micros <= 0 {
+            anyhow::bail!("--initial-cash-micros must be > 0");
+        }
+        let base_config = canonical_csv_backtest_config(
+            timeframe_secs,
+            initial_cash_micros,
+            false,
+            self.integrity_enabled
+                .unwrap_or(CSV_DEFAULT_INTEGRITY_ENABLED),
+            self.integrity_stale_threshold_ticks
+                .unwrap_or(CSV_DEFAULT_INTEGRITY_STALE_THRESHOLD_TICKS),
+            self.integrity_gap_tolerance_bars
+                .unwrap_or(CSV_DEFAULT_INTEGRITY_GAP_TOLERANCE_BARS),
+            self.integrity_calendar
+                .unwrap_or(IntegrityCalendarArg::AlwaysOn),
+            StrategySizingConfig::default_sizing(),
+        );
+        Ok(mqk_backtest::StrategyScanPolicy {
+            base_config,
+            benchmark_policy: mqk_backtest::ScanBenchmarkPolicy::CapitalMatchedExactTargetV2,
+            ..mqk_backtest::StrategyScanPolicy::default()
+        })
+    }
+}
+
 /// Scan the enabled-equity registry universe against local bar CSVs only.
 ///
 /// No provider call, no broker call, no live/paper order, no DB
@@ -1303,8 +1394,18 @@ pub fn run_strategy_scan(
     dry_run: bool,
     json: bool,
     benchmark_policy: Option<String>,
+    config_flags: ScanConfigFlags,
 ) -> Result<()> {
     let benchmark_policy = parse_benchmark_policy(benchmark_policy.as_deref())?;
+    if benchmark_policy == mqk_backtest::ScanBenchmarkPolicy::LegacyFullyInvested
+        && config_flags.any_set()
+    {
+        anyhow::bail!(
+            "--initial-cash-micros / --integrity-* select the canonical Backtest config and \
+             are accepted only with --benchmark-policy {}",
+            mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID
+        );
+    }
     let strategies: Vec<String> = strategy_ids
         .split(',')
         .map(|s| s.trim().to_string())
@@ -1327,8 +1428,18 @@ pub fn run_strategy_scan(
         git_hash: bkt_git_hash(),
         created_at_utc: Utc::now().to_rfc3339(), // allow: operational manifest timestamp
     };
-    let output = mqk_backtest::execute_strategy_scan_with_benchmark(&req, benchmark_policy)
-        .map_err(|e| anyhow::anyhow!("strategy scan failed: {e}"))?;
+    let output = match benchmark_policy {
+        mqk_backtest::ScanBenchmarkPolicy::LegacyFullyInvested => {
+            mqk_backtest::execute_strategy_scan_with_benchmark(&req, benchmark_policy)
+        }
+        mqk_backtest::ScanBenchmarkPolicy::CapitalMatchedExactTargetV2 => {
+            mqk_backtest::execute_strategy_scan_with_policy(
+                &req,
+                config_flags.v2_policy(&timeframe)?,
+            )
+        }
+    }
+    .map_err(|e| anyhow::anyhow!("strategy scan failed: {e}"))?;
 
     let mut artifacts_written = false;
     let mut artifacts_dir: Option<PathBuf> = None;

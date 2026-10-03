@@ -12,7 +12,7 @@ use commands::{
         run_finalize_p7a_p7b_replay_stress, run_finalize_robustness_sensitivity,
         run_native_fingerprint, run_native_signals, run_regime_detect, run_review_scan,
         run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
-        IntegrityCalendarArg,
+        IntegrityCalendarArg, ScanConfigFlags,
     },
     daemon::{daemon_arm, daemon_clear_halted_run, daemon_disarm, daemon_halt, daemon_status},
     load_payload,
@@ -190,7 +190,7 @@ enum BacktestCmd {
         timeframe_secs: i64,
 
         /// Initial cash in micros.
-        #[arg(long, default_value_t = 100_000_000_000)]
+        #[arg(long, default_value_t = commands::bkt::CSV_DEFAULT_INITIAL_CASH_MICROS)]
         initial_cash_micros: i64,
 
         /// Shadow mode: run strategy but do not execute trades.
@@ -198,7 +198,7 @@ enum BacktestCmd {
         shadow: bool,
 
         /// Enable integrity checks.
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = commands::bkt::CSV_DEFAULT_INTEGRITY_ENABLED)]
         integrity_enabled: bool,
 
         /// Integrity stale threshold in ticks (seconds for time-indexed bar feeds).
@@ -207,11 +207,11 @@ enum BacktestCmd {
         /// 86400 s and a threshold of 120 would immediately set execution_blocked=true.
         /// Weekend gaps in daily data can reach 259200 s (3 days); 172800 covers
         /// datasets that store only trading-day timestamps with no weekend entries.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = commands::bkt::CSV_DEFAULT_INTEGRITY_STALE_THRESHOLD_TICKS)]
         integrity_stale_threshold_ticks: u64,
 
         /// Integrity gap tolerance (missing bars).
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = commands::bkt::CSV_DEFAULT_INTEGRITY_GAP_TOLERANCE_BARS)]
         integrity_gap_tolerance_bars: u32,
 
         /// Integrity calendar for gap detection.
@@ -372,7 +372,7 @@ enum BacktestCmd {
         timeframe_secs: i64,
 
         /// Initial cash in micros.
-        #[arg(long, default_value_t = 100_000_000_000)]
+        #[arg(long, default_value_t = commands::bkt::CSV_DEFAULT_INITIAL_CASH_MICROS)]
         initial_cash_micros: i64,
 
         /// Shadow mode: run strategy but do not execute trades.
@@ -380,7 +380,7 @@ enum BacktestCmd {
         shadow: bool,
 
         /// Enable integrity checks.
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = commands::bkt::CSV_DEFAULT_INTEGRITY_ENABLED)]
         integrity_enabled: bool,
 
         /// Integrity stale threshold in ticks (seconds for time-indexed bar feeds).
@@ -521,6 +521,30 @@ enum BacktestCmd {
         /// benchmark cannot be computed fails closed.
         #[arg(long)]
         benchmark_policy: Option<String>,
+
+        /// Benchmark V2 only: starting capital of the scanned candidate, in
+        /// micros. Must equal the canonical `backtest csv --initial-cash-micros`
+        /// for the evidence to be promotable. Default mirrors `backtest csv`.
+        #[arg(long)]
+        initial_cash_micros: Option<i64>,
+
+        /// Benchmark V2 only: integrity checks on/off (`true`/`false`). Must
+        /// equal the canonical `backtest csv` run's for the evidence to be
+        /// promotable. Default mirrors `backtest csv`.
+        #[arg(long)]
+        integrity_enabled: Option<bool>,
+
+        /// Benchmark V2 only: integrity stale threshold (see `backtest csv`).
+        #[arg(long)]
+        integrity_stale_threshold_ticks: Option<u64>,
+
+        /// Benchmark V2 only: integrity gap tolerance (see `backtest csv`).
+        #[arg(long)]
+        integrity_gap_tolerance_bars: Option<u32>,
+
+        /// Benchmark V2 only: integrity calendar (see `backtest csv`).
+        #[arg(long, value_enum)]
+        integrity_calendar: Option<IntegrityCalendarArg>,
     },
 
     /// STRATEGY-SCANNER-PROMOTION-01C: research-review classification over
@@ -1773,6 +1797,11 @@ async fn run_cli() -> Result<()> {
                 dry_run,
                 json,
                 benchmark_policy,
+                initial_cash_micros,
+                integrity_enabled,
+                integrity_stale_threshold_ticks,
+                integrity_gap_tolerance_bars,
+                integrity_calendar,
             } => {
                 run_strategy_scan(
                     registry,
@@ -1785,6 +1814,13 @@ async fn run_cli() -> Result<()> {
                     dry_run,
                     json,
                     benchmark_policy,
+                    ScanConfigFlags {
+                        initial_cash_micros,
+                        integrity_enabled,
+                        integrity_stale_threshold_ticks,
+                        integrity_gap_tolerance_bars,
+                        integrity_calendar,
+                    },
                 )?;
             }
             BacktestCmd::ReviewScan {

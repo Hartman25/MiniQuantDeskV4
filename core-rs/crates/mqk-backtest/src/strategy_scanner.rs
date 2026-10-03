@@ -919,9 +919,10 @@ pub fn derive_scan_id(
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, canonical.as_bytes())
 }
 
-/// [`derive_scan_id`] with the benchmark policy bound into the identity, so a
-/// V2 scan can never share a `scan_id` (and artifact directory) with a legacy
-/// scan of the same universe.
+/// [`derive_scan_id`] with the benchmark policy AND the scan's base
+/// [`BacktestConfig`] identity bound in, so a V2 scan can never share a
+/// `scan_id` (and artifact directory) with a legacy scan of the same universe,
+/// nor with a V2 scan evaluated under a different execution/economic config.
 pub fn derive_scan_id_with_benchmark(
     registry_path: &str,
     bars_root: &str,
@@ -929,9 +930,10 @@ pub fn derive_scan_id_with_benchmark(
     strategies: &[String],
     universe: &[String],
     benchmark_policy_id: &str,
+    base_config_id: &uuid::Uuid,
 ) -> uuid::Uuid {
     let canonical = format!(
-        "mqk-scan.v2|registry={registry_path}|bars_root={bars_root}|timeframe={timeframe}|strategies={}|universe={}|benchmark_policy={benchmark_policy_id}",
+        "mqk-scan.v3|registry={registry_path}|bars_root={bars_root}|timeframe={timeframe}|strategies={}|universe={}|benchmark_policy={benchmark_policy_id}|base_config={base_config_id}",
         strategies.join(","),
         universe.join(","),
     );
@@ -1016,6 +1018,25 @@ pub fn execute_strategy_scan_with_benchmark(
     req: &ScanRunRequest,
     benchmark_policy: ScanBenchmarkPolicy,
 ) -> Result<ScanRunOutput, String> {
+    execute_strategy_scan_with_policy(
+        req,
+        StrategyScanPolicy {
+            benchmark_policy,
+            ..StrategyScanPolicy::default()
+        },
+    )
+}
+
+/// As [`execute_strategy_scan_with_benchmark`], under an explicit full
+/// [`StrategyScanPolicy`]. A promotion-grade V2 scan passes the canonical
+/// Backtest config as `policy.base_config` so every candidate's evidence is
+/// produced under the same execution/economic contract as the canonical
+/// Backtest evidence Promotion consumes.
+pub fn execute_strategy_scan_with_policy(
+    req: &ScanRunRequest,
+    policy: StrategyScanPolicy,
+) -> Result<ScanRunOutput, String> {
+    let benchmark_policy = policy.benchmark_policy;
     if req.strategies.is_empty() {
         return Err("strategies must name at least one strategy_id".to_string());
     }
@@ -1034,10 +1055,6 @@ pub fn execute_strategy_scan_with_benchmark(
         universe.truncate(limit);
     }
 
-    let policy = StrategyScanPolicy {
-        benchmark_policy,
-        ..StrategyScanPolicy::default()
-    };
     let bars_root_path = Path::new(&req.bars_root);
     let timeframe_dir = bars_root_path.join(&req.timeframe);
 
@@ -1116,6 +1133,7 @@ pub fn execute_strategy_scan_with_benchmark(
             &req.strategies,
             &universe,
             policy_id,
+            &policy.base_config.config_id(),
         ),
     };
     let manifest = ScanManifest {

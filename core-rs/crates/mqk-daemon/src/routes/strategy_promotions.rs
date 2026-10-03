@@ -1035,8 +1035,9 @@ pub(crate) async fn strategy_promotion_transition(
                 &strategy_id,
                 &symbol,
                 timeframe_secs,
-                backtest_bundle.initial_equity_micros,
-                &backtest_bundle.report.input_data_hash,
+                &crate::promotion_evidence_validation::BacktestEvidenceIdentity::from_bundle(
+                    &backtest_bundle,
+                ),
             )
         {
             return transition_response(TransitionResponseArgs {
