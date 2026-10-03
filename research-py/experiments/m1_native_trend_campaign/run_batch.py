@@ -160,12 +160,26 @@ def sizing_args(decl: dict) -> list[str]:
     return args
 
 
-def _refuse_research_without_capital_fraction_bridge() -> None:
-    if DECL.get("capital_sizing") is not None:
-        raise SystemExit(
-            "fail-closed: capital_sizing is declared, but the Research economic bridge does not resolve "
-            "capital-fraction quantities yet; trials and registration stay refused (Backtest/review only)"
-        )
+def research_capital_sizing(decl: dict) -> dict | None:
+    """The Research-side capital-fraction contract (identity + stream verification), derived
+    from the same validated block and the same capital basis `backtest csv` receives. None =
+    historical fixed-quantity protocol."""
+    if sizing_args(decl) == []:
+        return None
+    block = decl["capital_sizing"]
+    return {"policy_id": SIZING_POLICY_CF, "allocation_fraction_bps": block["allocation_fraction_bps"],
+            "initial_allocated_capital_micros": int(decl["native_backtest"]["initial_cash_micros"]),
+            "max_target_qty": block.get("max_target_qty"),
+            "max_position_notional_usd": block.get("max_position_notional_usd")}
+
+
+def native_bridge_args(decl: dict) -> list[str]:
+    """CLI flags for `native-fingerprint` / `native-signals`: the sizing flags plus the explicit
+    initial capital (the capital-fraction bridge has no default capital)."""
+    args = sizing_args(decl)
+    if not args:
+        return []
+    return [*args, "--initial-cash-micros", str(int(decl["native_backtest"]["initial_cash_micros"]))]
 
 
 def stage_check(_args) -> None:
@@ -204,7 +218,6 @@ def stage_register(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.native_signal_registry_integration import register_native_signal_trial
     _require_exact_target_protocol()
-    _refuse_research_without_capital_fraction_bridge()
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     store = ResearchResultStore(REGISTRY)
@@ -213,7 +226,8 @@ def stage_register(_args) -> None:
     index = {}
     for strategy, sym in TRIALS:
         h = HYP[strategy]
-        info = _run_cli("backtest", "native-fingerprint", "--strategy", strategy, "--symbol", sym)
+        info = _run_cli("backtest", "native-fingerprint", "--strategy", strategy, "--symbol", sym,
+                        *native_bridge_args(DECL))
         fingerprint = _parse(info, "semantic_fingerprint")
         required = int(_parse(info, "required_history_bars"))
         if int(_parse(info, "timeframe_secs")) != h["timeframe_secs"] or required != h["required_history_bars"]:
@@ -223,7 +237,8 @@ def stage_register(_args) -> None:
             semantic_fingerprint=fingerprint, required_history_bars=required, bars_provenance=manifest,
             economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
             test_months=part["test_months"], holdout_months=part["holdout_months"],
-            hypothesis_text=h["economic_rationale"], registry_db=REGISTRY)
+            hypothesis_text=h["economic_rationale"], registry_db=REGISTRY,
+            capital_sizing=research_capital_sizing(DECL))
         index[key(strategy, sym)] = {"trial_id": trial_id, "hypothesis_id": h["hypothesis_id"],
                                      "semantic_fingerprint": fingerprint, "required_history_bars": required}
         print(key(strategy, sym), trial_id, fingerprint[:12])
@@ -241,7 +256,6 @@ def stage_trials(_args) -> None:
         NativeSignalError, native_holdout_start, research_bars_to_backtest_csv,
         run_registered_native_signal_economic_eval)
     _require_exact_target_protocol()
-    _refuse_research_without_capital_fraction_bridge()
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     store = ResearchResultStore(REGISTRY)
     if len(store.list_trials(experiment_id=EXPERIMENT)) != len(TRIALS):
@@ -255,7 +269,8 @@ def stage_trials(_args) -> None:
 
         def emit(bt=bt, strategy=strategy, sym=sym, sdir=sdir, h=h):
             _run_cli("backtest", "native-signals", "--bars-path", str(bt), "--strategy", strategy, "--symbol", sym,
-                     "--timeframe-secs", str(h["timeframe_secs"]), "--out-dir", str(sdir / "emit"))
+                     "--timeframe-secs", str(h["timeframe_secs"]), "--out-dir", str(sdir / "emit"),
+                     *native_bridge_args(DECL))
 
         try:
             out = run_registered_native_signal_economic_eval(
@@ -265,7 +280,8 @@ def stage_trials(_args) -> None:
                 economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
                 test_months=part["test_months"], holdout_months=part["holdout_months"], registry_db=REGISTRY,
                 expected_timeframe_secs=h["timeframe_secs"], expected_semantic_fingerprint=rec["semantic_fingerprint"],
-                required_history_bars=rec["required_history_bars"])
+                required_history_bars=rec["required_history_bars"],
+                expected_capital_sizing=research_capital_sizing(DECL))
         except NativeSignalError as exc:  # the failed attempt is already durable
             rec["failed"] = str(exc)
             print(key(strategy, sym), "FAILED attempt kept:", str(exc)[:200])

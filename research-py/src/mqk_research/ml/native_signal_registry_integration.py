@@ -257,6 +257,46 @@ def require_native_exact_target_spec(economic_spec: EconomicWalkForwardSpec) -> 
     return spec
 
 
+_CAPITAL_SIZING_KEYS = (
+    "policy_id", "allocation_fraction_bps", "initial_allocated_capital_micros", "max_target_qty",
+    "max_position_notional_usd",
+)
+
+
+def _require_declared_sizing(
+    meta: Dict[str, Any], expected: Optional[Dict[str, Any]], emitter_cash: int
+) -> None:
+    """A stream's sizing block must equal the registered capital-fraction contract
+    exactly; a stream with a sizing block can never be consumed as fixed-quantity,
+    and a fixed-quantity stream can never satisfy a capital-fraction registration."""
+    block = meta.get("sizing")
+    if expected is None:
+        if block is not None:
+            raise NativeSignalError(
+                "signal stream carries a capital-fraction sizing block but the trial was registered "
+                "under the fixed-quantity protocol"
+            )
+        return
+    if not isinstance(block, dict):
+        raise NativeSignalError(
+            "trial is registered under the capital-fraction protocol but the signal stream carries no sizing block"
+        )
+    if set(expected) != set(_CAPITAL_SIZING_KEYS):
+        raise NativeSignalError(f"expected_capital_sizing must have exactly the keys {_CAPITAL_SIZING_KEYS}")
+    for k in _CAPITAL_SIZING_KEYS:
+        if block.get(k) != expected[k]:
+            raise NativeSignalError(
+                f"signal stream sizing.{k} {block.get(k)!r} != the registered {expected[k]!r}"
+            )
+    if int(expected["initial_allocated_capital_micros"]) != int(emitter_cash):
+        raise NativeSignalError("sizing capital differs from the emitter initial_cash_micros")
+    if not isinstance(block.get("entries"), list):
+        raise NativeSignalError("signal stream sizing block has no entries list")
+    for e in block["entries"]:
+        if int(e.get("resolved_target_qty_micros", 0)) <= 0:
+            raise NativeSignalError("signal stream sizing entry has a non-positive resolved quantity")
+
+
 def _load_signals(
     signals_csv: Path,
     meta_json: Path,
@@ -268,6 +308,7 @@ def _load_signals(
     expected_semantic_fingerprint: str,
     expected_required_history_bars: int,
     equity_usd: float,
+    expected_capital_sizing: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     meta = json.loads(Path(meta_json).read_text(encoding="utf-8"))
     protocol = meta.get("protocol_id")
@@ -334,6 +375,7 @@ def _load_signals(
             f"emitter/Backtest initial_cash_micros {emitter_cash} != Research equity_usd {equity_usd} "
             "-- Research and Backtest evidence must share one capital basis"
         )
+    _require_declared_sizing(meta, expected_capital_sizing, emitter_cash)
 
     df = pd.read_csv(signals_csv)
     if list(df.columns) != ["symbol", "decision_ts", "target_qty_micros"]:
@@ -349,6 +391,14 @@ def _load_signals(
         raise NativeSignalError("native exact-target protocol supports only non-negative targets")
     if (q % _MICROS != 0).any():
         raise NativeSignalError("native exact-target protocol supports only whole-share targets")
+    if expected_capital_sizing is not None:
+        resolved = {int(e["resolved_target_qty_micros"]) for e in meta["sizing"]["entries"]}
+        stray = sorted({int(x) for x in q[q > 0]} - resolved)
+        if stray:
+            raise NativeSignalError(
+                f"signal stream carries positive target quantities {stray} that no engine-resolved "
+                "capital-fraction entry produced"
+            )
     df = df.sort_values("decision_ts", kind="mergesort").reset_index(drop=True)
     df["decision_ts_utc"] = pd.to_datetime(df["decision_ts"].astype("int64"), unit="s", utc=True)
     df["target_qty"] = (df["target_qty_micros"].astype("int64") // _MICROS).astype("int64")
@@ -371,6 +421,7 @@ def build_native_signal_trial_identity(
     test_months: int,
     holdout_months: int,
     economic_spec: EconomicWalkForwardSpec,
+    capital_sizing: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Result-independent identity: strategy semantics, quantity contract, data
     provenance, partition policy and economic protocol only. The signal source
@@ -401,6 +452,12 @@ def build_native_signal_trial_identity(
         },
         "economic_protocol": economic_protocol_identity(spec),
     }
+    if capital_sizing is not None:
+        # Behavior-bearing and result-independent; absent for fixed-quantity
+        # trials, so every historical trial id is unchanged.
+        if set(capital_sizing) != set(_CAPITAL_SIZING_KEYS):
+            raise NativeSignalError(f"capital_sizing must have exactly the keys {_CAPITAL_SIZING_KEYS}")
+        identity["signal_source"]["capital_sizing"] = {k: capital_sizing[k] for k in _CAPITAL_SIZING_KEYS}
     if spec.execution_pricing.is_official_parity_model:
         identity["data_identity"]["bars_pricing_provenance"] = {
             "canonical_pricing_bars_hash": bars_provenance.get("canonical_pricing_bars_hash"),
@@ -429,6 +486,7 @@ def register_native_signal_trial(
     holdout_months: int = 6,
     hypothesis_text: Optional[str] = None,
     registry_db: Optional[Path] = None,
+    capital_sizing: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Register the hypothesis and the trial and NOTHING else: no emission, no
     market data, no attempt, no evaluation. The fingerprint comes from the
@@ -447,6 +505,7 @@ def register_native_signal_trial(
         semantic_fingerprint=semantic_fingerprint, required_history_bars=required_history_bars,
         bars_provenance=bars_provenance, evaluation_start_utc=evaluation_start_utc,
         test_months=test_months, holdout_months=holdout_months, economic_spec=spec,
+        capital_sizing=capital_sizing,
     )
     store = ResearchResultStore(registry_db or default_db_path(default_root()))
     store.register_hypothesis(
@@ -480,6 +539,7 @@ def run_registered_native_signal_economic_eval(
     holdout_months: int = 6,
     registry_db: Optional[Path] = None,
     expected_timeframe_secs: int = 86_400,
+    expected_capital_sizing: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Official registered entry point for a native strategy's signals. The
     trial must ALREADY be registered (`register_native_signal_trial`); order is
@@ -529,7 +589,7 @@ def run_registered_native_signal_economic_eval(
         symbol=symbol, semantic_fingerprint=expected_semantic_fingerprint,
         required_history_bars=required_history_bars, bars_provenance=bars_provenance,
         evaluation_start_utc=evaluation_start_utc, test_months=test_months,
-        holdout_months=holdout_months, economic_spec=spec,
+        holdout_months=holdout_months, economic_spec=spec, capital_sizing=expected_capital_sizing,
     )
 
     store = ResearchResultStore(registry_db or default_db_path(default_root()))
@@ -557,6 +617,7 @@ def run_registered_native_signal_economic_eval(
             backtest_bars_sha256=expected_sha, expected_timeframe_secs=expected_timeframe_secs,
             expected_semantic_fingerprint=expected_semantic_fingerprint,
             expected_required_history_bars=required_history_bars, equity_usd=wts.equity_usd,
+            expected_capital_sizing=expected_capital_sizing,
         )
 
         eval_dir = run_dir / "eval"

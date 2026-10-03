@@ -399,34 +399,119 @@ fn native_strategy_instance(
     cfg: &BacktestConfig,
 ) -> Result<Box<dyn mqk_strategy::Strategy>> {
     let mut reg = PluginRegistry::new();
-    register_builtin_strategies_with_sizing(
-        &mut reg,
-        symbol,
-        cfg.sizing.target_qty,
-        cfg.sizing.max_target_qty,
-        cfg.sizing.max_position_notional_usd,
-    )
-    .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    // Under the capital-fraction policy the engine wrapper owns caps and
+    // quantity, so the inner strategy keeps its default sizing (the same
+    // construction `backtest csv` and the scanner use).
+    let (qty, max_qty, max_notional) = if cfg.sizing_policy.is_capital_fraction() {
+        (1, None, None)
+    } else {
+        (
+            cfg.sizing.target_qty,
+            cfg.sizing.max_target_qty,
+            cfg.sizing.max_position_notional_usd,
+        )
+    };
+    register_builtin_strategies_with_sizing(&mut reg, symbol, qty, max_qty, max_notional)
+        .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
     reg.instantiate(strategy)
         .with_context(|| format!("unknown strategy '{}'", strategy))
 }
 
+/// Sizing inputs of the native Research bridge commands. Omitted entirely =
+/// the historical fixed-quantity bridge; the capital-fraction policy requires
+/// an explicit fraction AND an explicit initial capital (no default capital).
+#[derive(Clone, Debug, Default)]
+pub struct NativeBridgeSizingArgs {
+    pub sizing_policy: Option<String>,
+    pub allocation_fraction_bps: Option<i64>,
+    pub initial_cash_micros: Option<i64>,
+    pub max_target_qty: Option<i64>,
+    pub max_position_notional_usd: Option<i64>,
+}
+
+/// The one construction of the native-bridge [`BacktestConfig`], shared by
+/// `native-fingerprint` and `native-signals` so registration identity and the
+/// emitted stream are derived from the same config.
+fn native_bridge_config(
+    timeframe_secs: Option<i64>,
+    sizing: &NativeBridgeSizingArgs,
+) -> Result<BacktestConfig> {
+    let policy = resolve_cli_sizing_policy(
+        sizing.sizing_policy.as_deref(),
+        sizing.allocation_fraction_bps,
+    )?;
+    let mut cfg = BacktestConfig::conservative_defaults();
+    if let Some(tf) = timeframe_secs {
+        cfg.timeframe_secs = tf;
+    }
+    cfg.integrity_enabled = false;
+    if !policy.is_capital_fraction() {
+        if sizing.initial_cash_micros.is_some()
+            || sizing.max_target_qty.is_some()
+            || sizing.max_position_notional_usd.is_some()
+        {
+            anyhow::bail!(
+                "--initial-cash-micros / --max-target-qty / --max-position-notional-usd are accepted by the native bridge only with --sizing-policy fixed_initial_capital_fraction_v1"
+            );
+        }
+        return Ok(cfg);
+    }
+    let cash = sizing.initial_cash_micros.ok_or_else(|| {
+        anyhow::anyhow!(
+            "the capital-fraction native bridge requires an explicit --initial-cash-micros; there is no default capital"
+        )
+    })?;
+    if cash <= 0 {
+        anyhow::bail!("--initial-cash-micros must be > 0");
+    }
+    cfg.initial_cash_micros = cash;
+    cfg.sizing_policy = policy;
+    cfg.sizing = StrategySizingConfig {
+        target_qty: 1,
+        max_target_qty: sizing.max_target_qty,
+        max_position_notional_usd: sizing.max_position_notional_usd,
+    };
+    Ok(cfg)
+}
+
 /// Resolve a native strategy's semantic identity WITHOUT any market data, so a
-/// Research trial can be registered before any evaluation exists.
-pub fn run_native_fingerprint(strategy: String, symbol: String) -> Result<()> {
-    let cfg = BacktestConfig::conservative_defaults();
+/// Research trial can be registered before any evaluation exists. Under the
+/// capital-fraction policy the printed `semantic_fingerprint` is the wrapper
+/// identity Backtest and Promotion use (derived from the inner fingerprint,
+/// policy, fraction, capital and caps; never from results).
+pub fn run_native_fingerprint(
+    strategy: String,
+    symbol: String,
+    sizing: NativeBridgeSizingArgs,
+) -> Result<()> {
+    let cfg = native_bridge_config(None, &sizing)?;
     let instance = native_strategy_instance(&strategy, &symbol, &cfg)?;
     let required = instance.required_history_bars();
+    let inner_fingerprint = instance.semantic_fingerprint();
+    let semantic_fingerprint = if cfg.sizing_policy.is_capital_fraction() {
+        mqk_backtest::capital_fraction_wrapped_fingerprint(&cfg, &inner_fingerprint)
+            .map_err(|e| anyhow::anyhow!("capital-fraction fingerprint refused: {e}"))?
+    } else {
+        inner_fingerprint.clone()
+    };
     println!("strategy={}", instance.spec().name);
     println!("symbol={}", symbol);
     println!("timeframe_secs={}", instance.spec().timeframe_secs);
-    println!("semantic_fingerprint={}", instance.semantic_fingerprint());
+    println!("semantic_fingerprint={}", semantic_fingerprint);
     println!("required_history_bars={}", required);
     println!(
         "effective_bar_history_len={}",
         mqk_backtest::effective_history_len(cfg.bar_history_len, required)
     );
     println!("initial_cash_micros={}", cfg.initial_cash_micros);
+    if cfg.sizing_policy.is_capital_fraction() {
+        println!("inner_semantic_fingerprint={}", inner_fingerprint);
+        println!("sizing_policy_id={}", cfg.sizing_policy.policy_id());
+        println!(
+            "allocation_fraction_bps={}",
+            cfg.sizing_policy.allocation_fraction_bps().unwrap_or(0)
+        );
+    }
     Ok(())
 }
 
@@ -436,6 +521,7 @@ pub fn run_native_signals(
     symbol: String,
     timeframe_secs: i64,
     out_dir: String,
+    sizing: NativeBridgeSizingArgs,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
 
@@ -450,9 +536,7 @@ pub fn run_native_signals(
         anyhow::bail!("bars csv contains symbols other than --symbol {}", symbol);
     }
 
-    let mut cfg = BacktestConfig::conservative_defaults();
-    cfg.timeframe_secs = timeframe_secs;
-    cfg.integrity_enabled = false;
+    let cfg = native_bridge_config(Some(timeframe_secs), &sizing)?;
 
     let strategy_instance = native_strategy_instance(&strategy, &symbol, &cfg)?;
 
@@ -477,7 +561,7 @@ pub fn run_native_signals(
     std::fs::write(&csv_path, csv.as_bytes()).context("write native_signals.csv failed")?;
 
     let sha = |b: &[u8]| hex::encode(Sha256::digest(b));
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "protocol_id": mqk_backtest::NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
         "strategy_name": stream.strategy_name,
         "semantic_fingerprint": stream.semantic_fingerprint,
@@ -494,11 +578,43 @@ pub fn run_native_signals(
         "signal_rows": stream.rows.len(),
         "native_signals_csv_sha256": sha(csv.as_bytes()),
     });
+    if stream.sizing_policy.is_capital_fraction() {
+        // The engine's own sizing provenance for the emitting run; the rows'
+        // absolute quantities are exactly these resolved targets.
+        meta["sizing"] = serde_json::json!({
+            "policy_id": stream.sizing_policy.policy_id(),
+            "allocation_fraction_bps": stream.sizing_policy.allocation_fraction_bps(),
+            "initial_allocated_capital_micros": stream.initial_cash_micros,
+            "max_target_qty": cfg.sizing.max_target_qty,
+            "max_position_notional_usd": cfg.sizing.max_position_notional_usd,
+            "entries": stream.sizing_provenance.entries.iter().map(|e| serde_json::json!({
+                "reference_bar_end_ts": e.reference_bar_end_ts,
+                "causal_reference_price_micros": e.causal_reference_price_micros,
+                "position_budget_micros": e.position_budget_micros,
+                "resolved_target_qty_micros": e.resolved_target_qty_micros,
+                "capped_by": e.capped_by,
+            })).collect::<Vec<_>>(),
+            "refusal_reason_codes": stream.sizing_provenance.refusals.iter()
+                .map(|r| r.reason_code.clone()).collect::<Vec<_>>(),
+        });
+    }
     std::fs::write(
         out.join("native_signals_meta.json"),
         serde_json::to_string_pretty(&meta)?.as_bytes(),
     )
     .context("write native_signals_meta.json failed")?;
+
+    if cfg.sizing_policy.is_capital_fraction() {
+        // Benchmark V2 is a fixed-quantity policy and cannot benchmark a
+        // capital-fraction candidate; its comparator is the capital-fraction
+        // benchmark produced by `scan-strategies`.
+        println!("benchmark_v2=not_applicable reason=capital_fraction_candidate");
+        println!("strategy={}", stream.strategy_name);
+        println!("semantic_fingerprint={}", stream.semantic_fingerprint);
+        println!("signal_rows={}", stream.rows.len());
+        println!("native_signals_csv={}", csv_path.display());
+        return Ok(());
+    }
 
     // Benchmark V2 (capital-matched exact-target passive benchmark): additive,
     // non-fatal. A strategy/symbol/window combination that never emitted a

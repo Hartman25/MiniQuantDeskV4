@@ -253,20 +253,6 @@ fn invalid_policy_and_unsupported_semantics_fail_closed_before_any_bar() {
     assert!(matches!(err, BacktestError::InvalidSizingPolicy { .. }));
 }
 
-#[test]
-fn native_signal_stream_refuses_capital_fraction_config() {
-    let err = mqk_backtest::native_signals::emit_native_signal_stream(
-        config(Some(2_500)),
-        &bars_a(),
-        Box::new(Scripted {
-            script: vec![true; 5],
-            idx: 0,
-        }),
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("InvalidSizingPolicy"));
-}
-
 mod scanner_agreement {
     use mqk_backtest::{
         execute_strategy_scan_with_policy, load_csv_file, BacktestConfig, BacktestEngine,

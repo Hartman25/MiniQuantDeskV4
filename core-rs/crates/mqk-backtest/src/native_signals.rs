@@ -19,9 +19,13 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use mqk_execution::StrategyOutput;
-use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
+use mqk_strategy::{SizingPolicy, Strategy, StrategyContext, StrategySpec};
 
-use crate::{effective_history_len, BacktestBar, BacktestConfig, BacktestEngine, BacktestError};
+use crate::types::SizingProvenance;
+use crate::{
+    capital_fraction_wrapped_fingerprint, effective_history_len, BacktestBar, BacktestConfig,
+    BacktestEngine, BacktestError,
+};
 
 pub const NATIVE_SIGNAL_STREAM_PROTOCOL_ID: &str = "native_strategy_signal_stream_v2";
 /// Meaning of `target_qty_micros` in this protocol.
@@ -54,6 +58,12 @@ pub struct NativeSignalStream {
     /// The engine run identity for the same strategy/config/bars/execution
     /// model; equal to a plain `BacktestEngine` run of the unwrapped strategy.
     pub run_id: Uuid,
+    /// The sizing policy of the emitting run. Under the capital-fraction
+    /// policy every row's quantity is the wrapper's resolved absolute target.
+    pub sizing_policy: SizingPolicy,
+    /// The engine's own sizing provenance for the emitting run (entries and
+    /// refusals); empty under the fixed-quantity policy.
+    pub sizing_provenance: SizingProvenance,
     pub rows: Vec<NativeSignalRow>,
 }
 
@@ -74,6 +84,9 @@ pub enum NativeSignalError {
     NoSignals,
     /// The recorder lock was poisoned.
     RecorderPoisoned,
+    /// The engine's executed-strategy fingerprint differs from the identity
+    /// the stream was bound to.
+    FingerprintDrift,
 }
 
 impl std::fmt::Display for NativeSignalError {
@@ -142,15 +155,17 @@ pub fn emit_native_signal_stream(
     bars: &[BacktestBar],
     strategy: Box<dyn Strategy>,
 ) -> Result<NativeSignalStream, NativeSignalError> {
-    if config.sizing_policy.is_capital_fraction() {
-        return Err(NativeSignalError::Backtest(
-            BacktestError::InvalidSizingPolicy {
-                reason: "native signal streams carry fixed-quantity targets and cannot describe a capital-fraction run".to_string(),
-            },
-        ));
-    }
     let spec = strategy.spec();
-    let semantic_fingerprint = strategy.semantic_fingerprint();
+    // Under the capital-fraction policy the recorded targets are the wrapper's
+    // sized output, so the stream is bound to the wrapper's identity (the one
+    // Backtest and Promotion use), never to the unwrapped inner fingerprint.
+    let semantic_fingerprint = if config.sizing_policy.is_capital_fraction() {
+        capital_fraction_wrapped_fingerprint(&config, &strategy.semantic_fingerprint())
+            .map_err(NativeSignalError::Backtest)?
+    } else {
+        strategy.semantic_fingerprint()
+    };
+    let sizing_policy = config.sizing_policy;
     let timeframe_secs = config.timeframe_secs;
     let configured_bar_history_len = config.bar_history_len;
     let required_history_bars = strategy.required_history_bars();
@@ -159,16 +174,20 @@ pub fn emit_native_signal_stream(
     let initial_cash_micros = config.initial_cash_micros;
 
     let log: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
-    let recorder = SignalRecorder {
-        inner: strategy,
-        log: Arc::clone(&log),
-    };
-
     let mut engine = BacktestEngine::new(config);
+    let recorder_log = Arc::clone(&log);
     engine
-        .add_strategy(Box::new(recorder))
+        .add_strategy_observed(strategy, move |executed| {
+            Box::new(SignalRecorder {
+                inner: executed,
+                log: recorder_log,
+            })
+        })
         .map_err(NativeSignalError::Backtest)?;
     let report = engine.run(bars).map_err(NativeSignalError::Backtest)?;
+    if report.strategy_semantic_fingerprint != semantic_fingerprint {
+        return Err(NativeSignalError::FingerprintDrift);
+    }
 
     let recorded = log
         .lock()
@@ -211,6 +230,8 @@ pub fn emit_native_signal_stream(
         observed_max_window_len,
         initial_cash_micros,
         run_id: report.run_id,
+        sizing_policy,
+        sizing_provenance: report.sizing_provenance,
         rows,
     })
 }

@@ -41,7 +41,9 @@ pub use economics::{
     mark_to_market_value_micros, notional_micros, notional_micros_qty, realized_pnl_micros,
     BacktestEconomicsReport, BacktestInstrumentEconomics, EconomicsError,
 }; // BACKTEST-MULTIPLIER-MARGIN-01 / BACKTEST-REPORT-ECONOMICS-ARTIFACT-01 / D6-A2
-pub use engine::effective_history_len;
+pub use engine::{
+    capital_fraction_caps, capital_fraction_wrapped_fingerprint, effective_history_len,
+};
 pub use engine::{BacktestEngine, BacktestError};
 pub use genuine_shuffled_placebo::{
     genuine_shuffled_placebo_scenario, GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID,

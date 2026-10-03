@@ -224,6 +224,52 @@ struct PendingBacktestOrder {
     signal_ts: i64,
 }
 
+/// Cap authority for the capital-fraction wrapper, derived from the config
+/// exactly as the engine does. Refuses non-whole-unit quantity semantics.
+pub fn capital_fraction_caps(config: &BacktestConfig) -> Result<TargetSizing, BacktestError> {
+    let invalid = |reason: String| BacktestError::InvalidSizingPolicy { reason };
+    if config.quantity_semantics != QuantitySemanticsId::WholeUnitsV1 {
+        return Err(invalid(
+            "capital-fraction sizing requires whole-unit Equity quantity semantics".into(),
+        ));
+    }
+    TargetSizing::equity_whole_units(
+        config.sizing.target_qty,
+        config.sizing.max_target_qty,
+        config.sizing.max_position_notional_usd,
+    )
+    .map_err(|e| invalid(format!("invalid sizing caps: {e}")))
+}
+
+/// The semantic fingerprint the engine's capital-fraction wrapper reports for
+/// `inner_semantic_fingerprint` under `config`; no market data is needed, so a
+/// Research trial can be registered with it before any evaluation exists.
+/// Refuses a config that does not select the capital-fraction policy.
+pub fn capital_fraction_wrapped_fingerprint(
+    config: &BacktestConfig,
+    inner_semantic_fingerprint: &str,
+) -> Result<String, BacktestError> {
+    config
+        .sizing_policy
+        .validate()
+        .map_err(|e| BacktestError::InvalidSizingPolicy {
+            reason: e.reason_code().to_string(),
+        })?;
+    let bps = config
+        .sizing_policy
+        .allocation_fraction_bps()
+        .ok_or_else(|| BacktestError::InvalidSizingPolicy {
+            reason: "config does not select the capital-fraction policy".to_string(),
+        })?;
+    let caps = capital_fraction_caps(config)?;
+    Ok(mqk_strategy::capital_fraction_semantic_fingerprint(
+        inner_semantic_fingerprint,
+        bps,
+        config.initial_cash_micros,
+        &caps,
+    ))
+}
+
 /// The history window length the engine actually supplies to strategies: the
 /// configured length, widened to whatever the registered strategy declares it
 /// needs. The single definition of this rule; provenance records it verbatim.
@@ -398,35 +444,43 @@ impl BacktestEngine {
 
     /// Register a strategy. Must be called before run().
     pub fn add_strategy(&mut self, s: Box<dyn Strategy>) -> Result<(), BacktestError> {
+        self.add_strategy_observed(s, |sized| sized)
+    }
+
+    /// Register a strategy and pass the strategy the engine actually executes
+    /// (the capital-fraction wrapper when that policy is configured, otherwise
+    /// `s` itself) through `observe`. The Research signal recorder uses this so
+    /// it records the SAME sized output the canonical Backtest executes.
+    /// `observe` must delegate `semantic_fingerprint`, otherwise the run
+    /// identity changes.
+    pub fn add_strategy_observed(
+        &mut self,
+        s: Box<dyn Strategy>,
+        observe: impl FnOnce(Box<dyn Strategy>) -> Box<dyn Strategy>,
+    ) -> Result<(), BacktestError> {
         if !self.config.sizing_policy.is_capital_fraction() {
-            return self.host.register(s).map_err(BacktestError::StrategyHost);
+            return self
+                .host
+                .register(observe(s))
+                .map_err(BacktestError::StrategyHost);
         }
-        let invalid = |reason: String| BacktestError::InvalidSizingPolicy { reason };
-        if self.config.quantity_semantics != QuantitySemanticsId::WholeUnitsV1 {
-            return Err(invalid(
-                "capital-fraction sizing requires whole-unit Equity quantity semantics".into(),
-            ));
-        }
+        let caps = capital_fraction_caps(&self.config)?;
         if self.sizing_audit.is_some() {
             return Err(BacktestError::StrategyHost(
                 StrategyHostError::MultiStrategyNotAllowed,
             ));
         }
-        let caps = TargetSizing::equity_whole_units(
-            self.config.sizing.target_qty,
-            self.config.sizing.max_target_qty,
-            self.config.sizing.max_position_notional_usd,
-        )
-        .map_err(|e| invalid(format!("invalid sizing caps: {e}")))?;
         let (wrapped, audit) = CapitalFractionSizedStrategy::new(
             s,
             self.config.sizing_policy,
             self.config.initial_cash_micros,
             caps,
         )
-        .map_err(|e| invalid(e.reason_code().to_string()))?;
+        .map_err(|e| BacktestError::InvalidSizingPolicy {
+            reason: e.reason_code().to_string(),
+        })?;
         self.host
-            .register(Box::new(wrapped))
+            .register(observe(Box::new(wrapped)))
             .map_err(BacktestError::StrategyHost)?;
         self.sizing_audit = Some(audit);
         Ok(())

@@ -25,8 +25,8 @@ pub use plugin_registry::{
 };
 pub use semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 pub use sized_strategy::{
-    CapitalFractionSizedStrategy, SizedEntryRecord, SizingAudit, SizingAuditHandle,
-    SizingRefusalRecord,
+    capital_fraction_semantic_fingerprint, CapitalFractionSizedStrategy, SizedEntryRecord,
+    SizingAudit, SizingAuditHandle, SizingRefusalRecord,
 };
 pub use sizing::{
     parse_positive_qty, resolve_capital_fraction_target, CapitalFractionRefusal,

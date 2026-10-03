@@ -33,6 +33,27 @@ use crate::{Strategy, StrategyContext, StrategySpec};
 const WRAPPER_NAME: &str = "capital_fraction_sized_strategy";
 const WRAPPER_VERSION: &str = "v1";
 
+/// The one canonical semantic identity of a capital-fraction-wrapped strategy.
+/// Backtest, Research registration and Paper/runtime resolution all derive the
+/// wrapped fingerprint through this function; it takes no market-result value.
+pub fn capital_fraction_semantic_fingerprint(
+    inner_semantic_fingerprint: &str,
+    allocation_fraction_bps: i64,
+    initial_allocated_capital_micros: i64,
+    caps: &TargetSizing,
+) -> String {
+    let mut b =
+        SemanticIdentityBuilder::new(SEMANTIC_IDENTITY_SCHEMA_V1, WRAPPER_NAME, WRAPPER_VERSION);
+    b.push_str(inner_semantic_fingerprint)
+        .push_str(crate::sizing::SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1)
+        .push_i64(allocation_fraction_bps)
+        .push_i64(initial_allocated_capital_micros)
+        .push_str(&format!("asset_class:{:?}", caps.asset_class()))
+        .push_opt_i64(caps.max_target_qty().map(|q| q.raw()))
+        .push_opt_i64(caps.max_notional_usd());
+    b.finish()
+}
+
 /// One resolved flat->long entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SizedEntryRecord {
@@ -114,19 +135,12 @@ impl Strategy for CapitalFractionSizedStrategy {
     }
 
     fn semantic_fingerprint(&self) -> String {
-        let mut b = SemanticIdentityBuilder::new(
-            SEMANTIC_IDENTITY_SCHEMA_V1,
-            WRAPPER_NAME,
-            WRAPPER_VERSION,
-        );
-        b.push_str(&self.inner.semantic_fingerprint())
-            .push_str(crate::sizing::SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1)
-            .push_i64(self.allocation_fraction_bps)
-            .push_i64(self.initial_allocated_capital_micros)
-            .push_str(&format!("asset_class:{:?}", self.caps.asset_class()))
-            .push_opt_i64(self.caps.max_target_qty().map(|q| q.raw()))
-            .push_opt_i64(self.caps.max_notional_usd());
-        b.finish()
+        capital_fraction_semantic_fingerprint(
+            &self.inner.semantic_fingerprint(),
+            self.allocation_fraction_bps,
+            self.initial_allocated_capital_micros,
+            &self.caps,
+        )
     }
 
     fn empty_output_is_noop(&self) -> bool {

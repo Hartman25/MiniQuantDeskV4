@@ -12,7 +12,7 @@ use commands::{
         run_finalize_p7a_p7b_replay_stress, run_finalize_robustness_sensitivity,
         run_native_fingerprint, run_native_signals, run_regime_detect, run_review_scan,
         run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
-        IntegrityCalendarArg, ScanConfigFlags,
+        IntegrityCalendarArg, NativeBridgeSizingArgs, ScanConfigFlags,
     },
     daemon::{daemon_arm, daemon_clear_halted_run, daemon_disarm, daemon_halt, daemon_status},
     load_payload,
@@ -831,6 +831,29 @@ enum BacktestCmd {
         /// Output directory for the stream and its meta.
         #[arg(long)]
         out_dir: String,
+
+        /// `fixed_initial_capital_fraction_v1` emits the policy-resolved
+        /// absolute targets the canonical Backtest executes. Omitted = the
+        /// historical fixed-quantity bridge.
+        #[arg(long)]
+        sizing_policy: Option<String>,
+
+        /// Capital-fraction policy only: integer bps (1..=10000). No default.
+        #[arg(long)]
+        allocation_fraction_bps: Option<i64>,
+
+        /// Capital-fraction policy only: explicit immutable initial capital in
+        /// micros. No default.
+        #[arg(long)]
+        initial_cash_micros: Option<i64>,
+
+        /// Capital-fraction policy only: optional whole-share cap.
+        #[arg(long)]
+        max_target_qty: Option<i64>,
+
+        /// Capital-fraction policy only: optional whole-USD notional cap.
+        #[arg(long)]
+        max_position_notional_usd: Option<i64>,
     },
 
     /// Print a native strategy's semantic identity (fingerprint, timeframe,
@@ -844,6 +867,27 @@ enum BacktestCmd {
         /// Symbol the strategy trades.
         #[arg(long)]
         symbol: String,
+
+        /// Capital-fraction policy: prints the wrapper identity Backtest and
+        /// Promotion use. Omitted = the historical fixed-quantity identity.
+        #[arg(long)]
+        sizing_policy: Option<String>,
+
+        /// Capital-fraction policy only: integer bps (1..=10000). No default.
+        #[arg(long)]
+        allocation_fraction_bps: Option<i64>,
+
+        /// Capital-fraction policy only: explicit initial capital in micros.
+        #[arg(long)]
+        initial_cash_micros: Option<i64>,
+
+        /// Capital-fraction policy only: optional whole-share cap.
+        #[arg(long)]
+        max_target_qty: Option<i64>,
+
+        /// Capital-fraction policy only: optional whole-USD notional cap.
+        #[arg(long)]
+        max_position_notional_usd: Option<i64>,
     },
 
     /// W06-P9-CANONICAL-RESEARCH-REPLAY-CLI-01: produce a REAL canonical
@@ -1962,11 +2006,47 @@ async fn run_cli() -> Result<()> {
                 symbol,
                 timeframe_secs,
                 out_dir,
+                sizing_policy,
+                allocation_fraction_bps,
+                initial_cash_micros,
+                max_target_qty,
+                max_position_notional_usd,
             } => {
-                run_native_signals(bars_path, strategy, symbol, timeframe_secs, out_dir)?;
+                run_native_signals(
+                    bars_path,
+                    strategy,
+                    symbol,
+                    timeframe_secs,
+                    out_dir,
+                    NativeBridgeSizingArgs {
+                        sizing_policy,
+                        allocation_fraction_bps,
+                        initial_cash_micros,
+                        max_target_qty,
+                        max_position_notional_usd,
+                    },
+                )?;
             }
-            BacktestCmd::NativeFingerprint { strategy, symbol } => {
-                run_native_fingerprint(strategy, symbol)?;
+            BacktestCmd::NativeFingerprint {
+                strategy,
+                symbol,
+                sizing_policy,
+                allocation_fraction_bps,
+                initial_cash_micros,
+                max_target_qty,
+                max_position_notional_usd,
+            } => {
+                run_native_fingerprint(
+                    strategy,
+                    symbol,
+                    NativeBridgeSizingArgs {
+                        sizing_policy,
+                        allocation_fraction_bps,
+                        initial_cash_micros,
+                        max_target_qty,
+                        max_position_notional_usd,
+                    },
+                )?;
             }
             BacktestCmd::ResearchReplay {
                 registry_db,

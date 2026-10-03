@@ -115,6 +115,9 @@ pub enum BenchmarkV2Error {
     NegativeQuantityObserved { value: i64 },
     /// The stream or bar sequence was empty.
     EmptyInput,
+    /// The candidate is capital-fraction sized; its passive comparator is the
+    /// capital-fraction benchmark, never this fixed-quantity policy.
+    CapitalFractionUnsupported,
     /// The benchmark's own engine run failed.
     Backtest(BacktestError),
 }
@@ -134,6 +137,10 @@ impl fmt::Display for BenchmarkV2Error {
                 "native signal stream emitted a negative (short) target quantity ({value}) -- unsupported by {BENCHMARK_V2_POLICY_ID}"
             ),
             Self::EmptyInput => write!(f, "empty native signal stream or bar sequence"),
+            Self::CapitalFractionUnsupported => write!(
+                f,
+                "{BENCHMARK_V2_POLICY_ID} cannot benchmark a capital-fraction candidate"
+            ),
             Self::Backtest(e) => write!(f, "benchmark engine run failed: {e}"),
         }
     }
@@ -214,6 +221,9 @@ pub fn compute_benchmark_v2(
     config: BacktestConfig,
     candidate_total_return_pct: f64,
 ) -> Result<BenchmarkV2Section, BenchmarkV2Error> {
+    if stream.sizing_policy.is_capital_fraction() || config.sizing_policy.is_capital_fraction() {
+        return Err(BenchmarkV2Error::CapitalFractionUnsupported);
+    }
     if stream.rows.is_empty() || bars.is_empty() {
         return Err(BenchmarkV2Error::EmptyInput);
     }
@@ -579,6 +589,8 @@ mod tests {
             observed_max_window_len: 1,
             initial_cash_micros: cfg().initial_cash_micros,
             run_id: uuid::Uuid::nil(),
+            sizing_policy: Default::default(),
+            sizing_provenance: Default::default(),
             rows: vec![
                 NativeSignalRow {
                     decision_ts: 1,
@@ -617,6 +629,8 @@ mod tests {
             observed_max_window_len: 1,
             initial_cash_micros: cfg().initial_cash_micros,
             run_id: uuid::Uuid::nil(),
+            sizing_policy: Default::default(),
+            sizing_provenance: Default::default(),
             rows: vec![NativeSignalRow {
                 decision_ts: 1,
                 target_qty_micros: -1_000_000,
