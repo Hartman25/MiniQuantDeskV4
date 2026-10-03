@@ -27,8 +27,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::strategy_scanner::{
-    ScanBenchmarkPolicy, ScanBenchmarkV2Evidence, ScanManifest, StrategyScanCandidate,
-    StrategyScanTruthState,
+    ScanBenchmarkPolicy, ScanBenchmarkV2Evidence, ScanCapitalFractionBenchmarkEvidence,
+    ScanManifest, StrategyScanCandidate, StrategyScanTruthState,
 };
 
 // ---------------------------------------------------------------------------
@@ -125,6 +125,10 @@ pub struct StrategyScanReviewDecision {
     /// binding verified; omitted from legacy rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark_v2: Option<ScanBenchmarkV2Evidence>,
+    /// The verified capital-fraction benchmark evidence this decision's alpha
+    /// was judged against (capital-fraction review policy only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_capital_fraction: Option<ScanCapitalFractionBenchmarkEvidence>,
 }
 
 fn decision(
@@ -145,6 +149,7 @@ fn decision(
         blockers,
         warnings,
         benchmark_v2: None,
+        benchmark_capital_fraction: None,
     }
 }
 
@@ -161,6 +166,13 @@ fn verify_candidate_benchmark_v2_binding(
 ) -> Result<&ScanBenchmarkV2Evidence, (&'static str, String)> {
     const MISMATCH: &str = "benchmark_binding_mismatch";
     let m = &candidate.metrics;
+    if m.benchmark_capital_fraction.is_some() {
+        return Err((
+            "benchmark_policy_mismatch",
+            "candidate carries capital-fraction benchmark evidence; Benchmark V2 does not apply"
+                .to_string(),
+        ));
+    }
     let Some(ev) = m.benchmark_v2.as_ref() else {
         return Err((
             "missing_benchmark_v2",
@@ -212,6 +224,70 @@ fn verify_candidate_benchmark_v2_binding(
     Ok(ev)
 }
 
+/// Capital-fraction analogue of [`verify_candidate_benchmark_v2_binding`]. A
+/// candidate carrying Benchmark V2 evidence, or no evidence at all, is refused.
+fn verify_candidate_capital_fraction_binding(
+    candidate: &StrategyScanCandidate,
+) -> Result<&ScanCapitalFractionBenchmarkEvidence, (&'static str, String)> {
+    const MISMATCH: &str = "benchmark_binding_mismatch";
+    let m = &candidate.metrics;
+    if m.benchmark_v2.is_some() {
+        return Err((
+            "benchmark_policy_mismatch",
+            "candidate carries Benchmark V2 evidence; the capital-fraction benchmark is required"
+                .to_string(),
+        ));
+    }
+    let Some(ev) = m.benchmark_capital_fraction.as_ref() else {
+        return Err((
+            "missing_capital_fraction_benchmark",
+            "capital-fraction benchmark evidence is required by this review policy but absent"
+                .to_string(),
+        ));
+    };
+    ev.verify_internal().map_err(|e| (MISMATCH, e))?;
+    if ev.symbol != candidate.symbol
+        || ev.timeframe != candidate.timeframe
+        || ev.strategy_id != candidate.strategy_id
+    {
+        return Err((
+            MISMATCH,
+            "benchmark evidence strategy/symbol/timeframe differ from the candidate".to_string(),
+        ));
+    }
+    if m.total_return_pct != Some(ev.candidate_total_return_pct)
+        || m.benchmark_return_pct != Some(ev.benchmark_account_return_pct)
+        || m.alpha_pct != Some(ev.alpha_pct)
+    {
+        return Err((
+            MISMATCH,
+            "candidate return/benchmark/alpha metrics were not derived from the capital-fraction benchmark evidence"
+                .to_string(),
+        ));
+    }
+    if m.data_end_ts != Some(ev.evaluation_end_ts) {
+        return Err((
+            MISMATCH,
+            "benchmark evaluation endpoint differs from the candidate's data endpoint".to_string(),
+        ));
+    }
+    if ev.benchmark_entry_bar_index >= m.bars_used {
+        return Err((
+            MISMATCH,
+            "benchmark entry bar lies outside the evaluated bars".to_string(),
+        ));
+    }
+    if m.data_start_ts.is_none_or(|s| ev.reference_bar_end_ts < s)
+        || ev.reference_bar_end_ts > ev.evaluation_end_ts
+    {
+        return Err((
+            MISMATCH,
+            "benchmark reference bar lies outside the evaluated data window".to_string(),
+        ));
+    }
+    Ok(ev)
+}
+
 /// Classify one already-evaluated scanner candidate. Pure and deterministic:
 /// identical `(candidate, policy)` inputs always produce an identical
 /// `StrategyScanReviewDecision`.
@@ -238,6 +314,34 @@ pub fn evaluate_scan_review_decision(
         let mut d = classify_scan_candidate(candidate, policy);
         d.benchmark_v2 = candidate.metrics.benchmark_v2.clone();
         return d;
+    }
+    if policy.benchmark_policy == ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1
+        && candidate.truth_state == StrategyScanTruthState::CandidateRanked
+    {
+        if let Err((code, blocker)) = verify_candidate_capital_fraction_binding(candidate) {
+            return decision(
+                candidate,
+                StrategyScanReviewState::Blocked,
+                vec![code.to_string()],
+                vec![blocker],
+                Vec::new(),
+            );
+        }
+        let mut d = classify_scan_candidate(candidate, policy);
+        d.benchmark_capital_fraction = candidate.metrics.benchmark_capital_fraction.clone();
+        return d;
+    }
+    if candidate.metrics.benchmark_capital_fraction.is_some() {
+        return decision(
+            candidate,
+            StrategyScanReviewState::Blocked,
+            vec!["benchmark_policy_mismatch".to_string()],
+            vec![
+                "candidate carries capital-fraction benchmark evidence but the review policy is not the capital-fraction benchmark"
+                    .to_string(),
+            ],
+            Vec::new(),
+        );
     }
     classify_scan_candidate(candidate, policy)
 }

@@ -271,7 +271,6 @@ mod scanner_agreement {
     use mqk_backtest::{
         execute_strategy_scan_with_policy, load_csv_file, BacktestConfig, BacktestEngine,
         ScanBenchmarkPolicy, ScanRunRequest, SizingPolicy, StrategyScanPolicy,
-        StrategyScanTruthState,
     };
     use mqk_strategy::engines::register_builtin_strategies_with_sizing;
     use mqk_strategy::PluginRegistry;
@@ -340,7 +339,7 @@ mod scanner_agreement {
         let c = cfg(Some(2_500));
         let scan = execute_strategy_scan_with_policy(
             &req,
-            policy(&c, ScanBenchmarkPolicy::LegacyFullyInvested),
+            policy(&c, ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1),
         )
         .unwrap();
         let cand = &scan.candidates[0];
@@ -362,6 +361,13 @@ mod scanner_agreement {
             "capital-fraction Q must exceed legacy +1 share"
         );
         assert_eq!(direct.fills[0].inner.qty.raw(), q);
+        let ev = cand
+            .metrics
+            .benchmark_capital_fraction
+            .as_ref()
+            .expect("capital-fraction benchmark evidence");
+        assert_eq!(ev.candidate_target_qty_micros, q);
+        assert_eq!(ev.benchmark_target_qty_micros, q);
 
         let legacy = execute_strategy_scan_with_policy(
             &req,
@@ -380,20 +386,24 @@ mod scanner_agreement {
     }
 
     #[test]
-    fn benchmark_v2_scan_fails_closed_under_capital_fraction() {
-        let (dir, req, _) = fixture("v2");
+    fn capital_fraction_config_under_non_cf_benchmark_policy_is_refused() {
+        let (dir, req, _) = fixture("refuse");
         let c = cfg(Some(2_500));
-        let scan = execute_strategy_scan_with_policy(
+        for b in [
+            ScanBenchmarkPolicy::LegacyFullyInvested,
+            ScanBenchmarkPolicy::CapitalMatchedExactTargetV2,
+        ] {
+            assert!(execute_strategy_scan_with_policy(&req, policy(&c, b)).is_err());
+        }
+        // and the converse: CF benchmark policy over a legacy fixed-quantity config
+        assert!(execute_strategy_scan_with_policy(
             &req,
-            policy(&c, ScanBenchmarkPolicy::CapitalMatchedExactTargetV2),
+            policy(
+                &cfg(None),
+                ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1
+            ),
         )
-        .unwrap();
-        let cand = &scan.candidates[0];
-        assert!(
-            cand.metrics.benchmark_v2.is_none(),
-            "no V2 evidence under capital fraction"
-        );
-        assert_ne!(cand.truth_state, StrategyScanTruthState::CandidateRanked);
+        .is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

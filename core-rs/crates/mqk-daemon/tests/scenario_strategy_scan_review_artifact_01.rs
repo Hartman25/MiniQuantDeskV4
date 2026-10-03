@@ -50,6 +50,7 @@ fn sample_decisions(count: usize) -> Vec<StrategyScanReviewDecision> {
     let mut decisions = vec![
         StrategyScanReviewDecision {
             benchmark_v2: None,
+            benchmark_capital_fraction: None,
             symbol: "AAPL".to_string(),
             timeframe: "1D".to_string(),
             strategy_id: "swing_momentum".to_string(),
@@ -62,6 +63,7 @@ fn sample_decisions(count: usize) -> Vec<StrategyScanReviewDecision> {
         },
         StrategyScanReviewDecision {
             benchmark_v2: None,
+            benchmark_capital_fraction: None,
             symbol: "MSFT".to_string(),
             timeframe: "1D".to_string(),
             strategy_id: "swing_momentum".to_string(),
@@ -77,6 +79,7 @@ fn sample_decisions(count: usize) -> Vec<StrategyScanReviewDecision> {
     while decisions.len() < count {
         decisions.push(StrategyScanReviewDecision {
             benchmark_v2: None,
+            benchmark_capital_fraction: None,
             symbol: format!("SYM{i}"),
             timeframe: "1D".to_string(),
             strategy_id: "swing_momentum".to_string(),

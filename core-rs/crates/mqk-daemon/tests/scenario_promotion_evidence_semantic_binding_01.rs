@@ -411,6 +411,7 @@ fn shared_evidence() -> &'static SharedEvidence {
 fn write_paper_candidate_fixture(out_dir: &Path, strategy_id: &str, symbol: &str) -> PathBuf {
     let decision = StrategyScanReviewDecision {
         benchmark_v2: None,
+        benchmark_capital_fraction: None,
         symbol: symbol.to_string(),
         timeframe: "1D".to_string(),
         strategy_id: strategy_id.to_string(),

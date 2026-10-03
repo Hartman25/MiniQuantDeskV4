@@ -139,6 +139,10 @@ pub struct StrategyScanMetrics {
     /// legacy artifacts keep their exact historical bytes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark_v2: Option<ScanBenchmarkV2Evidence>,
+    /// Present only for a candidate scanned under
+    /// [`ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_capital_fraction: Option<ScanCapitalFractionBenchmarkEvidence>,
 }
 
 /// Benchmark policy a scan run (and the review of it) evaluates alpha against.
@@ -146,14 +150,18 @@ pub struct StrategyScanMetrics {
 /// `LegacyFullyInvested` is the historical raw fully-invested price return
 /// from [`crate::sweep::sweep_row_from_report`]. `CapitalMatchedExactTargetV2`
 /// is [`crate::benchmark_v2::BENCHMARK_V2_POLICY_ID`]: a candidate-quantity,
-/// candidate-capital, candidate-eligibility passive benchmark. There is no
-/// fallback between the two: a V2 scan that cannot compute Benchmark V2
+/// candidate-capital, candidate-eligibility passive benchmark for fixed-Q
+/// candidates. `CapitalFractionMatchedPassiveV1` is
+/// [`crate::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID`],
+/// the benchmark for capital-fraction-sized candidates. There is no fallback
+/// between policies: a scan that cannot compute its own policy's benchmark
 /// fails the candidate closed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScanBenchmarkPolicy {
     #[default]
     LegacyFullyInvested,
     CapitalMatchedExactTargetV2,
+    CapitalFractionMatchedPassiveV1,
 }
 
 impl ScanBenchmarkPolicy {
@@ -162,14 +170,22 @@ impl ScanBenchmarkPolicy {
         match self {
             Self::LegacyFullyInvested => None,
             Self::CapitalMatchedExactTargetV2 => Some(crate::benchmark_v2::BENCHMARK_V2_POLICY_ID),
+            Self::CapitalFractionMatchedPassiveV1 => {
+                Some(crate::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID)
+            }
         }
     }
 
-    /// Parse an explicit CLI/policy id. Only the V2 id is accepted; the
-    /// legacy policy is selected by omission, never by a string.
+    /// Parse an explicit CLI/policy id. The legacy policy is selected by
+    /// omission, never by a string.
     pub fn from_policy_id(id: &str) -> Option<Self> {
-        (id == crate::benchmark_v2::BENCHMARK_V2_POLICY_ID)
-            .then_some(Self::CapitalMatchedExactTargetV2)
+        if id == crate::benchmark_v2::BENCHMARK_V2_POLICY_ID {
+            Some(Self::CapitalMatchedExactTargetV2)
+        } else if id == crate::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID {
+            Some(Self::CapitalFractionMatchedPassiveV1)
+        } else {
+            None
+        }
     }
 
     /// Resolve a manifest-recorded policy id (`None` = legacy).
@@ -284,6 +300,152 @@ impl ScanBenchmarkV2Evidence {
             || self.benchmark_eligibility_bar_index != self.required_history_bars - 1
         {
             return bad("benchmark eligibility is not the candidate's first causally eligible bar");
+        }
+        if !self.candidate_total_return_pct.is_finite()
+            || !self.benchmark_account_return_pct.is_finite()
+            || !self.alpha_pct.is_finite()
+            || (self.candidate_total_return_pct
+                - self.benchmark_account_return_pct
+                - self.alpha_pct)
+                .abs()
+                > 1e-9
+        {
+            return bad("alpha_pct is not candidate return minus benchmark return");
+        }
+        Ok(())
+    }
+}
+
+/// Provenance of one capital-fraction-matched passive benchmark evaluation.
+/// Binds the candidate's policy-resolved entry (capital, fraction, budget,
+/// causal reference, quantity) and the benchmark run to one data window,
+/// execution model and cost basis, so substitution of any element is detectable.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScanCapitalFractionBenchmarkEvidence {
+    pub policy_id: String,
+    pub strategy_id: String,
+    pub strategy_semantic_fingerprint: String,
+    pub symbol: String,
+    pub timeframe: String,
+    pub candidate_run_id: String,
+    pub candidate_config_id: String,
+    /// `config_id` of the candidate config with only the sizing policy swapped
+    /// to fixed-quantity: the identity the benchmark run must share.
+    pub candidate_cost_basis_config_id: String,
+    pub sizing_policy_id: String,
+    pub allocation_fraction_bps: i64,
+    pub initial_allocated_capital_micros: i64,
+    pub position_budget_micros: i64,
+    pub reference_bar_end_ts: i64,
+    pub reference_price_micros: i64,
+    pub candidate_target_qty_micros: i64,
+    pub candidate_initial_cash_micros: i64,
+    pub candidate_execution_model_id: String,
+    pub candidate_total_return_pct: f64,
+    pub benchmark_run_id: String,
+    pub benchmark_config_id: String,
+    pub benchmark_target_qty_micros: i64,
+    pub benchmark_entry_bar_index: usize,
+    pub benchmark_initial_cash_micros: i64,
+    pub benchmark_execution_model_id: String,
+    pub benchmark_account_return_pct: f64,
+    pub alpha_pct: f64,
+    pub input_data_hash: String,
+    pub evaluation_end_ts: i64,
+    /// INFORMATIONAL ONLY: never an input to alpha or any review decision.
+    pub legacy_buy_and_hold_return_pct: Option<f64>,
+}
+
+impl ScanCapitalFractionBenchmarkEvidence {
+    /// Self-consistency independent of any metrics row; fails closed.
+    pub fn verify_internal(&self) -> Result<(), String> {
+        let bad = |what: &str| {
+            Err(format!(
+                "capital-fraction benchmark evidence inconsistent: {what}"
+            ))
+        };
+        if self.policy_id != crate::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID
+        {
+            return bad("policy_id is not the accepted capital-fraction benchmark policy");
+        }
+        for (name, v) in [
+            ("strategy_id", &self.strategy_id),
+            (
+                "strategy_semantic_fingerprint",
+                &self.strategy_semantic_fingerprint,
+            ),
+            ("symbol", &self.symbol),
+            ("timeframe", &self.timeframe),
+            ("candidate_run_id", &self.candidate_run_id),
+            ("benchmark_run_id", &self.benchmark_run_id),
+            ("candidate_config_id", &self.candidate_config_id),
+            (
+                "candidate_cost_basis_config_id",
+                &self.candidate_cost_basis_config_id,
+            ),
+            ("benchmark_config_id", &self.benchmark_config_id),
+            (
+                "candidate_execution_model_id",
+                &self.candidate_execution_model_id,
+            ),
+            (
+                "benchmark_execution_model_id",
+                &self.benchmark_execution_model_id,
+            ),
+            ("input_data_hash", &self.input_data_hash),
+        ] {
+            if v.trim().is_empty() {
+                return bad(&format!("{name} is empty"));
+            }
+        }
+        if self.sizing_policy_id != mqk_strategy::SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1 {
+            return bad("sizing_policy_id is not the capital-fraction policy");
+        }
+        if self.candidate_run_id == self.benchmark_run_id {
+            return bad("benchmark_run_id equals candidate_run_id");
+        }
+        if uuid::Uuid::parse_str(&self.candidate_run_id).is_err()
+            || uuid::Uuid::parse_str(&self.benchmark_run_id).is_err()
+        {
+            return bad("candidate/benchmark run id is not a UUID");
+        }
+        if !(1..=mqk_strategy::ALLOCATION_FRACTION_BPS_DENOMINATOR)
+            .contains(&self.allocation_fraction_bps)
+        {
+            return bad("allocation_fraction_bps outside 1..=10000");
+        }
+        if self.initial_allocated_capital_micros <= 0
+            || self.initial_allocated_capital_micros != self.candidate_initial_cash_micros
+            || self.candidate_initial_cash_micros != self.benchmark_initial_cash_micros
+        {
+            return bad(
+                "allocated capital, candidate cash and benchmark cash differ or are not positive",
+            );
+        }
+        let expected_budget = (self.initial_allocated_capital_micros as i128
+            * self.allocation_fraction_bps as i128)
+            / mqk_strategy::ALLOCATION_FRACTION_BPS_DENOMINATOR as i128;
+        if expected_budget <= 0 || self.position_budget_micros as i128 != expected_budget {
+            return bad("position budget is not floor(capital * fraction)");
+        }
+        if self.reference_price_micros <= 0 {
+            return bad("reference price is not positive");
+        }
+        let scale = mqk_execution::QTY_MICROS_SCALE as i128;
+        let q = self.candidate_target_qty_micros as i128;
+        if q <= 0
+            || q % scale != 0
+            || q != self.benchmark_target_qty_micros as i128
+            || (q / scale) * self.reference_price_micros as i128
+                > self.position_budget_micros as i128
+        {
+            return bad("benchmark quantity differs from the candidate's resolved whole-share quantity or exceeds the budget");
+        }
+        if self.candidate_execution_model_id != self.benchmark_execution_model_id {
+            return bad("candidate and benchmark execution model differ");
+        }
+        if self.candidate_cost_basis_config_id != self.benchmark_config_id {
+            return bad("candidate and benchmark cost/capital config differ");
         }
         if !self.candidate_total_return_pct.is_finite()
             || !self.benchmark_account_return_pct.is_finite()
@@ -552,6 +714,27 @@ pub fn evaluate_scan_candidate_with_emission(
         cfg.sizing = StrategySizingConfig::default_sizing();
     }
 
+    // A capital-fraction candidate is judged only by the capital-fraction
+    // benchmark and a fixed-quantity candidate never by it; there is no
+    // cross-policy substitution in either direction.
+    if cfg.sizing_policy.is_capital_fraction()
+        != (policy.benchmark_policy == ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1)
+    {
+        return StrategyScanCandidate::skipped(
+            symbol,
+            timeframe,
+            strategy_id,
+            bars.len(),
+            StrategyScanTruthState::MetricsUnavailable,
+            StrategyScanReasonCode::BenchmarkUnavailable,
+            vec![format!(
+                "sizing policy '{}' is incompatible with benchmark policy {:?}",
+                cfg.sizing_policy.policy_id(),
+                policy.benchmark_policy.policy_id()
+            )],
+        );
+    }
+
     let mut engine = BacktestEngine::new(cfg.clone());
     if let Err(e) = engine.add_strategy(strategy) {
         return StrategyScanCandidate::skipped(
@@ -607,6 +790,7 @@ pub fn evaluate_scan_candidate_with_emission(
         data_end_ts,
         halted: row.halted,
         benchmark_v2: None,
+        benchmark_capital_fraction: None,
     };
 
     if policy.benchmark_policy == ScanBenchmarkPolicy::CapitalMatchedExactTargetV2 {
@@ -640,6 +824,40 @@ pub fn evaluate_scan_candidate_with_emission(
                     vec![format!(
                         "{} unavailable: {reason}",
                         crate::benchmark_v2::BENCHMARK_V2_POLICY_ID
+                    )],
+                );
+            }
+        }
+    }
+
+    if policy.benchmark_policy == ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1 {
+        match capital_fraction_benchmark_evidence(
+            symbol,
+            timeframe,
+            strategy_id,
+            required_secs,
+            &cfg,
+            bars,
+            &report,
+            row.buy_and_hold_return_pct,
+        ) {
+            Ok(evidence) => {
+                metrics.total_return_pct = Some(evidence.candidate_total_return_pct);
+                metrics.benchmark_return_pct = Some(evidence.benchmark_account_return_pct);
+                metrics.alpha_pct = Some(evidence.alpha_pct);
+                metrics.benchmark_capital_fraction = Some(evidence);
+            }
+            Err(reason) => {
+                return StrategyScanCandidate::skipped(
+                    symbol,
+                    timeframe,
+                    strategy_id,
+                    bars.len(),
+                    StrategyScanTruthState::MetricsUnavailable,
+                    StrategyScanReasonCode::BenchmarkUnavailable,
+                    vec![format!(
+                        "{} unavailable: {reason}",
+                        crate::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID
                     )],
                 );
             }
@@ -752,6 +970,81 @@ fn benchmark_v2_evidence(
         benchmark_target_qty_micros: bench.target_qty_micros,
         benchmark_eligibility_bar_index: bench.eligibility_bar_index,
         benchmark_eligibility_decision_ts: bench.eligibility_decision_ts,
+        benchmark_initial_cash_micros: bench.initial_cash_micros,
+        benchmark_execution_model_id: bench.execution_model_id.clone(),
+        benchmark_account_return_pct: bench.account_return_pct,
+        alpha_pct: bench.alpha_pct,
+        input_data_hash: report.input_data_hash.clone(),
+        evaluation_end_ts: bars.last().map(|b| b.end_ts).unwrap_or(0),
+        legacy_buy_and_hold_return_pct,
+    })
+}
+
+/// Compute the capital-fraction benchmark evidence for one already-run
+/// candidate. Every failure is an `Err(reason)`; the caller fails closed.
+#[allow(clippy::too_many_arguments)]
+fn capital_fraction_benchmark_evidence(
+    symbol: &str,
+    timeframe: &str,
+    strategy_id: &str,
+    timeframe_secs: i64,
+    cfg: &BacktestConfig,
+    bars: &[BacktestBar],
+    report: &crate::types::BacktestReport,
+    legacy_buy_and_hold_return_pct: Option<f64>,
+) -> Result<ScanCapitalFractionBenchmarkEvidence, String> {
+    let initial = cfg.initial_cash_micros;
+    if initial <= 0 {
+        return Err("initial_cash_micros must be positive".to_string());
+    }
+    let ending = report
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial);
+    let candidate_total_return_pct = (ending - initial) as f64 / initial as f64 * 100.0;
+
+    let bench = crate::benchmark_capital_fraction::compute_capital_fraction_benchmark(
+        report,
+        bars,
+        cfg,
+        timeframe_secs,
+        candidate_total_return_pct,
+    )
+    .map_err(|e| e.to_string())?;
+    if bench.symbol != symbol {
+        return Err(format!(
+            "benchmark symbol '{}' != candidate symbol '{symbol}'",
+            bench.symbol
+        ));
+    }
+
+    let mut cost_basis_cfg = cfg.clone();
+    cost_basis_cfg.sizing_policy = mqk_strategy::SizingPolicy::FixedQuantityV1;
+
+    Ok(ScanCapitalFractionBenchmarkEvidence {
+        policy_id: bench.policy_id.clone(),
+        strategy_id: strategy_id.to_string(),
+        strategy_semantic_fingerprint: report.strategy_semantic_fingerprint.clone(),
+        symbol: symbol.to_string(),
+        timeframe: timeframe.to_string(),
+        candidate_run_id: report.run_id.to_string(),
+        candidate_config_id: report.config_id.to_string(),
+        candidate_cost_basis_config_id: cost_basis_cfg.config_id().to_string(),
+        sizing_policy_id: bench.sizing_policy_id.clone(),
+        allocation_fraction_bps: bench.allocation_fraction_bps,
+        initial_allocated_capital_micros: bench.initial_allocated_capital_micros,
+        position_budget_micros: bench.position_budget_micros,
+        reference_bar_end_ts: bench.reference_bar_end_ts,
+        reference_price_micros: bench.reference_price_micros,
+        candidate_target_qty_micros: bench.target_qty_micros,
+        candidate_initial_cash_micros: initial,
+        candidate_execution_model_id: report.execution_model_id.clone(),
+        candidate_total_return_pct,
+        benchmark_run_id: bench.benchmark_run_id.clone(),
+        benchmark_config_id: bench.config_id.clone(),
+        benchmark_target_qty_micros: bench.target_qty_micros,
+        benchmark_entry_bar_index: bench.entry_bar_index,
         benchmark_initial_cash_micros: bench.initial_cash_micros,
         benchmark_execution_model_id: bench.execution_model_id.clone(),
         benchmark_account_return_pct: bench.account_return_pct,
@@ -1040,6 +1333,15 @@ pub fn execute_strategy_scan_with_policy(
     policy: StrategyScanPolicy,
 ) -> Result<ScanRunOutput, String> {
     let benchmark_policy = policy.benchmark_policy;
+    if policy.base_config.sizing_policy.is_capital_fraction()
+        != (benchmark_policy == ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1)
+    {
+        return Err(format!(
+            "sizing policy '{}' requires its own benchmark policy; got {:?}",
+            policy.base_config.sizing_policy.policy_id(),
+            benchmark_policy.policy_id()
+        ));
+    }
     if req.strategies.is_empty() {
         return Err("strategies must name at least one strategy_id".to_string());
     }
@@ -1122,17 +1424,6 @@ pub fn execute_strategy_scan_with_policy(
     }
 
     let scan_id = match benchmark_policy.policy_id() {
-        None if policy.base_config.sizing_policy.is_capital_fraction() => {
-            derive_scan_id_with_benchmark(
-                &req.registry_path,
-                &req.bars_root,
-                &req.timeframe,
-                &req.strategies,
-                &universe,
-                "legacy_fully_invested",
-                &policy.base_config.config_id(),
-            )
-        }
         None => derive_scan_id(
             &req.registry_path,
             &req.bars_root,

@@ -1438,6 +1438,10 @@ pub fn run_strategy_scan(
                 config_flags.v2_policy(&timeframe)?,
             )
         }
+        mqk_backtest::ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1 => Err(
+            "capital-fraction scan requires explicit sizing flags, which this command does not accept yet"
+                .to_string(),
+        ),
     }
     .map_err(|e| anyhow::anyhow!("strategy scan failed: {e}"))?;
 

@@ -8556,6 +8556,7 @@ mod explicit_multi_strategy_start_snapshot_tests {
 
         let decision = mqk_backtest::StrategyScanReviewDecision {
             benchmark_v2: None,
+            benchmark_capital_fraction: None,
             symbol: symbol.clone(),
             timeframe: "1D".to_string(),
             strategy_id: strategy_id.clone(),

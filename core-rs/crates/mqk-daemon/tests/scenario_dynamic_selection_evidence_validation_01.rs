@@ -141,6 +141,7 @@ fn write_fixture(out_dir: &Path, decisions: Vec<StrategyScanReviewDecision>) -> 
 fn paper_candidate(strategy_id: &str, symbol: &str, timeframe: &str) -> StrategyScanReviewDecision {
     StrategyScanReviewDecision {
         benchmark_v2: None,
+        benchmark_capital_fraction: None,
         symbol: symbol.to_string(),
         timeframe: timeframe.to_string(),
         strategy_id: strategy_id.to_string(),
@@ -160,6 +161,7 @@ fn paper_candidate_no_score(
 ) -> StrategyScanReviewDecision {
     StrategyScanReviewDecision {
         benchmark_v2: None,
+        benchmark_capital_fraction: None,
         symbol: symbol.to_string(),
         timeframe: timeframe.to_string(),
         strategy_id: strategy_id.to_string(),

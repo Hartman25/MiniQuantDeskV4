@@ -14,6 +14,7 @@
 //! - Risk enforcement via mqk-risk (daily loss, drawdown, PDT, reject storm)
 //! - FIFO portfolio accounting via mqk-portfolio
 
+pub mod benchmark_capital_fraction; // capital-fraction-matched passive buy-and-hold benchmark
 pub mod benchmark_v2; // capital-matched exact-target passive benchmark (Benchmark V2)
 pub mod corporate_actions; // Patch B4
 pub mod dsr_pbo_sensitivity; // P9 BKT-ROBUSTNESS-GAUNTLET-01 / PROMOTION-STRESS-AUTHORITY-REPAIR-01
@@ -86,7 +87,7 @@ pub use strategy_scanner::{
     evaluate_scan_candidate_with_emission, execute_strategy_scan,
     execute_strategy_scan_with_benchmark, execute_strategy_scan_with_policy, rank_scan_candidates,
     resolve_timeframe_secs, write_scan_artifacts, ScanBenchmarkPolicy, ScanBenchmarkV2Evidence,
-    ScanManifest, ScanRunOutput, ScanRunRequest, ScanSkipReasonCount, ScanSummary,
+    ScanCapitalFractionBenchmarkEvidence, ScanManifest, ScanRunOutput, ScanRunRequest, ScanSkipReasonCount, ScanSummary,
     StrategyScanCandidate, StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode,
     StrategyScanTruthState, DEFAULT_MIN_BARS,
 };
