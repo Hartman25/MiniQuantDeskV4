@@ -316,7 +316,7 @@ fn oracle_return_pct(
 fn reentry_bars() -> Vec<BacktestBar> {
     let mut closes: Vec<i64> = (0..300).map(|i| 100_000_000 + i * 10_000).collect();
     closes.extend((0..100).map(|i| 103_000_000 - i * 830_000));
-    closes.extend(std::iter::repeat(20_000_000).take(300));
+    closes.extend(std::iter::repeat_n(20_000_000, 300));
     closes.extend((1..40).map(|i| 20_000_000 + i * 200_000));
     bars_from_closes(&closes)
 }
@@ -533,6 +533,13 @@ fn tampered_capital_fraction_evidence_is_blocked() {
     );
     let cases: Vec<(&str, Tamper)> = vec![
         ("policy_id", |e| e.policy_id = V2_ID.to_string()),
+        ("benchmark_run_id_substituted", |e| {
+            e.benchmark_run_id =
+                uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"other benchmark").to_string()
+        }),
+        ("benchmark_entry_index", |e| {
+            e.benchmark_entry_bar_index += 1
+        }),
         ("sizing_policy_id", |e| {
             e.sizing_policy_id = "fixed_quantity_v1".into()
         }),

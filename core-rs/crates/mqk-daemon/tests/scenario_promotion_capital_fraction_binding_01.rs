@@ -356,6 +356,19 @@ fn tampered_review_evidence_is_refused_field_by_field() {
                 .unwrap()
                 .position_budget_micros += 1
         }),
+        ("benchmark run id substituted", |e| {
+            e.benchmark_capital_fraction
+                .as_mut()
+                .unwrap()
+                .benchmark_run_id =
+                uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"other").to_string()
+        }),
+        ("benchmark entry index", |e| {
+            e.benchmark_capital_fraction
+                .as_mut()
+                .unwrap()
+                .benchmark_entry_bar_index += 1
+        }),
         ("candidate run id", |e| {
             e.benchmark_capital_fraction
                 .as_mut()
@@ -416,6 +429,25 @@ fn tampered_review_evidence_is_refused_field_by_field() {
         let res = promote_with_fp(&fp, &e, &report, cap);
         assert!(res.is_err(), "{name}: must be refused, got {res:?}");
     }
+}
+
+#[test]
+fn a_substituted_benchmark_run_id_is_refused_for_its_own_reason() {
+    let bars = bars();
+    let cfg = cf_cfg(BPS);
+    let (_fx, good) = cf_fixture(&cfg, &bars);
+    let report = backtest_report(&cfg, &bars);
+    let cap = cfg.initial_cash_micros;
+    let fp = fingerprint(&good);
+    promote_with_fp(&fp, &good, &report, cap).expect("control");
+    let mut e = good.clone();
+    e.benchmark_capital_fraction
+        .as_mut()
+        .unwrap()
+        .benchmark_run_id =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"another benchmark run").to_string();
+    let err = promote_with_fp(&fp, &e, &report, cap).unwrap_err();
+    assert!(err.contains("benchmark_run_id does not match"), "{err}");
 }
 
 #[test]

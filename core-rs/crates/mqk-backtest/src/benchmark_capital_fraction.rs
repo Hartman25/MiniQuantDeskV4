@@ -18,12 +18,86 @@
 use std::fmt;
 
 use mqk_execution::{QtyMicros, StrategyOutput, TargetPosition};
-use mqk_strategy::{SizingPolicy, Strategy, StrategyContext, StrategySpec};
+use mqk_strategy::{
+    SemanticIdentityBuilder, SizingPolicy, Strategy, StrategyContext, StrategySpec,
+    SEMANTIC_IDENTITY_SCHEMA_V1,
+};
+use uuid::Uuid;
 
-use crate::{BacktestBar, BacktestConfig, BacktestEngine, BacktestError, BacktestReport};
+use crate::{
+    derive_run_id_with_quantity_semantics, BacktestBar, BacktestConfig, BacktestEngine,
+    BacktestError, BacktestInstrumentEconomics, BacktestReport, QuantitySemanticsId,
+    BACKTEST_EXECUTION_MODEL_ID,
+};
 
 pub const BENCHMARK_CAPITAL_FRACTION_POLICY_ID: &str =
     "capital_fraction_matched_passive_buy_hold_v1";
+/// `StrategySpec` name of the benchmark strategy (part of its run identity).
+pub const BENCHMARK_CAPITAL_FRACTION_STRATEGY_NAME: &str =
+    "benchmark_capital_fraction_passive_buy_hold";
+const BENCHMARK_BEHAVIOR_VERSION: &str = "v1";
+
+/// The benchmark strategy's semantic identity: every behavior-bearing input
+/// (policy/version, symbol, timeframe, exact target quantity, and the causal
+/// entry: the reference bar's `end_ts` plus the positional index at which the
+/// strategy starts holding). No result value participates. Without this the
+/// default spec-only fingerprint would let two economically different passive
+/// executions share one canonical benchmark `run_id`.
+pub fn capital_fraction_benchmark_semantic_fingerprint(
+    symbol: &str,
+    timeframe_secs: i64,
+    target_qty_micros: i64,
+    entry_reference_bar_end_ts: i64,
+    entry_bar_index: usize,
+) -> String {
+    let mut b = SemanticIdentityBuilder::new(
+        SEMANTIC_IDENTITY_SCHEMA_V1,
+        BENCHMARK_CAPITAL_FRACTION_STRATEGY_NAME,
+        BENCHMARK_BEHAVIOR_VERSION,
+    );
+    b.push_str(BENCHMARK_CAPITAL_FRACTION_POLICY_ID)
+        .push_str(symbol)
+        .push_i64(timeframe_secs)
+        .push_i64(target_qty_micros)
+        .push_i64(entry_reference_bar_end_ts)
+        .push_i64(i64::try_from(entry_bar_index).unwrap_or(i64::MAX));
+    b.finish()
+}
+
+/// Recompute the canonical benchmark `run_id` from authoritative inputs alone:
+/// the benchmark `config_id` (candidate config with only the sizing policy
+/// swapped), the data identity, the execution model and the benchmark's own
+/// behavior-bearing identity. Used by the evidence verifier so a substituted
+/// `benchmark_run_id` (or a tampered quantity/entry/timeframe) is detected.
+/// The benchmark always runs under default equity economics and whole-unit
+/// quantity semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn expected_capital_fraction_benchmark_run_id(
+    benchmark_config_id: &Uuid,
+    input_data_hash: &str,
+    execution_model_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+    target_qty_micros: i64,
+    entry_reference_bar_end_ts: i64,
+    entry_bar_index: usize,
+) -> Uuid {
+    derive_run_id_with_quantity_semantics(
+        BENCHMARK_CAPITAL_FRACTION_STRATEGY_NAME,
+        benchmark_config_id,
+        input_data_hash,
+        &BacktestInstrumentEconomics::equity(),
+        execution_model_id,
+        &capital_fraction_benchmark_semantic_fingerprint(
+            symbol,
+            timeframe_secs,
+            target_qty_micros,
+            entry_reference_bar_end_ts,
+            entry_bar_index,
+        ),
+        QuantitySemanticsId::WholeUnitsV1,
+    )
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapitalFractionBenchmarkSection {
@@ -58,6 +132,9 @@ pub enum CapitalFractionBenchmarkError {
     ReferenceBarNotFound {
         reference_bar_end_ts: i64,
     },
+    /// The engine's benchmark run id differs from the one derived from the
+    /// benchmark's declared behavior-bearing inputs.
+    RunIdentityDrift,
     Backtest(BacktestError),
 }
 
@@ -82,6 +159,10 @@ impl fmt::Display for CapitalFractionBenchmarkError {
                 f,
                 "reference bar end_ts {reference_bar_end_ts} not found in evaluated bars"
             ),
+            Self::RunIdentityDrift => write!(
+                f,
+                "benchmark run id does not match its behavior-bearing inputs"
+            ),
             Self::Backtest(e) => write!(f, "benchmark engine run failed: {e}"),
         }
     }
@@ -93,6 +174,7 @@ struct BuyHoldFromBar {
     symbol: String,
     target: QtyMicros,
     entry_bar_index: usize,
+    entry_reference_bar_end_ts: i64,
     timeframe_secs: i64,
     seen: usize,
 }
@@ -100,8 +182,18 @@ struct BuyHoldFromBar {
 impl Strategy for BuyHoldFromBar {
     fn spec(&self) -> StrategySpec {
         StrategySpec::new(
-            "benchmark_capital_fraction_passive_buy_hold",
+            BENCHMARK_CAPITAL_FRACTION_STRATEGY_NAME,
             self.timeframe_secs,
+        )
+    }
+
+    fn semantic_fingerprint(&self) -> String {
+        capital_fraction_benchmark_semantic_fingerprint(
+            &self.symbol,
+            self.timeframe_secs,
+            self.target.raw(),
+            self.entry_reference_bar_end_ts,
+            self.entry_bar_index,
         )
     }
 
@@ -185,6 +277,7 @@ pub fn compute_capital_fraction_benchmark(
         symbol: first.symbol.clone(),
         target: QtyMicros::new(first.resolved_target_qty_micros),
         entry_bar_index,
+        entry_reference_bar_end_ts: first.reference_bar_end_ts,
         timeframe_secs,
         seen: 0,
     };
@@ -195,6 +288,21 @@ pub fn compute_capital_fraction_benchmark(
     let report = engine
         .run(bars)
         .map_err(CapitalFractionBenchmarkError::Backtest)?;
+    if report.execution_model_id != BACKTEST_EXECUTION_MODEL_ID
+        || report.run_id
+            != expected_capital_fraction_benchmark_run_id(
+                &report.config_id,
+                &report.input_data_hash,
+                &report.execution_model_id,
+                &first.symbol,
+                timeframe_secs,
+                first.resolved_target_qty_micros,
+                first.reference_bar_end_ts,
+                entry_bar_index,
+            )
+    {
+        return Err(CapitalFractionBenchmarkError::RunIdentityDrift);
+    }
 
     let ending = report
         .equity_curve

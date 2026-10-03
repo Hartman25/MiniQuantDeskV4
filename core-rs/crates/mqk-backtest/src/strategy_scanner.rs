@@ -458,6 +458,34 @@ impl ScanCapitalFractionBenchmarkEvidence {
         {
             return bad("alpha_pct is not candidate return minus benchmark return");
         }
+        // The benchmark run id is recomputed from the benchmark's own
+        // behavior-bearing inputs (exact quantity and causal entry included), so
+        // a substituted run id, or a quantity/entry/timeframe that differs from
+        // the run that produced it, is refused.
+        let (Some(timeframe_secs), Ok(config_id)) = (
+            resolve_timeframe_secs(&self.timeframe),
+            uuid::Uuid::parse_str(&self.benchmark_config_id),
+        ) else {
+            return bad(
+                "benchmark timeframe or config id cannot be resolved to recompute the run id",
+            );
+        };
+        let expected =
+            crate::benchmark_capital_fraction::expected_capital_fraction_benchmark_run_id(
+                &config_id,
+                &self.input_data_hash,
+                &self.benchmark_execution_model_id,
+                &self.symbol,
+                timeframe_secs,
+                self.benchmark_target_qty_micros,
+                self.reference_bar_end_ts,
+                self.benchmark_entry_bar_index,
+            );
+        if uuid::Uuid::parse_str(&self.benchmark_run_id).ok() != Some(expected) {
+            return bad(
+                "benchmark_run_id does not match the run identity derived from the benchmark's quantity, entry and inputs",
+            );
+        }
         Ok(())
     }
 }
