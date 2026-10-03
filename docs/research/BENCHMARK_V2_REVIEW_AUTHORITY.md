@@ -94,3 +94,10 @@ classifier) Research trials are outside this binding.
 * Mutation proof: benchmark costs removed, alpha fallback to legacy, silent
   degrade without emission instance, skipped capital / data-identity /
   fingerprint / policy checks in promotion — each fails the named tests.
+
+## Capital-fraction candidates
+
+Benchmark V2 is the fixed-quantity benchmark and is not mutated. A candidate
+sized by `fixed_initial_capital_fraction_v1` is reviewed against
+`capital_fraction_matched_passive_buy_hold_v1` instead; the two are never
+substituted for each other. See `NATIVE_SIZING_V1_CONTRACT.md`.

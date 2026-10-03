@@ -55,6 +55,10 @@ GAP_TOLERANCE_BARS = 3
 INTEGRITY_ARGS = ["--integrity-calendar", "us-equity-regular", "--integrity-stale-threshold-ticks", "259200",
                   "--integrity-gap-tolerance-bars", str(GAP_TOLERANCE_BARS)]
 EXACT_TARGET_DIRECTION_POLICY = "native_exact_target_qty_v1"
+SIZING_POLICY_CF = "fixed_initial_capital_fraction_v1"
+BENCHMARK_V2 = "capital_matched_exact_target_buy_hold_v1"
+BENCHMARK_CF = "capital_fraction_matched_passive_buy_hold_v1"
+CAPITAL_BASIS = "native_backtest.initial_cash_micros"
 
 
 def tdir(strategy: str, symbol: str) -> Path:
@@ -119,8 +123,54 @@ def _require_exact_target_protocol() -> None:
         )
 
 
+def sizing_args(decl: dict) -> list[str]:
+    """CLI sizing flags from the declaration's optional `capital_sizing` block.
+
+    Absent block = the historical fixed-quantity protocol (no flags). A present
+    block must name the capital-fraction policy, an explicit integer fraction in
+    1..=10000 bps, the immutable initial capital basis, and the matching
+    capital-fraction benchmark; anything else is refused. Caps are optional
+    positive integers.
+    """
+    block = decl.get("capital_sizing")
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        raise SystemExit("fail-closed: capital_sizing must be an object")
+    unknown = set(block) - {"policy_id", "allocation_fraction_bps", "capital_basis", "max_target_qty",
+                            "max_position_notional_usd"}
+    if unknown:
+        raise SystemExit(f"fail-closed: capital_sizing has unknown fields {sorted(unknown)}")
+    if block.get("policy_id") != SIZING_POLICY_CF:
+        raise SystemExit(f"fail-closed: capital_sizing.policy_id must be {SIZING_POLICY_CF!r}")
+    bps = block.get("allocation_fraction_bps")
+    if type(bps) is not int or not 1 <= bps <= 10_000:
+        raise SystemExit("fail-closed: capital_sizing.allocation_fraction_bps must be an explicit integer 1..=10000")
+    if block.get("capital_basis") != CAPITAL_BASIS:
+        raise SystemExit(f"fail-closed: capital_sizing.capital_basis must be {CAPITAL_BASIS!r}")
+    if decl["scanner_review"].get("benchmark_policy") != BENCHMARK_CF:
+        raise SystemExit(f"fail-closed: capital_sizing requires scanner_review.benchmark_policy {BENCHMARK_CF!r}")
+    args = ["--sizing-policy", SIZING_POLICY_CF, "--allocation-fraction-bps", str(bps)]
+    for field, flag in (("max_target_qty", "--max-target-qty"),
+                        ("max_position_notional_usd", "--max-position-notional-usd")):
+        if field in block:
+            if type(block[field]) is not int or block[field] <= 0:
+                raise SystemExit(f"fail-closed: capital_sizing.{field} must be a positive integer")
+            args += [flag, str(block[field])]
+    return args
+
+
+def _refuse_research_without_capital_fraction_bridge() -> None:
+    if DECL.get("capital_sizing") is not None:
+        raise SystemExit(
+            "fail-closed: capital_sizing is declared, but the Research economic bridge does not resolve "
+            "capital-fraction quantities yet; trials and registration stay refused (Backtest/review only)"
+        )
+
+
 def stage_check(_args) -> None:
     _require_exact_target_protocol()
+    sizing_args(DECL)
     assert len(TRIALS) == DECL["universe"]["max_trials"]
     print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()}")
 
@@ -154,6 +204,7 @@ def stage_register(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.native_signal_registry_integration import register_native_signal_trial
     _require_exact_target_protocol()
+    _refuse_research_without_capital_fraction_bridge()
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     store = ResearchResultStore(REGISTRY)
@@ -190,6 +241,7 @@ def stage_trials(_args) -> None:
         NativeSignalError, native_holdout_start, research_bars_to_backtest_csv,
         run_registered_native_signal_economic_eval)
     _require_exact_target_protocol()
+    _refuse_research_without_capital_fraction_bridge()
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     store = ResearchResultStore(REGISTRY)
     if len(store.list_trials(experiment_id=EXPERIMENT)) != len(TRIALS):
@@ -255,7 +307,7 @@ def stage_backtest(_args) -> None:
         out = _run_cli("backtest", "csv", "--bars", str(tdir(strategy, sym) / "bt_bars.csv"), "--strategy", strategy,
                        "--symbol", sym, "--timeframe-secs", str(nb["timeframe_secs"]),
                        "--initial-cash-micros", str(nb["initial_cash_micros"]),
-                       *INTEGRITY_ARGS,
+                       *INTEGRITY_ARGS, *sizing_args(DECL),
                        "--out-dir", str(RUN / "backtest" / strategy / sym))
         rec["backtest_run_id"] = _parse(out, "run_id")
         rec["execution_blocked"] = _parse(out, "execution_blocked")
@@ -311,7 +363,7 @@ def stage_review(_args) -> None:
         bench_args = ["--benchmark-policy", bench] if bench else []
         # Config flags are accepted only under the V2 policy.
         scan_cfg_args = ([*INTEGRITY_ARGS, "--initial-cash-micros", str(DECL["native_backtest"]["initial_cash_micros"])]
-                         if bench else [])
+                         + sizing_args(DECL) if bench else [])
         out = _run_cli("backtest", "scan-strategies", "--registry", str(reg_path), "--bars-root", str(base / "bars"),
                        "--timeframe", "1D", "--strategy", strategy, "--out-dir", str(base / "scans"), *bench_args, *scan_cfg_args)
         scan_dir = _parse(out, "artifacts_dir")

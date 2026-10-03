@@ -251,6 +251,18 @@ enum BacktestCmd {
         /// Optional output directory for deterministic artifacts (fills/equity/metrics).
         #[arg(long)]
         out_dir: Option<String>,
+
+        /// Explicit sizing policy: `fixed_quantity_v1` (historical default when
+        /// omitted) or `fixed_initial_capital_fraction_v1`, which sizes each
+        /// flat->long entry from the initial capital and requires
+        /// `--allocation-fraction-bps`. Captured in the run identity.
+        #[arg(long)]
+        sizing_policy: Option<String>,
+
+        /// Capital-fraction policy only: integer basis points (1..=10000) of the
+        /// initial capital allocated to one position. No default.
+        #[arg(long)]
+        allocation_fraction_bps: Option<i64>,
     },
 
     /// Run a deterministic parameter sweep over a CSV bars file.
@@ -514,11 +526,12 @@ enum BacktestCmd {
         json: bool,
 
         /// Explicit alpha benchmark policy. Omit for the legacy fully-invested
-        /// benchmark. The only accepted value is
-        /// `capital_matched_exact_target_buy_hold_v1` (Benchmark V2): alpha is
-        /// the candidate's account return minus a same-quantity, same-capital,
-        /// same-eligibility passive account return; a candidate whose
-        /// benchmark cannot be computed fails closed.
+        /// benchmark. Accepted values: `capital_matched_exact_target_buy_hold_v1`
+        /// (Benchmark V2, fixed-quantity candidates) and
+        /// `capital_fraction_matched_passive_buy_hold_v1` (capital-fraction
+        /// candidates): alpha is the candidate's account return minus a
+        /// same-quantity, same-capital passive account return; a candidate
+        /// whose benchmark cannot be computed fails closed.
         #[arg(long)]
         benchmark_policy: Option<String>,
 
@@ -545,6 +558,28 @@ enum BacktestCmd {
         /// Benchmark V2 only: integrity calendar (see `backtest csv`).
         #[arg(long, value_enum)]
         integrity_calendar: Option<IntegrityCalendarArg>,
+
+        /// Promotion-grade scans only: sizing policy (see `backtest csv
+        /// --sizing-policy`). `fixed_initial_capital_fraction_v1` requires
+        /// `--benchmark-policy capital_fraction_matched_passive_buy_hold_v1` and
+        /// an explicit `--allocation-fraction-bps`; the fixed policy requires
+        /// Benchmark V2. Must equal the canonical Backtest run's.
+        #[arg(long)]
+        sizing_policy: Option<String>,
+
+        /// Capital-fraction policy only: basis points (1..=10000). No default.
+        #[arg(long)]
+        allocation_fraction_bps: Option<i64>,
+
+        /// Capital-fraction policy only: hard cap on the resolved quantity
+        /// (reduces, never raises). Must equal the canonical Backtest run's.
+        #[arg(long)]
+        max_target_qty: Option<i64>,
+
+        /// Capital-fraction policy only: hard cap on position notional in whole
+        /// USD (reduces, never raises). Must equal the canonical Backtest run's.
+        #[arg(long)]
+        max_position_notional_usd: Option<i64>,
     },
 
     /// STRATEGY-SCANNER-PROMOTION-01C: research-review classification over
@@ -1664,6 +1699,8 @@ async fn run_cli() -> Result<()> {
                 initial_margin_micros,
                 maintenance_margin_micros,
                 out_dir,
+                sizing_policy,
+                allocation_fraction_bps,
             } => {
                 run_backtest_csv(
                     bars,
@@ -1683,6 +1720,8 @@ async fn run_cli() -> Result<()> {
                     initial_margin_micros,
                     maintenance_margin_micros,
                     out_dir,
+                    sizing_policy,
+                    allocation_fraction_bps,
                 )
                 .await?;
             }
@@ -1802,6 +1841,10 @@ async fn run_cli() -> Result<()> {
                 integrity_stale_threshold_ticks,
                 integrity_gap_tolerance_bars,
                 integrity_calendar,
+                sizing_policy,
+                allocation_fraction_bps,
+                max_target_qty,
+                max_position_notional_usd,
             } => {
                 run_strategy_scan(
                     registry,
@@ -1815,6 +1858,10 @@ async fn run_cli() -> Result<()> {
                     json,
                     benchmark_policy,
                     ScanConfigFlags {
+                        sizing_policy,
+                        allocation_fraction_bps,
+                        max_target_qty,
+                        max_position_notional_usd,
                         initial_cash_micros,
                         integrity_enabled,
                         integrity_stale_threshold_ticks,

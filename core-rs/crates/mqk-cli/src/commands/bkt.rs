@@ -51,6 +51,7 @@ fn canonical_csv_backtest_config(
     integrity_gap_tolerance_bars: u32,
     integrity_calendar: IntegrityCalendarArg,
     sizing: StrategySizingConfig,
+    sizing_policy: mqk_strategy::SizingPolicy,
 ) -> BacktestConfig {
     let mut cfg = BacktestConfig::conservative_defaults();
     cfg.timeframe_secs = timeframe_secs;
@@ -61,7 +62,42 @@ fn canonical_csv_backtest_config(
     cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
     cfg.integrity_calendar = integrity_calendar.into();
     cfg.sizing = sizing;
+    cfg.sizing_policy = sizing_policy;
     cfg
+}
+
+/// Resolve `--sizing-policy` / `--allocation-fraction-bps`. Omitted = the
+/// historical fixed-quantity policy. The capital-fraction policy has no
+/// default fraction: it requires an explicit `--allocation-fraction-bps`, and
+/// a fraction without that policy (or with the fixed policy) is refused.
+pub fn resolve_cli_sizing_policy(
+    policy: Option<&str>,
+    allocation_fraction_bps: Option<i64>,
+) -> Result<mqk_strategy::SizingPolicy> {
+    use mqk_strategy::{
+        SizingPolicy, SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1,
+        SIZING_POLICY_FIXED_QUANTITY_V1,
+    };
+    match (policy.map(str::trim), allocation_fraction_bps) {
+        (None, None) => Ok(SizingPolicy::FixedQuantityV1),
+        (None, Some(_)) => anyhow::bail!(
+            "--allocation-fraction-bps requires --sizing-policy {SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1}"
+        ),
+        (Some(SIZING_POLICY_FIXED_QUANTITY_V1), None) => Ok(SizingPolicy::FixedQuantityV1),
+        (Some(SIZING_POLICY_FIXED_QUANTITY_V1), Some(_)) => anyhow::bail!(
+            "--allocation-fraction-bps is not valid with --sizing-policy {SIZING_POLICY_FIXED_QUANTITY_V1}"
+        ),
+        (Some(SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1), None) => anyhow::bail!(
+            "--sizing-policy {SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1} requires an explicit --allocation-fraction-bps (1..=10000); there is no default"
+        ),
+        (Some(SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1), Some(bps)) => {
+            SizingPolicy::capital_fraction_v1(bps)
+                .map_err(|e| anyhow::anyhow!("invalid --allocation-fraction-bps {bps}: {e}"))
+        }
+        (Some(other), _) => anyhow::bail!(
+            "--sizing-policy '{other}' is not an accepted policy; accepted: {SIZING_POLICY_FIXED_QUANTITY_V1}, {SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1}"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +191,16 @@ pub async fn run_backtest_csv(
     initial_margin_micros: Option<i64>,
     maintenance_margin_micros: Option<i64>,
     out_dir: Option<String>,
+    sizing_policy: Option<String>,
+    allocation_fraction_bps: Option<i64>,
 ) -> Result<()> {
+    let sizing_policy =
+        resolve_cli_sizing_policy(sizing_policy.as_deref(), allocation_fraction_bps)?;
+    if sizing_policy.is_capital_fraction() && target_qty != 1 {
+        anyhow::bail!(
+            "--target-qty is the fixed-quantity policy's size and is not accepted with the capital-fraction policy"
+        );
+    }
     let bars = mqk_backtest::load_csv_file(&bars_path)
         .with_context(|| format!("load bars csv failed: {}", bars_path))?;
 
@@ -182,17 +227,30 @@ pub async fn run_backtest_csv(
             max_target_qty,
             max_position_notional_usd,
         },
+        sizing_policy,
     );
 
     // BACKTEST-CONFIG-DETERMINISM-SIZING-01: use sizing-aware registration so
-    // the strategy is constructed from cfg.sizing, not ambient env vars.
+    // the strategy is constructed from cfg.sizing, not ambient env vars. Under
+    // the capital-fraction policy the engine's wrapper applies the caps and
+    // resolves the quantity, so the inner strategy keeps its default sizing
+    // (the same construction the scanner uses).
     let mut reg = PluginRegistry::new();
+    let (reg_qty, reg_max_qty, reg_max_notional) = if sizing_policy.is_capital_fraction() {
+        (1, None, None)
+    } else {
+        (
+            cfg.sizing.target_qty,
+            cfg.sizing.max_target_qty,
+            cfg.sizing.max_position_notional_usd,
+        )
+    };
     register_builtin_strategies_with_sizing(
         &mut reg,
         &symbol,
-        cfg.sizing.target_qty,
-        cfg.sizing.max_target_qty,
-        cfg.sizing.max_position_notional_usd,
+        reg_qty,
+        reg_max_qty,
+        reg_max_notional,
     )
     .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
     let strategy_instance = reg.instantiate(&strategy).with_context(|| {
@@ -1314,8 +1372,9 @@ fn parse_benchmark_policy(raw: Option<&str>) -> Result<mqk_backtest::ScanBenchma
         None => Ok(mqk_backtest::ScanBenchmarkPolicy::LegacyFullyInvested),
         Some(id) => mqk_backtest::ScanBenchmarkPolicy::from_policy_id(id).ok_or_else(|| {
             anyhow::anyhow!(
-                "--benchmark-policy '{id}' is not an accepted policy; the only accepted value is '{}'",
-                mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID
+                "--benchmark-policy '{id}' is not an accepted policy; accepted: '{}', '{}'",
+                mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID,
+                mqk_backtest::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID
             )
         }),
     }
@@ -1325,8 +1384,12 @@ fn parse_benchmark_policy(raw: Option<&str>) -> Result<mqk_backtest::ScanBenchma
 /// under the Benchmark V2 policy, where they select the SAME `BacktestConfig`
 /// the canonical `backtest csv` evidence was run under (IR-BV2-01); the
 /// legacy scan keeps its own scanner-default config and refuses them.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ScanConfigFlags {
+    pub sizing_policy: Option<String>,
+    pub allocation_fraction_bps: Option<i64>,
+    pub max_target_qty: Option<i64>,
+    pub max_position_notional_usd: Option<i64>,
     pub initial_cash_micros: Option<i64>,
     pub integrity_enabled: Option<bool>,
     pub integrity_stale_threshold_ticks: Option<u64>,
@@ -1336,16 +1399,49 @@ pub struct ScanConfigFlags {
 
 impl ScanConfigFlags {
     fn any_set(&self) -> bool {
-        self.initial_cash_micros.is_some()
+        self.sizing_policy.is_some()
+            || self.allocation_fraction_bps.is_some()
+            || self.max_target_qty.is_some()
+            || self.max_position_notional_usd.is_some()
+            || self.initial_cash_micros.is_some()
             || self.integrity_enabled.is_some()
             || self.integrity_stale_threshold_ticks.is_some()
             || self.integrity_gap_tolerance_bars.is_some()
             || self.integrity_calendar.is_some()
     }
 
-    /// The V2 scan policy: the canonical `backtest csv` config (flag defaults
-    /// mirror `backtest csv`'s) so scanned candidates share its `config_id`.
-    fn v2_policy(&self, timeframe: &str) -> Result<mqk_backtest::StrategyScanPolicy> {
+    /// The scan policy for a promotion-grade benchmark: the canonical
+    /// `backtest csv` config (flag defaults mirror `backtest csv`'s) so scanned
+    /// candidates share its `config_id`. Sizing policy and benchmark policy
+    /// must correspond; caps are accepted only under the capital-fraction
+    /// policy (the legacy V2 scan keeps its default sizing).
+    fn promotion_policy(
+        &self,
+        timeframe: &str,
+        benchmark_policy: mqk_backtest::ScanBenchmarkPolicy,
+    ) -> Result<mqk_backtest::StrategyScanPolicy> {
+        let sizing_policy =
+            resolve_cli_sizing_policy(self.sizing_policy.as_deref(), self.allocation_fraction_bps)?;
+        let is_cf_benchmark =
+            benchmark_policy == mqk_backtest::ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1;
+        if sizing_policy.is_capital_fraction() != is_cf_benchmark {
+            anyhow::bail!(
+                "--sizing-policy {} requires --benchmark-policy {}",
+                sizing_policy.policy_id(),
+                if sizing_policy.is_capital_fraction() {
+                    mqk_backtest::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID
+                } else {
+                    mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID
+                }
+            );
+        }
+        if !sizing_policy.is_capital_fraction()
+            && (self.max_target_qty.is_some() || self.max_position_notional_usd.is_some())
+        {
+            anyhow::bail!(
+                "--max-target-qty / --max-position-notional-usd are accepted by scan-strategies only with the capital-fraction policy"
+            );
+        }
         let timeframe_secs = mqk_backtest::resolve_timeframe_secs(timeframe)
             .with_context(|| format!("unsupported --timeframe '{timeframe}'"))?;
         let initial_cash_micros = self
@@ -1366,11 +1462,16 @@ impl ScanConfigFlags {
                 .unwrap_or(CSV_DEFAULT_INTEGRITY_GAP_TOLERANCE_BARS),
             self.integrity_calendar
                 .unwrap_or(IntegrityCalendarArg::AlwaysOn),
-            StrategySizingConfig::default_sizing(),
+            StrategySizingConfig {
+                max_target_qty: self.max_target_qty,
+                max_position_notional_usd: self.max_position_notional_usd,
+                ..StrategySizingConfig::default_sizing()
+            },
+            sizing_policy,
         );
         Ok(mqk_backtest::StrategyScanPolicy {
             base_config,
-            benchmark_policy: mqk_backtest::ScanBenchmarkPolicy::CapitalMatchedExactTargetV2,
+            benchmark_policy,
             ..mqk_backtest::StrategyScanPolicy::default()
         })
     }
@@ -1401,9 +1502,10 @@ pub fn run_strategy_scan(
         && config_flags.any_set()
     {
         anyhow::bail!(
-            "--initial-cash-micros / --integrity-* select the canonical Backtest config and \
-             are accepted only with --benchmark-policy {}",
-            mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID
+            "--initial-cash-micros / --integrity-* / --sizing-policy select the canonical Backtest config and \
+             are accepted only with --benchmark-policy {} or {}",
+            mqk_backtest::benchmark_v2::BENCHMARK_V2_POLICY_ID,
+            mqk_backtest::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID
         );
     }
     let strategies: Vec<String> = strategy_ids
@@ -1432,16 +1534,13 @@ pub fn run_strategy_scan(
         mqk_backtest::ScanBenchmarkPolicy::LegacyFullyInvested => {
             mqk_backtest::execute_strategy_scan_with_benchmark(&req, benchmark_policy)
         }
-        mqk_backtest::ScanBenchmarkPolicy::CapitalMatchedExactTargetV2 => {
+        mqk_backtest::ScanBenchmarkPolicy::CapitalMatchedExactTargetV2
+        | mqk_backtest::ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1 => {
             mqk_backtest::execute_strategy_scan_with_policy(
                 &req,
-                config_flags.v2_policy(&timeframe)?,
+                config_flags.promotion_policy(&timeframe, benchmark_policy)?,
             )
         }
-        mqk_backtest::ScanBenchmarkPolicy::CapitalFractionMatchedPassiveV1 => Err(
-            "capital-fraction scan requires explicit sizing flags, which this command does not accept yet"
-                .to_string(),
-        ),
     }
     .map_err(|e| anyhow::anyhow!("strategy scan failed: {e}"))?;
 
