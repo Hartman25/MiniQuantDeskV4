@@ -92,6 +92,7 @@ pub mod reconcile_state;
 pub mod restart_intent;
 pub mod runs;
 pub mod runtime_opportunity_allocation;
+pub mod held_sizing_state;
 pub mod runtime_qty_evidence;
 pub mod runtime_strategy_conflict;
 pub mod strategy;

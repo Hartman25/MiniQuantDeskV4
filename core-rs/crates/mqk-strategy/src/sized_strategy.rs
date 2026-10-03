@@ -15,8 +15,11 @@
 //! * a refusal emits a flat target and is recorded; it never falls back to a
 //!   default quantity.
 //!
-//! The held `Q` is in-memory state, so this wrapper is not restart-recoverable
-//! and must not be used where a process restart could lose it.
+//! The held `Q` is in-memory state. Backtest/Research use [`CapitalFractionSizedStrategy::new`]
+//! (one continuous instance). A runtime that can restart must build the wrapper
+//! with [`CapitalFractionSizedStrategy::new_recoverable`] from a validated durable
+//! snapshot, and persist [`SizingStateHandle::drain_transitions`] before it acts
+//! on the bar's output; see `sizing_state`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -27,6 +30,10 @@ use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA
 use crate::sizing::{
     resolve_capital_fraction_target, CapitalFractionRefusal, CapitalFractionResolution,
     SizingPolicy, TargetSizing,
+};
+use crate::sizing_state::{
+    HeldSizingContract, HeldSizingRecord, HeldSizingRecoveryError, HeldSizingScope,
+    HeldSizingStatus, HeldSizingTransition, HELD_SIZING_STATE_VERSION,
 };
 use crate::{Strategy, StrategyContext, StrategySpec};
 
@@ -91,6 +98,34 @@ impl SizingAuditHandle {
     }
 }
 
+/// Shared queue of held-state transitions awaiting durable persistence.
+#[derive(Clone, Debug, Default)]
+pub struct SizingStateHandle(Arc<Mutex<Vec<HeldSizingTransition>>>);
+
+impl SizingStateHandle {
+    /// Take every transition produced since the last drain, in order.
+    pub fn drain_transitions(&self) -> Vec<HeldSizingTransition> {
+        self.0
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
+    }
+
+    fn push(&self, t: HeldSizingTransition) {
+        if let Ok(mut g) = self.0.lock() {
+            g.push(t);
+        }
+    }
+}
+
+/// Durable-state bookkeeping present only for a recoverable wrapper.
+struct Recoverable {
+    scope: HeldSizingScope,
+    /// Latest record per symbol (active or released): the generation floor.
+    latest: BTreeMap<String, HeldSizingRecord>,
+    state: SizingStateHandle,
+}
+
 pub struct CapitalFractionSizedStrategy {
     inner: Box<dyn Strategy>,
     allocation_fraction_bps: i64,
@@ -98,6 +133,7 @@ pub struct CapitalFractionSizedStrategy {
     caps: TargetSizing,
     held: BTreeMap<String, QtyMicros>,
     audit: SizingAuditHandle,
+    recoverable: Option<Recoverable>,
 }
 
 impl CapitalFractionSizedStrategy {
@@ -123,9 +159,103 @@ impl CapitalFractionSizedStrategy {
                 caps,
                 held: BTreeMap::new(),
                 audit: audit.clone(),
+                recoverable: None,
             },
             audit,
         ))
+    }
+
+    /// Build a wrapper for a runtime that can restart. `snapshot` is the
+    /// durable state read for `scope` (an empty snapshot is an explicit "no
+    /// held entries"); every record is proven against the contract and one
+    /// record per symbol is required. An `Active` record restores the held
+    /// `Q` exactly; a `Released` record only raises the entry generation.
+    pub fn new_recoverable(
+        inner: Box<dyn Strategy>,
+        policy: SizingPolicy,
+        initial_allocated_capital_micros: i64,
+        caps: TargetSizing,
+        scope: HeldSizingScope,
+        snapshot: Vec<HeldSizingRecord>,
+    ) -> Result<(Self, SizingAuditHandle, SizingStateHandle), HeldSizingRecoveryError> {
+        let (mut wrapper, audit) = Self::new(inner, policy, initial_allocated_capital_micros, caps)
+            .map_err(|_| HeldSizingRecoveryError::InvalidContract {
+                reason: "policy is not a valid capital-fraction policy",
+            })?;
+        let contract = HeldSizingContract {
+            scope: scope.clone(),
+            allocation_fraction_bps: wrapper.allocation_fraction_bps,
+            initial_allocated_capital_micros,
+            caps,
+        };
+        contract.validate_scope()?;
+        let mut latest: BTreeMap<String, HeldSizingRecord> = BTreeMap::new();
+        for record in snapshot {
+            contract.validate_record(&record)?;
+            if latest.contains_key(&record.symbol) {
+                return Err(HeldSizingRecoveryError::DuplicateSymbol {
+                    symbol: record.symbol,
+                });
+            }
+            if record.status == HeldSizingStatus::Active {
+                wrapper.held.insert(
+                    record.symbol.clone(),
+                    QtyMicros::new(record.resolved_target_qty_micros),
+                );
+            }
+            latest.insert(record.symbol.clone(), record);
+        }
+        let state = SizingStateHandle::default();
+        wrapper.recoverable = Some(Recoverable {
+            scope,
+            latest,
+            state: state.clone(),
+        });
+        Ok((wrapper, audit, state))
+    }
+
+    fn note_entry(&mut self, symbol: &str, end_ts: i64, r: &CapitalFractionResolution) {
+        let (bps, caps) = (self.allocation_fraction_bps, self.caps);
+        let Some(rec) = self.recoverable.as_mut() else {
+            return;
+        };
+        let generation = rec
+            .latest
+            .get(symbol)
+            .map(|l| l.entry_generation)
+            .unwrap_or(0)
+            + 1;
+        let record = HeldSizingRecord {
+            deployment_id: rec.scope.deployment_id.clone(),
+            strategy_id: rec.scope.strategy_id.clone(),
+            symbol: symbol.to_string(),
+            state_version: HELD_SIZING_STATE_VERSION,
+            entry_generation: generation,
+            status: HeldSizingStatus::Active,
+            policy_id: crate::sizing::SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1.to_string(),
+            allocation_fraction_bps: bps,
+            initial_allocated_capital_micros: r.initial_allocated_capital_micros,
+            max_target_qty_micros: caps.max_target_qty().map(|q| q.raw()),
+            max_notional_usd: caps.max_notional_usd(),
+            resolved_target_qty_micros: r.resolved_target_qty.raw(),
+            reference_bar_end_ts: end_ts,
+            reference_price_micros: r.causal_reference_price_micros,
+        };
+        rec.latest.insert(symbol.to_string(), record.clone());
+        rec.state.push(HeldSizingTransition::Entered(record));
+    }
+
+    fn note_release(&mut self, symbol: &str) {
+        let Some(rec) = self.recoverable.as_mut() else {
+            return;
+        };
+        if let Some(latest) = rec.latest.get_mut(symbol) {
+            if latest.status == HeldSizingStatus::Active {
+                latest.status = HeldSizingStatus::Released;
+                rec.state
+                    .push(HeldSizingTransition::Released(latest.clone()));
+            }
+        }
     }
 }
 
@@ -184,6 +314,7 @@ impl Strategy for CapitalFractionSizedStrategy {
                 Ok((end_ts, resolution)) => {
                     let q = resolution.resolved_target_qty;
                     self.held.insert(t.symbol.clone(), q);
+                    self.note_entry(&t.symbol, end_ts, &resolution);
                     still_long.push(t.symbol.clone());
                     self.audit.with(|a| {
                         a.entries.push(SizedEntryRecord {
@@ -209,7 +340,16 @@ impl Strategy for CapitalFractionSizedStrategy {
 
         // Complete-target semantics: a held symbol the inner strategy no longer
         // targets long (flat, absent, or short) is released.
-        self.held.retain(|sym, _| still_long.contains(sym));
+        let released: Vec<String> = self
+            .held
+            .keys()
+            .filter(|sym| !still_long.contains(sym))
+            .cloned()
+            .collect();
+        for sym in &released {
+            self.held.remove(sym);
+            self.note_release(sym);
+        }
         StrategyOutput { targets }
     }
 }

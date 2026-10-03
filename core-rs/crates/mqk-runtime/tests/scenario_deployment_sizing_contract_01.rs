@@ -1,10 +1,12 @@
 //! Deployment sizing contract (FixedInitialCapitalFractionV1): strict parsing,
-//! legacy identity preservation, and refusal (not activation) at registry build.
+//! legacy identity preservation, and the capital-fraction registry that only a
+//! durable-state runtime can instantiate (Paper stays inactive).
 
 use mqk_runtime::native_strategy::{
-    build_plugin_registry_from_inputs, resolve_deployment_sizing_contract, StrategyBootstrapInputs,
+    build_plugin_registry_from_inputs, resolve_deployment_sizing_contract, NativeStrategyBootstrap,
+    StrategyBootstrapInputs,
 };
-use mqk_strategy::SizingPolicy;
+use mqk_strategy::{RegistryError, RestartRecovery, SizingPolicy};
 
 const CF: &str = "fixed_initial_capital_fraction_v1";
 
@@ -81,7 +83,7 @@ fn malformed_partial_and_mixed_contracts_are_refused() {
 }
 
 #[test]
-fn valid_capital_fraction_contract_is_bound_but_not_activated() {
+fn valid_capital_fraction_contract_is_bound_and_requires_durable_state() {
     let i = inputs(Some(CF), Some("2500"), Some("100000000000"));
     let c = resolve_deployment_sizing_contract(&i).unwrap();
     assert_eq!(c.policy, SizingPolicy::capital_fraction_v1(2500).unwrap());
@@ -100,12 +102,39 @@ fn valid_capital_fraction_contract_is_bound_but_not_activated() {
     assert_ne!(tok("2500", "100000000000"), tok("2501", "100000000000"));
     assert_ne!(tok("2500", "100000000000"), tok("2500", "100000000001"));
 
-    // Not activated: no registry, an explicit reason, no one-share fallback.
-    let Err(err) = build_plugin_registry_from_inputs(&i) else {
-        panic!("capital-fraction contract must not build a registry")
-    };
-    assert!(err.0.contains("not activated"), "{err}");
-    assert!(err.0.contains("sz_frac_bps=2500"), "{err}");
+    // The registry builds, but every entry requires durable held-state
+    // recovery: the stateless seam refuses it with an explicit reason, and
+    // nothing falls back to a fixed or one-share quantity.
+    let registry = build_plugin_registry_from_inputs(&i).expect("capital-fraction registry builds");
+    assert!(!registry.is_empty());
+    for meta in registry.list() {
+        // An unrecoverable engine stays unrecoverable; every other engine now
+        // requires durable state. Neither is stateless-instantiable.
+        let expected = if meta.name == "pullback_mean_reversion_20_2" {
+            RestartRecovery::NotRecoverable
+        } else {
+            RestartRecovery::DurableStateRequired
+        };
+        assert_eq!(meta.restart_recovery, expected, "{}", meta.name);
+        let Err(e) = registry.instantiate_verified(&meta.name) else {
+            panic!("stateless instantiation of {} must be refused", meta.name)
+        };
+        assert!(
+            matches!(
+                e,
+                RegistryError::DurableStateRequired { .. }
+                    | RegistryError::NotRestartRecoverable { .. }
+            ),
+            "{e}"
+        );
+    }
+    let bootstrap =
+        NativeStrategyBootstrap::bootstrap(Some(&["swing_momentum".to_string()]), &registry);
+    assert!(
+        bootstrap.is_failed(),
+        "the daemon bootstrap stays fail-closed"
+    );
+    assert!(bootstrap.failure_reason().unwrap().contains("durable"));
 }
 
 #[test]

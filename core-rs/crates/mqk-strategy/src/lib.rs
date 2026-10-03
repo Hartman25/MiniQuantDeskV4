@@ -17,6 +17,7 @@ pub mod plugin_registry;
 pub mod semantic_identity;
 pub mod sized_strategy;
 pub mod sizing;
+pub mod sizing_state;
 
 pub use host::*;
 pub use plugin_registry::{
@@ -26,7 +27,11 @@ pub use plugin_registry::{
 pub use semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 pub use sized_strategy::{
     capital_fraction_semantic_fingerprint, CapitalFractionSizedStrategy, SizedEntryRecord,
-    SizingAudit, SizingAuditHandle, SizingRefusalRecord,
+    SizingAudit, SizingAuditHandle, SizingRefusalRecord, SizingStateHandle,
+};
+pub use sizing_state::{
+    HeldSizingContract, HeldSizingRecord, HeldSizingRecoveryError, HeldSizingScope,
+    HeldSizingStatus, HeldSizingTransition, HELD_SIZING_STATE_VERSION,
 };
 pub use sizing::{
     parse_positive_qty, resolve_capital_fraction_target, CapitalFractionRefusal,

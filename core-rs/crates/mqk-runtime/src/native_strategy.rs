@@ -591,24 +591,158 @@ pub fn resolve_deployment_sizing_contract(
     }
 }
 
+/// The validated capital-fraction deployment contract: the policy, the
+/// immutable initial allocated capital, and the caps (strictly parsed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapitalFractionDeploymentContract {
+    pub policy: SizingPolicy,
+    pub allocation_fraction_bps: i64,
+    pub allocated_capital_micros: i64,
+    pub caps: TargetSizing,
+}
+
+/// Resolve the capital-fraction contract from `inputs`. `Ok(None)` is the
+/// historical fixed-quantity contract. Caps are parsed STRICTLY here (a
+/// malformed cap is refused, never silently dropped as in the fixed-quantity
+/// env semantics), and only Equity is supported: asset class comes from
+/// registry-v2 truth, never from the symbol.
+pub fn resolve_capital_fraction_deployment(
+    inputs: &StrategyBootstrapInputs,
+) -> Result<Option<CapitalFractionDeploymentContract>, StrategySizingResolutionError> {
+    let contract = resolve_deployment_sizing_contract(inputs)?;
+    let (Some(bps), Some(capital)) = (
+        contract.policy.allocation_fraction_bps(),
+        contract.allocated_capital_micros,
+    ) else {
+        return Ok(None);
+    };
+    let refuse = |m: String| StrategySizingResolutionError(format!("sizing contract refused: {m}"));
+    // Asset class authority: the registry-v2 class of the symbol must be
+    // Equity. Resolve with no size/caps so only the class can decide.
+    let class_probe = StrategyBootstrapInputs {
+        raw_target_qty: None,
+        raw_max_target_qty: None,
+        raw_max_notional_usd: None,
+        ..inputs.clone()
+    };
+    let probe = resolve_strategy_target_sizing(&class_probe)?;
+    if probe.asset_class() != mqk_execution::AssetClass::Equity {
+        return Err(refuse(
+            "capital-fraction sizing supports Equity only".to_string(),
+        ));
+    }
+    let strict_cap =
+        |name: &str, raw: &Option<String>| -> Result<Option<i64>, StrategySizingResolutionError> {
+            match raw.as_deref().map(str::trim) {
+                None => Ok(None),
+                Some(v) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => {
+                    match v.parse::<i64>() {
+                        Ok(n) if n > 0 => Ok(Some(n)),
+                        _ => Err(refuse(format!("{name} must be a positive integer"))),
+                    }
+                }
+                Some(_) => Err(refuse(format!("{name} must be a positive integer"))),
+            }
+        };
+    let max_qty = strict_cap("max_target_qty", &inputs.raw_max_target_qty)?;
+    let max_notional = strict_cap("max_notional_usd", &inputs.raw_max_notional_usd)?;
+    // `target` is the fixed-quantity size; the capital-fraction wrapper
+    // ignores it, so it is pinned to the historical 1 and a supplied value is
+    // refused rather than ignored.
+    if inputs
+        .raw_target_qty
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Err(refuse(
+            "target_qty is the fixed-quantity size and is not accepted with the capital-fraction policy"
+                .to_string(),
+        ));
+    }
+    let caps = TargetSizing::equity_whole_units(1, max_qty, max_notional)
+        .map_err(|e| refuse(format!("invalid caps: {e}")))?;
+    Ok(Some(CapitalFractionDeploymentContract {
+        policy: contract.policy,
+        allocation_fraction_bps: bps,
+        allocated_capital_micros: capital,
+        caps,
+    }))
+}
+
+/// The resolved semantic identity of one native strategy under the deployment
+/// contract: the unwrapped engine fingerprint for the fixed-quantity contract,
+/// the capital-fraction WRAPPER fingerprint (the one Backtest and Promotion
+/// use; derived by the same pure function) otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDeploymentIdentity {
+    pub semantic_fingerprint: String,
+    pub timeframe_secs: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeIdentityError {
+    Sizing(StrategySizingResolutionError),
+    /// Unknown strategy, restart-unrecoverable engine, or registry
+    /// metadata/spec inconsistency.
+    UnsupportedStrategy,
+}
+
+pub fn resolve_native_deployment_identity(
+    inputs: &StrategyBootstrapInputs,
+    strategy_id: &str,
+) -> Result<NativeDeploymentIdentity, NativeIdentityError> {
+    let registry =
+        build_plugin_registry_from_inputs(inputs).map_err(NativeIdentityError::Sizing)?;
+    let cf = resolve_capital_fraction_deployment(inputs).map_err(NativeIdentityError::Sizing)?;
+    let (inner, _) = registry
+        .instantiate_for_identity(strategy_id)
+        .map_err(|_| NativeIdentityError::UnsupportedStrategy)?;
+    let timeframe_secs = inner.spec().timeframe_secs;
+    let inner_fingerprint = inner.semantic_fingerprint();
+    let semantic_fingerprint = match cf {
+        None => inner_fingerprint,
+        Some(c) => mqk_strategy::capital_fraction_semantic_fingerprint(
+            &inner_fingerprint,
+            c.allocation_fraction_bps,
+            c.allocated_capital_micros,
+            &c.caps,
+        ),
+    };
+    Ok(NativeDeploymentIdentity {
+        semantic_fingerprint,
+        timeframe_secs,
+    })
+}
+
 /// Build the production plugin registry from explicit inputs. Every asset
 /// class goes through resolved [`TargetSizing`]; a refusal yields no registry
 /// at all (fail closed).
 ///
-/// A valid capital-fraction contract is parsed and bound into identity but
-/// NOT activated: the held entry quantity lives in memory only and would
-/// re-resolve after a restart, so Paper/runtime refuses it rather than fall
-/// back to a fixed or one-share quantity.
+/// A capital-fraction contract yields a registry whose entries are the
+/// UNWRAPPED engines marked `DurableStateRequired`: the stateless seams
+/// (`instantiate_verified`: bootstrap, host pool, promotion identity) refuse
+/// them, so nothing can run one without a runtime that recovers and persists
+/// the held quantity (`capital_fraction_host`). Identity resolves through
+/// [`resolve_native_deployment_identity`]. The inner engines are registered
+/// exactly as Backtest registers them (default one-share sizing; the wrapper
+/// owns quantity and caps).
 pub fn build_plugin_registry_from_inputs(
     inputs: &StrategyBootstrapInputs,
 ) -> Result<PluginRegistry, StrategySizingResolutionError> {
-    let contract = resolve_deployment_sizing_contract(inputs)?;
-    if contract.policy.is_capital_fraction() {
-        return Err(StrategySizingResolutionError(format!(
-            "capital-fraction sizing is not activated for Paper/runtime ({}): the held entry \
-             quantity is not restart-recoverable",
-            contract.identity_token()
-        )));
+    if resolve_capital_fraction_deployment(inputs)?.is_some() {
+        let mut registry = PluginRegistry::new();
+        mqk_strategy::engines::register_builtin_strategies_with_sizing(
+            &mut registry,
+            inputs.symbol.clone(),
+            1,
+            None,
+            None,
+        )
+        .map_err(|e| {
+            StrategySizingResolutionError(format!("built-in strategy registration failed: {e}"))
+        })?;
+        return Ok(registry.with_durable_state_required());
     }
     let sizing = resolve_strategy_target_sizing(inputs)?;
     let mut registry = PluginRegistry::new();

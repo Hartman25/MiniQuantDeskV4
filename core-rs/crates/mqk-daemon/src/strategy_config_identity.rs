@@ -24,7 +24,7 @@
 //! the correct, desired failure mode this seam exists to catch — not a
 //! defect in this derivation.
 
-use mqk_runtime::native_strategy::build_daemon_plugin_registry_for_symbol;
+use mqk_runtime::native_strategy::{resolve_native_deployment_identity, StrategyBootstrapInputs};
 
 /// Bounded, truthful `config_identity_status` vocabulary persisted on
 /// `sys_strategy_promotion_transitions.config_identity_status`.
@@ -99,15 +99,20 @@ pub fn resolve_server_semantic_fingerprint(
     symbol: &str,
     timeframe_secs: i64,
 ) -> Result<String, ConfigIdentityError> {
-    let registry = build_daemon_plugin_registry_for_symbol(symbol);
-    let instance = registry
-        .instantiate_verified(strategy_id)
-        .map_err(|_| ConfigIdentityError::UnsupportedStrategyPlugin)?;
-    let registered_secs = instance.spec().timeframe_secs;
-    if registered_secs != timeframe_secs {
-        return Err(ConfigIdentityError::TimeframeMismatch { registered_secs });
+    // One derivation shared with the runtime: the unwrapped engine fingerprint
+    // under the fixed-quantity contract, the capital-fraction wrapper
+    // fingerprint (identical to canonical Backtest's) under that contract.
+    let identity = resolve_native_deployment_identity(
+        &StrategyBootstrapInputs::from_process_env_for_symbol(symbol),
+        strategy_id,
+    )
+    .map_err(|_| ConfigIdentityError::UnsupportedStrategyPlugin)?;
+    if identity.timeframe_secs != timeframe_secs {
+        return Err(ConfigIdentityError::TimeframeMismatch {
+            registered_secs: identity.timeframe_secs,
+        });
     }
-    Ok(instance.semantic_fingerprint())
+    Ok(identity.semantic_fingerprint)
 }
 
 /// Seed-safe token for [`resolve_server_semantic_fingerprint`]'s outcome —
@@ -181,6 +186,7 @@ pub fn config_identity_is_verified(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mqk_runtime::native_strategy::build_daemon_plugin_registry_for_symbol;
 
     #[test]
     fn known_identity_resolves_and_matches_direct_instantiation() {

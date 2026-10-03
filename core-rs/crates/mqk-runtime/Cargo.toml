@@ -41,6 +41,9 @@ testkit = ["mqk-execution/testkit", "mqk-db/testkit"]
 [dev-dependencies]
 tokio.workspace = true
 
+# Capital-fraction runtime/Backtest fingerprint-parity proof drives the real engine.
+mqk-backtest = { path = "../mqk-backtest" }
+
 # Test-only feature activations for mqk-runtime unit/lib tests.
 # These do not affect production builds, but they allow lib tests to call
 # explicit test escape hatches such as BrokerGateway::for_test and

@@ -7,6 +7,7 @@
 //! the broker.
 
 pub mod alpaca_inbound;
+pub mod capital_fraction_host;
 pub mod native_strategy;
 pub mod observability;
 pub mod orchestrator;

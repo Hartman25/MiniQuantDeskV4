@@ -90,6 +90,11 @@ pub enum RestartRecovery {
     BoundedHistoryReconstructible,
     /// A restart cannot prove the instance's state from a finite window.
     NotRecoverable,
+    /// Decisions are a function of the bounded window PLUS durable held state
+    /// (the capital-fraction wrapper's held quantity). Valid in production only
+    /// through a runtime that recovers and persists that state, so the
+    /// stateless [`PluginRegistry::instantiate_verified`] seam refuses it.
+    DurableStateRequired,
 }
 
 /// Static metadata for a registered strategy.
@@ -209,6 +214,9 @@ pub enum RegistryError {
     /// The strategy's state cannot be reconstructed after a restart from the
     /// bounded history the runtime loads, so no production path may run it.
     NotRestartRecoverable { name: String },
+    /// The strategy needs durable held state that the stateless production
+    /// seam cannot supply.
+    DurableStateRequired { name: String },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -230,6 +238,10 @@ impl std::fmt::Display for RegistryError {
                 "strategy '{name}': metadata timeframe {meta_secs}s != spec timeframe {spec_secs}s"
             ),
             Self::InvalidSizing(reason) => write!(f, "invalid strategy sizing: {reason}"),
+            Self::DurableStateRequired { name } => write!(
+                f,
+                "strategy '{name}' requires durable held-state recovery and cannot be instantiated through the stateless production seam"
+            ),
             Self::NotRestartRecoverable { name } => write!(
                 f,
                 "strategy '{name}' is not restart-recoverable: its state cannot be rebuilt from                  bounded history, so it is refused for production use"
@@ -368,12 +380,54 @@ impl PluginRegistry {
                 name: name.to_string(),
             })?;
 
+        match entry.meta.restart_recovery {
+            RestartRecovery::NotRecoverable => {
+                return Err(RegistryError::NotRestartRecoverable {
+                    name: name.to_string(),
+                })
+            }
+            RestartRecovery::DurableStateRequired => {
+                return Err(RegistryError::DurableStateRequired {
+                    name: name.to_string(),
+                })
+            }
+            RestartRecovery::BoundedHistoryReconstructible => {}
+        }
+
+        Self::instantiate_checked(entry, name)
+    }
+
+    /// Instantiate the (unwrapped) strategy for IDENTITY or durable wrapping:
+    /// timeframe-verified like [`Self::instantiate_verified`] and still refusing
+    /// [`RestartRecovery::NotRecoverable`], but admitting
+    /// [`RestartRecovery::DurableStateRequired`]. The caller owns the durable
+    /// state; this seam never dispatches on its own.
+    pub fn instantiate_for_identity(
+        &self,
+        name: &str,
+    ) -> Result<(Box<dyn Strategy>, RestartRecovery), RegistryError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.meta.name == name)
+            .ok_or_else(|| RegistryError::UnknownStrategy {
+                name: name.to_string(),
+            })?;
         if entry.meta.restart_recovery == RestartRecovery::NotRecoverable {
             return Err(RegistryError::NotRestartRecoverable {
                 name: name.to_string(),
             });
         }
+        Ok((
+            Self::instantiate_checked(entry, name)?,
+            entry.meta.restart_recovery,
+        ))
+    }
 
+    fn instantiate_checked(
+        entry: &RegistryEntry,
+        name: &str,
+    ) -> Result<Box<dyn Strategy>, RegistryError> {
         let strategy = (entry.factory)();
         let spec = strategy.spec();
 
@@ -386,6 +440,18 @@ impl PluginRegistry {
         }
 
         Ok(strategy)
+    }
+
+    /// Mark every [`RestartRecovery::BoundedHistoryReconstructible`] entry as
+    /// [`RestartRecovery::DurableStateRequired`]. Used when the deployment
+    /// contract wraps every strategy in the capital-fraction wrapper.
+    pub fn with_durable_state_required(mut self) -> Self {
+        for e in &mut self.entries {
+            if e.meta.restart_recovery == RestartRecovery::BoundedHistoryReconstructible {
+                e.meta.restart_recovery = RestartRecovery::DurableStateRequired;
+            }
+        }
+        self
     }
 
     /// Remove a registered strategy by name.

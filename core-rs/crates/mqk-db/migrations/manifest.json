@@ -554,6 +554,12 @@
       "path": "0090_option_lifecycle_adjustment_journal.sql",
       "status": "applied",
       "intent": "V4-M5-M8-FINAL-INDEPENDENT-REVIEW-CORRECTION-02 D2: the canonical options-lifecycle adjustment journal. sys_option_lifecycle_adjustment_journal holds one immutable row per applied lifecycle event with the SIGNED option-position delta, SIGNED underlying-share delta (+ strike basis) and the provider's SIGNED cash amount (NULL for an expiration, which invents no delivery/cash), keyed by a deterministic UUIDv5 economic_apply_id, unique per (account, event) and per consumed OPTRD, with FKs to the account authority and the event state row; a trigger makes rows immutable except a set-once baseline_subsumed_at_utc. Adds the state->journal FK for economic_apply_id. Replaces the marker-only sys_option_lifecycle_applied (0084/0087), which nothing reads as economic state any more. Idempotent (existence-guarded). Does not modify 0083-0089."
+    },
+    {
+      "id": "0091",
+      "path": "0091_strategy_held_sizing_state.sql",
+      "status": "applied",
+      "intent": "V4-M1-NATIVE-SIZING-V1-INDEPENDENT-REVIEW-CORRECTION-01 IR-SZ-02: sys_strategy_held_sizing_state, the restart-recoverable held-quantity record for FixedInitialCapitalFractionV1. One row per (deployment_id, strategy_id, symbol) stores the resolved entry quantity, reference bar/price, entry_generation, status (active/released) and every sizing-contract identity field (policy, fraction bps, immutable initial allocated capital, caps) so a restart reconstructs the exact held Q instead of re-resolving it, and a stale/foreign row is detectable. CHECK-enforced shape (whole-share positive Q, closed status vocabulary, release timestamp iff released); no SQL defaults; every value caller-supplied. Idempotent (create table if not exists). Does not modify any earlier migration."
     }
   ]
 }
