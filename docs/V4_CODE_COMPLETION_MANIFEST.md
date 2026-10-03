@@ -1245,3 +1245,9 @@ ML                                                                              
 ```
 
 Not performed: `cargo test --workspace`, GitHub CI, any Paper/Live session or order, any real broker/provider call, push. Next: independent review of `21718bcb`..HEAD, then an explicit operator push decision.
+
+## Current-Truth Addendum — Pushed Baseline (2026-10-03, `V4-README-CURRENT-TRUTH-INTEGRATION-CORRECTION-01`)
+
+Supersedes every "not pushed" / "GitHub CI not verified" note in the sections above for work at or below `92d337b67670b2858aa24c00b2768a2ca04cc212`, which is the accepted `origin/main` head. GitHub CI #621 (run `37145565796`) on that exact head: SUCCESS, 6/6 jobs green. Native Sizing V1 (`fixed_initial_capital_fraction_v1`; this manifest has no section for it) is PUSHED-VERIFIED. Authoritative record: `docs/CURRENT_MISSION.md` §-27 and ledger G2.15A.
+
+Unchanged: M1 is the CURRENT TARGET and `M1_BLOCKED`; Batch 01 `BATCH_REJECTED`; Batch 02 NOT STARTED; Promotion NONE; no active Paper strategy; holdout RESERVED / UNCONSUMED; Live DISABLED / NOT READY. M1.9 OPEN; M1.10 OPEN (10 countable sessions + 5 consecutive clean; the waiver above is code-completion accounting only). M1 is not complete.

@@ -6,9 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -27. Native Sizing V1 Pushed-Verified (2026-10-03, `V4-README-CURRENT-TRUTH-INTEGRATION-CORRECTION-01`)
+
+Current truth; supersedes the "Not pushed" lines of -26 and -25 (and of older entries for commits at or below `92d337b6`). Record: ledger G2.15A.
+
+- Native Sizing V1: **PUSHED-VERIFIED** at exact head `92d337b67670b2858aa24c00b2768a2ca04cc212` (= `origin/main`); GitHub CI #621, run `37145565796`, SUCCESS, 6/6 jobs green.
+- M1 is the CURRENT TARGET and remains `M1_BLOCKED`. Batch 01 `BATCH_REJECTED`; Batch 02 NOT STARTED; Promotion NONE; Active Paper strategy/deployment NONE / INACTIVE pending a qualified candidate; final holdout RESERVED / UNCONSUMED; Live DISABLED / NOT READY / NOT TOUCHED.
+- M1.9 OPEN. M1.10 OPEN (10 countable autonomous Paper sessions + 5 consecutive clean sessions). The historical genuine Paper trade and no-trade lifecycle evidence stays accepted/frozen. M1 is not complete.
+
 ## -26. Native Sizing V1 Independent-Review Correction (2026-10-03, `V4-M1-NATIVE-SIZING-V1-INDEPENDENT-REVIEW-CORRECTION-01`)
 
-Not pushed. Records: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`, `docs/research/NATIVE_SIZING_V1_CENSUS.md`, ledger G2.15. Supersedes the "locally complete / deferred" wording of the entry below.
+Not pushed when written (now PUSHED-VERIFIED, see -27). Records: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`, `docs/research/NATIVE_SIZING_V1_CENSUS.md`, ledger G2.15. Supersedes the "locally complete / deferred" wording of the entry below.
 
 - IR-SZ-01 Research economic bridge, IR-SZ-02 restart-recoverable runtime/deployment seam (+ runtime == canonical Backtest wrapper fingerprint) and IR-SZ-03 benchmark run-id identity are FIXED + PROVEN; daemon backtest job route and CLI routes without a bridge refuse a sizing selection.
 - Operator decision recorded as a FUTURE campaign parameter only (not a code default, not executed): next M1 hypothesis campaign sizing = `fixed_initial_capital_fraction_v1`, `allocation_fraction_bps = 1000` (10% of immutable initial capital; USD 100,000 -> USD 10,000 entry budget). Batch 02: NOT STARTED, no hypotheses/trials/results.
@@ -16,7 +24,7 @@ Not pushed. Records: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`, `docs/researc
 
 ## -25. Native Capital-Fraction Sizing V1 (2026-10-03, `V4-M1-NATIVE-SIZING-V1-01`) — superseded in part by -26
 
-Not pushed. Records: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`, `docs/research/NATIVE_SIZING_V1_CENSUS.md`.
+Not pushed when written (now PUSHED-VERIFIED, see -27). Records: `docs/research/NATIVE_SIZING_V1_CONTRACT.md`, `docs/research/NATIVE_SIZING_V1_CENSUS.md`.
 
 - Added the explicit, versioned sizing policy `fixed_initial_capital_fraction_v1` (integer `allocation_fraction_bps` 1..=10000, immutable initial capital, floor whole shares at the causal completed-bar close, refuse instead of a one-share fallback, quantity held for the position lifetime, caps reduce/refuse only) with one shared pure resolver used by Backtest, scanner and the Paper contract. The historical fixed-quantity policy and every historical identity are unchanged.
 - New benchmark `capital_fraction_matched_passive_buy_hold_v1` (Benchmark V2 untouched); scanner, review and Promotion fail closed on cross-substitution; `backtest csv`/`scan-strategies` and the batch declaration select the policy explicitly. Paper/runtime: contract only, refused at registry build (no restart-recoverable seam yet); NOT ACTIVATED.
