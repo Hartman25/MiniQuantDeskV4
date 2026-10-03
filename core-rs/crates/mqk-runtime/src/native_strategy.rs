@@ -45,8 +45,9 @@
 //! - multi-strategy fleet execution
 
 use mqk_strategy::{
-    BarStub, PluginRegistry, RecentBarsWindow, ShadowMode, StrategyBarResult, StrategyContext,
-    StrategyHost, TargetSizing,
+    BarStub, PluginRegistry, RecentBarsWindow, ShadowMode, SizingPolicy, StrategyBarResult,
+    StrategyContext, StrategyHost, TargetSizing, SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1,
+    SIZING_POLICY_FIXED_QUANTITY_V1,
 };
 
 // ---------------------------------------------------------------------------
@@ -345,6 +346,12 @@ pub fn try_build_daemon_plugin_registry_for_symbol(
 /// order-admission seam resolves the instrument asset class from).
 pub const TRADING_REGISTRY_V2_PATH_ENV: &str = "MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH";
 
+/// Deployment sizing-contract inputs. Unset = the historical fixed-quantity
+/// contract; the capital-fraction contract has no defaults.
+pub const SIZING_POLICY_ENV: &str = "MQK_STRATEGY_SIZING_POLICY";
+pub const ALLOCATION_FRACTION_BPS_ENV: &str = "MQK_STRATEGY_ALLOCATION_FRACTION_BPS";
+pub const ALLOCATED_CAPITAL_MICROS_ENV: &str = "MQK_STRATEGY_ALLOCATED_CAPITAL_MICROS";
+
 /// Raw operator inputs a production strategy registry is built from, kept as
 /// unparsed strings so sizing is resolved exactly once, by
 /// [`resolve_strategy_target_sizing`].
@@ -355,6 +362,9 @@ pub struct StrategyBootstrapInputs {
     pub raw_target_qty: Option<String>,
     pub raw_max_target_qty: Option<String>,
     pub raw_max_notional_usd: Option<String>,
+    pub raw_sizing_policy: Option<String>,
+    pub raw_allocation_fraction_bps: Option<String>,
+    pub raw_allocated_capital_micros: Option<String>,
 }
 
 impl StrategyBootstrapInputs {
@@ -368,6 +378,9 @@ impl StrategyBootstrapInputs {
             raw_target_qty: env(scalper::TARGET_QTY_ENV),
             raw_max_target_qty: env(scalper::MAX_TARGET_QTY_ENV),
             raw_max_notional_usd: env(scalper::MAX_NOTIONAL_USD_ENV),
+            raw_sizing_policy: env(SIZING_POLICY_ENV),
+            raw_allocation_fraction_bps: env(ALLOCATION_FRACTION_BPS_ENV),
+            raw_allocated_capital_micros: env(ALLOCATED_CAPITAL_MICROS_ENV),
         }
     }
 
@@ -487,12 +500,116 @@ pub fn resolve_strategy_target_sizing(
     }
 }
 
+/// Validated deployment sizing contract: the versioned policy plus, for the
+/// capital-fraction policy, the explicit immutable allocated capital.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeploymentSizingContract {
+    pub policy: SizingPolicy,
+    pub allocated_capital_micros: Option<i64>,
+}
+
+impl DeploymentSizingContract {
+    /// Deterministic identity token; EMPTY for the historical fixed-quantity
+    /// contract so legacy deployment identity is unchanged.
+    pub fn identity_token(&self) -> String {
+        match (
+            self.policy.allocation_fraction_bps(),
+            self.allocated_capital_micros,
+        ) {
+            (Some(bps), Some(cap)) => format!(
+                "sz_policy={}|sz_frac_bps={bps}|sz_capital_micros={cap}",
+                self.policy.policy_id()
+            ),
+            _ => String::new(),
+        }
+    }
+}
+
+/// Strictly resolve the deployment sizing contract. Nothing set => legacy
+/// fixed quantity. Partial, mixed, unknown, malformed or out-of-range inputs
+/// are refused; there is no default fraction, capital, or one-share fallback,
+/// and nothing is inferred from a broker balance.
+pub fn resolve_deployment_sizing_contract(
+    inputs: &StrategyBootstrapInputs,
+) -> Result<DeploymentSizingContract, StrategySizingResolutionError> {
+    let refuse = |m: String| StrategySizingResolutionError(format!("sizing contract refused: {m}"));
+    fn trim(v: &Option<String>) -> Option<&str> {
+        v.as_deref().map(str::trim)
+    }
+    let (policy, bps, cap) = (
+        trim(&inputs.raw_sizing_policy),
+        trim(&inputs.raw_allocation_fraction_bps),
+        trim(&inputs.raw_allocated_capital_micros),
+    );
+    let strict_int = |name: &str, raw: &str| -> Result<i64, StrategySizingResolutionError> {
+        if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(refuse(format!("{name} must be a plain positive integer")));
+        }
+        raw.parse::<i64>()
+            .map_err(|_| refuse(format!("{name} is out of range")))
+    };
+    match policy {
+        None if bps.is_none() && cap.is_none() => Ok(DeploymentSizingContract {
+            policy: SizingPolicy::FixedQuantityV1,
+            allocated_capital_micros: None,
+        }),
+        None => Err(refuse(
+            "capital-fraction fields are set without an explicit sizing policy".to_string(),
+        )),
+        Some(SIZING_POLICY_FIXED_QUANTITY_V1) if bps.is_none() && cap.is_none() => {
+            Ok(DeploymentSizingContract {
+                policy: SizingPolicy::FixedQuantityV1,
+                allocated_capital_micros: None,
+            })
+        }
+        Some(SIZING_POLICY_FIXED_QUANTITY_V1) => Err(refuse(
+            "fixed_quantity_v1 cannot carry capital-fraction fields".to_string(),
+        )),
+        Some(SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1) => {
+            let (Some(bps), Some(cap)) = (bps, cap) else {
+                return Err(refuse(
+                    "capital-fraction policy requires explicit allocation_fraction_bps and \
+                     allocated_capital_micros"
+                        .to_string(),
+                ));
+            };
+            let policy =
+                SizingPolicy::capital_fraction_v1(strict_int("allocation_fraction_bps", bps)?)
+                    .map_err(|e| refuse(e.reason_code().to_string()))?;
+            let cap = strict_int("allocated_capital_micros", cap)?;
+            if cap <= 0 {
+                return Err(refuse(
+                    "allocated_capital_micros must be positive".to_string(),
+                ));
+            }
+            Ok(DeploymentSizingContract {
+                policy,
+                allocated_capital_micros: Some(cap),
+            })
+        }
+        Some(other) => Err(refuse(format!("unknown sizing policy '{other}'"))),
+    }
+}
+
 /// Build the production plugin registry from explicit inputs. Every asset
 /// class goes through resolved [`TargetSizing`]; a refusal yields no registry
 /// at all (fail closed).
+///
+/// A valid capital-fraction contract is parsed and bound into identity but
+/// NOT activated: the held entry quantity lives in memory only and would
+/// re-resolve after a restart, so Paper/runtime refuses it rather than fall
+/// back to a fixed or one-share quantity.
 pub fn build_plugin_registry_from_inputs(
     inputs: &StrategyBootstrapInputs,
 ) -> Result<PluginRegistry, StrategySizingResolutionError> {
+    let contract = resolve_deployment_sizing_contract(inputs)?;
+    if contract.policy.is_capital_fraction() {
+        return Err(StrategySizingResolutionError(format!(
+            "capital-fraction sizing is not activated for Paper/runtime ({}): the held entry \
+             quantity is not restart-recoverable",
+            contract.identity_token()
+        )));
+    }
     let sizing = resolve_strategy_target_sizing(inputs)?;
     let mut registry = PluginRegistry::new();
     mqk_strategy::engines::register_builtin_strategies_with_target_sizing(

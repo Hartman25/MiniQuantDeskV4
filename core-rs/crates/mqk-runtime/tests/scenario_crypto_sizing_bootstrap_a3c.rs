@@ -72,6 +72,7 @@ fn btc_inputs(path: &str, raw_target: Option<&str>) -> StrategyBootstrapInputs {
         raw_target_qty: raw_target.map(str::to_string),
         raw_max_target_qty: None,
         raw_max_notional_usd: None,
+        ..Default::default()
     }
 }
 
@@ -252,6 +253,7 @@ fn asset_class_is_registry_truth_never_symbol_spelling() {
             raw_target_qty: None,
             raw_max_target_qty: None,
             raw_max_notional_usd: None,
+            ..Default::default()
         };
         let (mut b, _) =
             bootstrap_with_effective_binding_from_inputs(Some(&fleet("intraday_scalper")), &inputs);
@@ -288,6 +290,7 @@ fn equity_bootstrap_is_unchanged_by_the_registry_seam() {
                 raw_target_qty: raw.map(str::to_string),
                 raw_max_target_qty: None,
                 raw_max_notional_usd: None,
+                ..Default::default()
             };
             let (mut b, _) = bootstrap_with_effective_binding_from_inputs(
                 Some(&fleet("intraday_scalper")),
@@ -308,6 +311,7 @@ fn equity_bootstrap_is_unchanged_by_the_registry_seam() {
         raw_target_qty: Some("7".to_string()),
         raw_max_target_qty: Some("3".to_string()),
         raw_max_notional_usd: Some("900".to_string()),
+        ..Default::default()
     };
     let built = build_plugin_registry_from_inputs(&inputs).unwrap();
     let mut explicit = mqk_strategy::PluginRegistry::new();

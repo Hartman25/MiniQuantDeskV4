@@ -422,6 +422,9 @@ pub struct ValidatedEvidence {
     /// The matched row's verified-at-review Benchmark V2 evidence (`None`
     /// for a legacy review row).
     pub benchmark_v2: Option<mqk_backtest::ScanBenchmarkV2Evidence>,
+    /// The matched row's capital-fraction benchmark evidence (`None` unless
+    /// the review used that policy).
+    pub benchmark_capital_fraction: Option<mqk_backtest::ScanCapitalFractionBenchmarkEvidence>,
 }
 
 /// The identity of the canonical Backtest evidence Promotion consumes, as
@@ -440,6 +443,10 @@ pub struct BacktestEvidenceIdentity<'a> {
     /// The run's starting capital.
     pub initial_equity_micros: i64,
     pub input_data_hash: &'a str,
+    /// The run's recorded sizing policy (legacy runs: fixed quantity).
+    pub sizing_policy: mqk_backtest::SizingPolicy,
+    /// The run's earliest policy-resolved entry (capital-fraction runs only).
+    pub first_sizing_entry: Option<&'a mqk_backtest::SizingEntryProvenance>,
 }
 
 impl<'a> BacktestEvidenceIdentity<'a> {
@@ -454,6 +461,12 @@ impl<'a> BacktestEvidenceIdentity<'a> {
             strategy_semantic_fingerprint: report.strategy_semantic_fingerprint.as_str(),
             initial_equity_micros,
             input_data_hash: report.input_data_hash.as_str(),
+            sizing_policy: report.sizing_provenance.policy,
+            first_sizing_entry: report
+                .sizing_provenance
+                .entries
+                .iter()
+                .min_by_key(|e| e.reference_bar_end_ts),
         }
     }
 
@@ -570,6 +583,116 @@ pub fn verify_review_benchmark_v2_binding(
     Ok(())
 }
 
+/// Capital-fraction analogue of [`verify_review_benchmark_v2_binding`]: the
+/// review must have judged alpha against the capital-fraction-matched passive
+/// benchmark, and the reviewed candidate must be the canonical Backtest run
+/// (same config, run, capital, data, execution model, sizing parameters and
+/// first resolved entry). No fallback to Benchmark V2 or the legacy alpha.
+pub fn verify_review_capital_fraction_binding(
+    ev: &ValidatedEvidence,
+    exp: &BenchmarkV2PromotionExpectation<'_>,
+) -> Result<(), String> {
+    use mqk_backtest::benchmark_capital_fraction::BENCHMARK_CAPITAL_FRACTION_POLICY_ID as CF_ID;
+    let refuse = |what: String| {
+        Err(format!(
+            "capital-fraction native evidence requires a capital-fraction review ({CF_ID}): {what}"
+        ))
+    };
+    if ev.benchmark_policy_id.as_deref() != Some(CF_ID) {
+        return refuse(format!(
+            "the review artifact's benchmark policy is {:?}, not the required policy",
+            ev.benchmark_policy_id
+        ));
+    }
+    if ev.benchmark_v2.is_some() {
+        return refuse("the matched review row carries Benchmark V2 evidence".to_string());
+    }
+    let Some(b) = ev.benchmark_capital_fraction.as_ref() else {
+        return refuse(
+            "the matched review row carries no capital-fraction benchmark evidence".to_string(),
+        );
+    };
+    if let Err(e) = b.verify_internal() {
+        return refuse(e);
+    }
+    let bt = &exp.backtest;
+    let mqk_backtest::SizingPolicy::FixedInitialCapitalFractionV1 {
+        allocation_fraction_bps,
+    } = bt.sizing_policy
+    else {
+        return refuse("the canonical Backtest evidence is not capital-fraction sized".to_string());
+    };
+    if b.sizing_policy_id != bt.sizing_policy.policy_id()
+        || b.allocation_fraction_bps != allocation_fraction_bps
+    {
+        return refuse(
+            "evidence sizing policy/fraction differs from the canonical Backtest evidence's"
+                .to_string(),
+        );
+    }
+    if b.strategy_id != exp.strategy_id {
+        return refuse("evidence strategy_id differs from the promotion candidate".to_string());
+    }
+    if b.symbol.trim().to_ascii_uppercase() != exp.symbol {
+        return refuse("evidence symbol differs from the promotion candidate".to_string());
+    }
+    if scanner_timeframe_label_to_secs(&b.timeframe) != Some(exp.timeframe_secs) {
+        return refuse("evidence timeframe differs from the promotion candidate".to_string());
+    }
+    if b.strategy_semantic_fingerprint != exp.native_semantic_fingerprint
+        || b.strategy_semantic_fingerprint != bt.strategy_semantic_fingerprint
+    {
+        return refuse("evidence strategy semantic fingerprint differs".to_string());
+    }
+    if b.initial_allocated_capital_micros != bt.initial_equity_micros
+        || b.candidate_initial_cash_micros != bt.initial_equity_micros
+    {
+        return refuse("evidence capital basis differs from the Backtest evidence's".to_string());
+    }
+    if bt.input_data_hash.trim().is_empty() || b.input_data_hash != bt.input_data_hash {
+        return refuse("evidence data identity differs from the Backtest evidence's".to_string());
+    }
+    let same_id = |candidate: &str, canonical: uuid::Uuid| matches!(uuid::Uuid::parse_str(candidate), Ok(c) if !c.is_nil() && c == canonical);
+    if !same_id(&b.candidate_config_id, bt.config_id) {
+        return refuse(
+            "evidence candidate config_id differs from the canonical Backtest evidence's"
+                .to_string(),
+        );
+    }
+    if !same_id(&b.candidate_run_id, bt.run_id) {
+        return refuse(
+            "evidence candidate run_id differs from the canonical Backtest evidence's".to_string(),
+        );
+    }
+    if b.candidate_execution_model_id != bt.execution_model_id {
+        return refuse(
+            "evidence candidate execution model differs from the Backtest evidence's".to_string(),
+        );
+    }
+    let Some(first) = bt.first_sizing_entry else {
+        return refuse("the canonical Backtest evidence records no resolved entry".to_string());
+    };
+    if b.candidate_target_qty_micros != first.resolved_target_qty_micros
+        || b.reference_bar_end_ts != first.reference_bar_end_ts
+        || b.reference_price_micros != first.causal_reference_price_micros
+        || b.position_budget_micros != first.position_budget_micros
+    {
+        return refuse(
+            "evidence first entry (quantity/reference/budget) differs from the canonical Backtest evidence's"
+                .to_string(),
+        );
+    }
+    match ev.scanner_score {
+        Some(score) if (score - b.alpha_pct).abs() <= 1e-9 => {}
+        _ => {
+            return refuse(
+                "the review row's score is not the capital-fraction benchmark alpha".to_string(),
+            )
+        }
+    }
+    Ok(())
+}
+
 /// Root-bounded, content-validated read of a review artifact directory,
 /// mirroring the exact canonicalize+root-prefix pattern used by
 /// `GET /api/v1/strategy-scans/review-artifact`
@@ -667,6 +790,7 @@ pub fn validate_paper_candidate_evidence(
         warnings: matched.warnings.clone(),
         benchmark_policy_id,
         benchmark_v2: matched.benchmark_v2.clone(),
+        benchmark_capital_fraction: matched.benchmark_capital_fraction.clone(),
     })
 }
 
@@ -691,16 +815,18 @@ pub fn enforce_native_review_benchmark_binding(
                 .to_string(),
         );
     };
-    verify_review_benchmark_v2_binding(
-        ev,
-        &BenchmarkV2PromotionExpectation {
-            strategy_id,
-            symbol,
-            timeframe_secs,
-            native_semantic_fingerprint: fingerprint,
-            backtest: *backtest,
-        },
-    )
+    let expectation = BenchmarkV2PromotionExpectation {
+        strategy_id,
+        symbol,
+        timeframe_secs,
+        native_semantic_fingerprint: fingerprint,
+        backtest: *backtest,
+    };
+    if backtest.sizing_policy.is_capital_fraction() {
+        verify_review_capital_fraction_binding(ev, &expectation)
+    } else {
+        verify_review_benchmark_v2_binding(ev, &expectation)
+    }
 }
 
 /// Defect 4: bounded, single-open-handle JSON read -- see
