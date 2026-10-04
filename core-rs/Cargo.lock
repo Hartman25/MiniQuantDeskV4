@@ -1815,6 +1815,7 @@ name = "mqk-backtest"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "mqk-execution",
  "mqk-integrity",
  "mqk-isolation",
@@ -2097,8 +2098,11 @@ dependencies = [
 name = "mqk-strategy"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "chrono-tz",
  "hex",
  "mqk-execution",
+ "mqk-integrity",
  "sha2",
 ]
 

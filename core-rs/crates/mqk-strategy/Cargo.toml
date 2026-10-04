@@ -5,7 +5,13 @@ edition = "2021"
 
 [dependencies]
 mqk-execution = { path = "../mqk-execution" }
+# us_equity_regular_sessions_v1: shared daily session-date authority for calendar engines.
+mqk-integrity = { path = "../mqk-integrity" }
+chrono = { workspace = true }
 # S1: canonical semantic-identity fingerprint (deterministic SHA-256 over
 # each strategy instance's decision-affecting configuration).
 sha2 = "0.10"
 hex = "0.4"
+
+[dev-dependencies]
+chrono-tz = { workspace = true }

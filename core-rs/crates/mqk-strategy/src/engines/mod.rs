@@ -4,6 +4,7 @@ use mqk_execution::AssetClass;
 
 pub mod absolute_momentum_252;
 pub mod dual_sma_50_200_trend;
+pub mod halloween_nov_apr;
 pub mod intraday_scalper;
 pub mod mean_reversion;
 pub mod near_high_momentum_252_3pct;
@@ -11,11 +12,14 @@ pub mod pullback_mean_reversion_20_2;
 pub mod swing_momentum;
 pub mod trend_pullback_5d_4pct_hold5;
 pub mod trend_sma50;
+pub mod turn_of_month_last1_first3;
 pub mod volatility_breakout;
+mod session_calendar;
 mod window;
 
 pub use absolute_momentum_252::AbsoluteMomentum252Strategy;
 pub use dual_sma_50_200_trend::DualSma50200TrendStrategy;
+pub use halloween_nov_apr::HalloweenNovAprStrategy;
 pub use intraday_scalper::{
     compute_diagnostics as intraday_scalper_compute_diagnostics, IntradayScalperDiagnostics,
     IntradayScalperStrategy,
@@ -26,6 +30,7 @@ pub use pullback_mean_reversion_20_2::PullbackMeanReversion202Strategy;
 pub use swing_momentum::SwingMomentumStrategy;
 pub use trend_pullback_5d_4pct_hold5::TrendPullback5d4pctHold5Strategy;
 pub use trend_sma50::TrendSma50Strategy;
+pub use turn_of_month_last1_first3::TurnOfMonthLast1First3Strategy;
 pub use volatility_breakout::VolatilityBreakoutStrategy;
 
 /// IR9: the single authoritative list of every strategy identity
@@ -53,6 +58,8 @@ pub const REGISTERED_STRATEGY_IDS: &[&str] = &[
     absolute_momentum_252::NAME,
     near_high_momentum_252_3pct::NAME,
     trend_pullback_5d_4pct_hold5::NAME,
+    turn_of_month_last1_first3::NAME,
+    halloween_nov_apr::NAME,
     intraday_scalper::SHORT_NAME,
 ];
 
@@ -121,6 +128,16 @@ pub fn register_builtin_strategies(
     let tpb_symbol = symbol.clone();
     registry.register(trend_pullback_5d_4pct_hold5::meta(), move || {
         Box::new(TrendPullback5d4pctHold5Strategy::new(tpb_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let tom_symbol = symbol.clone();
+    registry.register(turn_of_month_last1_first3::meta(), move || {
+        Box::new(TurnOfMonthLast1First3Strategy::new(tom_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let hw_symbol = symbol.clone();
+    registry.register(halloween_nov_apr::meta(), move || {
+        Box::new(HalloweenNovAprStrategy::new(hw_symbol.clone())) as Box<dyn Strategy>
     })?;
 
     // SHORT-SIDE-PARALLEL-STRATEGY-DRY-RUN-01: register the short-only variant
@@ -236,6 +253,16 @@ fn register_with_sizing(
         registry.register(trend_pullback_5d_4pct_hold5::meta(), move || {
             Box::new(TrendPullback5d4pctHold5Strategy::new(tpb_symbol.clone())) as Box<dyn Strategy>
         })?;
+
+        let tom_symbol = symbol.clone();
+        registry.register(turn_of_month_last1_first3::meta(), move || {
+            Box::new(TurnOfMonthLast1First3Strategy::new(tom_symbol.clone())) as Box<dyn Strategy>
+        })?;
+
+        let hw_symbol = symbol.clone();
+        registry.register(halloween_nov_apr::meta(), move || {
+            Box::new(HalloweenNovAprStrategy::new(hw_symbol.clone())) as Box<dyn Strategy>
+        })?;
     }
 
     let scalp_symbol = symbol.clone();
@@ -285,7 +312,7 @@ mod registered_strategy_ids_tests {
     }
 
     #[test]
-    fn registered_strategy_ids_has_eleven_distinct_entries() {
+    fn registered_strategy_ids_has_thirteen_distinct_entries() {
         let mut unique = REGISTERED_STRATEGY_IDS.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -294,7 +321,7 @@ mod registered_strategy_ids_tests {
             REGISTERED_STRATEGY_IDS.len(),
             "every registered strategy identity must be distinct"
         );
-        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 11);
+        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 13);
     }
 
     /// IR-2: the production seam `instantiate_verified` must refuse any engine

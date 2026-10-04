@@ -1007,6 +1007,8 @@ mod tests {
         assert!(names.contains(&"absolute_momentum_252"));
         assert!(names.contains(&"near_high_momentum_252_3pct"));
         assert!(names.contains(&"trend_pullback_5d_4pct_hold5"));
+        assert!(names.contains(&"turn_of_month_last1_first3"));
+        assert!(names.contains(&"halloween_nov_apr"));
     }
 
     /// IR-2: a restart-unsafe stateful engine can never become an Active Paper host.
