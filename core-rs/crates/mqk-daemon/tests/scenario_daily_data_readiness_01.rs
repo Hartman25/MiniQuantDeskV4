@@ -852,6 +852,54 @@ fn ddr_32_saturday_afternoon_still_uses_friday_tail() {
     );
 }
 
+/// M1 system closure: a Sunday must never demand Sunday bars. The expected
+/// latest session is the most recent completed regular session (Friday
+/// 2026-10-02), the schedule coverage is Active, and absence of Sunday bars is
+/// not a provider outage.
+#[test]
+fn ddr_sunday_2026_10_04_requires_the_friday_session_never_sunday_bars() {
+    let provider = NyseWeekdaysProvider;
+    let now = Utc.with_ymd_and_hms(2026, 10, 4, 16, 0, 0).unwrap(); // Sunday noon ET
+    let schedule = resolve_market_session_schedule(&provider, now);
+    assert!(!schedule.is_trading_day, "Sunday is not a trading day");
+    assert_eq!(schedule.market_date, (2026, 10, 4));
+    assert_eq!(schedule.previous_trading_date, (2026, 10, 2));
+    assert_eq!(schedule.coverage_state, CalendarCoverageState::Active);
+    let friday =
+        market_calendar::resolve_market_session_schedule_for_date(&provider, (2026, 10, 2))
+            .expect("Friday's schedule must resolve");
+    assert!(friday.is_trading_day);
+    let expected =
+        expected_intraday_end_ts_window(&provider, &schedule, now.timestamp(), 300, 0, 5)
+            .expect("must resolve via Friday's tail");
+    assert_eq!(expected.len(), 5);
+    assert!(
+        expected
+            .iter()
+            .all(|&t| t >= friday.session_open_utc.timestamp()
+                && t <= friday.session_close_utc.timestamp()),
+        "every expected slot comes from Friday's session: {expected:?}"
+    );
+    // The daily expectation never includes the weekend, even late Sunday night
+    // (after the ordinary-hours "close" arithmetic of the non-trading date).
+    for at in [
+        now,
+        Utc.with_ymd_and_hms(2026, 10, 5, 3, 0, 0).unwrap(), // Sunday 23:00 ET
+    ] {
+        let sched = resolve_market_session_schedule(&provider, at);
+        assert_eq!(sched.market_date, (2026, 10, 4));
+        let daily = expected_daily_end_ts_window(&provider, &sched, at.timestamp(), 0, 3)
+            .expect("daily window resolves");
+        assert_eq!(
+            daily.last(),
+            Some(&market_calendar::midnight_utc_ts_for_date((2026, 10, 2)))
+        );
+        for weekend in [(2026, 10, 3), (2026, 10, 4)] {
+            assert!(!daily.contains(&market_calendar::midnight_utc_ts_for_date(weekend)));
+        }
+    }
+}
+
 /// Full-day exchange holiday morning: uses the prior trading session's tail.
 #[test]
 fn ddr_33_holiday_morning_uses_prior_session() {
