@@ -24,7 +24,10 @@ impl Drop for TmpDir {
 
 /// registry + one SPY 1D bars file laid out the way `scan-strategies` reads.
 fn fixture() -> (TmpDir, ScanRunRequest, std::path::PathBuf) {
-    let p = std::env::temp_dir().join(format!("mqk_scan_canon_cfg_{}", std::process::id()));
+    // Unique per fixture: tests in this binary run in parallel.
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("mqk_scan_canon_cfg_{}_{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(p.join("bars").join("1D")).unwrap();
     std::fs::write(
