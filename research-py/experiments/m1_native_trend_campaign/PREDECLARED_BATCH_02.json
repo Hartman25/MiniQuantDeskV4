@@ -1,0 +1,645 @@
+{
+  "batch_id": "m1_native_hypothesis_batch_02",
+  "mission_id": "V4-M1-NATIVE-HYPOTHESIS-BATCH-02-01",
+  "predeclared_utc_date": "2026-10-03",
+  "wave_classification": "NEW_HYPOTHESIS_BATCH_THREE_HYPOTHESES_FIXED_SYMBOL_LIST_CAPITAL_FRACTION_SIZING",
+  "run_dir": "runs/run_batch_02",
+  "declaration_selection": "run_batch.py and summarize_batch.py read this file when MQK_M1_BATCH_DECLARATION names it.",
+  "governance": {
+    "historical_batch_01_stop_field": "PREDECLARED_BATCH_01_CORRECTED.json carries no_batch_02=true. That field is HISTORICAL, governed that campaign's own stopping rule and is left unchanged.",
+    "batch_02_authority": "CURRENT_MISSION section -27 (Batch 02 NOT STARTED with the planned H1/H2/H3), the accepted Native Sizing V1 future-campaign decision, and the explicit operator authorization of controller V4-M1-NATIVE-HYPOTHESIS-BATCH-02-01.",
+    "stress_sizing_operator_correction": "The operator resolved the half-exposure stress as a recomputed 500 bps capital-fraction target quantity, not a post-sizing USD cap. An accidental UI selection of a USD 25,000 cap was voided by the operator and is not used."
+  },
+  "protocol_note": "A NEW hypothesis batch (not a reevaluation). Hypothesis != trial != attempt != evaluation slice != robustness scenario: three hypotheses, one trial per (hypothesis, symbol) = 15 trials, one disclosed selection population. The 500 bps half-exposure stress is a robustness evaluation of the SAME registered trial, never a trial.",
+  "calendar": {
+    "contract_id": "us_equity_regular_sessions_v1",
+    "definition": "A session is one official US-equity regular exchange trading date. Weekends are not sessions. Full exchange holidays/closures are not sessions. Early-close / half-day sessions ARE sessions; their shortened hours do not alter their ordinal position within the month.",
+    "coverage_start_date": "2016-01-01",
+    "coverage_end_date": "2026-12-31",
+    "coverage_rule": "Any date outside [coverage_start_date, coverage_end_date], and any next-session or month-end query that would need a date outside it, is a fail-closed refusal. Weekday arithmetic is never a fallback; a missing price row is never calendar evidence; row order of a data file is never calendar authority.",
+    "implementation_seam": "mqk-integrity (shared lower-level crate with no workspace dependencies), consumed by mqk-strategy. NOT a strategy-local calendar and NOT the 2023-2028 intraday NyseWeekdays table.",
+    "authority_basis": [
+      "NYSE published holiday schedule and observation rules (nyse.com/markets/hours-calendars) for the regular holidays and the 2026 closures",
+      "NYSE special full-day closures within the covered range: 2018-12-05 (National Day of Mourning, President George H. W. Bush) and 2025-01-09 (National Day of Mourning, President Jimmy Carter)",
+      "Juneteenth is a NYSE holiday from 2022 onward (first observed 2022-06-20)",
+      "New Year's Day falling on a Saturday is NOT observed on the preceding Friday (e.g. 2022-01-01: 2021-12-31 was a session)",
+      "Cross-checks only, never authority: the fixed provider daily-bar dates for SPY/EFA/IEF/VNQ/GLD (identical session sets, no weekend rows) and the published NYSE annual session counts"
+    ],
+    "full_closure_dates_weekdays": [
+      "2016-01-01",
+      "2016-01-18",
+      "2016-02-15",
+      "2016-03-25",
+      "2016-05-30",
+      "2016-07-04",
+      "2016-09-05",
+      "2016-11-24",
+      "2016-12-26",
+      "2017-01-02",
+      "2017-01-16",
+      "2017-02-20",
+      "2017-04-14",
+      "2017-05-29",
+      "2017-07-04",
+      "2017-09-04",
+      "2017-11-23",
+      "2017-12-25",
+      "2018-01-01",
+      "2018-01-15",
+      "2018-02-19",
+      "2018-03-30",
+      "2018-05-28",
+      "2018-07-04",
+      "2018-09-03",
+      "2018-11-22",
+      "2018-12-05",
+      "2018-12-25",
+      "2019-01-01",
+      "2019-01-21",
+      "2019-02-18",
+      "2019-04-19",
+      "2019-05-27",
+      "2019-07-04",
+      "2019-09-02",
+      "2019-11-28",
+      "2019-12-25",
+      "2020-01-01",
+      "2020-01-20",
+      "2020-02-17",
+      "2020-04-10",
+      "2020-05-25",
+      "2020-07-03",
+      "2020-09-07",
+      "2020-11-26",
+      "2020-12-25",
+      "2021-01-01",
+      "2021-01-18",
+      "2021-02-15",
+      "2021-04-02",
+      "2021-05-31",
+      "2021-07-05",
+      "2021-09-06",
+      "2021-11-25",
+      "2021-12-24",
+      "2022-01-17",
+      "2022-02-21",
+      "2022-04-15",
+      "2022-05-30",
+      "2022-06-20",
+      "2022-07-04",
+      "2022-09-05",
+      "2022-11-24",
+      "2022-12-26",
+      "2023-01-02",
+      "2023-01-16",
+      "2023-02-20",
+      "2023-04-07",
+      "2023-05-29",
+      "2023-06-19",
+      "2023-07-04",
+      "2023-09-04",
+      "2023-11-23",
+      "2023-12-25",
+      "2024-01-01",
+      "2024-01-15",
+      "2024-02-19",
+      "2024-03-29",
+      "2024-05-27",
+      "2024-06-19",
+      "2024-07-04",
+      "2024-09-02",
+      "2024-11-28",
+      "2024-12-25",
+      "2025-01-01",
+      "2025-01-09",
+      "2025-01-20",
+      "2025-02-17",
+      "2025-04-18",
+      "2025-05-26",
+      "2025-06-19",
+      "2025-07-04",
+      "2025-09-01",
+      "2025-11-27",
+      "2025-12-25",
+      "2026-01-01",
+      "2026-01-19",
+      "2026-02-16",
+      "2026-04-03",
+      "2026-05-25",
+      "2026-06-19",
+      "2026-07-03",
+      "2026-09-07",
+      "2026-11-26",
+      "2026-12-25"
+    ],
+    "full_closure_count": 105,
+    "early_close_sessions": "are sessions and are not listed: they do not change which dates are sessions",
+    "content_identity": {
+      "algorithm": "sha256 over the UTF-8 string: 'us_equity_regular_sessions_v1\\ncoverage=2016-01-01..2026-12-31\\n' followed by one 'closure=YYYY-MM-DD' line per full_closure_dates_weekdays entry in ascending order, lines joined by '\\n' with no trailing newline",
+      "expected_content_sha256": "3249ee517cbc6763b9f73b372d5c6a5f8337d872b91d20a5bca1c27b7a1a76de",
+      "binding": "the content hash is bound into the H1 and H2 native semantic fingerprints; changing any closure, the coverage or the contract id changes both fingerprints and therefore every H1/H2 trial identity"
+    },
+    "bar_to_session_mapping": {
+      "provider_timeframe": "1Day",
+      "observed_bar_end_ts_semantics": "an Alpaca 1Day research bar carries end_ts = 00:00:00 America/New_York of the session's civil date (04:00Z in EDT, 05:00Z in EST); verified on every row of the fixed dataset (13400/13400, zero non-midnight)",
+      "S_of_t": "the America/New_York civil date of the completed bar's end_ts; end_ts must be exactly 00:00:00 ET and that date must be a covered session, otherwise fail closed",
+      "N_of_t": "the first session date strictly after S(t); never derived from price rows"
+    },
+    "fail_closed_output": "FLAT target (never a fabricated long) for an unresolvable S(t), an uncovered date or a missing calendar identity"
+  },
+  "hypotheses": [
+    {
+      "hypothesis_id": "m1_batch02_turn_of_month_last1_first3_v1",
+      "hypothesis_label": "H1",
+      "strategy_id": "turn_of_month_last1_first3",
+      "economic_rationale": "Return concentration around the canonical turn of the month may remain strong enough in the recent fixed ETF universe to survive conservative causal execution, costs, matched-capital benchmarking and the canonical promotion gates. Falsifiable; no profitability is assumed.",
+      "timeframe_secs": 86400,
+      "required_history_bars": 1,
+      "direction": "long_only_flat",
+      "calendar_contract_id": "us_equity_regular_sessions_v1",
+      "rule": "For the latest completed bar t resolve S(t) and N(t). TARGET +1 iff is_last_session_of_month(N(t)) OR month_ordinal(N(t)) in {1,2,3}, where month_ordinal is the 1-based ordinal of N(t) among canonical regular sessions of N(t)'s calendar month and is_last_session_of_month is true iff no later canonical session exists in the same calendar month. Otherwise 0. Never negative.",
+      "causal_consequences": "The completed bar before month-end targets long for the month-end session; the month-end bar targets long for ordinal 1; ordinal 1 -> ordinal 2; ordinal 2 -> ordinal 3 (long); the ordinal-3 bar targets flat for ordinal 4. Executed exposure = final session of the month + first three sessions of the next month, always via a strictly later bar (no same-bar fill).",
+      "special_cases": {
+        "fewer_than_1_completed_bars": "FLAT",
+        "incomplete_latest_bar": "FLAT",
+        "unresolvable_session_identity": "FLAT / explicit fail-closed refusal",
+        "calendar_outside_authoritative_coverage": "FLAT / explicit fail-closed refusal",
+        "half_day": "counts as one ordinary session ordinal",
+        "weekend_or_holiday": "never a session"
+      },
+      "state": "none: reconstructed from the latest completed bar's session identity and the calendar authority; a fresh instance equals a long-lived instance",
+      "forbidden_additions": [
+        "last-2 window",
+        "last-3 window",
+        "first-4 / first-5 variants",
+        "quarter-end variant",
+        "year-end variant",
+        "January enhancement",
+        "holiday enhancement",
+        "trend filter",
+        "volatility filter",
+        "SMA filter",
+        "stop loss",
+        "profit target",
+        "short side",
+        "alternate calendar window",
+        "result-driven variation",
+        "event-count-driven tuning"
+      ]
+    },
+    {
+      "hypothesis_id": "m1_batch02_halloween_nov_apr_v1",
+      "hypothesis_label": "H2",
+      "strategy_id": "halloween_nov_apr",
+      "economic_rationale": "The canonical November-through-April seasonal regime may retain economic value in recent liquid ETF data under MQD's conservative causal execution, cost, matched-capital benchmark and promotion framework. No profitability is assumed.",
+      "timeframe_secs": 86400,
+      "required_history_bars": 1,
+      "direction": "long_only_flat",
+      "calendar_contract_id": "us_equity_regular_sessions_v1",
+      "rule": "For the latest completed bar t resolve S(t) and N(t); M = calendar month number of N(t). TARGET +1 iff M in {11,12,1,2,3,4}; TARGET 0 iff M in {5,6,7,8,9,10}. Never negative.",
+      "causal_consequences": "After the final October session N(t) is the first November session -> target +1 (entry on that session); December->January stays long; after the final April session N(t) is the first May session -> target 0 (flatten on that session). No same-bar fill.",
+      "special_cases": {
+        "fewer_than_1_completed_bars": "FLAT",
+        "incomplete_latest_bar": "FLAT",
+        "unresolvable_session": "fail closed",
+        "calendar_outside_authoritative_coverage": "fail closed",
+        "year_transition": "December -> January remains long",
+        "half_day": "counts as a regular trading session/date"
+      },
+      "state": "none: purely reconstructible from the latest completed-bar session and the canonical next session",
+      "forbidden_additions": [
+        "September exception",
+        "October inclusion",
+        "May inclusion",
+        "different six-month interval",
+        "shoulder weeks",
+        "year-end enhancement",
+        "trend confirmation",
+        "volatility filter",
+        "stop",
+        "profit target",
+        "short side",
+        "result-driven variant"
+      ]
+    },
+    {
+      "hypothesis_id": "m1_batch02_trading_range_breakout_50d_hold10_v1",
+      "hypothesis_label": "H3",
+      "strategy_id": "trading_range_breakout_50d_hold10",
+      "economic_rationale": "A strict new closing-price high relative to the immediately preceding 50 completed sessions may exhibit continuation over the next 10 signal sessions sufficient to survive MQD's conservative execution and costs. Modern out-of-sample evidence is hostile; this is a deliberate low-prior one-shot falsification.",
+      "timeframe_secs": 86400,
+      "required_history_bars": 60,
+      "direction": "long_only_flat",
+      "rule": "event(j) iff close_micros[j] > MAX(close_micros[j-50 .. j-1]) (strict i64 comparison; the current bar j is NOT part of the prior maximum; equality is no event). TARGET +1 iff at least one event exists at any of t, t-1, ..., t-9; otherwise 0. No mutable countdown; overlapping events extend exposure only through this rolling definition. Never negative.",
+      "exact_integer_form": "event(j) iff close_micros[j] > max(close_micros[j-50..=j-1]); i64 comparison, no division, no floating point",
+      "required_history_derivation": "the oldest event inspected at t is j = t-9 and needs closes j-50..j-1 = t-59..t-10; with the event bars through t the bounded reconstruction window is t-59..t = exactly 60 completed bars (59 insufficient; bars older than t-59 cannot affect the target)",
+      "special_cases": {
+        "fewer_than_60_completed_bars": "FLAT",
+        "incomplete_latest_bar": "FLAT",
+        "any_incomplete_required_bar_in_latest_60": "FLAT",
+        "any_non_positive_close_in_latest_60": "FLAT",
+        "close_equals_prior_50_maximum": "NO EVENT",
+        "close_one_price_micro_above_prior_maximum": "EVENT"
+      },
+      "state": "stateless / restart-reconstructible: a pure function of the latest 60 completed bars",
+      "forbidden_additions": [
+        "20-day breakout",
+        "55-day breakout",
+        "100-day breakout",
+        "150-day breakout",
+        "200-day breakout",
+        "1% band",
+        "0.5% band",
+        "lower breakout short",
+        "5-day hold",
+        "20-day hold",
+        "SMA filter",
+        "ATR filter",
+        "volatility filter",
+        "stop loss",
+        "profit target",
+        "trailing stop",
+        "result-driven rescue"
+      ],
+      "family_failure_rule": "if this exact family fails, it is not reparameterized in this batch"
+    }
+  ],
+  "universe": {
+    "selection_rule": "Fixed ex-ante five asset-class proxies (same list as every prior campaign): US equities, foreign developed equities, 10-year Treasuries, US real estate, commodities. IEF and GLD are kept deliberately as cross-asset falsification tests even where the calendar literature applies less directly.",
+    "symbols": [
+      "SPY",
+      "EFA",
+      "IEF",
+      "VNQ",
+      "GLD"
+    ],
+    "symbol_roles": {
+      "SPY": "US equities",
+      "EFA": "foreign developed equities",
+      "IEF": "10-year Treasury proxy",
+      "VNQ": "US real estate / REIT proxy",
+      "GLD": "commodity / gold proxy"
+    },
+    "universe_mode": "fixed_ex_ante",
+    "point_in_time_membership": false,
+    "survivorship_note": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean. Each symbol is its own registered trial and the judge deflates over all five, so selection among them is accounted for; residual survivorship of the list itself is a stated limitation.",
+    "max_trials": 15,
+    "additional_candidate_after_predeclaration": "forbidden",
+    "population_note": "Closed prior campaigns live in their own experiment ids and registries and are disclosed by name; scope = experiment_id.",
+    "trials": [
+      {
+        "order": 1,
+        "hypothesis_label": "H1",
+        "strategy_id": "turn_of_month_last1_first3",
+        "symbol": "SPY"
+      },
+      {
+        "order": 2,
+        "hypothesis_label": "H1",
+        "strategy_id": "turn_of_month_last1_first3",
+        "symbol": "EFA"
+      },
+      {
+        "order": 3,
+        "hypothesis_label": "H1",
+        "strategy_id": "turn_of_month_last1_first3",
+        "symbol": "IEF"
+      },
+      {
+        "order": 4,
+        "hypothesis_label": "H1",
+        "strategy_id": "turn_of_month_last1_first3",
+        "symbol": "VNQ"
+      },
+      {
+        "order": 5,
+        "hypothesis_label": "H1",
+        "strategy_id": "turn_of_month_last1_first3",
+        "symbol": "GLD"
+      },
+      {
+        "order": 6,
+        "hypothesis_label": "H2",
+        "strategy_id": "halloween_nov_apr",
+        "symbol": "SPY"
+      },
+      {
+        "order": 7,
+        "hypothesis_label": "H2",
+        "strategy_id": "halloween_nov_apr",
+        "symbol": "EFA"
+      },
+      {
+        "order": 8,
+        "hypothesis_label": "H2",
+        "strategy_id": "halloween_nov_apr",
+        "symbol": "IEF"
+      },
+      {
+        "order": 9,
+        "hypothesis_label": "H2",
+        "strategy_id": "halloween_nov_apr",
+        "symbol": "VNQ"
+      },
+      {
+        "order": 10,
+        "hypothesis_label": "H2",
+        "strategy_id": "halloween_nov_apr",
+        "symbol": "GLD"
+      },
+      {
+        "order": 11,
+        "hypothesis_label": "H3",
+        "strategy_id": "trading_range_breakout_50d_hold10",
+        "symbol": "SPY"
+      },
+      {
+        "order": 12,
+        "hypothesis_label": "H3",
+        "strategy_id": "trading_range_breakout_50d_hold10",
+        "symbol": "EFA"
+      },
+      {
+        "order": 13,
+        "hypothesis_label": "H3",
+        "strategy_id": "trading_range_breakout_50d_hold10",
+        "symbol": "IEF"
+      },
+      {
+        "order": 14,
+        "hypothesis_label": "H3",
+        "strategy_id": "trading_range_breakout_50d_hold10",
+        "symbol": "VNQ"
+      },
+      {
+        "order": 15,
+        "hypothesis_label": "H3",
+        "strategy_id": "trading_range_breakout_50d_hold10",
+        "symbol": "GLD"
+      }
+    ],
+    "trial_order_rule": "frozen: H1, H2, H3; within each, SPY, EFA, IEF, VNQ, GLD"
+  },
+  "experiment": {
+    "real_experiment_id": "M1-NATIVE-HYPOTHESIS-BATCH-02-REAL",
+    "registry_db_relative_path": "runs/run_batch_02/registry/research.sqlite3",
+    "trial_per_hypothesis_symbol": true,
+    "population_policy": "ONE experiment id holds the three hypotheses and all fifteen trials. The multiple-testing judge scope is the experiment id with hypothesis_id unset: ONE disclosed selection population. No per-hypothesis judge is used for selection; losing and failed trials are never excluded by hand.",
+    "judge_scope": "whole experiment, never a subset",
+    "all_fifteen_trials_registered_before_first_economic_evaluation": true
+  },
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "adjustment": "all",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2026-09-01T00:00:00Z",
+    "asof": "2026-10-01",
+    "fallback_if_corporate_action_gate_refuses": {
+      "end_utc": "2025-05-01T00:00:00Z",
+      "note": "Boundary already established as corporate-action-safe by prior campaigns. Used only if the fail-closed gate refuses the primary window; declared now, before any result."
+    },
+    "completed_bars_only": true,
+    "reuse_verified_data_from": {
+      "run_dir": "runs/run_01/data",
+      "rule": "byte-identical reuse after verifying the provenance manifest artifact_sha256 and row_count against the CSV; no new provider call",
+      "expected_artifact_sha256": "100242690c4e8d220975485a722703f6237efc9788d84dd12330b5279098d4a5",
+      "expected_row_count": 13400,
+      "expected_canonical_semantic_bars_hash": "db67fd86b788bf92bb8878c43136504aa647e4df81debcab4ca6b77074b85589",
+      "expected_source_attestation_id": "a9efd485f46be6501bd49e9a9caf70fe1fdd69ee5d4334669e03169b2bdcf3ce"
+    }
+  },
+  "partition": {
+    "evaluation_start_utc": "2016-03-01T00:00:00Z",
+    "test_months": 12,
+    "holdout_months": 6,
+    "expected_folds": 10,
+    "holdout_rule": "last 6 calendar months of the dataset, reserved_not_evaluated, never consumed by this campaign",
+    "warmup_note": "The partition is carried over unchanged from the closed campaigns. The Rust emitter receives bars from 2016-01-04; the 252/253/204-bar warm-ups end during 2016-2017, so the early part of fold 1 is structurally flat for the affected engines."
+  },
+  "economic_protocol": {
+    "protocol_id": "economic_walk_forward_v1",
+    "signal_policy": {
+      "direction_policy": "native_exact_target_qty_v1",
+      "sizing": "exact_native_target_qty_v1",
+      "entry_threshold": 0.5,
+      "long_only": true,
+      "max_gross_exposure": 1.0
+    },
+    "cost_model": {
+      "commission_bps_per_side": 10.0,
+      "slippage_bps_per_side": 0.0
+    },
+    "execution_pricing": {
+      "pricing_model_id": "rust_conservative_bar_range_v1",
+      "slippage_bps": 5,
+      "volatility_mult_bps": 0
+    },
+    "weight_to_share": {
+      "equity_usd": 100000.0,
+      "max_position_notional_usd": 50000.0
+    },
+    "annualization": {
+      "annualization_days": 252,
+      "risk_free_rate_annual": 0.0
+    },
+    "signal_stream_protocol": "native_strategy_signal_stream_v2",
+    "quantity_semantics": {
+      "id": "absolute_target_qty_micros_v1",
+      "executable_targets": "0 or exactly +1 share (every predeclared engine is fixed-one-share and long/flat)",
+      "rule": "the economic engine holds EXACTLY the native absolute target quantity; ml_score is ignored; no weight re-sizing; a +1 desired / +N held mismatch is a fidelity failure"
+    }
+  },
+  "native_backtest": {
+    "initial_cash_micros": 100000000000,
+    "initial_cash_rule": "USD 100,000 = economic_protocol.weight_to_share.equity_usd: Research, Backtest, scanner and Benchmark V2 share ONE capital basis; run_batch.py refuses any other value",
+    "timeframe_secs": 86400,
+    "integrity_calendar": "us-equity-regular",
+    "bars": "the same provenance-bound research bars converted deterministically, truncated at the holdout start",
+    "evidence_root_layout": "runs/run_batch_01_corrected/backtest/<strategy_id>/<symbol>"
+  },
+  "capital_sizing": {
+    "policy_id": "fixed_initial_capital_fraction_v1",
+    "allocation_fraction_bps": 1000,
+    "capital_basis": "native_backtest.initial_cash_micros",
+    "initial_capital_micros": 100000000000,
+    "nominal_entry_budget_micros": 10000000000,
+    "max_position_notional_usd": 50000,
+    "cap_note": "max_position_notional_usd 50000 is an INDEPENDENT safety cap (the same value as economic_protocol.weight_to_share.max_position_notional_usd). It is non-binding: the entry budget is USD 10,000 so a resolved quantity can never exceed it. It is NOT a half-exposure mechanism.",
+    "quantity_rule": "Q = floor(position_budget_micros / close_micros of the fully completed strategy bar on which a FLAT strategy emits its new +1 target); position_budget_micros = floor(initial_capital_micros * allocation_fraction_bps / 10000); whole Equity shares; refuse (stay flat) if the budget cannot buy one share; no +1 fallback; held exactly for the position lifetime; a genuine re-entry re-resolves from the same immutable capital.",
+    "forbidden": [
+      "current-equity resizing",
+      "broker buying-power sizing",
+      "compounding",
+      "Kelly",
+      "ATR sizing",
+      "risk parity",
+      "volatility targeting",
+      "portfolio optimizer",
+      "floating-point sizing",
+      "rounding up"
+    ]
+  },
+  "benchmark": {
+    "policy_id": "capital_fraction_matched_passive_buy_hold_v1",
+    "definition": "passive buy-and-hold of the candidate's first resolved quantity Q, same initial capital, execution model and cost basis, through the existing accepted implementation",
+    "historical_benchmark_v2_not_authorized": "capital_matched_exact_target_buy_hold_v1 is NOT authorized for Batch 02; cross-substitution fails closed",
+    "min_alpha_pct": 0.0,
+    "scanner_cli_flag": "--benchmark-policy capital_fraction_matched_passive_buy_hold_v1"
+  },
+  "robustness": {
+    "block_counts": [
+      8,
+      10,
+      12
+    ],
+    "dsr_max_sensitivity_range": 0.15,
+    "pbo_max_sensitivity_range": 0.15,
+    "p7a_p7b_stress": {
+      "stress_execution_slippage_bps": 15,
+      "stress_execution_volatility_mult_bps": 10,
+      "max_drawdown_ceiling": 0.4,
+      "stress_sizing": {
+        "scenario_id": "half_exposure_capital_fraction_500bps_v1",
+        "policy_id": "fixed_initial_capital_fraction_v1",
+        "allocation_fraction_bps": 500,
+        "initial_capital_micros": 100000000000,
+        "nominal_entry_budget_micros": 5000000000,
+        "quantity_rule": "resolve a new stress Q from the same causal completed-bar reference price; do not cap a 1000-bps baseline Q",
+        "is_a_trial": false,
+        "identity": "the stress is an evaluation scenario of the SAME registered trial; the trial identity stays bound to the 1000 bps baseline; the scenario artifact separately binds the stress sizing, the stress signal stream hash and the execution-stress parameters"
+      },
+      "stress_notional_cap_policy": "stress_max_position_notional_usd and stress_max_target_qty are NOT used by this campaign. Neither a USD 5,000 hard cap on a 1000-bps quantity (the accepted exact-target replay refuses it) nor the historical USD 25,000 cap (non-binding here) is a half-exposure mechanism. The independent baseline notional safety cap (USD 50,000) is carried unchanged into the stress.",
+      "source_note": "Execution stress values (15 / 10 / 0.40) are the finite values prior campaigns froze before their results; the 500 bps stress is the mechanically derived half of the 1000 bps baseline and was not selected from any Batch 02 result. No other stress fraction is searched."
+    }
+  },
+  "scanner_review": {
+    "policy": "mqk_backtest::StrategyScanReviewPolicy::default (min_bars 252, min_trades 5, min_return_pct 0, min_alpha_pct 0, max_drawdown_pct 25, min_profit_factor 1.05) -- unchanged; benchmark_policy = capital_fraction_matched_passive_buy_hold_v1",
+    "data": "the same discovery-only converted bars (truncated at the holdout start), one registry/bars root per campaign run",
+    "benchmark_policy": "capital_fraction_matched_passive_buy_hold_v1"
+  },
+  "promotion_policy": {
+    "note": "No canonical production threshold values exist in the deployed configuration. These are fixed now, before any result, and are supplied to the daemon only for the promotion transition.",
+    "MQK_PROMOTION_MIN_SHARPE": 0.5,
+    "MQK_PROMOTION_MAX_MDD": 0.25,
+    "MQK_PROMOTION_MIN_CAGR": 0.0,
+    "MQK_PROMOTION_MIN_PROFIT_FACTOR": 1.05,
+    "MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT": 0.4,
+    "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO": 0.5,
+    "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING": 0.5,
+    "MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING": 1
+  },
+  "rejection_gates": [
+    "economic evaluation fails or is insolvent",
+    "judge not evaluable (DSR/PBO) or DSR below promotion_policy minimum or PBO above maximum",
+    "any required robustness scenario fails or is not evaluable (canonical P9 gauntlet, genuine shuffled placebo, P7A/P7B stress, DSR/PBO block-count sensitivity)",
+    "native stress suite fails",
+    "scanner review is not paper_candidate",
+    "any promotion_policy threshold fails in canonical evaluate_promotion"
+  ],
+  "execution_fidelity": {
+    "floor": 0.95,
+    "metric": "fraction of evaluated bars on which the simulator's discrete post-order position EQUALS the native desired target quantity (subject only to the canonical causal one-bar rule); positions only, never P&L; direction-only agreement is insufficient",
+    "enforced_by": "mqk_research.ml.native_signal_registry_integration.native_exact_target_fidelity / NATIVE_EXECUTION_FIDELITY_FLOOR; an attempt below the floor is finalized failed and kept"
+  },
+  "review_and_promotion_freeze": "promotion_policy thresholds, the baseline execution model rust_conservative_bar_range_v1, the P9 robustness scenarios and every scanner_review threshold are carried over unchanged; no observed result reopens any of them",
+  "holdout": {
+    "status": "RESERVED / UNCONSUMED",
+    "rule": "the last 6 calendar months of the dataset stay reserved_not_evaluated; scanner and backtest bars are truncated at the holdout start; a rerun requiring the holdout is a hard stop"
+  },
+  "comparison_scope": {
+    "scope": "experiment M1-NATIVE-HYPOTHESIS-BATCH-02-REAL, hypothesis_id unset",
+    "population": "all fifteen predeclared trials",
+    "judge": "canonical research_multiple_testing_judge_v1 over the whole experiment; DSR per trial, PBO over the batch; block counts 8/10/12"
+  },
+  "selection_authority": {
+    "population": "all fifteen predeclared trials",
+    "eligibility": "a trial is eligible only if it clears every rejection gate in the canonical path",
+    "rule": "among eligible trials select the single trial with the highest canonical judge DSR; ties broken by the lexicographically smallest canonical trial_id",
+    "max_selected": 1,
+    "no_manual_selection": true,
+    "no_family_balancing": true,
+    "selection_made_only_after_all_fifteen_trials_and_the_batch_judge_complete": true
+  },
+  "family_outcomes": {
+    "assigned_only_after": "all 15 trials are accounted for and the batch-wide judge and canonical eligibility evaluation are complete",
+    "FAMILY_SELECTED": "the mechanically selected batch winner belongs to the family",
+    "FAMILY_ELIGIBLE_NOT_SELECTED": "one or more of the family's five trials clears every gate but another eligible trial wins the batch selection",
+    "FAMILY_REJECTED": "none of the family's five trials clears every gate after all final evidence is complete",
+    "FAMILY_BLOCKED_NOT_FINAL": "a genuine hard stop leaves required trials unresolved",
+    "rule": "a canonically final not_evaluable, blocked or economic-failure trial remains in its family; family rejection grants no permission to reparameterize"
+  },
+  "batch_outcomes": {
+    "BATCH_REJECTED": "all 15 finalized/accounted, one batch judge complete, zero trials clear every gate",
+    "BATCH_HAS_ELIGIBLE_CANDIDATE": "at least one trial clears every gate; exactly one is selected mechanically; status PROMOTION_ELIGIBLE_PENDING_INDEPENDENT_REVIEW; no production promotion state is written",
+    "BATCH_BLOCKED_NOT_FINAL": "a genuine hard stop leaves required trials unresolved; never called rejected; no selection from an incomplete population"
+  },
+  "activity_report": {
+    "gate": false,
+    "descriptive_only": true,
+    "report_per_symbol": [
+      "entries",
+      "exits",
+      "total state transitions",
+      "days long",
+      "percent time invested",
+      "position-agreement ratio",
+      "gross return",
+      "net return",
+      "execution/slippage cost drag"
+    ],
+    "rule": "measured and reported; no threshold is created from these numbers."
+  },
+  "batch_stopping_rule": {
+    "trials": 15,
+    "run_all_fifteen_regardless_of_outcome": true,
+    "no_early_selection": true,
+    "no_h4_or_further_hypothesis": true,
+    "no_10_month_sma_reserve": true,
+    "no_batch_02b": true,
+    "no_batch_03": true,
+    "no_parameter_variations": true,
+    "no_second_campaign": true,
+    "no_different_sizes_or_thresholds": true,
+    "no_additional_symbols": true,
+    "no_holdout_consumption": true,
+    "infrastructure_failure": "retry the same trial under a new attempt id; an economic failure is finalized failed and never retried",
+    "if_no_trial_clears_every_gate": "record BATCH_REJECTED and stop; a further campaign requires a new explicit operator decision"
+  },
+  "attempt_identity_rules": "A retry after an infrastructure failure is a new attempt of the SAME trial_id. trial_id derives from strategy_id, symbol, native inner and capital-fraction wrapped semantic fingerprints (H1/H2 including the calendar content identity), bars provenance, partition policy, economic protocol and the capital sizing block only; never from a result value.",
+  "paper_live": {
+    "paper": "NOT ACTIVATED",
+    "production_promotion_state": "NOT WRITTEN",
+    "live": "NOT TOUCHED"
+  },
+  "forbidden_after_predeclaration": [
+    "changing symbols or trial order",
+    "changing the H1 session window",
+    "changing the H2 month set",
+    "changing the H3 lookback, hold or event window",
+    "changing equality boundaries",
+    "changing calendar semantics to increase results (a proven FACTUAL calendar defect voids prior results and changes identity)",
+    "changing the 1000 bps baseline sizing or the capital basis",
+    "changing the 500 bps stress fraction or substituting a USD cap for it",
+    "continuous resizing",
+    "changing execution chronology",
+    "changing commission or slippage to improve outcomes",
+    "changing the benchmark or falling back to Benchmark V2",
+    "changing scanner, Promotion or robustness thresholds",
+    "changing DSR/PBO policy",
+    "changing the partition",
+    "consuming the holdout",
+    "dropping losing trials",
+    "winner-only registration",
+    "defining identity from results",
+    "retrying economic failures",
+    "activating H4",
+    "trying another breakout horizon or seasonal window",
+    "adding stops or filters",
+    "shorting",
+    "hand promotion",
+    "Paper activation",
+    "Live activation"
+  ]
+}
