@@ -735,7 +735,19 @@ Outcome: 15 registered / 0 attempts before the first attempt; 15 attempts (12 su
 
 **M1 status: `M1_BLOCKED`.** The Batch-02 hypotheses lost on economics, not on software. No H4, 10-month-SMA reserve, Batch 02B/03 or rescue is authorized; further research needs a new explicit operator decision. M1.9 and M1.10 stay OPEN; M1 is not complete.
 
-Out-of-scope findings recorded, not fixed: intraday `calendar.rs` holiday/early-close table gaps (2025-01-09, 2027-12-31, 2023-07-03, 2025-07-03); `1D` vs `1Day` manifest label convention in `require_bars_match_manifest`; the promotion verifier does not independently require `stress_sizing` evidence for a capital-fraction candidate; a parallel-fixture race in `scenario_scan_canonical_config_binding_01`.
+Out-of-scope findings recorded, not fixed: intraday `calendar.rs` holiday/early-close table gaps (2025-01-09, 2027-12-31, 2023-07-03, 2025-07-03); `1D` vs `1Day` manifest label convention in `require_bars_match_manifest`; the promotion verifier did not independently require `stress_sizing` evidence for a capital-fraction candidate (later split and addressed in G2.17); a parallel-fixture race in `scenario_scan_canonical_config_binding_01`.
+
+### G2.17 Batch 02 independent-review correction (`V4-M1-NATIVE-HYPOTHESIS-BATCH-02-INDEPENDENT-REVIEW-CORRECTION-01`, 2026-10-03) — `BATCH_REJECTED` unchanged
+
+Local, **not pushed** (baseline `4df36008aec1ac16852a89f807de6262685b0652`; origin/main `e4e9dba6…`). Independent review provisionally accepted the economic rejection and found two items. No economic attempt or result was rerun or changed; no G2 status changes. Records: `docs/research/M1_BATCH02_PREDECLARATION_ERRATUM.md`, `docs/research/M1_BATCH02_CENSUS.md`.
+
+| Commit | Item | Disposition |
+|---|---|---|
+| `0fc1d7ef` | IR-B02-01: the immutable predeclaration carried six copied Batch 01 descriptions (not internally perfect; original bytes untouched, digest `bee59261…ed05` CRLF / `68103582…2b82` LF blob). Post-run erratum + explicit frozen-policy test + copied-description detector + invariance proof (15 trial ids, sizing/benchmark/economic-spec inputs, attempt inventory, selection/holdout inputs unchanged) | FIXED + PROVEN; descriptive-only |
+| `98e31d62` | IR-B02-02 (a): Promotion binds a capital-fraction candidate's P7A/P7B `stress_sizing` provenance to its own authenticated sizing contract (policy-neutral, no 500 bps default; 12 killed mutations) | FIXED + PROVEN |
+| — | IR-B02-02 (b): the exact required stress allocation has no Promotion authority source | **BLOCKED — NEW PROMOTION-AUTHORITY CONTRACT REQUIRED** |
+
+**M1 status: `M1_BLOCKED`.** `BATCH_REJECTED` remains the Batch 02 economic outcome; Promotion NONE; Paper INACTIVE; final holdout RESERVED / UNCONSUMED; Live NOT TOUCHED. **Future prerequisite (not relevant to Batch 02, whose rejected candidates never reach Promotion):** before any future capital-fraction candidate is production-promoted, the required stress allocation authority must be decided and bound — Promotion currently accepts any consistent, strictly smaller fraction. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI after an authorized push.
 
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 

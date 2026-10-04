@@ -89,6 +89,10 @@ The first real pass (`run_batch_02_pass1_defective_robustness`, preserved locall
 
 Final holdout **RESERVED / UNCONSUMED**: ledger row `reserved`, `consumed_at` null; the post-run guard found no timestamp ≥ 2026-03-01 in native/stress signal generation, research folds, judge inputs, Backtest equity/fills/orders, scanner/benchmark bars, robustness stress or placebo artifacts (latest 2026-02-27). Calendar derivation inspected provider row TIMESTAMPS only (no prices) for dates after 2026-02-28. Paper **NOT ACTIVATED**; production promotion state **NOT WRITTEN**; Live **NOT TOUCHED**; nothing pushed.
 
+## Independent-review disclosure (post-run)
+
+Independent review found that the formal predeclaration `PREDECLARED_BATCH_02.json` was not internally perfect: six descriptive strings were copied from Batch 01 and contradict the Batch 02 contract (old warm-ups, fixed one-share quantity prose, Benchmark V2 capital basis, old run root, five-trial judge wording). The original file remains immutable; a post-run erratum documents it (`M1_BATCH02_PREDECLARATION_ERRATUM.md`). An invariance proof established that none of the six reached any trial id, sizing argument, benchmark policy, economic spec, attempt inventory or selection/holdout input, so Batch 02 economics and candidate identities are unchanged. No economic attempt or result was rerun or changed. **`BATCH_REJECTED` remains the economic outcome.** The independently confirmed Promotion-time stress-sizing binding gap (census C11) is split: its consistency binding is fixed, and the exact required stress allocation is a blocked future Promotion-authority prerequisite that does not concern this rejected batch (`M1_BATCH02_CENSUS.md`).
+
 ## M1 status
 
 `M1_BLOCKED`; Batch 01 and Batch 02 `BATCH_REJECTED`; Promotion NONE; Paper INACTIVE. Next exact step: operator decision on whether any further research campaign is wanted (none is authorized); independent ChatGPT review of this controller's commits → at most one correction → push → exact-head CI. M1.9 and M1.10 remain open; M1 is not complete.
