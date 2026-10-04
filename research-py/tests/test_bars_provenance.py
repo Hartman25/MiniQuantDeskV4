@@ -1010,3 +1010,55 @@ def test_trial_identity_excludes_physical_bars_file_bytes(tmp_path):
         identity["data_identity"]["bars_provenance"]["canonical_semantic_bars_hash"]
         == manifest["canonical_semantic_bars_hash"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Daily timeframe label vs observed bar granularity (M1 system closure).
+# `1D` is the internal label, `1Day` the Alpaca transport label; the declared
+# label stays identity-bearing and is never rewritten.
+# ---------------------------------------------------------------------------
+
+
+def _et_midnight_daily_bars(start: str, periods: int) -> pd.DataFrame:
+    # Alpaca `1Day` stamp: 00:00 America/New_York (05:00Z EST / 04:00Z EDT).
+    days = pd.date_range(start, periods=periods, freq="D")
+    stamps = [d.tz_localize("America/New_York").tz_convert("UTC").isoformat() for d in days]
+    return pd.DataFrame({"symbol": "AAA", "end_ts": stamps, "close": [100.0 + i for i in range(periods)]})
+
+
+def _hourly_bars(periods: int = 6) -> pd.DataFrame:
+    hours = pd.date_range("2021-01-04T14:00:00", periods=periods, freq="h", tz="UTC")
+    return pd.DataFrame({"symbol": "AAA", "end_ts": [h.isoformat() for h in hours], "close": [100.0 + i for i in range(periods)]})
+
+
+@pytest.mark.parametrize("label", ["1D", "1Day"])
+@pytest.mark.parametrize("start", ["2021-01-04", "2021-03-10"])  # the latter spans the US spring-forward
+def test_daily_label_accepts_real_et_midnight_and_utc_midnight_bars(label, start):
+    span = dict(timeframe=label, start_utc="2021-01-01T00:00:00+00:00", end_utc="2021-12-31T00:00:00+00:00")
+    et_bars = _et_midnight_daily_bars(start, 6)
+    require_bars_match_manifest(et_bars, _base_manifest(et_bars, **span))
+    utc_bars = _bars_df([100.0, 101.0, 102.0], start=start)
+    require_bars_match_manifest(utc_bars, _base_manifest(utc_bars, **span))
+
+
+@pytest.mark.parametrize("label", ["1D", "1Day"])
+def test_daily_label_is_falsified_by_sub_day_bars(label):
+    bars = _hourly_bars()
+    with pytest.raises(BarsProvenanceContentMismatch):
+        require_bars_match_manifest(bars, _base_manifest(bars, timeframe=label))
+
+
+@pytest.mark.parametrize("label", ["1H", "1Hour", "60Min", "5Min", "1Min", "1day", "garbage"])
+def test_non_daily_or_unknown_labels_are_never_treated_as_daily(label):
+    # Hourly bars under a non-daily/unknown label do not hit the daily falsifier;
+    # no label collapses into the daily alias set.
+    bars = _hourly_bars()
+    require_bars_match_manifest(bars, _base_manifest(bars, timeframe=label))
+
+
+def test_daily_alias_choice_stays_identity_bearing():
+    bars = _et_midnight_daily_bars("2021-01-04", 4)
+    m_1d = _base_manifest(bars, timeframe="1D")
+    m_1day = _base_manifest(bars, timeframe="1Day")
+    assert m_1d["timeframe"] == "1D" and m_1day["timeframe"] == "1Day"
+    assert provenance_identity_fragment(m_1d) != provenance_identity_fragment(m_1day)

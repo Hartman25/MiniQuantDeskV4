@@ -1036,6 +1036,10 @@ def require_registered_bars_provenance(manifest: Dict[str, Any]) -> None:
         raise BarsProvenanceUnverifiable("Fail-closed: bars provenance manifest missing symbol_universe")
 
 
+# Daily labels: `1D` is the internal label, `1Day` Alpaca's transport label.
+_DAILY_TIMEFRAME_LABELS = frozenset({"1D", "1Day"})
+
+
 def require_bars_match_manifest(bars: pd.DataFrame, manifest: Dict[str, Any]) -> None:
     """Fail-closed CONTENT-BINDING preflight (Defect 1 / P8 REPAIR-02). MUST
     run BEFORE check_corporate_action_integrity and BEFORE any economic
@@ -1089,19 +1093,22 @@ def require_bars_match_manifest(bars: pd.DataFrame, manifest: Dict[str, Any]) ->
 
     # Timeframe/extraction semantics, as far as they can be independently
     # established from the bars content alone: a manifest declaring whole-
-    # day granularity ("1D") is falsifiable by observing any sub-day
-    # timestamp in the actual data. Unrecognized timeframe strings are not
-    # rejected here -- this system does not carry an independent granularity
-    # authority beyond what the bars themselves can prove.
-    if manifest.get("timeframe") == "1D":
-        sub_day = (
-            (actual_ts.dt.hour != 0) | (actual_ts.dt.minute != 0)
-            | (actual_ts.dt.second != 0) | (actual_ts.dt.microsecond != 0)
-        )
+    # day granularity is falsifiable by observing any timestamp that is not a
+    # day boundary. A daily bar is stamped at local midnight: UTC (synthetic
+    # fixtures) or America/New_York (Alpaca `1Day`: 05:00Z EST / 04:00Z EDT).
+    # The declared label is NOT rewritten (it stays identity-bearing); only
+    # the exact daily labels below select this check. Other/unknown labels are
+    # not rejected here -- this system does not carry an independent
+    # granularity authority beyond what the bars themselves can prove.
+    if manifest.get("timeframe") in _DAILY_TIMEFRAME_LABELS:
+        def _at_midnight(ts: pd.Series) -> pd.Series:
+            return (ts.dt.hour == 0) & (ts.dt.minute == 0) & (ts.dt.second == 0) & (ts.dt.microsecond == 0)
+
+        sub_day = ~(_at_midnight(actual_ts) | _at_midnight(actual_ts.dt.tz_convert("America/New_York")))
         if bool(sub_day.any()):
             raise BarsProvenanceContentMismatch(
-                "Fail-closed: manifest declares timeframe='1D' but actual bars contain sub-day "
-                "timestamps -- declared timeframe does not match observed bar granularity"
+                f"Fail-closed: manifest declares daily timeframe={manifest.get('timeframe')!r} but actual "
+                "bars contain sub-day timestamps -- declared timeframe does not match observed bar granularity"
             )
 
 
