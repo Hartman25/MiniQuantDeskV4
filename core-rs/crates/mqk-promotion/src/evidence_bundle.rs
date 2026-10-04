@@ -42,8 +42,9 @@ use crate::artifact_gate::{lock_artifact_from_str, ArtifactLock, LockError};
 use crate::types::{RobustnessEvidence, StressSuiteResult};
 use mqk_artifacts::{
     load_canonical_backtest_report, load_canonical_robustness_gauntlet,
-    load_canonical_stress_suite, BacktestReportArtifactError, RobustnessGauntletArtifact,
-    RobustnessGauntletArtifactError, StressSuiteArtifact, StressSuiteArtifactError,
+    load_canonical_stress_suite, BacktestReportArtifactError, CapitalFractionStressBaseline,
+    RobustnessGauntletArtifact, RobustnessGauntletArtifactError, StressSuiteArtifact,
+    StressSuiteArtifactError,
 };
 use mqk_backtest::BacktestReport;
 
@@ -269,7 +270,8 @@ pub fn resolve_backtest_evidence(
     let robustness_artifact = load_canonical_robustness_gauntlet(&candidate_canon)
         .map_err(BacktestEvidenceResolveError::RobustnessGauntlet)?;
     let finalized_robustness_artifact_sha256 = robustness_artifact.content_sha256();
-    let robustness_evidence = robustness_evidence_from_artifact(&robustness_artifact);
+    let robustness_evidence =
+        robustness_evidence_from_artifact(&robustness_artifact, &report, initial_equity_micros);
 
     Ok(BacktestEvidenceBundle {
         run_id,
@@ -314,7 +316,33 @@ fn stress_result_from_artifact(a: &StressSuiteArtifact) -> StressSuiteResult {
 /// `mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION`; still carried
 /// through (never dropped/re-derived) so `evaluate_promotion`'s own
 /// protocol check is a real, independent verification.
-fn robustness_evidence_from_artifact(a: &RobustnessGauntletArtifact) -> RobustnessEvidence {
+///
+/// For a capital-fraction candidate the P7A/P7B stress must also carry
+/// well-formed `stress_spec.stress_sizing` provenance consistent with the
+/// candidate's own authenticated sizing contract (`report`, audited
+/// `initial_equity_micros`); a defect is reported through the same
+/// missing/invalid-required-field list `evaluate_promotion` already refuses on.
+fn robustness_evidence_from_artifact(
+    a: &RobustnessGauntletArtifact,
+    report: &BacktestReport,
+    initial_equity_micros: i64,
+) -> RobustnessEvidence {
+    let mut missing_stress_fields: Vec<String> = a
+        .p7a_p7b_economic_replay_stress_missing_required_evidence_fields()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(allocation_fraction_bps) = report.sizing_provenance.policy.allocation_fraction_bps()
+    {
+        missing_stress_fields.extend(a.p7a_p7b_capital_fraction_stress_sizing_defects(
+            &CapitalFractionStressBaseline {
+                policy_id: report.sizing_provenance.policy.policy_id(),
+                allocation_fraction_bps,
+                initial_capital_micros: initial_equity_micros,
+                semantic_fingerprint: &report.strategy_semantic_fingerprint,
+            },
+        ));
+    }
     RobustnessEvidence {
         protocol_version: a.protocol_version.clone(),
         is_complete: a.is_complete(),
@@ -330,11 +358,7 @@ fn robustness_evidence_from_artifact(a: &RobustnessGauntletArtifact) -> Robustne
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: a
             .p7a_p7b_economic_replay_stress_baseline_economic_eval_id()
             .map(|s| s.to_string()),
-        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: a
-            .p7a_p7b_economic_replay_stress_missing_required_evidence_fields()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: missing_stress_fields,
         genuine_shuffled_placebo_research_trial_id: a
             .genuine_shuffled_placebo_research_trial_id()
             .map(|s| s.to_string()),

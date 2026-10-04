@@ -20,6 +20,17 @@ use uuid::Uuid;
 
 use crate::RunManifest;
 
+/// The candidate's authenticated capital-sizing contract that a capital-fraction
+/// stress echo must be consistent with (taken from its canonical Backtest report
+/// and audited run capital, never from the stress evidence itself).
+#[derive(Debug, Clone, Copy)]
+pub struct CapitalFractionStressBaseline<'a> {
+    pub policy_id: &'a str,
+    pub allocation_fraction_bps: i64,
+    pub initial_capital_micros: i64,
+    pub semantic_fingerprint: &'a str,
+}
+
 /// Current schema version of `robustness_gauntlet.json`.
 pub const ROBUSTNESS_GAUNTLET_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
@@ -255,6 +266,114 @@ impl RobustnessGauntletArtifact {
             missing.push("passed");
         }
         missing
+    }
+
+    /// Defects in the capital-fraction half-exposure stress provenance
+    /// (`stress_spec.stress_sizing` of the `p7a_p7b_economic_replay_stress`
+    /// evidence) relative to `baseline`, the candidate's OWN authenticated
+    /// capital-sizing contract. Empty iff the echo is present, well formed,
+    /// strictly adverse (a smaller fraction on the same immutable capital and
+    /// unchanged caps), re-resolved by the wrapper (a distinct stress
+    /// fingerprint with stream hashes), and bound to the baseline's policy,
+    /// fraction, capital and wrapper fingerprint.
+    ///
+    /// Policy-neutral by construction: it never names a particular stress
+    /// fraction. Which fraction a campaign must stress at is NOT decided here.
+    pub fn p7a_p7b_capital_fraction_stress_sizing_defects(
+        &self,
+        baseline: &CapitalFractionStressBaseline<'_>,
+    ) -> Vec<String> {
+        let evidence = self
+            .scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME)
+            .and_then(|s| s.evidence.as_ref());
+        let sizing = match evidence
+            .and_then(|e| e.get("stress_spec"))
+            .and_then(|s| s.get("stress_sizing"))
+            .filter(|v| v.is_object())
+        {
+            Some(s) => s,
+            None => return vec!["stress_spec.stress_sizing".to_string()],
+        };
+        let text = |k: &str| sizing.get(k).and_then(Value::as_str);
+        let int = |k: &str| sizing.get(k).and_then(Value::as_i64);
+        let is_hex64 = |s: Option<&str>| {
+            s.is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        };
+        let budget =
+            |bps: i64| i128::from(baseline.initial_capital_micros) * i128::from(bps) / 10_000;
+
+        let mut defects: Vec<String> = Vec::new();
+        let mut bad = |field: &str| defects.push(format!("stress_spec.stress_sizing.{field}"));
+
+        if text("scenario_id").is_none_or(|s| s.trim().is_empty()) {
+            bad("scenario_id");
+        }
+        if text("policy_id") != Some(baseline.policy_id) {
+            bad("policy_id");
+        }
+        if int("baseline_allocation_fraction_bps") != Some(baseline.allocation_fraction_bps) {
+            bad("baseline_allocation_fraction_bps");
+        }
+        let stress_bps = int("allocation_fraction_bps")
+            .filter(|b| (1..baseline.allocation_fraction_bps).contains(b));
+        if stress_bps.is_none() {
+            bad("allocation_fraction_bps");
+        }
+        if int("initial_allocated_capital_micros") != Some(baseline.initial_capital_micros) {
+            bad("initial_allocated_capital_micros");
+        }
+        if sizing
+            .get("baseline_nominal_entry_budget_micros")
+            .and_then(Value::as_i64)
+            .map(i128::from)
+            != Some(budget(baseline.allocation_fraction_bps))
+        {
+            bad("baseline_nominal_entry_budget_micros");
+        }
+        if stress_bps.and_then(|b| {
+            int("nominal_entry_budget_micros")
+                .map(i128::from)
+                .map(|v| v == budget(b))
+        }) != Some(true)
+        {
+            bad("nominal_entry_budget_micros");
+        }
+        let baseline_fp = text("baseline_semantic_fingerprint");
+        if baseline_fp.is_none_or(str::is_empty)
+            || baseline_fp != Some(baseline.semantic_fingerprint)
+        {
+            bad("baseline_semantic_fingerprint");
+        }
+        let stress_fp = text("stress_semantic_fingerprint");
+        if !is_hex64(stress_fp) || stress_fp == baseline_fp {
+            bad("stress_semantic_fingerprint");
+        }
+        if sizing
+            .get("caps_unchanged_from_baseline")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            bad("caps_unchanged_from_baseline");
+        }
+        if sizing.get("is_a_trial").and_then(Value::as_bool) != Some(false) {
+            bad("is_a_trial");
+        }
+        for stream_hash in [
+            "stress_native_signals_csv_sha256",
+            "stress_native_signals_meta_sha256",
+            "stress_oos_predictions_csv_sha256",
+        ] {
+            if !is_hex64(text(stream_hash)) {
+                bad(stream_hash);
+            }
+        }
+        defects
     }
 
     /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: see
