@@ -11,7 +11,10 @@ sessions, all after the final correctness repair.
 ## Counting authority
 
 The count is derived, never incremented by hand: `mqk_integrity::soak_ledger::evaluate` over one
-`SessionRecord` per finalized session, with `LedgerPolicy::m1_10(<accepted post-repair SHA>)`.
+`SessionRecord` per finalized session, with `LedgerPolicy::m1_10(<accepted post-repair SHA>, <deployment identity>)`.
+The deployment identity is `DeploymentIdentity { strategy_id, symbol, timeframe_secs, runtime_domain }` (the
+promotion identity plus `paper`), supplied canonical by the caller and compared exactly; each record carries the
+identity it is evidence for.
 Verdict fields: `countable_sessions`, `longest_clean_run`, `trailing_clean_run`, `exclusions`,
 `passed`. `passed` requires `countable_sessions >= 10` **and** `longest_clean_run >= 5`.
 
@@ -19,9 +22,10 @@ Verdict fields: `countable_sessions`, `longest_clean_run`, `trailing_clean_run`,
 |---|---|
 | its date is a regular US-equity session per `us_equity_regular_sessions_v1` (covered through 2026-12-31) | `NotARegularSession` (weekend, holiday, Sunday) / `OutOfCoverage` (extend the calendar under a new identity first; never a weekday fallback) |
 | it ran under exactly the accepted post-repair SHA | `WrongCodeSha` |
-| the exact deployed `(strategy, symbol, timeframe)` held `active_paper` for the whole session | `NoActivePaperPromotion` |
+| its deployment identity equals the policy's (strategy, symbol, timeframe, runtime domain all equal; an incomplete policy identity counts nothing) | `WrongDeployment` |
+| that deployed identity held `active_paper` for the whole session | `NoActivePaperPromotion` |
 | the day's autonomous operation finalized as `completed_with_activity` or `completed_no_trade` | `NotCompleted` (never started, evidence blocked/degraded, manual intervention, unfinalized) |
-| duplicate records of the date are identical (restart/retry collapses to one) | `ConflictingDuplicate` (date excluded) |
+| duplicate records of the date are identical, including deployment identity (restart/retry collapses to one) | `ConflictingDuplicate` (date excluded) |
 
 A startup-only day, a day with no regular session, and any day before a valid promoted deployment
 exists never count. A session with an invalidator is **dirty**: it counts toward 10 but ends the
@@ -44,7 +48,7 @@ in the ledger; record the new SHA before the first session that is meant to coun
 
 ## After each real session capture
 
-1. `market_date` and the daemon's build SHA.
+1. `market_date`, the daemon's build SHA and the deployed `(strategy_id, symbol, timeframe_secs, runtime domain)`.
 2. `GET /api/v1/strategy/promotions/check?strategy_id=...&symbol=...&timeframe_secs=...` before open
    and after close: `current_state` is `active_paper` both times.
 3. The finalized `sys_autonomous_daily_operations` row: `state`, `outcome`, `no_trade_reason`,

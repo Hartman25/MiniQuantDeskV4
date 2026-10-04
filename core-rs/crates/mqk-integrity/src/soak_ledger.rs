@@ -8,7 +8,9 @@
 //!   and dates outside the calendar coverage never count; there is no weekday fallback);
 //! * the session must have run under exactly the accepted post-repair code SHA (a session under
 //!   any other SHA never counts, so a correctness repair restarts the count);
-//! * the exact deployed `(strategy, symbol, timeframe)` must have held `active_paper` authority;
+//! * the record must carry exactly the policy's [`DeploymentIdentity`] (strategy, symbol,
+//!   timeframe, runtime domain), so evidence of one deployment never counts for another;
+//! * that deployed identity must have held `active_paper` authority;
 //! * the finalized outcome must be a completed one (activity or an evidenced no-trade day);
 //! * duplicate records of one date collapse when identical (retry/restart idempotency) and
 //!   exclude the date when they conflict.
@@ -32,9 +34,31 @@ pub enum SessionOutcome {
     NotCompleted,
 }
 
+/// The canonical deployed identity a session is evidence for: the promotion identity
+/// `(strategy_id, symbol, timeframe_secs)` plus the runtime domain. Callers supply canonical
+/// (already normalized) values; the ledger compares exactly and never normalizes or defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentIdentity {
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    pub runtime_domain: String,
+}
+
+impl DeploymentIdentity {
+    fn is_complete(&self) -> bool {
+        !self.strategy_id.is_empty()
+            && !self.symbol.is_empty()
+            && self.timeframe_secs > 0
+            && !self.runtime_domain.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRecord {
     pub market_date: NaiveDate,
+    /// The deployment this session is evidence for.
+    pub deployment: DeploymentIdentity,
     /// Git SHA the daemon ran under for this session.
     pub code_sha: String,
     /// The exact deployed binding held `active_paper` authority for the whole session.
@@ -48,15 +72,18 @@ pub struct SessionRecord {
 pub struct LedgerPolicy {
     /// The accepted final post-repair SHA; sessions under any other SHA never count.
     pub accepted_code_sha: String,
+    /// The one deployment whose sessions count; an incomplete identity counts nothing.
+    pub deployment: DeploymentIdentity,
     pub required_sessions: u32,
     pub required_consecutive_clean: u32,
 }
 
 impl LedgerPolicy {
     /// The frozen M1.10 gate: 10 countable sessions and 5 consecutive clean sessions.
-    pub fn m1_10(accepted_code_sha: impl Into<String>) -> Self {
+    pub fn m1_10(accepted_code_sha: impl Into<String>, deployment: DeploymentIdentity) -> Self {
         Self {
             accepted_code_sha: accepted_code_sha.into(),
+            deployment,
             required_sessions: 10,
             required_consecutive_clean: 5,
         }
@@ -68,6 +95,7 @@ pub enum Exclusion {
     NotARegularSession,
     OutOfCoverage,
     WrongCodeSha,
+    WrongDeployment,
     NoActivePaperPromotion,
     NotCompleted,
     ConflictingDuplicate,
@@ -89,12 +117,24 @@ enum Standing {
     Excluded,
 }
 
-type Normalized = (String, bool, SessionOutcome, Vec<String>);
+type Normalized = (
+    DeploymentIdentity,
+    String,
+    bool,
+    SessionOutcome,
+    Vec<String>,
+);
 
 fn normalized(r: &SessionRecord) -> Normalized {
     let mut inv = r.invalidators.clone();
     inv.sort();
-    (r.code_sha.clone(), r.active_paper_promotion, r.outcome, inv)
+    (
+        r.deployment.clone(),
+        r.code_sha.clone(),
+        r.active_paper_promotion,
+        r.outcome,
+        inv,
+    )
 }
 
 fn classify(policy: &LedgerPolicy, records: &[&SessionRecord]) -> Result<bool, Exclusion> {
@@ -110,6 +150,9 @@ fn classify(policy: &LedgerPolicy, records: &[&SessionRecord]) -> Result<bool, E
     }
     if policy.accepted_code_sha.is_empty() || r.code_sha != policy.accepted_code_sha {
         return Err(Exclusion::WrongCodeSha);
+    }
+    if !policy.deployment.is_complete() || r.deployment != policy.deployment {
+        return Err(Exclusion::WrongDeployment);
     }
     if !r.active_paper_promotion {
         return Err(Exclusion::NoActivePaperPromotion);
@@ -193,9 +236,19 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
+    fn deployment() -> DeploymentIdentity {
+        DeploymentIdentity {
+            strategy_id: "h1_turn_of_month".into(),
+            symbol: "SPY".into(),
+            timeframe_secs: 86_400,
+            runtime_domain: "paper".into(),
+        }
+    }
+
     fn rec(date: NaiveDate) -> SessionRecord {
         SessionRecord {
             market_date: date,
+            deployment: deployment(),
             code_sha: SHA.to_string(),
             active_paper_promotion: true,
             outcome: SessionOutcome::CompletedNoTrade,
@@ -213,7 +266,7 @@ mod tests {
     }
 
     fn policy() -> LedgerPolicy {
-        LedgerPolicy::m1_10(SHA)
+        LedgerPolicy::m1_10(SHA, deployment())
     }
 
     fn eval(records: &[SessionRecord]) -> LedgerVerdict {
@@ -347,7 +400,77 @@ mod tests {
             6
         );
         // An empty accepted SHA fails closed.
-        assert!(!evaluate(&LedgerPolicy::m1_10(""), &clean_run(10)).passed);
+        assert!(!evaluate(&LedgerPolicy::m1_10("", deployment()), &clean_run(10)).passed);
+    }
+
+    type Mutate = fn(&mut DeploymentIdentity);
+
+    #[test]
+    fn evidence_of_a_different_deployment_never_counts() {
+        let cases: [(&str, Mutate); 4] = [
+            ("strategy", |d| d.strategy_id = "other_strategy".into()),
+            ("symbol", |d| d.symbol = "QQQ".into()),
+            ("timeframe", |d| d.timeframe_secs = 3_600),
+            ("runtime", |d| d.runtime_domain = "live".into()),
+        ];
+        for (label, mutate) in cases {
+            let mut r = clean_run(10);
+            mutate(&mut r[3].deployment);
+            let v = eval(&r);
+            assert_eq!(v.countable_sessions, 9, "{label}");
+            assert!(!v.passed, "{label}");
+            assert!(
+                v.exclusions
+                    .contains(&(r[3].market_date, Exclusion::WrongDeployment)),
+                "{label}"
+            );
+            assert_eq!(
+                v.longest_clean_run, 6,
+                "{label}: the excluded date splits 3 + 6"
+            );
+            // The same record counts under a policy for that deployment.
+            let mut p = policy();
+            mutate(&mut p.deployment);
+            let only = evaluate(&p, &r[3..4]);
+            assert_eq!(only.countable_sessions, 1, "{label}");
+        }
+    }
+
+    #[test]
+    fn a_same_date_duplicate_with_a_conflicting_deployment_excludes_the_date() {
+        let mut r = clean_run(10);
+        let mut other = r[4].clone();
+        other.deployment.symbol = "QQQ".into();
+        r.push(other);
+        let v = eval(&r);
+        assert_eq!(v.countable_sessions, 9);
+        assert!(v
+            .exclusions
+            .contains(&(r[4].market_date, Exclusion::ConflictingDuplicate)));
+    }
+
+    #[test]
+    fn an_incomplete_policy_deployment_counts_nothing() {
+        let cases: [(&str, Mutate); 4] = [
+            ("strategy", |d| d.strategy_id.clear()),
+            ("symbol", |d| d.symbol.clear()),
+            ("timeframe", |d| d.timeframe_secs = 0),
+            ("runtime", |d| d.runtime_domain.clear()),
+        ];
+        for (label, mutate) in cases {
+            let mut p = policy();
+            mutate(&mut p.deployment);
+            let r: Vec<SessionRecord> = clean_run(10)
+                .into_iter()
+                .map(|mut x| {
+                    mutate(&mut x.deployment);
+                    x
+                })
+                .collect();
+            let v = evaluate(&p, &r);
+            assert_eq!(v.countable_sessions, 0, "{label}");
+            assert!(!v.passed, "{label}");
+        }
     }
 
     #[test]
