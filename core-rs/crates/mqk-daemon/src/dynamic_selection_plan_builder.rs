@@ -141,7 +141,7 @@ pub async fn build_dynamic_selection_plan(
     let mut pending: Vec<PendingCandidate> = Vec::new();
     // Defect F: `true` the moment any one symbol's deduplicated candidate
     // strategy-ID set exceeds `MAX_STRATEGY_UNIVERSE` (which mirrors
-    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s thirteen identities) --
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s fourteen identities) --
     // checked per symbol, independently of the total-pairs bound below,
     // since a single over-loaded symbol can stay under the total while still
     // locally violating this one.
@@ -236,7 +236,7 @@ pub(crate) async fn evaluate_candidate(
     now_utc: DateTime<Utc>,
 ) -> SelectionCandidateEvidence {
     // Defect F: classify an unregistered strategy_id cheaply, against
-    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (the thirteen-identity
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (the fourteen-identity
     // authority) -- zero I/O, not even ephemeral registry construction --
     // and refuse immediately, before any promotion/artifact/readiness query
     // is ever dispatched. A watchlist-assigned unknown ID still gets a
@@ -704,7 +704,7 @@ pub(crate) mod tests {
         ));
         let calendar = NyseWeekdaysProvider;
         let ctx = ctx_no_db(&st, &calendar);
-        // 5 symbols x 15 strategy ids (14 fleet + assigned; over MAX_STRATEGY_UNIVERSE=13) = 75 > 65.
+        // 5 symbols x 16 strategy ids (15 fleet + assigned; over MAX_STRATEGY_UNIVERSE=14) = 80 > 70.
         let symbols = vec!["A", "B", "C", "D", "E"]
             .into_iter()
             .map(|s| SymbolStrategyAssignment {
@@ -714,7 +714,7 @@ pub(crate) mod tests {
             })
             .collect();
         let cfg = config(symbols);
-        let fleet: Vec<String> = (0..14).map(|i| format!("strategy_{i}")).collect();
+        let fleet: Vec<String> = (0..15).map(|i| format!("strategy_{i}")).collect();
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1488,7 +1488,7 @@ pub(crate) mod tests {
             strategy_id: "assigned_only".to_string(),
             timeframe: "1D".to_string(),
         }]);
-        let fleet: Vec<String> = (0..14).map(|i| format!("strategy_{i}")).collect();
+        let fleet: Vec<String> = (0..15).map(|i| format!("strategy_{i}")).collect();
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1501,7 +1501,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Defect F: exactly all thirteen known strategy IDs for one symbol must still
+    /// Defect F: exactly all fourteen known strategy IDs for one symbol must still
     /// evaluate normally (the bound is `<=` MAX_STRATEGY_UNIVERSE, not `<`).
     #[tokio::test]
     async fn all_known_strategy_ids_for_one_symbol_evaluate_normally() {
@@ -1519,7 +1519,7 @@ pub(crate) mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(fleet.len(), 13);
+        assert_eq!(fleet.len(), 14);
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1527,7 +1527,7 @@ pub(crate) mod tests {
             mqk_portfolio::DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED
         );
         let aapl = &plan.symbol_results[0];
-        assert_eq!(aapl.candidates.len(), 13, "all thirteen known IDs evaluate");
+        assert_eq!(aapl.candidates.len(), 14, "all fourteen known IDs evaluate");
         // With no DB, every known ID reaches the promotion-query stage (the
         // stage right after the cheap registration check) -- proving each
         // one was individually evaluated, not short-circuited as unknown.

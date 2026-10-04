@@ -108,6 +108,23 @@ fn reference(name: &str, dates: &[NaiveDate], t: usize, all: &[NaiveDate]) -> i6
     }
 }
 
+/// H3: an event on bar j iff close[j] > max(close[j-50..j]); long iff any event on the latest ten bars.
+fn reference_breakout(c: &[i64], t: usize) -> i64 {
+    if t < 59 {
+        return 0;
+    }
+    let event = |j: usize| c[j] > *c[j - 50..j].iter().max().unwrap();
+    i64::from((0..10).any(|k| event(t - k)))
+}
+
+fn expected(name: &str, dates: &[NaiveDate], t: usize, all: &[NaiveDate], c: &[i64]) -> i64 {
+    if name == "trading_range_breakout_50d_hold10" {
+        reference_breakout(c, t)
+    } else {
+        reference(name, dates, t, all)
+    }
+}
+
 fn full_calendar() -> Vec<NaiveDate> {
     let mut out = Vec::new();
     let mut x = sessions::coverage_start();
@@ -120,7 +137,11 @@ fn full_calendar() -> Vec<NaiveDate> {
     out
 }
 
-const ENGINES: [(&str, usize); 2] = [("turn_of_month_last1_first3", 1), ("halloween_nov_apr", 1)];
+const ENGINES: [(&str, usize); 3] = [
+    ("turn_of_month_last1_first3", 1),
+    ("halloween_nov_apr", 1),
+    ("trading_range_breakout_50d_hold10", 60),
+];
 
 #[test]
 fn emitted_stream_equals_the_independent_reference_at_every_bar() {
@@ -134,7 +155,7 @@ fn emitted_stream_equals_the_independent_reference_at_every_bar() {
         assert_eq!(stream.rows.len(), dates.len(), "{name}");
         let got: Vec<i64> = stream.rows.iter().map(|r| r.target_qty_micros).collect();
         let expect: Vec<i64> = (0..dates.len())
-            .map(|t| reference(name, &dates, t, &all) * M)
+            .map(|t| expected(name, &dates, t, &all, &c) * M)
             .collect();
         assert_eq!(got, expect, "{name}: emitter vs reference");
         assert!(got.iter().any(|&q| q > 0) && got.contains(&0), "{name}");
@@ -143,23 +164,27 @@ fn emitted_stream_equals_the_independent_reference_at_every_bar() {
             registered(name).semantic_fingerprint(),
             "{name}"
         );
-        assert_eq!(stream.required_history_bars, 1, "{name}");
+        assert_eq!(stream.required_history_bars, required, "{name}");
+        assert!(
+            got.iter().take(required - 1).all(|&q| q == 0),
+            "{name}: flat before the declared history exists"
+        );
     }
 }
 
-/// Stateless: a fresh instance fed only the latest bar reproduces the long-running instance.
+/// Stateless: a fresh instance fed only its declared bounded history reproduces the long-running instance.
 #[test]
-fn fresh_instance_with_only_the_latest_bar_matches_at_every_bar() {
+fn fresh_instance_with_only_the_bounded_history_matches_at_every_bar() {
     let dates = session_dates();
     let c = closes(dates.len());
-    for (name, _) in ENGINES {
+    for (name, required) in ENGINES {
         let mut long_lived = registered(name);
         for t in 0..dates.len() {
             let lo = t.saturating_sub(60);
             let full: Vec<BarStub> = (lo..=t)
                 .map(|i| BarStub::new(label(dates[i]), true, c[i], 1))
                 .collect();
-            let latest = vec![full.last().unwrap().clone()];
+            let latest: Vec<BarStub> = full[full.len().saturating_sub(required)..].to_vec();
             let ctx_of = |w: Vec<BarStub>| {
                 StrategyContext::new(DAY, 0, RecentBarsWindow::new(w.len().max(1), w))
             };

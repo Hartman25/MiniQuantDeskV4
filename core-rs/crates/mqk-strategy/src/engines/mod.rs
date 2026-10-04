@@ -9,12 +9,13 @@ pub mod intraday_scalper;
 pub mod mean_reversion;
 pub mod near_high_momentum_252_3pct;
 pub mod pullback_mean_reversion_20_2;
+mod session_calendar;
 pub mod swing_momentum;
+pub mod trading_range_breakout_50d_hold10;
 pub mod trend_pullback_5d_4pct_hold5;
 pub mod trend_sma50;
 pub mod turn_of_month_last1_first3;
 pub mod volatility_breakout;
-mod session_calendar;
 mod window;
 
 pub use absolute_momentum_252::AbsoluteMomentum252Strategy;
@@ -28,6 +29,7 @@ pub use mean_reversion::MeanReversionStrategy;
 pub use near_high_momentum_252_3pct::NearHighMomentum2523PctStrategy;
 pub use pullback_mean_reversion_20_2::PullbackMeanReversion202Strategy;
 pub use swing_momentum::SwingMomentumStrategy;
+pub use trading_range_breakout_50d_hold10::TradingRangeBreakout50dHold10Strategy;
 pub use trend_pullback_5d_4pct_hold5::TrendPullback5d4pctHold5Strategy;
 pub use trend_sma50::TrendSma50Strategy;
 pub use turn_of_month_last1_first3::TurnOfMonthLast1First3Strategy;
@@ -60,6 +62,7 @@ pub const REGISTERED_STRATEGY_IDS: &[&str] = &[
     trend_pullback_5d_4pct_hold5::NAME,
     turn_of_month_last1_first3::NAME,
     halloween_nov_apr::NAME,
+    trading_range_breakout_50d_hold10::NAME,
     intraday_scalper::SHORT_NAME,
 ];
 
@@ -138,6 +141,13 @@ pub fn register_builtin_strategies(
     let hw_symbol = symbol.clone();
     registry.register(halloween_nov_apr::meta(), move || {
         Box::new(HalloweenNovAprStrategy::new(hw_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let trb_symbol = symbol.clone();
+    registry.register(trading_range_breakout_50d_hold10::meta(), move || {
+        Box::new(TradingRangeBreakout50dHold10Strategy::new(
+            trb_symbol.clone(),
+        )) as Box<dyn Strategy>
     })?;
 
     // SHORT-SIDE-PARALLEL-STRATEGY-DRY-RUN-01: register the short-only variant
@@ -263,6 +273,13 @@ fn register_with_sizing(
         registry.register(halloween_nov_apr::meta(), move || {
             Box::new(HalloweenNovAprStrategy::new(hw_symbol.clone())) as Box<dyn Strategy>
         })?;
+
+        let trb_symbol = symbol.clone();
+        registry.register(trading_range_breakout_50d_hold10::meta(), move || {
+            Box::new(TradingRangeBreakout50dHold10Strategy::new(
+                trb_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
     }
 
     let scalp_symbol = symbol.clone();
@@ -312,7 +329,7 @@ mod registered_strategy_ids_tests {
     }
 
     #[test]
-    fn registered_strategy_ids_has_thirteen_distinct_entries() {
+    fn registered_strategy_ids_has_fourteen_distinct_entries() {
         let mut unique = REGISTERED_STRATEGY_IDS.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -321,7 +338,7 @@ mod registered_strategy_ids_tests {
             REGISTERED_STRATEGY_IDS.len(),
             "every registered strategy identity must be distinct"
         );
-        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 13);
+        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 14);
     }
 
     /// IR-2: the production seam `instantiate_verified` must refuse any engine
