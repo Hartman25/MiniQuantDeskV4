@@ -1,0 +1,65 @@
+# M1 system closure — `V4-M1-SYSTEM-CLOSURE-CANDIDATE-READY-01` (2026-10-04, a Sunday)
+
+Baseline `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (= origin/main, GitHub CI #623, run `37222460113`, SUCCESS 6/6). Local commits, not pushed. No Batch 03, no new trial, no economic attempt, holdout untouched, no Paper/Live mutation, no real-market evidence claimed.
+
+## Verdict
+
+`M1_SYSTEM_CANDIDATE_READY = false`, for exactly one reason: capital-fraction strategies cannot yet be traded by the daemon (Finding E, `OPERATOR_DECISION_REQUIRED_CAPITAL_FRACTION_PAPER_DISPATCH`). Every other candidate-independent defect found is fixed and proven. M1 stays `M1_BLOCKED` (no qualified candidate, M1.9 deployment, M1.10 real sessions).
+
+## Closure matrix (category = exactly one)
+
+| ID | Requirement | Authority / seam | Status | Needs |
+|---|---|---|---|---|
+| M1.1-M1.6 | Research→Promotion, Paper deploy path, provider gates, risk/OMS/accounting, reconcile, runtime ownership | manifest, code/tests | ALREADY_CORRECT_PROVE (no contradiction found; Promotion route re-proven 33/33 DB tests incl. real research pipeline) | none |
+| M1.7, M1.8 | genuine trade / no-trade lifecycle | accepted frozen evidence | ALREADY_CORRECT_PROVE (frozen) | none |
+| A | exact required stress scenario for a capital-fraction candidate | registered trial identity → Promotion | FIX_NOW: fixed + proven (`3ba296c7`) | none |
+| B | US-equity calendar authorities | `calendar.rs` vs `sessions.rs` | FIX_NOW: fixed + proven (`7e69b9b7`) | none |
+| C | `1D` vs `1Day` | `require_bars_match_manifest` | FIX_NOW: fixed + proven (`2ab0aa41`) | none |
+| D | parallel fixture race | `scenario_scan_canonical_config_binding_01` | FIX_NOW: fixed + proven (`e78806b6`) | none |
+| D2 | env race in autofresh scheduler tests | `scenario_market_data_autofresh_required_universe_01` | FIX_NOW: fixed + proven (`2101f410`) | none |
+| M1.10-machinery | derived 10/5 count | none existed | FIX_NOW: `soak_ledger` (`f825e994`) + runbook | none |
+| E | daemon dispatch of capital-fraction strategies | `mqk-runtime::capital_fraction_host` not used by the daemon | BLOCKED, hard stop | operator decision |
+| M1.9 candidate deployment | a promoted candidate deployed to Paper | - | BLOCKED_NO_CANDIDATE | candidate |
+| M1.9 market-hours observation | deployed runtime under an open session | - | WAITING_MARKET_SESSION | market |
+| M1.10 | 10 countable / 5 consecutive clean real sessions | `soak_ledger`, runbook `docs/runbooks/m1_10_finite_validation.md` | WAITING_MARKET_SESSION (after a candidate) | candidate + 10 sessions |
+| host sleep / Modern Standby | unattended-session precondition | - | OPERATOR_ACTION_REQUIRED before M1.10 | operator |
+| unattended pre-open start result, `DAEMON-EXIT-20260824` recurrence | real evidence | - | WAITING_MARKET_SESSION | market |
+| reboot/outage, B2 restore, LiveShadow, Live | G2.8 historical list | - | OUTSIDE_M1 (destructive or later milestones; not performed) | - |
+
+## Known findings
+
+**A. Stress authority.** The campaign predeclaration was not a production authority; Promotion accepted any consistent strictly-smaller fraction. Now the registered trial identity may carry `signal_source.stress_contract {scenario_id, allocation_fraction_bps}` (absent for every historical trial, so no id changes; the Batch 02 runner registers it only on an explicit `register_stress_contract: true`). `mqk-promotion` reads it from the durable registry and `verify_registered_stress_contract` refuses a capital-fraction candidate whose hash-verified P7A/P7B echo differs from it, or that has none; a fixed-quantity candidate must carry none. The daemon route calls it before `evaluate_promotion`. No universal fraction is chosen. Proof: Python 3 new test groups, Rust `cfsb02a-f` + wiring guard; mutations killed: stress-bps check dropped, scenario check dropped, missing contract accepted, fixed+contract accepted, reader ignores contract, reader drops the strictly-below check (6/6), plus the Python identity/opt-in tests. Batch 02 trial ids are unchanged (predeclaration/erratum/registration tests green). Closed historical Batch 02 candidates are not promotable under this rule (they carry no contract); they are rejected anyway.
+
+**B. Calendar.** Callers: `NyseWeekdaysProvider` (Paper) and the system/session surfaces use `calendar.rs`; daily research uses `sessions.rs` (v1, 2016-2026, bound into H1/H2 identity, untouched). Defects fixed in `calendar.rs`: missing closure 2025-01-09, false closure 2027-12-31 (NYSE publishes no Friday observance for Saturday 2028-01-01), missing early closes 2023-07-03 / 2025-07-03 / 2028-07-03 (NYSE page lists 2028-07-03), and weekday extrapolation of the wall-clock classifiers outside 2023-2028. Wall-clock classifiers now report `closed` outside the table; gap detection keeps expecting weekday bars there (a missing bar surfaces rather than being excused). Parity test pins both authorities on every shared date 2023-2026, the published 2027-2028 closures, early closes, weekends, year boundaries and coverage edges; 5/5 mutations killed; daemon lib 1121/0 and the calendar-dependent daemon binaries green.
+
+**C. `1D`/`1Day`.** Internal label `1D`, Alpaca transport label `1Day`; the declared label stays identity-bearing (`1D` and `1Day` manifests have different identity fragments, preserving every historical trial id). The granularity check fired only for the literal `1D` and tested UTC midnight, so real ET-midnight daily bars were falsely rejected under `1D` while hourly bars passed under the real label `1Day`. Both daily labels now select the check; a day boundary is midnight UTC or America/New_York. `1H`, `60Min`, `5Min`, `1day` and unknown labels never become daily (unchanged, not rejected here). Rust replay sites already accept exactly `1D|1Day` and refuse the rest. 3/3 mutations killed.
+
+**D. Fixture race.** Per-fixture unique directory: 25/25 failures at `--test-threads=4` before, 0/25 after. A second, independent race (shared process env across 19 async + 3 sync tests of the autofresh scheduler file; failed 3 of 4 local runs) is fixed by one tokio mutex; 0/45 failures after.
+
+**E. Capital-fraction Paper dispatch (hard stop).** With `MQK_STRATEGY_SIZING_POLICY` selecting the capital-fraction policy the daemon builds a `DurableStateRequired` registry; every stateless seam (`instantiate_verified`: bootstrap, host pool, promotion identity, dry run) refuses it, so no capital-fraction strategy can run. `mqk-runtime::capital_fraction_host` (persist-before-act, recover from `sys_strategy_held_sizing_state`) exists and is tested but has no daemon caller; `EffectiveRuntimeBinding` readers (readiness, coverage, outcome, bar driver) derive identity from the bootstrap and would also need the contract path. This was recorded as deferred in G2.15; it is a multi-seam runtime change (not an ordinary defect fix) and therefore is not attempted here. Decision required (smallest): authorize a dedicated daemon-wiring controller for capital-fraction dispatch **or** choose the historical fixed-quantity sizing for the next campaign. Until then the system fails closed (no capital-fraction order can be created).
+
+## M1.9 candidate-independent matrix (read-only, off-market; no secrets)
+
+| Item | Status |
+|---|---|
+| Paper DB identity (`mqk-paper-postgres`, `miniquantdesk_paper`, port 5440; session forced read-only) | VERIFIED_NOW |
+| Config/mode: `MQK_DAEMON_DEPLOYMENT_MODE=paper`; no live-routing flag; no `MQK_ALLOW_PROVIDER_API_CALLS` | VERIFIED_NOW |
+| Live disabled / untouched; daemon not running | VERIFIED_NOW |
+| Alpaca Paper adapter: mode-derived endpoint pairing | VERIFIED by code/tests; runtime observation WAITING_MARKET_SESSION |
+| Provider authority / session-aware freshness (Sunday requires Friday 2026-10-02, never weekend bars) | VERIFIED_NOW |
+| Scheduler: `MiniQuantDesk-Paper-Preopen-Startup` Ready, Mon-Fri 02:00 HST (08:00 ET), `Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled`; older soak tasks Disabled | VERIFIED_NOW (registration); unattended start WAITING_MARKET_SESSION |
+| Risk/arm/reconcile: `DISARMED` (`InboundContinuityUnproven`, 2026-09-25), `sys_risk_block_state` not blocked, reconcile `ok` 0 mismatches | VERIFIED_NOW (truthful; re-arm after cursor proof at deployment: WAITING_CANDIDATE) |
+| OMS: 9 ACKED + 3 SENT historical outbox rows; 8 unapplied inbox rows all from May-June 2026 test-era runs; 2 stale `RUNNING` run rows (2026-06-23, 2026-07-09), latest run 2026-09-25 `HALTED`; no active run | OBSERVED, historical residue, no active-run impact |
+| Promotion enforcement + no-default deployment: 0 promotion transitions; registry has 41 rows (38 enabled, 1 genuine `intraday_scalper`); `.env.local` selects AAPL/5m target qty 3; Gate 3b refuses without exact `active_paper` | VERIFIED_NOW: nothing can create a Paper outbox order |
+| Paper DB migrations: applied through 76, repo head 0091 | WAITING_CANDIDATE (apply through the canonical boot path at deployment) |
+| Candidate deployment identity; market-hours runtime proof | WAITING_CANDIDATE / WAITING_MARKET_SESSION |
+
+Status: `M1.9_PREDEPLOYMENT_READY` for every item that can exist without a candidate; M1.9 itself stays OPEN.
+
+## M1.10
+
+No code tallied the count before this controller; it was a runbook convention. `soak_ledger` now derives it (rules and the capture checklist in `docs/runbooks/m1_10_finite_validation.md`). Sunday, weekends, holidays, startup-only days and days before a valid promoted deployment never count; a repair changes the accepted SHA and restarts the count. Status: `M1.10_READY_TO_START_AFTER_VALID_DEPLOYMENT`; not started, not counted today.
+
+## Second adversarial sweep (every item FIXED+PROVEN, ALREADY CORRECT+PROVEN, or BLOCKED)
+
+Unpromoted/default strategy trading: ALREADY CORRECT (0 promotions; gate tests). Research-only identity bypass, strategy-id-only match, fixed-quantity benchmark authorizing capital-fraction, missing benchmark/stress authority fallback: ALREADY CORRECT + new gate. Wrong stress scenario authorizing Promotion, candidate choosing its stress after results, caller-invented stress: FIXED (registry-sourced, registered before the first attempt). Calendar disagreement Research/Backtest/Paper: FIXED (parity test); Sunday as outage: ALREADY CORRECT + new test; holiday/early close/outdated coverage: FIXED. 1D/1Day identity/unknown alias: FIXED/ALREADY CORRECT. Flaky tests hiding defects: FIXED (two races). Local config selecting an unpromoted strategy: ALREADY CORRECT (gate). Paper active without `active_paper`: ALREADY CORRECT. Live routing: ALREADY CORRECT, untouched. Docs claiming Batch 02 not pushed: FIXED here. M1 complete before 10/5; historical sessions counted after a repair: ALREADY CORRECT + `soak_ledger` (`WrongCodeSha`). Silent Batch 03; holdout consumed: NO. Capital-fraction candidate tradable in Paper: BLOCKED (E).

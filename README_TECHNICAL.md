@@ -18,10 +18,10 @@ tests win over all documents. Use the root [`README.md`](README.md) for the shor
 | Topic | State |
 |---|---|
 | Current target | **M1 — US Equity/ETF Paper Production** (open) |
-| Accepted production-code baseline | Native Sizing V1 pushed-verified head `92d337b67670b2858aa24c00b2768a2ca04cc212` (exact head of CI #621); later docs-only commits do not change production behavior |
+| Accepted pushed baseline | `fac225922d3b46bb842bea22f2c9676f7cfb5b58`, GitHub CI #623 (run 37222460113), SUCCESS, 6/6 jobs |
 | Native Sizing V1 | **PUSHED-VERIFIED** — CI #621, run 37145565796, SUCCESS, 6/6 jobs, exact pushed head |
 | Research Batch 01 | **BATCH_REJECTED** (3 hypotheses × 5 symbols, 0 `paper_candidate`) |
-| Research Batch 02 | **BATCH_REJECTED** (turn-of-month, Halloween / November–April, 50-day range breakout with 10-day hold; 3 hypotheses × 5 symbols, 0 `paper_candidate`; local, not pushed, pending independent review) |
+| Research Batch 02 | **BATCH_REJECTED** (turn-of-month, Halloween / November–April, 50-day range breakout with 10-day hold; 3 hypotheses × 5 symbols, 0 `paper_candidate`; PUSHED-VERIFIED) |
 | Promoted candidate | **None** |
 | Paper deployment | **Inactive** — no deployed strategy; pending a valid promotable candidate |
 | Final holdout | **RESERVED / UNCONSUMED** |
@@ -250,7 +250,7 @@ Python research setup: from `research-py/`, `python -m venv .venv`, `pip install
 ## 12. Current boundaries and non-claims
 
 - No active deployed Paper strategy and no promoted candidate. Paper deployment is inactive pending a valid promotable candidate.
-- Research Batches 01 and 02 are rejected; no further campaign is authorized without a new operator decision.
+- Research Batches 01 and 02 are rejected. Future discovery is allowed after system closure (`docs/M1_SYSTEM_CLOSURE_01.md`) under a new formal predeclaration; none is started.
 - The final holdout is reserved and unconsumed.
 - Live is disabled and not ready. Typed support for `live-shadow` and `live-capital` is not evidence of safe live operation.
 - M1 is not complete: candidate discovery/promotion, M1.9 and M1.10 are open.

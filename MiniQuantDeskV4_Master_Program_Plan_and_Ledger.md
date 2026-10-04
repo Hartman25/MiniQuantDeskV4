@@ -749,6 +749,25 @@ Local, **not pushed** (baseline `4df36008aec1ac16852a89f807de6262685b0652`; orig
 
 **M1 status: `M1_BLOCKED`.** `BATCH_REJECTED` remains the Batch 02 economic outcome; Promotion NONE; Paper INACTIVE; final holdout RESERVED / UNCONSUMED; Live NOT TOUCHED. **Future prerequisite (not relevant to Batch 02, whose rejected candidates never reach Promotion):** before any future capital-fraction candidate is production-promoted, the required stress allocation authority must be decided and bound — Promotion currently accepts any consistent, strictly smaller fraction. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI after an authorized push.
 
+### G2.17A Batch 02 pushed-verified current truth (2026-10-04)
+
+Supersedes the "Local, **not pushed**" wording of G2.16 and G2.17. Batch 02 (`BATCH_REJECTED`) and its independent-review correction are **PUSHED-VERIFIED** at `fac225922d3b46bb842bea22f2c9676f7cfb5b58`: GitHub CI #623, run `37222460113`, SUCCESS, 6/6 jobs. Promotion NONE; Paper INACTIVE; holdout RESERVED / UNCONSUMED; Live NOT TOUCHED. The operator's later sequencing decision: future strategy discovery is allowed, system completion first, and a new campaign needs a normal formal predeclaration (none started). Historical entries are not rewritten.
+
+### G2.18 M1 system closure (`V4-M1-SYSTEM-CLOSURE-CANDIDATE-READY-01`, 2026-10-04)
+
+Local, not pushed (baseline `fac22592`). Full record, matrix, census, second sweep: `docs/M1_SYSTEM_CLOSURE_01.md`.
+
+| Commit | Invariant |
+|---|---|
+| `e78806b6` | scan-fixture test uses a unique temp dir per test (25/25 -> 0/25 failures) |
+| `2ab0aa41` | daily granularity check is label- and zone-correct (`1D`/`1Day`; ET-midnight bars; identity unchanged) |
+| `7e69b9b7` | `calendar.rs` closes 2025-01-09, opens 2027-12-31, early closes 2023/2025/2028-07-03, wall-clock classifiers closed outside 2023-2028; parity with `sessions` v1 pinned |
+| `f825e994` | `mqk_integrity::soak_ledger`: the M1.10 10/5 count is derived, not incremented |
+| `3ba296c7` | Promotion binds the capital-fraction stress scenario to the registered Research trial identity (no universal fraction; historical ids unchanged) |
+| `2101f410`, `a28deaf4` | autofresh scheduler tests serialized on process env; Sunday freshness pinned to the last completed session |
+
+Open: `OPERATOR_DECISION_REQUIRED_CAPITAL_FRACTION_PAPER_DISPATCH` (daemon cannot trade a capital-fraction strategy). M1 status `M1_BLOCKED` (no qualified candidate; M1.9 deployment; M1.10 real sessions). `M1_SYSTEM_CANDIDATE_READY = false` until the dispatch decision is resolved. G2.17's blocked stress-authority item (IR-B02-02 b) is closed by `3ba296c7`.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).

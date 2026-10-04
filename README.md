@@ -45,11 +45,11 @@ Live trading is disabled and not ready.
 | Topic | Current state |
 |---|---|
 | Current milestone | **M1 — US Equity/ETF Paper Production** (open) |
-| Accepted production-code baseline | Native Sizing V1 pushed-verified head `92d337b67670b2858aa24c00b2768a2ca04cc212` (exact head of CI #621); later docs-only commits do not change production behavior |
+| Accepted pushed baseline | `fac225922d3b46bb842bea22f2c9676f7cfb5b58`, GitHub CI #623 (run 37222460113), SUCCESS, 6/6 jobs; later local commits are tracked by Git, not by this table |
 | Research / backtest stack | Native strategy engines, causal Backtest, scanner/review with explicit versioned benchmark policy, Promotion gate, statistical judge |
 | Native Sizing V1 (`fixed_initial_capital_fraction_v1`) | **PUSHED-VERIFIED** — GitHub CI #621 (run 37145565796), SUCCESS, 6/6 jobs, on the exact pushed head |
 | Research Batch 01 | **BATCH_REJECTED** (no `paper_candidate`) |
-| Research Batch 02 | **BATCH_REJECTED** — 15 trials, 0 `paper_candidate`; local, not pushed, pending independent review (`docs/research/M1_BATCH02_RESULT.md`) |
+| Research Batch 02 | **BATCH_REJECTED** — 15 trials, 0 `paper_candidate`; **PUSHED-VERIFIED** (`docs/research/M1_BATCH02_RESULT.md`) |
 | Promotion | **None** — no strategy is selected or promoted |
 | Paper deployment | **Inactive** — no active deployed Paper strategy; pending a valid promotable candidate |
 | Final holdout | **RESERVED / UNCONSUMED** |
@@ -94,8 +94,9 @@ decision, and **every step after Research is still open**. In particular:
 - M1.10, ten countable autonomous Paper sessions including five consecutive clean ones, is open.
 
 Batch 02 (turn-of-month, Halloween / November–April, and a 50-day range breakout with a 10-day hold; 3 hypotheses ×
-5 symbols) ran once under its committed predeclaration and produced no `paper_candidate`. No follow-up hypothesis or
-parameter rescue is authorized.
+5 symbols) ran once under its committed predeclaration and produced no `paper_candidate`. No rescue of Batch 01/02 is
+authorized. Future strategy discovery is allowed, but only after system closure (`docs/M1_SYSTEM_CLOSURE_01.md`) and
+under a new formal predeclaration; none is started.
 
 ## Architecture at a glance
 

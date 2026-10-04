@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -30. M1 System Closure (2026-10-04, `V4-M1-SYSTEM-CLOSURE-CANDIDATE-READY-01`)
+
+Local commits on top of `fac22592`, **not pushed**. Record: `docs/M1_SYSTEM_CLOSURE_01.md`; runbook `docs/runbooks/m1_10_finite_validation.md`; ledger G2.18. Supersedes the "local, not pushed" wording of -29 and -28: Batch 02 and its independent-review correction are **PUSHED-VERIFIED** at `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (GitHub CI #623, run `37222460113`, SUCCESS, 6/6).
+
+- Operator sequencing decision: future strategy discovery IS allowed, but SYSTEM COMPLETION comes first and a new campaign needs a normal formal predeclaration before any economic evaluation. No Batch 03, hypothesis, trial or economic attempt was created here.
+- Fixed + proven: capital-fraction stress scenario bound to the registered Research trial (additive `signal_source.stress_contract`; no universal fraction); calendar authority (`calendar.rs` closures/early closes/coverage); daily-label granularity check; two test races; derived M1.10 ledger (`mqk_integrity::soak_ledger`).
+- **Hard stop `OPERATOR_DECISION_REQUIRED_CAPITAL_FRACTION_PAPER_DISPATCH`:** the daemon cannot trade a capital-fraction strategy (its runtime host is not wired; the daemon fails closed). Decide: authorize a dedicated wiring controller, or choose fixed-quantity sizing for the next campaign. `M1_SYSTEM_CANDIDATE_READY = false` until then.
+- Off-market state (read-only): Paper DB `mqk-paper-postgres` DISARMED, 0 promotion transitions, daemon not running, Paper DB migrations at 76 vs repo 0091, `MiniQuantDesk-Paper-Preopen-Startup` task Ready. M1.9 is `PREDEPLOYMENT_READY` for candidate-independent items only; M1.10 is not started (`READY_TO_START_AFTER_VALID_DEPLOYMENT`). Sunday counts for nothing.
+- Unchanged: M1 `M1_BLOCKED`; Batch 01 and 02 `BATCH_REJECTED`; Promotion NONE; Paper INACTIVE; final holdout RESERVED / UNCONSUMED; Live DISABLED / NOT TOUCHED. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI.
+
 ## -29. Batch 02 Independent-Review Correction (2026-10-03, `V4-M1-NATIVE-HYPOTHESIS-BATCH-02-INDEPENDENT-REVIEW-CORRECTION-01`)
 
 Local only, **not pushed**. Records: `docs/research/M1_BATCH02_PREDECLARATION_ERRATUM.md`, `docs/research/M1_BATCH02_CENSUS.md` (correction section), ledger G2.17. Nothing economic changed; `BATCH_REJECTED` stands.
