@@ -189,14 +189,20 @@ mod tests {
         for date in [d(2023, 10, 31), d(2024, 4, 30), d(2024, 7, 15)] {
             let base = sig_on(date);
             for close in [1, 1_000_000, 987_654_321_000, i64::MAX / 4] {
-                assert_eq!(HalloweenNovAprStrategy::signal_from_recent(&[bar(date, close, true)]), base);
+                assert_eq!(
+                    HalloweenNovAprStrategy::signal_from_recent(&[bar(date, close, true)]),
+                    base
+                );
             }
             let with_history = [
                 bar(d(2020, 1, 2), -5, false),
                 bar(d(2021, 6, 1), 0, true),
                 bar(date, 100_000_000, true),
             ];
-            assert_eq!(HalloweenNovAprStrategy::signal_from_recent(&with_history), base);
+            assert_eq!(
+                HalloweenNovAprStrategy::signal_from_recent(&with_history),
+                base
+            );
         }
     }
 
@@ -204,7 +210,11 @@ mod tests {
     fn fails_closed_flat_on_incomplete_unknown_and_uncovered_calendar_input() {
         let f = |bars: &[BarStub]| HalloweenNovAprStrategy::signal_from_recent(bars);
         assert_eq!(sig_on(d(2023, 12, 20)), 1);
-        assert_eq!(f(&[bar(d(2023, 12, 20), 100, false)]), 0, "incomplete latest bar");
+        assert_eq!(
+            f(&[bar(d(2023, 12, 20), 100, false)]),
+            0,
+            "incomplete latest bar"
+        );
         assert_eq!(f(&[]), 0);
         assert_eq!(f(&[bar(d(2023, 12, 25), 100, true)]), 0, "holiday label");
         assert_eq!(f(&[bar(d(2023, 12, 23), 100, true)]), 0, "weekend label");
@@ -213,7 +223,11 @@ mod tests {
         assert_eq!(f(&[shifted]), 0);
         assert_eq!(f(&[bar(d(2015, 12, 31), 100, true)]), 0, "before coverage");
         assert_eq!(f(&[bar(d(2027, 12, 1), 100, true)]), 0, "after coverage");
-        assert_eq!(f(&[bar(d(2026, 12, 31), 100, true)]), 0, "next session uncovered");
+        assert_eq!(
+            f(&[bar(d(2026, 12, 31), 100, true)]),
+            0,
+            "next session uncovered"
+        );
     }
 
     #[test]
@@ -233,10 +247,18 @@ mod tests {
     #[test]
     fn fingerprint_is_deterministic_symbol_bound_and_hex() {
         let a = HalloweenNovAprStrategy::new("SPY").semantic_fingerprint();
-        assert_eq!(a, HalloweenNovAprStrategy::new("SPY").semantic_fingerprint());
-        assert_ne!(a, HalloweenNovAprStrategy::new("EFA").semantic_fingerprint());
+        assert_eq!(
+            a,
+            HalloweenNovAprStrategy::new("SPY").semantic_fingerprint()
+        );
+        assert_ne!(
+            a,
+            HalloweenNovAprStrategy::new("EFA").semantic_fingerprint()
+        );
         assert_eq!(a.len(), 64);
-        assert!(a.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(a
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
     }
 
     #[test]
@@ -273,14 +295,91 @@ mod tests {
         let flat = "flat_months:5_6_7_8_9_10";
         let decision = "decision:next_regular_session_after_latest_completed_bar";
         let live = HalloweenNovAprStrategy::new("SPY").semantic_fingerprint();
-        assert_eq!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, &months, flat, decision), "recipe mirrors the engine");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, &[11, 12, 1, 2, 3, 4, 5], flat, decision), "May included");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, &[10, 11, 12, 1, 2, 3, 4], flat, decision), "October included");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, &[11, 12, 1, 2, 3], flat, decision));
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, &months, flat, "decision:current_session"), "current session substituted for next");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, "0".repeat(64).as_str(), &months, flat, decision), "calendar content identity");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, "us_equity_regular_sessions_v2", &sha, &months, flat, decision));
-        assert_ne!(live, fp("0.1.1", TIMEFRAME_SECS, id, &sha, &months, flat, decision));
+        assert_eq!(
+            live,
+            fp(VERSION, TIMEFRAME_SECS, id, &sha, &months, flat, decision),
+            "recipe mirrors the engine"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                &sha,
+                &[11, 12, 1, 2, 3, 4, 5],
+                flat,
+                decision
+            ),
+            "May included"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                &sha,
+                &[10, 11, 12, 1, 2, 3, 4],
+                flat,
+                decision
+            ),
+            "October included"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                &sha,
+                &[11, 12, 1, 2, 3],
+                flat,
+                decision
+            )
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                &sha,
+                &months,
+                flat,
+                "decision:current_session"
+            ),
+            "current session substituted for next"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                "0".repeat(64).as_str(),
+                &months,
+                flat,
+                decision
+            ),
+            "calendar content identity"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                "us_equity_regular_sessions_v2",
+                &sha,
+                &months,
+                flat,
+                decision
+            )
+        );
+        assert_ne!(
+            live,
+            fp("0.1.1", TIMEFRAME_SECS, id, &sha, &months, flat, decision)
+        );
         assert_ne!(live, fp(VERSION, 3_600, id, &sha, &months, flat, decision));
     }
 }

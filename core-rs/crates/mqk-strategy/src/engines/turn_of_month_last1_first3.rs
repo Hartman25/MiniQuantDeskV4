@@ -210,7 +210,8 @@ mod tests {
         for date in [d(2024, 3, 27), d(2024, 3, 26), d(2025, 9, 4)] {
             let base = sig_on(date);
             for close in [1, 1_000_000, 987_654_321_000, i64::MAX / 4] {
-                let one = TurnOfMonthLast1First3Strategy::signal_from_recent(&[bar(date, close, true)]);
+                let one =
+                    TurnOfMonthLast1First3Strategy::signal_from_recent(&[bar(date, close, true)]);
                 assert_eq!(one, base);
             }
             // Older bars of any kind, price or completeness, cannot change the target.
@@ -219,7 +220,10 @@ mod tests {
                 bar(d(2021, 6, 1), 0, true),
                 bar(date, 100_000_000, true),
             ];
-            assert_eq!(TurnOfMonthLast1First3Strategy::signal_from_recent(&with_history), base);
+            assert_eq!(
+                TurnOfMonthLast1First3Strategy::signal_from_recent(&with_history),
+                base
+            );
         }
     }
 
@@ -227,16 +231,28 @@ mod tests {
     fn fails_closed_flat_on_incomplete_unknown_and_uncovered_calendar_input() {
         let flat = |bars: &[BarStub]| TurnOfMonthLast1First3Strategy::signal_from_recent(bars);
         assert_eq!(sig_on(d(2024, 3, 27)), 1);
-        assert_eq!(flat(&[bar(d(2024, 3, 27), 100, false)]), 0, "incomplete latest bar");
+        assert_eq!(
+            flat(&[bar(d(2024, 3, 27), 100, false)]),
+            0,
+            "incomplete latest bar"
+        );
         assert_eq!(flat(&[]), 0, "no bars");
         assert_eq!(flat(&[bar(d(2024, 3, 29), 100, true)]), 0, "holiday label");
         assert_eq!(flat(&[bar(d(2024, 3, 30), 100, true)]), 0, "weekend label");
         let mut shifted = bar(d(2024, 3, 27), 100, true);
         shifted.end_ts += 16 * 3600; // a close-labelled stamp, not the daily label
         assert_eq!(flat(&[shifted]), 0, "unresolvable session identity");
-        assert_eq!(flat(&[bar(d(2015, 12, 30), 100, true)]), 0, "before coverage");
+        assert_eq!(
+            flat(&[bar(d(2015, 12, 30), 100, true)]),
+            0,
+            "before coverage"
+        );
         assert_eq!(flat(&[bar(d(2027, 1, 28), 100, true)]), 0, "after coverage");
-        assert_eq!(flat(&[bar(d(2026, 12, 31), 100, true)]), 0, "next session uncovered");
+        assert_eq!(
+            flat(&[bar(d(2026, 12, 31), 100, true)]),
+            0,
+            "next session uncovered"
+        );
     }
 
     #[test]
@@ -252,16 +268,32 @@ mod tests {
             assert_eq!(a.targets.len(), 1);
             assert_eq!(a.targets[0].symbol, "SPY");
         }
-        assert_eq!(long_lived.on_bar(&ctx(vec![bar(d(2024, 3, 27), 1, true)])).targets[0].qty.to_whole_units_checked().unwrap(), 1);
+        assert_eq!(
+            long_lived
+                .on_bar(&ctx(vec![bar(d(2024, 3, 27), 1, true)]))
+                .targets[0]
+                .qty
+                .to_whole_units_checked()
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
     fn fingerprint_is_deterministic_symbol_bound_and_hex() {
         let a = TurnOfMonthLast1First3Strategy::new("SPY").semantic_fingerprint();
-        assert_eq!(a, TurnOfMonthLast1First3Strategy::new("SPY").semantic_fingerprint());
-        assert_ne!(a, TurnOfMonthLast1First3Strategy::new("EFA").semantic_fingerprint());
+        assert_eq!(
+            a,
+            TurnOfMonthLast1First3Strategy::new("SPY").semantic_fingerprint()
+        );
+        assert_ne!(
+            a,
+            TurnOfMonthLast1First3Strategy::new("EFA").semantic_fingerprint()
+        );
         assert_eq!(a.len(), 64);
-        assert!(a.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(a
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
     }
 
     /// Mutation proof: every behavior-bearing semantic, including the calendar identity, is bound.
@@ -298,15 +330,84 @@ mod tests {
         let rule = "rule:long_if_last_session_of_month_or_ordinal_in_set";
         let decision = "decision:next_regular_session_after_latest_completed_bar";
         let live = TurnOfMonthLast1First3Strategy::new("SPY").semantic_fingerprint();
-        assert_eq!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, 3, 1, rule, decision), "recipe mirrors the engine");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, 4, 1, rule, decision), "first-three -> first-four");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, 2, 1, rule, decision));
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, 3, 2, rule, decision), "required history");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, 3, 1, "rule:long_if_ordinal_in_set", decision));
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, &sha, 3, 1, rule, "decision:current_session"), "current session substituted for next");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, id, "0".repeat(64).as_str(), 3, 1, rule, decision), "calendar content identity");
-        assert_ne!(live, fp(VERSION, TIMEFRAME_SECS, "us_equity_regular_sessions_v2", &sha, 3, 1, rule, decision), "calendar contract id");
-        assert_ne!(live, fp("0.1.1", TIMEFRAME_SECS, id, &sha, 3, 1, rule, decision));
+        assert_eq!(
+            live,
+            fp(VERSION, TIMEFRAME_SECS, id, &sha, 3, 1, rule, decision),
+            "recipe mirrors the engine"
+        );
+        assert_ne!(
+            live,
+            fp(VERSION, TIMEFRAME_SECS, id, &sha, 4, 1, rule, decision),
+            "first-three -> first-four"
+        );
+        assert_ne!(
+            live,
+            fp(VERSION, TIMEFRAME_SECS, id, &sha, 2, 1, rule, decision)
+        );
+        assert_ne!(
+            live,
+            fp(VERSION, TIMEFRAME_SECS, id, &sha, 3, 2, rule, decision),
+            "required history"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                &sha,
+                3,
+                1,
+                "rule:long_if_ordinal_in_set",
+                decision
+            )
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                &sha,
+                3,
+                1,
+                rule,
+                "decision:current_session"
+            ),
+            "current session substituted for next"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                id,
+                "0".repeat(64).as_str(),
+                3,
+                1,
+                rule,
+                decision
+            ),
+            "calendar content identity"
+        );
+        assert_ne!(
+            live,
+            fp(
+                VERSION,
+                TIMEFRAME_SECS,
+                "us_equity_regular_sessions_v2",
+                &sha,
+                3,
+                1,
+                rule,
+                decision
+            ),
+            "calendar contract id"
+        );
+        assert_ne!(
+            live,
+            fp("0.1.1", TIMEFRAME_SECS, id, &sha, 3, 1, rule, decision)
+        );
         assert_ne!(live, fp(VERSION, 3_600, id, &sha, 3, 1, rule, decision));
     }
 }

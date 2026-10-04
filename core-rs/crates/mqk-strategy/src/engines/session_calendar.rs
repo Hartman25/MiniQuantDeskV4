@@ -26,14 +26,19 @@ pub(crate) fn next_session_of_latest_bar(recent: &[BarStub]) -> Option<NaiveDate
 
 /// sha256 (hex) of the calendar's canonical content string.
 pub(crate) fn calendar_content_sha256() -> String {
-    hex::encode(Sha256::digest(sessions::calendar_content_string().as_bytes()))
+    hex::encode(Sha256::digest(
+        sessions::calendar_content_string().as_bytes(),
+    ))
 }
 
 /// Binds the calendar contract id and its content hash into a fingerprint, so changing any
 /// closure, the coverage or the contract changes the identity of every dependent trial.
 pub(crate) fn push_calendar_identity(b: &mut SemanticIdentityBuilder) {
-    b.push_str(&format!("calendar:{}", sessions::US_EQUITY_REGULAR_SESSIONS_V1))
-        .push_str(&calendar_content_sha256());
+    b.push_str(&format!(
+        "calendar:{}",
+        sessions::US_EQUITY_REGULAR_SESSIONS_V1
+    ))
+    .push_str(&calendar_content_sha256());
 }
 
 #[cfg(test)]
@@ -93,15 +98,33 @@ mod tests {
     #[test]
     fn unresolvable_inputs_resolve_to_none() {
         assert_eq!(next_session_of_latest_bar(&[]), None);
-        assert_eq!(next_session_of_latest_bar(&[bar(d(2024, 3, 28), 1, false)]), None);
+        assert_eq!(
+            next_session_of_latest_bar(&[bar(d(2024, 3, 28), 1, false)]),
+            None
+        );
         // Holiday / weekend label, non-midnight label, uncovered dates.
-        assert_eq!(next_session_of_latest_bar(&[bar(d(2024, 3, 29), 1, true)]), None);
-        assert_eq!(next_session_of_latest_bar(&[bar(d(2024, 3, 30), 1, true)]), None);
+        assert_eq!(
+            next_session_of_latest_bar(&[bar(d(2024, 3, 29), 1, true)]),
+            None
+        );
+        assert_eq!(
+            next_session_of_latest_bar(&[bar(d(2024, 3, 30), 1, true)]),
+            None
+        );
         let mut off = bar(d(2024, 3, 28), 1, true);
         off.end_ts += 3600;
         assert_eq!(next_session_of_latest_bar(&[off]), None);
-        assert_eq!(next_session_of_latest_bar(&[bar(d(2015, 12, 31), 1, true)]), None);
-        assert_eq!(next_session_of_latest_bar(&[bar(d(2026, 12, 31), 1, true)]), None);
-        assert_eq!(next_session_of_latest_bar(&[bar(d(2027, 6, 1), 1, true)]), None);
+        assert_eq!(
+            next_session_of_latest_bar(&[bar(d(2015, 12, 31), 1, true)]),
+            None
+        );
+        assert_eq!(
+            next_session_of_latest_bar(&[bar(d(2026, 12, 31), 1, true)]),
+            None
+        );
+        assert_eq!(
+            next_session_of_latest_bar(&[bar(d(2027, 6, 1), 1, true)]),
+            None
+        );
     }
 }
