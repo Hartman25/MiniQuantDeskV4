@@ -110,31 +110,12 @@ impl Strategy for MonthlyMultihorizonAbsMomentumConsensusV1Strategy {
 
 #[cfg(test)]
 mod tests {
+    use super::super::monthly::test_support::series;
     use super::super::session_calendar::test_support::*;
     use super::*;
     use crate::RecentBarsWindow;
-    use chrono::NaiveDate;
-    use mqk_integrity::sessions;
 
     const BASE: i64 = 100_000_000;
-
-    /// `n` consecutive regular sessions ending on `last`, closes from `f(index_from_start)`.
-    fn series(last: NaiveDate, n: usize, f: impl Fn(usize) -> i64) -> Vec<BarStub> {
-        let mut dates = vec![last];
-        while dates.len() < n {
-            let mut x = dates.last().unwrap().pred_opt().unwrap();
-            while !sessions::is_session(x).unwrap() {
-                x = x.pred_opt().unwrap();
-            }
-            dates.push(x);
-        }
-        dates.reverse();
-        dates
-            .into_iter()
-            .enumerate()
-            .map(|(i, dt)| bar(dt, f(i), true))
-            .collect()
-    }
 
     /// Month-end 2024-06-28 is the last bar; vote closes are set by horizon at that bar.
     fn at_month_end(c: i64, c21: i64, c63: i64, c252: i64) -> Vec<BarStub> {

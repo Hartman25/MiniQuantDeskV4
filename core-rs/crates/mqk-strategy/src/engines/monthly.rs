@@ -13,6 +13,9 @@ use crate::BarStub;
 /// Most sessions after a month-end decision bar before the next month-end.
 pub(crate) const MAX_SESSIONS_SINCE_MONTH_END: usize = 22;
 
+/// Most regular sessions in one calendar month (consecutive month-ends are at most this far apart).
+pub(crate) const MAX_SESSIONS_PER_MONTH: usize = 23;
+
 fn month_key(d: NaiveDate) -> (i32, u32) {
     (d.year(), d.month())
 }
@@ -42,6 +45,44 @@ pub(crate) fn month_end_indices(win: &[BarStub]) -> Option<Vec<usize>> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::super::session_calendar::test_support::{bar, d};
+    use super::*;
+
+    /// `n` consecutive regular sessions ending on `last`, closes from `f(index_from_start)`.
+    pub(crate) fn series(last: NaiveDate, n: usize, f: impl Fn(usize) -> i64) -> Vec<BarStub> {
+        let mut dates = vec![last];
+        while dates.len() < n {
+            let mut x = dates.last().unwrap().pred_opt().unwrap();
+            while !sessions::is_session(x).unwrap() {
+                x = x.pred_opt().unwrap();
+            }
+            dates.push(x);
+        }
+        dates.reverse();
+        dates
+            .into_iter()
+            .enumerate()
+            .map(|(i, dt)| bar(dt, f(i), true))
+            .collect()
+    }
+
+    /// A tape of `required + 60` sessions all closing at `default`, and the index `m` of its
+    /// second-to-last month-end (so every window `tape[e+1-required..=e]` for `e` from `m` to the
+    /// last month-end `- 1` holds `m` with at least `required - 23` bars before it).
+    pub(crate) fn tape_with_decision(
+        required: usize,
+        default: i64,
+    ) -> (Vec<BarStub>, usize, usize) {
+        let tape = series(d(2025, 3, 31), required + 60, |_| default);
+        let me = month_end_indices(&tape).unwrap();
+        let (m, next) = (me[me.len() - 2], me[me.len() - 1]);
+        assert!(m + 1 >= required);
+        (tape, m, next)
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +156,23 @@ mod tests {
             day = day.succ_opt().unwrap();
         }
         assert!(max_gap <= MAX_SESSIONS_SINCE_MONTH_END, "{max_gap}");
+    }
+
+    #[test]
+    fn no_covered_month_has_more_than_the_declared_maximum_sessions() {
+        let mut count = 0usize;
+        let mut max_count = 0usize;
+        let mut day = sessions::coverage_start();
+        while day <= sessions::coverage_end() {
+            if sessions::is_session(day).unwrap() {
+                count += 1;
+                max_count = max_count.max(count);
+                if sessions::is_last_session_of_month(day).unwrap() {
+                    count = 0;
+                }
+            }
+            day = day.succ_opt().unwrap();
+        }
+        assert!(max_count <= MAX_SESSIONS_PER_MONTH, "{max_count}");
     }
 }
