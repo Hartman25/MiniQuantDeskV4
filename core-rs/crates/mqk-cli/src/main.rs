@@ -177,7 +177,7 @@ enum BacktestCmd {
         bars: String,
 
         /// Strategy name to run (see `mqk backtest list-strategies`).
-        /// Available: swing_momentum, mean_reversion, volatility_breakout, intraday_scalper, trend_sma50, dual_sma_50_200_trend, pullback_mean_reversion_20_2, absolute_momentum_252, near_high_momentum_252_3pct, trend_pullback_5d_4pct_hold5, turn_of_month_last1_first3, halloween_nov_apr, trading_range_breakout_50d_hold10.
+        /// Available: swing_momentum, mean_reversion, volatility_breakout, intraday_scalper, trend_sma50, dual_sma_50_200_trend, pullback_mean_reversion_20_2, absolute_momentum_252, near_high_momentum_252_3pct, trend_pullback_5d_4pct_hold5, turn_of_month_last1_first3, halloween_nov_apr, trading_range_breakout_50d_hold10, monthly_multihorizon_abs_momentum_consensus_v1, trend_filtered_rsi5_reversion_v1, trend_filtered_extreme_3d_atr_reversal_v1, close_channel_100_50_trend_v1, monthly_10month_trend_timing_v1, trend_filtered_zscore20_reversion_v1, volatility_contraction_breakout_v1, monthly_12_minus_1_abs_momentum_v1, delayed_overnight_gap_reversal_v1, monthly_52week_high_proximity_v1.
         #[arg(long, default_value = "swing_momentum")]
         strategy: String,
 

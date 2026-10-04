@@ -5,12 +5,15 @@ use mqk_execution::AssetClass;
 pub mod absolute_momentum_252;
 pub mod close_channel_100_50_trend_v1;
 mod daily_math;
+pub mod delayed_overnight_gap_reversal_v1;
 pub mod dual_sma_50_200_trend;
 pub mod halloween_nov_apr;
 pub mod intraday_scalper;
 pub mod mean_reversion;
 mod monthly;
 pub mod monthly_10month_trend_timing_v1;
+pub mod monthly_12_minus_1_abs_momentum_v1;
+pub mod monthly_52week_high_proximity_v1;
 pub mod monthly_multihorizon_abs_momentum_consensus_v1;
 pub mod near_high_momentum_252_3pct;
 pub mod pullback_mean_reversion_20_2;
@@ -24,10 +27,12 @@ pub mod trend_pullback_5d_4pct_hold5;
 pub mod trend_sma50;
 pub mod turn_of_month_last1_first3;
 pub mod volatility_breakout;
+pub mod volatility_contraction_breakout_v1;
 mod window;
 
 pub use absolute_momentum_252::AbsoluteMomentum252Strategy;
 pub use close_channel_100_50_trend_v1::CloseChannel10050TrendV1Strategy;
+pub use delayed_overnight_gap_reversal_v1::DelayedOvernightGapReversalV1Strategy;
 pub use dual_sma_50_200_trend::DualSma50200TrendStrategy;
 pub use halloween_nov_apr::HalloweenNovAprStrategy;
 pub use intraday_scalper::{
@@ -36,6 +41,8 @@ pub use intraday_scalper::{
 };
 pub use mean_reversion::MeanReversionStrategy;
 pub use monthly_10month_trend_timing_v1::Monthly10MonthTrendTimingV1Strategy;
+pub use monthly_12_minus_1_abs_momentum_v1::Monthly12Minus1AbsMomentumV1Strategy;
+pub use monthly_52week_high_proximity_v1::Monthly52WeekHighProximityV1Strategy;
 pub use monthly_multihorizon_abs_momentum_consensus_v1::MonthlyMultihorizonAbsMomentumConsensusV1Strategy;
 pub use near_high_momentum_252_3pct::NearHighMomentum2523PctStrategy;
 pub use pullback_mean_reversion_20_2::PullbackMeanReversion202Strategy;
@@ -48,6 +55,7 @@ pub use trend_pullback_5d_4pct_hold5::TrendPullback5d4pctHold5Strategy;
 pub use trend_sma50::TrendSma50Strategy;
 pub use turn_of_month_last1_first3::TurnOfMonthLast1First3Strategy;
 pub use volatility_breakout::VolatilityBreakoutStrategy;
+pub use volatility_contraction_breakout_v1::VolatilityContractionBreakoutV1Strategy;
 
 /// IR9: the single authoritative list of every strategy identity
 /// [`register_builtin_strategies`] registers, in registration order. Each
@@ -77,6 +85,16 @@ pub const REGISTERED_STRATEGY_IDS: &[&str] = &[
     turn_of_month_last1_first3::NAME,
     halloween_nov_apr::NAME,
     trading_range_breakout_50d_hold10::NAME,
+    monthly_multihorizon_abs_momentum_consensus_v1::NAME,
+    trend_filtered_rsi5_reversion_v1::NAME,
+    trend_filtered_extreme_3d_atr_reversal_v1::NAME,
+    close_channel_100_50_trend_v1::NAME,
+    monthly_10month_trend_timing_v1::NAME,
+    trend_filtered_zscore20_reversion_v1::NAME,
+    volatility_contraction_breakout_v1::NAME,
+    monthly_12_minus_1_abs_momentum_v1::NAME,
+    delayed_overnight_gap_reversal_v1::NAME,
+    monthly_52week_high_proximity_v1::NAME,
     intraday_scalper::SHORT_NAME,
 ];
 
@@ -161,6 +179,78 @@ pub fn register_builtin_strategies(
     registry.register(trading_range_breakout_50d_hold10::meta(), move || {
         Box::new(TradingRangeBreakout50dHold10Strategy::new(
             trb_symbol.clone(),
+        )) as Box<dyn Strategy>
+    })?;
+
+    let f01_symbol = symbol.clone();
+    registry.register(
+        monthly_multihorizon_abs_momentum_consensus_v1::meta(),
+        move || {
+            Box::new(MonthlyMultihorizonAbsMomentumConsensusV1Strategy::new(
+                f01_symbol.clone(),
+            )) as Box<dyn Strategy>
+        },
+    )?;
+
+    let f02_symbol = symbol.clone();
+    registry.register(trend_filtered_rsi5_reversion_v1::meta(), move || {
+        Box::new(TrendFilteredRsi5ReversionV1Strategy::new(
+            f02_symbol.clone(),
+        )) as Box<dyn Strategy>
+    })?;
+
+    let f03_symbol = symbol.clone();
+    registry.register(
+        trend_filtered_extreme_3d_atr_reversal_v1::meta(),
+        move || {
+            Box::new(TrendFilteredExtreme3dAtrReversalV1Strategy::new(
+                f03_symbol.clone(),
+            )) as Box<dyn Strategy>
+        },
+    )?;
+
+    let f04_symbol = symbol.clone();
+    registry.register(close_channel_100_50_trend_v1::meta(), move || {
+        Box::new(CloseChannel10050TrendV1Strategy::new(f04_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let f05_symbol = symbol.clone();
+    registry.register(monthly_10month_trend_timing_v1::meta(), move || {
+        Box::new(Monthly10MonthTrendTimingV1Strategy::new(f05_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let f06_symbol = symbol.clone();
+    registry.register(trend_filtered_zscore20_reversion_v1::meta(), move || {
+        Box::new(TrendFilteredZscore20ReversionV1Strategy::new(
+            f06_symbol.clone(),
+        )) as Box<dyn Strategy>
+    })?;
+
+    let f07_symbol = symbol.clone();
+    registry.register(volatility_contraction_breakout_v1::meta(), move || {
+        Box::new(VolatilityContractionBreakoutV1Strategy::new(
+            f07_symbol.clone(),
+        )) as Box<dyn Strategy>
+    })?;
+
+    let f08_symbol = symbol.clone();
+    registry.register(monthly_12_minus_1_abs_momentum_v1::meta(), move || {
+        Box::new(Monthly12Minus1AbsMomentumV1Strategy::new(
+            f08_symbol.clone(),
+        )) as Box<dyn Strategy>
+    })?;
+
+    let f09_symbol = symbol.clone();
+    registry.register(delayed_overnight_gap_reversal_v1::meta(), move || {
+        Box::new(DelayedOvernightGapReversalV1Strategy::new(
+            f09_symbol.clone(),
+        )) as Box<dyn Strategy>
+    })?;
+
+    let f10_symbol = symbol.clone();
+    registry.register(monthly_52week_high_proximity_v1::meta(), move || {
+        Box::new(Monthly52WeekHighProximityV1Strategy::new(
+            f10_symbol.clone(),
         )) as Box<dyn Strategy>
     })?;
 
@@ -294,6 +384,79 @@ fn register_with_sizing(
                 trb_symbol.clone(),
             )) as Box<dyn Strategy>
         })?;
+
+        let f01_symbol = symbol.clone();
+        registry.register(
+            monthly_multihorizon_abs_momentum_consensus_v1::meta(),
+            move || {
+                Box::new(MonthlyMultihorizonAbsMomentumConsensusV1Strategy::new(
+                    f01_symbol.clone(),
+                )) as Box<dyn Strategy>
+            },
+        )?;
+
+        let f02_symbol = symbol.clone();
+        registry.register(trend_filtered_rsi5_reversion_v1::meta(), move || {
+            Box::new(TrendFilteredRsi5ReversionV1Strategy::new(
+                f02_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
+
+        let f03_symbol = symbol.clone();
+        registry.register(
+            trend_filtered_extreme_3d_atr_reversal_v1::meta(),
+            move || {
+                Box::new(TrendFilteredExtreme3dAtrReversalV1Strategy::new(
+                    f03_symbol.clone(),
+                )) as Box<dyn Strategy>
+            },
+        )?;
+
+        let f04_symbol = symbol.clone();
+        registry.register(close_channel_100_50_trend_v1::meta(), move || {
+            Box::new(CloseChannel10050TrendV1Strategy::new(f04_symbol.clone())) as Box<dyn Strategy>
+        })?;
+
+        let f05_symbol = symbol.clone();
+        registry.register(monthly_10month_trend_timing_v1::meta(), move || {
+            Box::new(Monthly10MonthTrendTimingV1Strategy::new(f05_symbol.clone()))
+                as Box<dyn Strategy>
+        })?;
+
+        let f06_symbol = symbol.clone();
+        registry.register(trend_filtered_zscore20_reversion_v1::meta(), move || {
+            Box::new(TrendFilteredZscore20ReversionV1Strategy::new(
+                f06_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
+
+        let f07_symbol = symbol.clone();
+        registry.register(volatility_contraction_breakout_v1::meta(), move || {
+            Box::new(VolatilityContractionBreakoutV1Strategy::new(
+                f07_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
+
+        let f08_symbol = symbol.clone();
+        registry.register(monthly_12_minus_1_abs_momentum_v1::meta(), move || {
+            Box::new(Monthly12Minus1AbsMomentumV1Strategy::new(
+                f08_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
+
+        let f09_symbol = symbol.clone();
+        registry.register(delayed_overnight_gap_reversal_v1::meta(), move || {
+            Box::new(DelayedOvernightGapReversalV1Strategy::new(
+                f09_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
+
+        let f10_symbol = symbol.clone();
+        registry.register(monthly_52week_high_proximity_v1::meta(), move || {
+            Box::new(Monthly52WeekHighProximityV1Strategy::new(
+                f10_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
     }
 
     let scalp_symbol = symbol.clone();
@@ -343,7 +506,7 @@ mod registered_strategy_ids_tests {
     }
 
     #[test]
-    fn registered_strategy_ids_has_fourteen_distinct_entries() {
+    fn registered_strategy_ids_has_twenty_four_distinct_entries() {
         let mut unique = REGISTERED_STRATEGY_IDS.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -352,27 +515,52 @@ mod registered_strategy_ids_tests {
             REGISTERED_STRATEGY_IDS.len(),
             "every registered strategy identity must be distinct"
         );
-        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 14);
+        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 24);
     }
 
-    /// IR-2: the production seam `instantiate_verified` must refuse any engine
+    /// IR-2: the production seam `instantiate_verified` must refuse every engine
     /// whose state cannot be reconstructed from the bounded history Paper loads,
     /// while Backtest/Research (`instantiate`) keep using it. Every other
-    /// registered identity stays deployable.
+    /// registered identity stays deployable. The refused set is stated explicitly
+    /// so a classification change cannot pass silently.
     #[test]
-    fn restart_unsafe_engine_is_refused_by_the_verified_production_seam() {
+    fn restart_unsafe_engines_are_refused_by_the_verified_production_seam() {
         let mut registry = PluginRegistry::new();
         register_builtin_strategies(&mut registry, "SPY".to_string()).unwrap();
-        let name = pullback_mean_reversion_20_2::NAME;
+        let unsafe_ids = [
+            pullback_mean_reversion_20_2::NAME,
+            trend_filtered_rsi5_reversion_v1::NAME,
+            trend_filtered_extreme_3d_atr_reversal_v1::NAME,
+            close_channel_100_50_trend_v1::NAME,
+            trend_filtered_zscore20_reversion_v1::NAME,
+            volatility_contraction_breakout_v1::NAME,
+            delayed_overnight_gap_reversal_v1::NAME,
+        ];
 
-        assert!(registry.instantiate(name).is_ok(), "research/backtest path");
-        let err = registry
-            .instantiate_verified(name)
-            .err()
-            .expect("verified production instantiation must refuse the engine");
-        assert!(err.to_string().contains("restart"), "{err}");
+        let classified: Vec<&str> = registry
+            .list()
+            .iter()
+            .filter(|m| m.restart_recovery == crate::RestartRecovery::NotRecoverable)
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(
+            classified, unsafe_ids,
+            "NotRecoverable classification drifted"
+        );
 
-        for id in REGISTERED_STRATEGY_IDS.iter().filter(|id| **id != name) {
+        for name in unsafe_ids {
+            assert!(registry.instantiate(name).is_ok(), "research/backtest path");
+            let err = registry
+                .instantiate_verified(name)
+                .err()
+                .expect("verified production instantiation must refuse the engine");
+            assert!(err.to_string().contains("restart"), "{err}");
+        }
+
+        for id in REGISTERED_STRATEGY_IDS
+            .iter()
+            .filter(|id| !unsafe_ids.contains(id))
+        {
             assert!(
                 registry.instantiate_verified(id).is_ok(),
                 "{id} must stay deployable"

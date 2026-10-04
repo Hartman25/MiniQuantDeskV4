@@ -477,16 +477,11 @@ impl ExactSelectionReason {
 /// duplicated here and must stay numerically identical to that ceiling.
 pub const MAX_ELIGIBLE_SYMBOLS: usize = 5;
 
-/// Mirrors the current built-in strategy plugin universe size registered by
-/// `mqk-strategy::engines::register_builtin_strategies` as of this writing:
-/// swing_momentum, mean_reversion, volatility_breakout, intraday_scalper
-/// (long), trend_sma50, dual_sma_50_200_trend, pullback_mean_reversion_20_2,
-/// absolute_momentum_252, near_high_momentum_252_3pct, trend_pullback_5d_4pct_hold5,
-/// turn_of_month_last1_first3, halloween_nov_apr, trading_range_breakout_50d_hold10,
-/// intraday_scalper (short) — 14 registrations. Any candidate strategy_id set the
-/// daemon builds must already be deduplicated against this universe before it
-/// reaches this module.
-pub const MAX_STRATEGY_UNIVERSE: usize = 14;
+/// Mirrors the size of the built-in strategy identity list
+/// `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (cross-checked by a daemon
+/// test). Any candidate strategy_id set the daemon builds must already be
+/// deduplicated against this universe before it reaches this module.
+pub const MAX_STRATEGY_UNIVERSE: usize = 24;
 
 /// Derived bound on total `(symbol, strategy_id[, timeframe])` candidate
 /// pairs a plan may consider: [`MAX_ELIGIBLE_SYMBOLS`] × [`MAX_STRATEGY_UNIVERSE`].
@@ -1953,7 +1948,7 @@ pub fn compute_dynamic_selection_plan(
     }
 
     // Defect F: structurally tie the per-symbol candidate universe to
-    // MAX_STRATEGY_UNIVERSE (which mirrors the fourteen-identity
+    // MAX_STRATEGY_UNIVERSE (which mirrors the
     // `REGISTERED_STRATEGY_IDS` authority) -- a single symbol carrying more
     // candidate rows than the entire strategy universe has identities is a
     // caller-contract violation, checked here independently of the total
@@ -3352,14 +3347,14 @@ mod tests {
     }
 
     /// Defect F: a single symbol carrying more candidates than
-    /// `MAX_STRATEGY_UNIVERSE` (14) fails the whole plan closed with its own
-    /// distinct truth_state -- proven with a total candidate count (15) well
-    /// under `MAX_CANDIDATE_PAIRS` (70), so this is genuinely a *different*
+    /// `MAX_STRATEGY_UNIVERSE` (24) fails the whole plan closed with its own
+    /// distinct truth_state -- proven with a total candidate count (25) well
+    /// under `MAX_CANDIDATE_PAIRS` (120), so this is genuinely a *different*
     /// bound from the total-pairs check above, not a restatement of it.
     #[test]
     fn over_universe_strategy_ids_for_one_symbol_fails_whole_plan_closed() {
         let eligible = symbols(&["AAPL"]);
-        assert_eq!(MAX_STRATEGY_UNIVERSE, 14);
+        assert_eq!(MAX_STRATEGY_UNIVERSE, 24);
         let mut over_candidates = Vec::new();
         for i in 0..(MAX_STRATEGY_UNIVERSE + 1) {
             over_candidates.push(candidate(

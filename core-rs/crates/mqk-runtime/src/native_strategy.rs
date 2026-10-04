@@ -1010,6 +1010,16 @@ mod tests {
         assert!(names.contains(&"turn_of_month_last1_first3"));
         assert!(names.contains(&"halloween_nov_apr"));
         assert!(names.contains(&"trading_range_breakout_50d_hold10"));
+        assert!(names.contains(&"monthly_multihorizon_abs_momentum_consensus_v1"));
+        assert!(names.contains(&"trend_filtered_rsi5_reversion_v1"));
+        assert!(names.contains(&"trend_filtered_extreme_3d_atr_reversal_v1"));
+        assert!(names.contains(&"close_channel_100_50_trend_v1"));
+        assert!(names.contains(&"monthly_10month_trend_timing_v1"));
+        assert!(names.contains(&"trend_filtered_zscore20_reversion_v1"));
+        assert!(names.contains(&"volatility_contraction_breakout_v1"));
+        assert!(names.contains(&"monthly_12_minus_1_abs_momentum_v1"));
+        assert!(names.contains(&"delayed_overnight_gap_reversal_v1"));
+        assert!(names.contains(&"monthly_52week_high_proximity_v1"));
     }
 
     /// IR-2: a restart-unsafe stateful engine can never become an Active Paper host.
