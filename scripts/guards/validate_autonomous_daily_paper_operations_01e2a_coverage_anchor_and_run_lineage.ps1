@@ -112,6 +112,35 @@ function Show-Red   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red  
 function Show-Green { param([string]$Msg) Write-Host $Msg -ForegroundColor Green  }
 function Show-Info  { param([string]$Msg) Write-Host $Msg -ForegroundColor Cyan   }
 
+# Line-ending-agnostic Rust item-body extractor. Normalizes CRLF/LF, locates
+# the item by its signature, and ends the body at the first column-0 closing
+# brace (rustfmt top-level item end). Whole-line `//` comments are stripped so
+# commentary can neither satisfy nor trip a code assertion. Returns $null when
+# the item or its terminator is not found -- never silently extends to EOF.
+function Get-RustItemBody {
+    param([string]$Content, [string]$Signature)
+    if ($null -eq $Content) { return $null }
+    $norm = $Content -replace "`r`n", "`n"
+    $startIdx = $norm.IndexOf($Signature, [System.StringComparison]::Ordinal)
+    if ($startIdx -lt 0) { return $null }
+    $endIdx = $norm.IndexOf("`n}`n", $startIdx, [System.StringComparison]::Ordinal)
+    if ($endIdx -lt 0) { return $null }
+    $body = $norm.Substring($startIdx, $endIdx + 2 - $startIdx)
+    return (($body -split "`n" | Where-Object { $_ -notmatch '^\s*//' }) -join "`n")
+}
+
+function Test-BodyMatches {
+    param([string]$Label, [string]$Body, [string]$Pattern)
+    if ($null -ne $Body -and [regex]::IsMatch($Body, $Pattern)) {
+        Show-Green "  OK -- $Label"
+        return $true
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label (pattern not found in scoped body: '$Pattern')"
+        return $false
+    }
+}
+
 function Test-FileExists {
     param([string]$Label, [string]$Path)
     if (Test-Path $Path) {
@@ -256,23 +285,24 @@ Test-ContentContains "four closed reason codes exist (conflict)" $CoverageConten
 
 Write-Host ""
 Show-Info "--- [5] Coordinator ensure-authority seam runs before state dispatch ---"
-$TickCoordinatorBody = Get-ContentBetween -Content $CoordinatorContent `
-    -StartNeedle "pub async fn tick_autonomous_daily_coordinator(" `
-    -EndNeedle "`r`n// ---"
+$TickCoordinatorBody = Get-RustItemBody -Content $CoordinatorContent -Signature "pub async fn tick_autonomous_daily_coordinator("
 if ($null -eq $TickCoordinatorBody) {
     $script:Violations++
     Show-Red "  FAIL -- could not locate tick_autonomous_daily_coordinator's body"
 } else {
-    $EnsureIdx = $TickCoordinatorBody.IndexOf("ensure_coverage_authority(", [System.StringComparison]::OrdinalIgnoreCase)
-    $DispatchIdx = $TickCoordinatorBody.IndexOf("dispatch_by_state(state, &pool, operation, &plan, now_utc)", [System.StringComparison]::OrdinalIgnoreCase)
-    if ($EnsureIdx -ge 0 -and $DispatchIdx -ge 0 -and $EnsureIdx -lt $DispatchIdx) {
-        Show-Green "  OK -- ensure_coverage_authority runs before dispatch_by_state"
+    $EnsureM   = [regex]::Match($TickCoordinatorBody, '\bensure_coverage_authority\(\s*state,\s*domain,')
+    $DispatchM = [regex]::Match($TickCoordinatorBody, '\bdispatch_by_state\(\s*state,\s*domain,')
+    if ($EnsureM.Success -and $DispatchM.Success -and $EnsureM.Index -lt $DispatchM.Index) {
+        Show-Green "  OK -- ensure_coverage_authority(state, domain, ...) runs before dispatch_by_state(state, domain, ...) in the coordinator tick body"
+        $BetweenCalls = $TickCoordinatorBody.Substring($EnsureM.Index, $DispatchM.Index - $EnsureM.Index)
+        Test-BodyMatches "a blocked coverage outcome returns before dispatch_by_state" $BetweenCalls 'return Ok\(blocked_outcome\);' | Out-Null
     } else {
         $script:Violations++
-        Show-Red "  FAIL -- ensure_coverage_authority does not precede dispatch_by_state (ensure=$EnsureIdx, dispatch=$DispatchIdx)"
+        Show-Red "  FAIL -- ensure_coverage_authority does not precede dispatch_by_state inside the coordinator tick body (ensure=$($EnsureM.Index) success=$($EnsureM.Success), dispatch=$($DispatchM.Index) success=$($DispatchM.Success))"
     }
 }
-Test-ContentContains "close priority is preserved in the coverage blocker path" $CoordinatorContent "handle_session_close(state, pool, operation.clone(), now_utc).await" | Out-Null
+$CoverageBlockerBody = Get-RustItemBody -Content $CoordinatorContent -Signature "async fn apply_coverage_blocker("
+Test-BodyMatches "close priority is preserved in the coverage blocker path (domain-aware handle_session_close inside apply_coverage_blocker)" $CoverageBlockerBody 'STATE_STOPPING \| STATE_STOP_RETRYING \| STATE_MANUAL_INTERVENTION_REQUIRED\s*\)\s*\{\s*return handle_session_close\(\s*state,\s*domain,\s*pool,\s*operation\.clone\(\),\s*now_utc,?\s*\)\s*\.await;' | Out-Null
 
 Write-Host ""
 Show-Info "--- [6] Prior-activity rows can never have a fabricated anchor ---"
@@ -291,14 +321,33 @@ Test-ContentContains "a semantic mismatch reports the conflict reason code, not 
 
 Write-Host ""
 Show-Info "--- [8] Run-lineage query never uses SELECT DISTINCT; no general list cap ---"
-$RawLineageFnBody = Get-ContentBetween -Content $DbOperationContent `
-    -StartNeedle "pub async fn fetch_autonomous_daily_operation_running_transitions_raw(" `
-    -EndNeedle "`r`n/// Fail-closed reason"
+$RawLineageFnBody = Get-RustItemBody -Content $DbOperationContent -Signature "pub async fn fetch_autonomous_daily_operation_running_transitions_raw("
 if ($null -eq $RawLineageFnBody) {
     $script:Violations++
     Show-Red "  FAIL -- could not locate fetch_autonomous_daily_operation_running_transitions_raw's body"
 } else {
-    Test-ContentDoesNotContain "the raw run-lineage query never uses SELECT DISTINCT" $RawLineageFnBody "distinct" | Out-Null
+    # Inspect only the SQL string literal handed to sqlx::query (comments and
+    # doc text outside it can never satisfy or trip the check).
+    $SqlM = [regex]::Match($RawLineageFnBody, 'sqlx::query\(\s*"((?:[^"\\]|\\[\s\S])*)"\s*,?\s*\)')
+    if (-not $SqlM.Success) {
+        $script:Violations++
+        Show-Red "  FAIL -- could not extract the raw run-lineage SQL string literal passed to sqlx::query"
+    } else {
+        $RawLineageSql = $SqlM.Groups[1].Value
+        Test-BodyMatches "the extracted SQL is the running-transition select (non-vacuous extraction)" $RawLineageSql '(?is)select\s+transition_seq,\s*run_id,\s*from_state\s.*sys_autonomous_daily_operation_events' | Out-Null
+        if ([regex]::IsMatch($RawLineageSql, '(?i)\bdistinct\b')) {
+            $script:Violations++
+            Show-Red "  FAIL -- the raw run-lineage query never uses SELECT DISTINCT (forbidden token found in the SQL)"
+        } else {
+            Show-Green "  OK -- the raw run-lineage query never uses SELECT DISTINCT"
+        }
+        if ([regex]::IsMatch($RawLineageSql, '(?i)\blimit\b')) {
+            $script:Violations++
+            Show-Red "  FAIL -- the raw run-lineage query never uses LIMIT (forbidden token found in the SQL)"
+        } else {
+            Show-Green "  OK -- the raw run-lineage query never uses LIMIT"
+        }
+    }
     Test-ContentDoesNotContain "the raw run-lineage helper never binds a LIMIT parameter" $RawLineageFnBody ".bind(limit)" | Out-Null
     Test-ContentDoesNotContain "the raw run-lineage helper is not routed through the general list cap" $RawLineageFnBody "bounded_limit(" | Out-Null
 }

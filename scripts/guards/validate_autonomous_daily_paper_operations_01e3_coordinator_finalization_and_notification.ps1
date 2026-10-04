@@ -129,6 +129,35 @@ function Show-Red   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red  
 function Show-Green { param([string]$Msg) Write-Host $Msg -ForegroundColor Green  }
 function Show-Info  { param([string]$Msg) Write-Host $Msg -ForegroundColor Cyan   }
 
+# Line-ending-agnostic Rust item-body extractor. Normalizes CRLF/LF, locates
+# the item by its signature, and ends the body at the first column-0 closing
+# brace (rustfmt top-level item end). Whole-line `//` comments are stripped so
+# commentary can neither satisfy nor trip a code assertion. Returns $null when
+# the item or its terminator is not found -- never silently extends to EOF.
+function Get-RustItemBody {
+    param([string]$Content, [string]$Signature)
+    if ($null -eq $Content) { return $null }
+    $norm = $Content -replace "`r`n", "`n"
+    $startIdx = $norm.IndexOf($Signature, [System.StringComparison]::Ordinal)
+    if ($startIdx -lt 0) { return $null }
+    $endIdx = $norm.IndexOf("`n}`n", $startIdx, [System.StringComparison]::Ordinal)
+    if ($endIdx -lt 0) { return $null }
+    $body = $norm.Substring($startIdx, $endIdx + 2 - $startIdx)
+    return (($body -split "`n" | Where-Object { $_ -notmatch '^\s*//' }) -join "`n")
+}
+
+function Test-BodyMatches {
+    param([string]$Label, [string]$Body, [string]$Pattern)
+    if ($null -ne $Body -and [regex]::IsMatch($Body, $Pattern)) {
+        Show-Green "  OK -- $Label"
+        return $true
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label (pattern not found in scoped body: '$Pattern')"
+        return $false
+    }
+}
+
 function Test-FileExists {
     param([string]$Label, [string]$Path)
     if (Test-Path $Path) {
@@ -202,33 +231,31 @@ if (Test-Path $PathTaskRs) { $TaskContent = Get-Content -Raw -Path $PathTaskRs }
 
 Write-Host ""
 Show-Info "--- [1] handle_stopping requires stopped_at_utc before routing into finalization ---"
-$HandleStoppingBody = Get-ContentBetween -Content $CoordinatorContent `
-    -StartNeedle "pub async fn handle_stopping(" `
-    -EndNeedle "`npub async fn retry_stop("
+$HandleStoppingBody = Get-RustItemBody -Content $CoordinatorContent -Signature "pub async fn handle_stopping("
 if ($null -eq $HandleStoppingBody) {
     $script:Violations++
     Show-Red "  FAIL -- could not locate handle_stopping's body"
 } else {
-    Test-ContentContains "handle_stopping checks operation.stopped_at_utc.is_some() before finalizing" $HandleStoppingBody "if operation.stopped_at_utc.is_some() {" | Out-Null
-    Test-ContentContains "the stopped_at_utc branch routes into handle_outcome_finalization" $HandleStoppingBody "handle_outcome_finalization(state, pool, operation, now_utc).await" | Out-Null
+    Test-BodyMatches "handle_stopping takes the ExecutionDomain" $HandleStoppingBody 'domain:\s*ExecutionDomain' | Out-Null
+    Test-BodyMatches "handle_stopping checks operation.stopped_at_utc.is_some() and, inside that branch, routes into handle_outcome_finalization with the domain" $HandleStoppingBody 'if operation\.stopped_at_utc\.is_some\(\)\s*\{\s*return handle_outcome_finalization\(\s*state,\s*domain,\s*pool,\s*operation,\s*now_utc,?\s*\)\s*\.await;\s*\}' | Out-Null
 }
 Test-ContentContains "the evidence_degraded routing arm also gates on stopped_at_utc" $CoordinatorContent "mqk_db::STATE_EVIDENCE_DEGRADED if operation.stopped_at_utc.is_some() =>" | Out-Null
 
 Write-Host ""
 Show-Info "--- [2] matching-local-runtime fact is derived from locally_owned_run_id vs operation.run_id ---"
-$MatchingFnBody = Get-ContentBetween -Content $CoordinatorContent `
-    -StartNeedle "async fn matching_local_runtime_active(" `
-    -EndNeedle "`n}"
+$MatchingFnBody = Get-RustItemBody -Content $CoordinatorContent -Signature "async fn matching_local_runtime_active("
 if ($null -eq $MatchingFnBody) {
     $script:Violations++
     Show-Red "  FAIL -- could not locate matching_local_runtime_active's body"
 } else {
-    Test-ContentContains "matching_local_runtime_active reads AppState::locally_owned_run_id" $MatchingFnBody "state.locally_owned_run_id().await" | Out-Null
-    Test-ContentContains "matching_local_runtime_active compares against operation.run_id" $MatchingFnBody "operation.run_id" | Out-Null
+    Test-BodyMatches "matching_local_runtime_active takes the ExecutionDomain" $MatchingFnBody 'domain:\s*ExecutionDomain' | Out-Null
+    Test-BodyMatches "matching_local_runtime_active reads AppState::locally_owned_run_id for that domain and compares it to operation.run_id" $MatchingFnBody 'match operation\.run_id\s*\{\s*Some\(expected\)\s*=>\s*state\.locally_owned_run_id\(domain\)\.await\s*==\s*Some\(expected\),\s*None\s*=>\s*false,?\s*\}' | Out-Null
     Test-ContentDoesNotContain "matching_local_runtime_active never reads locally_started" $MatchingFnBody "locally_started" | Out-Null
     Test-ContentDoesNotContain "matching_local_runtime_active never reads a bar dispatch counter" $MatchingFnBody "bar_tick_dispatch_count" | Out-Null
 }
-Test-ContentContains "handle_outcome_finalization threads the fact into AutonomousDailyFinalizationContext" $CoordinatorContent "matching_local_runtime_active: matching_local_runtime_active(state, &operation).await" | Out-Null
+$FinalizationFnBody = Get-RustItemBody -Content $CoordinatorContent -Signature "async fn handle_outcome_finalization("
+Test-BodyMatches "handle_outcome_finalization takes the ExecutionDomain" $FinalizationFnBody 'domain:\s*ExecutionDomain' | Out-Null
+Test-BodyMatches "handle_outcome_finalization threads the domain-aware fact into AutonomousDailyFinalizationContext" $FinalizationFnBody 'AutonomousDailyFinalizationContext\s*\{\s*matching_local_runtime_active:\s*matching_local_runtime_active\(\s*state,\s*domain,\s*&operation\s*\)\s*\.await,?\s*\}' | Out-Null
 
 Write-Host ""
 Show-Info "--- [3] No parallel classifier in the coordinator ---"
@@ -342,7 +369,7 @@ if ($null -eq $ProductionTickBody) {
         Show-Red "  FAIL -- log_coordinator_outcome does not strictly follow the coordinator tick call (tick=$TickCallIdx, log=$LogCallIdx)"
     }
 }
-Test-ContentDoesNotContain "handle_outcome_finalization never sends a notification itself (notification is session_controller's job only)" (Get-ContentBetween -Content $CoordinatorContent -StartNeedle "async fn handle_outcome_finalization(" -EndNeedle "`n}`n`n/// E3.5") "discord_notifier" | Out-Null
+Test-ContentDoesNotContain "handle_outcome_finalization never sends a notification itself (notification is session_controller's job only)" $FinalizationFnBody "discord_notifier" | Out-Null
 
 Write-Host ""
 Show-Info "--- [12] No raw error/debug text enters a notification payload ---"
@@ -461,20 +488,18 @@ if (Test-FileExists "E3 scenario test file" $PathE3Test) {
 
 Write-Host ""
 Show-Info "--- [17] handle_outcome_finalization gates on matching_local_runtime_active before policy resolution and blocker persistence (E3 repair) ---"
-$HandleOutcomeFinalizationBody = Get-ContentBetween -Content $CoordinatorContent `
-    -StartNeedle "async fn handle_outcome_finalization(" `
-    -EndNeedle "`n}`n`n/// E3.5"
+$HandleOutcomeFinalizationBody = $FinalizationFnBody
 if ($null -eq $HandleOutcomeFinalizationBody) {
     $script:Violations++
     Show-Red "  FAIL -- could not locate handle_outcome_finalization's body"
 } else {
-    $ContextIdx    = $HandleOutcomeFinalizationBody.IndexOf("matching_local_runtime_active: matching_local_runtime_active(state, &operation).await", [System.StringComparison]::OrdinalIgnoreCase)
-    $GateIdx       = $HandleOutcomeFinalizationBody.IndexOf("if context.matching_local_runtime_active {", [System.StringComparison]::OrdinalIgnoreCase)
-    $AwaitingIdx   = $HandleOutcomeFinalizationBody.IndexOf("return Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization);", [System.StringComparison]::OrdinalIgnoreCase)
-    $ConfigIdx     = $HandleOutcomeFinalizationBody.IndexOf("build_multi_symbol_runtime_config_from_env()", [System.StringComparison]::OrdinalIgnoreCase)
-    $RuntimeCtxIdx = $HandleOutcomeFinalizationBody.IndexOf("resolve_autonomous_runtime_context(state).await", [System.StringComparison]::OrdinalIgnoreCase)
-    $FirstPersistIdx = $HandleOutcomeFinalizationBody.IndexOf("persist_autonomous_daily_finalization_blocker(", [System.StringComparison]::OrdinalIgnoreCase)
-    $ClassifyIdx   = $HandleOutcomeFinalizationBody.IndexOf("classify_and_finalize_autonomous_daily_operation(", [System.StringComparison]::OrdinalIgnoreCase)
+    $M_ContextIdx = [regex]::Match($HandleOutcomeFinalizationBody, 'matching_local_runtime_active:\s*matching_local_runtime_active\(\s*state,\s*domain,\s*&operation\s*\)'); $ContextIdx = if ($M_ContextIdx.Success) { $M_ContextIdx.Index } else { -1 }
+    $M_GateIdx = [regex]::Match($HandleOutcomeFinalizationBody, 'if context\.matching_local_runtime_active\s*\{'); $GateIdx = if ($M_GateIdx.Success) { $M_GateIdx.Index } else { -1 }
+    $M_AwaitingIdx = [regex]::Match($HandleOutcomeFinalizationBody, 'return Ok\(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization\);'); $AwaitingIdx = if ($M_AwaitingIdx.Success) { $M_AwaitingIdx.Index } else { -1 }
+    $M_ConfigIdx = [regex]::Match($HandleOutcomeFinalizationBody, 'build_multi_symbol_runtime_config_from_env\(\)'); $ConfigIdx = if ($M_ConfigIdx.Success) { $M_ConfigIdx.Index } else { -1 }
+    $M_RuntimeCtxIdx = [regex]::Match($HandleOutcomeFinalizationBody, 'resolve_autonomous_runtime_context\(state\)\.await'); $RuntimeCtxIdx = if ($M_RuntimeCtxIdx.Success) { $M_RuntimeCtxIdx.Index } else { -1 }
+    $M_FirstPersistIdx = [regex]::Match($HandleOutcomeFinalizationBody, 'persist_autonomous_daily_finalization_blocker\('); $FirstPersistIdx = if ($M_FirstPersistIdx.Success) { $M_FirstPersistIdx.Index } else { -1 }
+    $M_ClassifyIdx = [regex]::Match($HandleOutcomeFinalizationBody, 'classify_and_finalize_autonomous_daily_operation\('); $ClassifyIdx = if ($M_ClassifyIdx.Success) { $M_ClassifyIdx.Index } else { -1 }
 
     if ($ContextIdx -lt 0 -or $GateIdx -lt 0 -or $AwaitingIdx -lt 0) {
         $script:Violations++

@@ -127,6 +127,35 @@ function Show-Red   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red  
 function Show-Green { param([string]$Msg) Write-Host $Msg -ForegroundColor Green  }
 function Show-Info  { param([string]$Msg) Write-Host $Msg -ForegroundColor Cyan   }
 
+# Line-ending-agnostic Rust item-body extractor. Normalizes CRLF/LF, locates
+# the item by its signature, and ends the body at the first column-0 closing
+# brace (rustfmt top-level item end). Whole-line `//` comments are stripped so
+# commentary can neither satisfy nor trip a code assertion. Returns $null when
+# the item or its terminator is not found -- never silently extends to EOF.
+function Get-RustItemBody {
+    param([string]$Content, [string]$Signature)
+    if ($null -eq $Content) { return $null }
+    $norm = $Content -replace "`r`n", "`n"
+    $startIdx = $norm.IndexOf($Signature, [System.StringComparison]::Ordinal)
+    if ($startIdx -lt 0) { return $null }
+    $endIdx = $norm.IndexOf("`n}`n", $startIdx, [System.StringComparison]::Ordinal)
+    if ($endIdx -lt 0) { return $null }
+    $body = $norm.Substring($startIdx, $endIdx + 2 - $startIdx)
+    return (($body -split "`n" | Where-Object { $_ -notmatch '^\s*//' }) -join "`n")
+}
+
+function Test-BodyMatches {
+    param([string]$Label, [string]$Body, [string]$Pattern)
+    if ($null -ne $Body -and [regex]::IsMatch($Body, $Pattern)) {
+        Show-Green "  OK -- $Label"
+        return $true
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label (pattern not found in scoped body: '$Pattern')"
+        return $false
+    }
+}
+
 function Test-FileExists {
     param([string]$Label, [string]$Path)
     if (Test-Path $Path) {
@@ -299,8 +328,10 @@ Test-ContentContains "check_finalization_eligibility gates on matching_local_run
 # -----------------------------------------------------------------------
 Write-Host ""
 Show-Info "--- [8] Matching local runtime ownership is never ignored ---"
-Test-ContentContains "matching_local_runtime_active is derived from AppState::locally_owned_run_id()" $CoordinatorContent "state.locally_owned_run_id().await == Some(expected)" | Out-Null
-Test-ContentContains "handle_outcome_finalization returns early on a matching local runtime" $CoordinatorContent "if context.matching_local_runtime_active {" | Out-Null
+$E5MatchingFnBody = Get-RustItemBody -Content $CoordinatorContent -Signature "async fn matching_local_runtime_active("
+Test-BodyMatches "matching_local_runtime_active is derived from AppState::locally_owned_run_id(domain) for the operation's ExecutionDomain" $E5MatchingFnBody 'domain:\s*ExecutionDomain[\s\S]*Some\(expected\)\s*=>\s*state\.locally_owned_run_id\(domain\)\.await\s*==\s*Some\(expected\)' | Out-Null
+$E5FinalizationFnBody = Get-RustItemBody -Content $CoordinatorContent -Signature "async fn handle_outcome_finalization("
+Test-BodyMatches "handle_outcome_finalization feeds the domain-aware fact into the finalization context and returns AwaitingOutcomeFinalization early on a matching local runtime" $E5FinalizationFnBody 'matching_local_runtime_active:\s*matching_local_runtime_active\(\s*state,\s*domain,\s*&operation\s*\)\s*\.await,?\s*\};\s*if context\.matching_local_runtime_active\s*\{\s*return Ok\(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization\);\s*\}' | Out-Null
 
 # -----------------------------------------------------------------------
 # [9] Terminal replay cannot notify again.
