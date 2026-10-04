@@ -39,17 +39,17 @@ humans can misconfigure the control plane — so safety is enforced by the archi
 The current top-level target is **Milestone 1 (M1) — US Equity/ETF Paper Production**. The project is in **M1
 candidate discovery**: the engineering for research, backtesting, promotion evaluation and the Paper path is
 largely in place, but **no strategy has yet qualified for promotion, so no strategy is deployed to Paper**.
-The accepted baseline is `origin/main` at `92d337b6`, with Native Sizing V1 pushed and verified in CI.
+The Native Sizing V1 pushed-verified production-code baseline is `92d337b6` (verified by GitHub CI #621).
 Live trading is disabled and not ready.
 
 | Topic | Current state |
 |---|---|
 | Current milestone | **M1 — US Equity/ETF Paper Production** (open) |
-| Accepted baseline | `origin/main` `92d337b67670b2858aa24c00b2768a2ca04cc212` |
-| Research / backtest stack | Native strategy engines, causal Backtest, scanner/review (Benchmark V2), Promotion gate, statistical judge |
+| Accepted production-code baseline | Native Sizing V1 pushed-verified head `92d337b67670b2858aa24c00b2768a2ca04cc212` (exact head of CI #621); later docs-only commits do not change production behavior |
+| Research / backtest stack | Native strategy engines, causal Backtest, scanner/review with explicit versioned benchmark policy, Promotion gate, statistical judge |
 | Native Sizing V1 (`fixed_initial_capital_fraction_v1`) | **PUSHED-VERIFIED** — GitHub CI #621 (run 37145565796), SUCCESS, 6/6 jobs, on the exact pushed head |
 | Research Batch 01 | **BATCH_REJECTED** (no `paper_candidate`) |
-| Research Batch 02 | **NOT STARTED — next** (no hypotheses run, no results) |
+| Research Batch 02 | **NOT STARTED — next** (formal predeclaration not yet committed; no hypotheses run, no results) |
 | Promotion | **None** — no strategy is selected or promoted |
 | Paper deployment | **Inactive** — no active deployed Paper strategy; pending a valid promotable candidate |
 | Final holdout | **RESERVED / UNCONSUMED** |
@@ -93,8 +93,9 @@ open**. In particular:
 - M1.9, verification of the actual deployed Paper state, is open;
 - M1.10, ten countable autonomous Paper sessions including five consecutive clean ones, is open.
 
-Batch 02 is a frozen research direction, not a result. Its hypotheses are turn-of-month, Halloween (November–April),
-and a 50-day trading-range breakout with a 10-day hold. None of them has been run.
+Batch 02 is **not started**. The operator-selected/planned hypotheses for its formal predeclaration are turn-of-month,
+Halloween / November–April, and a 50-day range breakout with a 10-day hold. The canonical predeclaration has not yet
+been committed, and none of them has been run.
 
 ## Architecture at a glance
 

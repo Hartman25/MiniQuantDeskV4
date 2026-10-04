@@ -710,11 +710,11 @@ Local, not pushed when written (since PUSHED-VERIFIED, see G2.15A); the seven ea
 
 Current-truth addendum; supersedes the "local, not pushed" and "GitHub CI not verified" wording of G2.14, G2.15 and of the G2.x open-items list for everything at or below the accepted head. Historical entries are not rewritten.
 
-- **Native Sizing V1: PUSHED-VERIFIED.** Accepted exact pushed head `92d337b67670b2858aa24c00b2768a2ca04cc212` (= `origin/main`). GitHub CI #621, run `37145565796`, conclusion SUCCESS, 6 of 6 jobs green (Rust fmt+clippy+test, Safety Guards, DB Proof Lane, GUI Truth + Daemon Contract Gate, Python Research, Windows Platform).
-- **M1:** CURRENT TARGET; `M1_BLOCKED`. Batch 01 `BATCH_REJECTED`. **Batch 02: NOT STARTED** (the 1000-bps value in G2.15 remains a future campaign parameter only). Promotion: NONE. Active Paper strategy/deployment: NONE / INACTIVE pending a qualified candidate. Final holdout: RESERVED / UNCONSUMED. Live: DISABLED / NOT READY / NOT TOUCHED.
+- **Native Sizing V1: PUSHED-VERIFIED.** `92d337b67670b2858aa24c00b2768a2ca04cc212` is the Native Sizing V1 pushed-verified production-code baseline: the exact pushed head on which GitHub CI #621 ran (later docs-only commits do not move this baseline). GitHub CI #621, run `37145565796`, conclusion SUCCESS, 6 of 6 jobs green (Rust fmt+clippy+test, Safety Guards, DB Proof Lane, GUI Truth + Daemon Contract Gate, Python Research, Windows Platform).
+- **M1:** CURRENT TARGET; `M1_BLOCKED`. Batch 01 `BATCH_REJECTED`. **Batch 02: NOT STARTED** (the 1000-bps value in G2.15 remains a future campaign parameter only; the operator-selected/planned hypotheses for the formal predeclaration are turn-of-month, Halloween / November–April and 50-day range breakout / hold-10, but the canonical predeclaration file has not yet been committed — the "predeclared" wording in G2.15 records the operator's sizing decision, not a committed Batch 02 predeclaration). Promotion: NONE. Active Paper strategy/deployment: NONE / INACTIVE pending a qualified candidate. Final holdout: RESERVED / UNCONSUMED. Live: DISABLED / NOT READY / NOT TOUCHED.
 - **M1.9: OPEN. M1.10: OPEN** (10 countable autonomous Paper sessions plus 5 consecutive clean sessions; the earlier operator waiver was for code-completion accounting only and is not a pass).
 - The historical genuine Paper trade lifecycle and genuine no-trade lifecycle remain accepted/frozen evidence; neither implies a strategy is currently deployed.
-- M1 is NOT complete. Local docs-only commits above `92d337b6` change no production behavior and are not pushed.
+- M1 is NOT complete. Docs-only commits above `92d337b6` change no production behavior; their push status is tracked by Git (`git rev-list origin/main..HEAD`), not by this ledger.
 
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 

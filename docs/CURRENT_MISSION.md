@@ -10,7 +10,9 @@ This file is intentionally short. It records current durable project state, not 
 
 Current truth; supersedes the "Not pushed" lines of -26 and -25 (and of older entries for commits at or below `92d337b6`). Record: ledger G2.15A.
 
-- Native Sizing V1: **PUSHED-VERIFIED** at exact head `92d337b67670b2858aa24c00b2768a2ca04cc212` (= `origin/main`); GitHub CI #621, run `37145565796`, SUCCESS, 6/6 jobs green.
+- Native Sizing V1: **PUSHED-VERIFIED**. `92d337b67670b2858aa24c00b2768a2ca04cc212` is the Native Sizing V1 pushed-verified production-code baseline: the exact pushed head on which GitHub CI #621, run `37145565796`, ran — SUCCESS, 6/6 jobs green. Later docs-only commits change no production behavior and do not move this baseline.
+- Batch 02 status wording: **NOT STARTED.** The operator-selected/planned hypotheses for its formal predeclaration are turn-of-month, Halloween / November–April, and 50-day range breakout / hold-10; the canonical Batch 02 predeclaration file has not yet been committed, and no Batch 02 hypothesis, trial or result exists. The 1000-bps sizing in -26 is a future campaign parameter only.
+- Benchmark policy is explicit per candidate class: historical fixed-quantity corrected Batch 01 uses `capital_matched_exact_target_buy_hold_v1` (Benchmark V2); native capital-fraction candidates use `capital_fraction_matched_passive_buy_hold_v1`. Cross-substitution is forbidden; Benchmark V2 is not the benchmark authority for a capital-fraction campaign.
 - M1 is the CURRENT TARGET and remains `M1_BLOCKED`. Batch 01 `BATCH_REJECTED`; Batch 02 NOT STARTED; Promotion NONE; Active Paper strategy/deployment NONE / INACTIVE pending a qualified candidate; final holdout RESERVED / UNCONSUMED; Live DISABLED / NOT READY / NOT TOUCHED.
 - M1.9 OPEN. M1.10 OPEN (10 countable autonomous Paper sessions + 5 consecutive clean sessions). The historical genuine Paper trade and no-trade lifecycle evidence stays accepted/frozen. M1 is not complete.
 

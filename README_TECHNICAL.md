@@ -18,10 +18,10 @@ tests win over all documents. Use the root [`README.md`](README.md) for the shor
 | Topic | State |
 |---|---|
 | Current target | **M1 — US Equity/ETF Paper Production** (open) |
-| Accepted baseline | `origin/main` `92d337b67670b2858aa24c00b2768a2ca04cc212` |
+| Accepted production-code baseline | Native Sizing V1 pushed-verified head `92d337b67670b2858aa24c00b2768a2ca04cc212` (exact head of CI #621); later docs-only commits do not change production behavior |
 | Native Sizing V1 | **PUSHED-VERIFIED** — CI #621, run 37145565796, SUCCESS, 6/6 jobs, exact pushed head |
 | Research Batch 01 | **BATCH_REJECTED** (3 hypotheses × 5 symbols, 0 `paper_candidate`) |
-| Research Batch 02 | **NOT STARTED — next** (frozen directions only: turn-of-month, Halloween / November–April, 50-day range breakout with 10-day hold) |
+| Research Batch 02 | **NOT STARTED — next** (operator-selected/planned hypotheses for the formal predeclaration: turn-of-month, Halloween / November–April, 50-day range breakout with 10-day hold; the canonical predeclaration is not yet committed) |
 | Promoted candidate | **None** |
 | Paper deployment | **Inactive** — no deployed strategy; pending a valid promotable candidate |
 | Final holdout | **RESERVED / UNCONSUMED** |
@@ -75,7 +75,7 @@ flowchart TB
 ```mermaid
 flowchart LR
   H[Predeclared hypothesis<br/>and trial registration] --> BT[Causal Backtest<br/>cost and execution aware]
-  BT --> SC[Scanner and review<br/>Benchmark V2]
+  BT --> SC[Scanner and review<br/>versioned matched benchmark]
   SC --> PG[Promotion gate<br/>bound evidence]
   PG --> PD[Paper deployment]
   PD --> VAL[Finite autonomous<br/>Paper validation]
