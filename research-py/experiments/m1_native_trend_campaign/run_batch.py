@@ -206,6 +206,17 @@ def research_stress_contract(decl: dict) -> dict | None:
     return {"scenario_id": plan["scenario_id"], "allocation_fraction_bps": plan["allocation_fraction_bps"]}
 
 
+def canonical_timeframe_identity(decl: dict) -> bool:
+    """True only when the declaration opts in to the versioned `canonical_semantic_v1` timeframe
+    identity (1D == 1Day). Absent = the historical raw-label identity, so closed campaigns keep their ids."""
+    value = decl["data"].get("timeframe_identity")
+    if value is None:
+        return False
+    if value != "canonical_semantic_v1":
+        raise SystemExit("fail-closed: data.timeframe_identity must be 'canonical_semantic_v1' when present")
+    return True
+
+
 def native_bridge_args(decl: dict, allocation_fraction_bps: int | None = None) -> list[str]:
     """CLI flags for `native-fingerprint` / `native-signals`: the sizing flags plus the explicit
     initial capital (the capital-fraction bridge has no default capital)."""
@@ -329,7 +340,8 @@ def expected_trial_ids(fingerprints: dict, manifest: dict) -> list[tuple[str, st
             semantic_fingerprint=fingerprint, required_history_bars=required, bars_provenance=manifest,
             evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]), test_months=part["test_months"],
             holdout_months=part["holdout_months"], economic_spec=_economic_spec(),
-            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL))
+            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL),
+            canonical_timeframe_identity=canonical_timeframe_identity(DECL))
         out.append((strategy, sym, trial_id, identity))
     return out
 
@@ -405,7 +417,8 @@ def stage_register(_args) -> None:
             economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
             test_months=part["test_months"], holdout_months=part["holdout_months"],
             hypothesis_text=h["economic_rationale"], registry_db=REGISTRY,
-            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL))
+            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL),
+            canonical_timeframe_identity=canonical_timeframe_identity(DECL))
         index[key(strategy, sym)] = {"trial_id": trial_id, "hypothesis_id": h["hypothesis_id"],
                                      "semantic_fingerprint": fingerprint, "required_history_bars": required}
         print(key(strategy, sym), trial_id, fingerprint[:12])
@@ -450,7 +463,8 @@ def stage_trials(_args) -> None:
                 expected_timeframe_secs=h["timeframe_secs"], expected_semantic_fingerprint=rec["semantic_fingerprint"],
                 required_history_bars=rec["required_history_bars"],
                 expected_capital_sizing=research_capital_sizing(DECL),
-                expected_stress_contract=research_stress_contract(DECL))
+                expected_stress_contract=research_stress_contract(DECL),
+                canonical_timeframe_identity=canonical_timeframe_identity(DECL))
         except NativeSignalError as exc:  # the failed attempt is already durable
             rec["failed"] = str(exc)
             print(key(strategy, sym), "FAILED attempt kept:", str(exc)[:200])

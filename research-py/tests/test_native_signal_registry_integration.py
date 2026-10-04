@@ -484,3 +484,40 @@ def test_real_rust_emitter_roundtrip_and_no_data_fingerprint(tmp_path):
     assert meta["effective_bar_history_len"] == max(meta["configured_bar_history_len"], required)
     assert meta["observed_max_window_len"] == meta["effective_bar_history_len"]
     assert json.loads(out.read_text())["registry"]["semantic_fingerprint"] == fp
+
+
+def _identity(env: Env, manifest: dict, **over):
+    kw = dict(experiment_id=EXPERIMENT, hypothesis_id="H1", strategy_id=STRATEGY, symbol=SYMBOL,
+              semantic_fingerprint=FP_X, required_history_bars=REQUIRED, bars_provenance=manifest,
+              evaluation_start_utc=EVAL_START, test_months=12, holdout_months=6, economic_spec=_spec())
+    kw.update(over)
+    return build_native_signal_trial_identity(**kw)
+
+
+def test_canonical_timeframe_identity_collapses_daily_aliases_and_leaves_v1_unchanged(tmp_path):
+    env = Env(tmp_path)
+    m_1d = dict(env.manifest, timeframe="1D")
+    m_1day = dict(env.manifest, timeframe="1Day")
+    # Historical default (v1): the raw label is identity-bearing; ids are unchanged by this seam.
+    v1_d, v1_day = _identity(env, m_1d)[0], _identity(env, m_1day)[0]
+    assert v1_d != v1_day
+    assert _identity(env, m_1d, canonical_timeframe_identity=False)[0] == v1_d
+    # Future (v2): one identity for the one economic timeframe, disjoint from v1.
+    v2_d, id_d = _identity(env, m_1d, canonical_timeframe_identity=True)
+    v2_day, id_day = _identity(env, m_1day, canonical_timeframe_identity=True)
+    assert v2_d == v2_day and id_d == id_day and v2_d not in (v1_d, v1_day)
+    assert id_d["data_identity"]["bars_provenance"]["timeframe_identity"] == "canonical_semantic_v1"
+    for label in ("1H", "60Min", "5Min", "1Min", "garbage"):
+        with pytest.raises(Exception, match="canonical semantic timeframe"):
+            _identity(env, dict(env.manifest, timeframe=label), canonical_timeframe_identity=True)
+
+
+def test_canonical_timeframe_registration_and_eval_agree_and_a_flag_mismatch_is_unregistered(tmp_path):
+    env = Env(tmp_path)
+    env.register(canonical_timeframe_identity=True)
+    out = env.run(register=False, canonical_timeframe_identity=True)
+    econ = json.loads(out.read_text(encoding="utf-8"))
+    assert econ["registry"]["trial_id"] == _identity(env, env.manifest, canonical_timeframe_identity=True)[0]
+    # The legacy (raw-label) identity of the same trial was never registered: the eval refuses it.
+    with pytest.raises(NativeSignalError, match="not registered"):
+        env.run(register=False, run_name="r2")

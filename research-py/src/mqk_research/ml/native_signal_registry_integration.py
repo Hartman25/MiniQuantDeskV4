@@ -41,6 +41,7 @@ import pandas as pd
 
 from mqk_research.data.bars_provenance import (
     provenance_identity_fragment,
+    provenance_identity_fragment_canonical_timeframe,
     require_registered_bars_provenance,
 )
 from mqk_research.exp_distributed.hashing import short_hash
@@ -447,20 +448,30 @@ def build_native_signal_trial_identity(
     economic_spec: EconomicWalkForwardSpec,
     capital_sizing: Optional[Dict[str, Any]] = None,
     stress_contract: Optional[Dict[str, Any]] = None,
+    canonical_timeframe_identity: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     """Result-independent identity: strategy semantics, quantity contract, data
     provenance, partition policy and economic protocol only. The signal source
     kind, the exact-target policy inside the economic identity and the capital
     basis all differ from the superseded v1 bridge, so no v1 trial id can equal
-    a v2 one."""
+    a v2 one.
+
+    `canonical_timeframe_identity=True` selects the versioned `canonical_semantic_v1`
+    bars-provenance fragment (daily aliases `1D`/`1Day` collapse to one identity; unknown
+    labels are refused). The default reproduces every historical trial id."""
     spec = require_native_exact_target_spec(economic_spec)
+    bars_fragment = (
+        provenance_identity_fragment_canonical_timeframe
+        if canonical_timeframe_identity
+        else provenance_identity_fragment
+    )
     identity: Dict[str, Any] = {
         "experiment_id": experiment_id,
         "hypothesis_id": hypothesis_id,
         "strategy_id": strategy_id,
         "protocol_id": ECONOMIC_PROTOCOL_ID,
         "data_identity": {
-            "bars_provenance": provenance_identity_fragment(bars_provenance),
+            "bars_provenance": bars_fragment(bars_provenance),
         },
         "signal_source": {
             "kind": NATIVE_SIGNAL_SOURCE_KIND,
@@ -518,6 +529,7 @@ def register_native_signal_trial(
     registry_db: Optional[Path] = None,
     capital_sizing: Optional[Dict[str, Any]] = None,
     stress_contract: Optional[Dict[str, Any]] = None,
+    canonical_timeframe_identity: bool = False,
 ) -> str:
     """Register the hypothesis and the trial and NOTHING else: no emission, no
     market data, no attempt, no evaluation. The fingerprint comes from the
@@ -537,6 +549,7 @@ def register_native_signal_trial(
         bars_provenance=bars_provenance, evaluation_start_utc=evaluation_start_utc,
         test_months=test_months, holdout_months=holdout_months, economic_spec=spec,
         capital_sizing=capital_sizing, stress_contract=stress_contract,
+        canonical_timeframe_identity=canonical_timeframe_identity,
     )
     store = ResearchResultStore(registry_db or default_db_path(default_root()))
     store.register_hypothesis(
@@ -572,6 +585,7 @@ def run_registered_native_signal_economic_eval(
     expected_timeframe_secs: int = 86_400,
     expected_capital_sizing: Optional[Dict[str, Any]] = None,
     expected_stress_contract: Optional[Dict[str, Any]] = None,
+    canonical_timeframe_identity: bool = False,
 ) -> Path:
     """Official registered entry point for a native strategy's signals. The
     trial must ALREADY be registered (`register_native_signal_trial`); order is
@@ -623,6 +637,7 @@ def run_registered_native_signal_economic_eval(
         evaluation_start_utc=evaluation_start_utc, test_months=test_months,
         holdout_months=holdout_months, economic_spec=spec, capital_sizing=expected_capital_sizing,
         stress_contract=expected_stress_contract,
+        canonical_timeframe_identity=canonical_timeframe_identity,
     )
 
     store = ResearchResultStore(registry_db or default_db_path(default_root()))

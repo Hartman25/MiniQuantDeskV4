@@ -46,7 +46,9 @@ from mqk_research.data.bars_provenance import (
     check_corporate_action_integrity,
     corporate_action_evidence_id,
     forbidden_periods_from_evidence,
+    canonical_semantic_timeframe,
     provenance_identity_fragment,
+    provenance_identity_fragment_canonical_timeframe,
     require_bars_match_manifest,
     require_registered_bars_provenance,
 )
@@ -1062,3 +1064,43 @@ def test_daily_alias_choice_stays_identity_bearing():
     m_1day = _base_manifest(bars, timeframe="1Day")
     assert m_1d["timeframe"] == "1D" and m_1day["timeframe"] == "1Day"
     assert provenance_identity_fragment(m_1d) != provenance_identity_fragment(m_1day)
+
+
+# ---------------------------------------------------------------------------
+# canonical_semantic_v1 timeframe identity (FUTURE identity only). The historical
+# fragment above is untouched; the versioned fragment collapses the two daily
+# transport labels, keeps the raw label auditable in the manifest, and refuses
+# every other label.
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_fragment_collapses_daily_aliases_but_manifest_keeps_raw_label():
+    bars = _et_midnight_daily_bars("2021-01-04", 4)
+    m_1d = _base_manifest(bars, timeframe="1D")
+    m_1day = _base_manifest(bars, timeframe="1Day")
+    assert (m_1d["timeframe"], m_1day["timeframe"]) == ("1D", "1Day")  # raw provenance stays distinguishable
+    a = provenance_identity_fragment_canonical_timeframe(m_1d)
+    b = provenance_identity_fragment_canonical_timeframe(m_1day)
+    assert a == b
+    assert a["timeframe"] == "1D" and a["timeframe_identity"] == "canonical_semantic_v1"
+    # Disjoint from the historical identity of either alias.
+    assert a != provenance_identity_fragment(m_1d) and a != provenance_identity_fragment(m_1day)
+    assert "timeframe_identity" not in provenance_identity_fragment(m_1d)
+
+
+@pytest.mark.parametrize("label", ["1H", "1Hour", "60Min", "5Min", "1Min", "1day", "1d", "Day", "garbage", "", None, 1])
+def test_canonical_timeframe_refuses_every_non_daily_label(label):
+    bars = _hourly_bars()
+    manifest = _base_manifest(bars, timeframe="1H")
+    manifest["timeframe"] = label
+    with pytest.raises(BarsProvenanceUnverifiable, match="canonical semantic timeframe"):
+        provenance_identity_fragment_canonical_timeframe(manifest)
+    with pytest.raises(BarsProvenanceUnverifiable):
+        canonical_semantic_timeframe(label)
+
+
+def test_canonical_fragment_still_binds_every_other_identity_field():
+    bars = _et_midnight_daily_bars("2021-01-04", 4)
+    base_fragment = provenance_identity_fragment_canonical_timeframe(_base_manifest(bars, timeframe="1D"))
+    other = _et_midnight_daily_bars("2021-01-04", 5)
+    assert provenance_identity_fragment_canonical_timeframe(_base_manifest(other, timeframe="1D")) != base_fragment

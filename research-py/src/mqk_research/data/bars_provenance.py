@@ -982,6 +982,38 @@ def provenance_identity_fragment(manifest: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+TIMEFRAME_IDENTITY_CANONICAL_SEMANTIC_V1 = "canonical_semantic_v1"
+DAILY_SEMANTIC_TIMEFRAME = "1D"
+# Provider/transport spellings of the one daily economic timeframe. Closed set:
+# anything else (including `1day`, `1H`, `60Min`) is not a daily alias.
+_DAILY_TRANSPORT_LABELS = frozenset({"1D", "1Day"})
+
+
+def canonical_semantic_timeframe(label: Any) -> str:
+    """The canonical ECONOMIC timeframe for a raw provider/transport label. Only the
+    daily aliases are authorized; every other label is refused rather than becoming an
+    authoritative timeframe."""
+    if isinstance(label, str) and label in _DAILY_TRANSPORT_LABELS:
+        return DAILY_SEMANTIC_TIMEFRAME
+    raise BarsProvenanceUnverifiable(
+        f"Fail-closed: timeframe label {label!r} has no canonical semantic timeframe "
+        f"(authorized daily aliases: {sorted(_DAILY_TRANSPORT_LABELS)!r})"
+    )
+
+
+def provenance_identity_fragment_canonical_timeframe(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """Versioned FUTURE identity fragment (`canonical_semantic_v1`): identical to
+    `provenance_identity_fragment` except that the raw transport label is replaced by its
+    canonical semantic timeframe, so `1D` and `1Day` manifests of the same bars yield one
+    identity. The raw label stays in the manifest as audit provenance. The explicit
+    `timeframe_identity` marker keeps these ids disjoint from every historical (v1) id,
+    which `provenance_identity_fragment` continues to reproduce unchanged."""
+    fragment = provenance_identity_fragment(manifest)
+    fragment["timeframe"] = canonical_semantic_timeframe(manifest.get("timeframe"))
+    fragment["timeframe_identity"] = TIMEFRAME_IDENTITY_CANONICAL_SEMANTIC_V1
+    return fragment
+
+
 def require_registered_bars_provenance(manifest: Dict[str, Any]) -> None:
     """Fail-closed STRUCTURAL gate for the OFFICIAL registered economic
     evaluation entry point (economic_registry_integration.
@@ -1036,8 +1068,7 @@ def require_registered_bars_provenance(manifest: Dict[str, Any]) -> None:
         raise BarsProvenanceUnverifiable("Fail-closed: bars provenance manifest missing symbol_universe")
 
 
-# Daily labels: `1D` is the internal label, `1Day` Alpaca's transport label.
-_DAILY_TIMEFRAME_LABELS = frozenset({"1D", "1Day"})
+_DAILY_TIMEFRAME_LABELS = _DAILY_TRANSPORT_LABELS
 
 
 def require_bars_match_manifest(bars: pd.DataFrame, manifest: Dict[str, Any]) -> None:
