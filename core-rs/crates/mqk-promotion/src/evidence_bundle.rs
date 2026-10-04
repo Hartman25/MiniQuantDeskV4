@@ -340,6 +340,8 @@ fn robustness_evidence_from_artifact(
                 allocation_fraction_bps,
                 initial_capital_micros: initial_equity_micros,
                 semantic_fingerprint: &report.strategy_semantic_fingerprint,
+                max_target_qty: report.sizing.max_target_qty,
+                max_position_notional_usd: report.sizing.max_position_notional_usd,
             },
         ));
     }

@@ -29,6 +29,8 @@ pub struct CapitalFractionStressBaseline<'a> {
     pub allocation_fraction_bps: i64,
     pub initial_capital_micros: i64,
     pub semantic_fingerprint: &'a str,
+    pub max_target_qty: Option<i64>,
+    pub max_position_notional_usd: Option<i64>,
 }
 
 /// Current schema version of `robustness_gauntlet.json`.
@@ -360,6 +362,29 @@ impl RobustnessGauntletArtifact {
             != Some(true)
         {
             bad("caps_unchanged_from_baseline");
+        }
+        // The boolean above is only a claim; the echoed caps must equal the
+        // candidate's authenticated Backtest caps (`None` <=> explicit JSON null).
+        match sizing.get("baseline_caps").filter(|v| v.is_object()) {
+            None => bad("baseline_caps"),
+            Some(caps) => {
+                for (name, expected) in [
+                    ("max_target_qty", baseline.max_target_qty),
+                    (
+                        "max_position_notional_usd",
+                        baseline.max_position_notional_usd,
+                    ),
+                ] {
+                    let matches = match (caps.get(name), expected) {
+                        (Some(Value::Null), None) => true,
+                        (Some(v), Some(n)) => v.as_i64() == Some(n),
+                        _ => false,
+                    };
+                    if !matches {
+                        bad(&format!("baseline_caps.{name}"));
+                    }
+                }
+            }
         }
         if sizing.get("is_a_trial").and_then(Value::as_bool) != Some(false) {
             bad("is_a_trial");

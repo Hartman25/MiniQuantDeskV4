@@ -54,9 +54,22 @@ fn hex64(seed: char) -> String {
     std::iter::repeat_n(seed, 64).collect()
 }
 
+/// Authenticated Backtest caps `(max_target_qty, max_position_notional_usd)` of the default fixture.
+const CAPS: (Option<i64>, Option<i64>) = (Some(1_000), Some(50_000));
+
+type Caps = (Option<i64>, Option<i64>);
+
 /// A stress-sizing echo shaped exactly like the Python replay emits, consistent with the baseline.
 fn consistent_echo(baseline_fp: &str, stress_bps: i64) -> Value {
+    consistent_echo_caps(baseline_fp, stress_bps, CAPS)
+}
+
+fn consistent_echo_caps(baseline_fp: &str, stress_bps: i64, caps: Caps) -> Value {
     json!({
+        "baseline_caps": {
+            "max_target_qty": caps.0,
+            "max_position_notional_usd": caps.1,
+        },
         "scenario_id": "half_exposure_test_v1",
         "policy_id": "fixed_initial_capital_fraction_v1",
         "allocation_fraction_bps": stress_bps,
@@ -93,8 +106,20 @@ fn resolve_candidate(
     capital_fraction: bool,
     stress_spec: impl FnOnce(&str) -> Value,
 ) -> Vec<String> {
+    resolve_candidate_caps(label, capital_fraction, CAPS, stress_spec)
+}
+
+/// `caps` are the Backtest sizing caps recorded in the authenticated canonical report.
+fn resolve_candidate_caps(
+    label: &str,
+    capital_fraction: bool,
+    caps: Caps,
+    stress_spec: impl FnOnce(&str) -> Value,
+) -> Vec<String> {
     let mut config = BacktestConfig::test_defaults();
     config.max_gross_exposure_mult_micros = 100_000_000;
+    config.sizing.max_target_qty = caps.0;
+    config.sizing.max_position_notional_usd = caps.1;
     let bars = bars();
     let mut engine = BacktestEngine::new(config.clone());
     engine
@@ -170,6 +195,14 @@ fn resolve_candidate(
 
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
     let _ = fs::remove_dir_all(&root);
+    assert_eq!(
+        (
+            bundle.report.sizing.max_target_qty,
+            bundle.report.sizing.max_position_notional_usd
+        ),
+        caps,
+        "fixture: the authenticated report must carry the intended baseline caps"
+    );
     bundle
         .robustness_evidence
         .p7a_p7b_economic_replay_stress_missing_required_evidence_fields
@@ -288,6 +321,83 @@ fn cfsb01c_inconsistent_or_malformed_stress_sizing_is_flagged_field_by_field() {
             "caps_unchanged_from_baseline",
         ),
         (
+            "baseline_caps absent",
+            Box::new(|e| {
+                e.as_object_mut().unwrap().remove("baseline_caps");
+            }),
+            "baseline_caps",
+        ),
+        (
+            "baseline_caps not an object",
+            Box::new(|e| e["baseline_caps"] = json!("none")),
+            "baseline_caps",
+        ),
+        (
+            "baseline_caps null",
+            Box::new(|e| e["baseline_caps"] = Value::Null),
+            "baseline_caps",
+        ),
+        (
+            "max_target_qty absent",
+            Box::new(|e| {
+                e["baseline_caps"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("max_target_qty");
+            }),
+            "baseline_caps.max_target_qty",
+        ),
+        (
+            "max_target_qty wrong integer",
+            Box::new(|e| e["baseline_caps"]["max_target_qty"] = json!(999)),
+            "baseline_caps.max_target_qty",
+        ),
+        (
+            "max_target_qty null against Some baseline",
+            Box::new(|e| e["baseline_caps"]["max_target_qty"] = Value::Null),
+            "baseline_caps.max_target_qty",
+        ),
+        (
+            "max_target_qty float",
+            Box::new(|e| e["baseline_caps"]["max_target_qty"] = json!(1000.0)),
+            "baseline_caps.max_target_qty",
+        ),
+        (
+            "max_target_qty numeric string",
+            Box::new(|e| e["baseline_caps"]["max_target_qty"] = json!("1000")),
+            "baseline_caps.max_target_qty",
+        ),
+        (
+            "max_position_notional_usd absent",
+            Box::new(|e| {
+                e["baseline_caps"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("max_position_notional_usd");
+            }),
+            "baseline_caps.max_position_notional_usd",
+        ),
+        (
+            "max_position_notional_usd wrong integer",
+            Box::new(|e| e["baseline_caps"]["max_position_notional_usd"] = json!(49_999)),
+            "baseline_caps.max_position_notional_usd",
+        ),
+        (
+            "max_position_notional_usd null against Some baseline",
+            Box::new(|e| e["baseline_caps"]["max_position_notional_usd"] = Value::Null),
+            "baseline_caps.max_position_notional_usd",
+        ),
+        (
+            "max_position_notional_usd float",
+            Box::new(|e| e["baseline_caps"]["max_position_notional_usd"] = json!(50_000.0)),
+            "baseline_caps.max_position_notional_usd",
+        ),
+        (
+            "max_position_notional_usd numeric string",
+            Box::new(|e| e["baseline_caps"]["max_position_notional_usd"] = json!("50000")),
+            "baseline_caps.max_position_notional_usd",
+        ),
+        (
             "stress claims to be a trial",
             Box::new(|e| e["is_a_trial"] = json!(true)),
             "is_a_trial",
@@ -319,6 +429,68 @@ fn cfsb01c_inconsistent_or_malformed_stress_sizing_is_flagged_field_by_field() {
             "{label}: expected {field} in {defects:?}"
         );
     }
+}
+
+#[test]
+fn cfsb01e_caps_unchanged_boolean_cannot_spoof_the_actual_cap_binding() {
+    // The echo keeps `caps_unchanged_from_baseline = true`; only one actual cap differs.
+    for (label, key, wrong) in [
+        ("qty", "max_target_qty", json!(1_001)),
+        ("notional", "max_position_notional_usd", json!(1)),
+    ] {
+        let defects = capital_fraction_defects(|e| e["baseline_caps"][key] = wrong);
+        assert_eq!(
+            defects,
+            vec![format!("stress_spec.stress_sizing.baseline_caps.{key}")],
+            "{label}: only the actual cap must be flagged while the boolean still claims true"
+        );
+    }
+}
+
+#[test]
+fn cfsb01f_none_baseline_caps_accept_only_explicit_json_null() {
+    let run = |caps: Caps, mutate: fn(&mut Value)| {
+        resolve_candidate_caps("cf_none_caps", true, caps, |fp| {
+            let mut echo = consistent_echo_caps(fp, 500, caps);
+            mutate(&mut echo);
+            json!({ "stress_sizing": echo })
+        })
+    };
+    let q = "stress_spec.stress_sizing.baseline_caps.max_target_qty".to_string();
+    let n = "stress_spec.stress_sizing.baseline_caps.max_position_notional_usd".to_string();
+
+    // Correct nulls / mixed Some+None combinations pass, at several adverse fractions' worth of echo.
+    for caps in [(None, None), (Some(1_000), None), (None, Some(50_000))] {
+        assert!(run(caps, |_| {}).is_empty(), "{caps:?}");
+    }
+    // Missing key is not null.
+    assert_eq!(
+        run((None, None), |e| {
+            let c = e["baseline_caps"].as_object_mut().unwrap();
+            c.remove("max_target_qty");
+            c.remove("max_position_notional_usd");
+        }),
+        vec![q.clone(), n.clone()]
+    );
+    // A concrete value or the string "null" is not null.
+    assert_eq!(
+        run((None, None), |e| {
+            e["baseline_caps"]["max_target_qty"] = json!(1_000);
+            e["baseline_caps"]["max_position_notional_usd"] = json!("null");
+        }),
+        vec![q.clone(), n.clone()]
+    );
+    assert_eq!(
+        run((Some(1_000), None), |e| e["baseline_caps"]
+            ["max_position_notional_usd"] =
+            json!(0)),
+        vec![n.clone()]
+    );
+    assert_eq!(
+        run((None, Some(50_000)), |e| e["baseline_caps"]
+            ["max_target_qty"] = json!(0)),
+        vec![q]
+    );
 }
 
 #[test]
