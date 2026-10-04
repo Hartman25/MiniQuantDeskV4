@@ -59,7 +59,8 @@ pub use native_signals::{
     NATIVE_SIGNAL_QUANTITY_SEMANTICS_ID, NATIVE_SIGNAL_STREAM_PROTOCOL_ID,
 };
 pub use p7a_p7b_economic_replay_stress::{
-    p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
+    p7a_p7b_capital_fraction_stress_scenario, p7a_p7b_economic_replay_stress_scenario,
+    CapitalFractionStressSizing, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
     P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
 };
 pub use regime::{

@@ -47,10 +47,55 @@
 //! `RobustnessGauntletOutput::merge_dsr_pbo_sensitivity` (name-agnostic --
 //! see that function's own docs).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::robustness_gauntlet::RobustnessScenarioOutcome;
+
+/// Half-exposure stress as a RECOMPUTED capital-fraction target quantity.
+///
+/// `signals_csv` / `signals_meta` are a native signal stream of the SAME registered trial that
+/// the Rust emitter produced under `FixedInitialCapitalFractionV1` at `allocation_fraction_bps`
+/// (strictly below the baseline's) on the same immutable capital and bars;
+/// `expected_semantic_fingerprint` is the wrapper fingerprint `native-fingerprint` resolves for
+/// that fraction. The Python replay authenticates the stream against the baseline's, so the
+/// decisions are provably unchanged and only the quantity differs. It is never a USD cap on the
+/// baseline quantity, which the exact-target replay refuses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapitalFractionStressSizing {
+    pub scenario_id: String,
+    pub allocation_fraction_bps: i64,
+    pub signals_csv: PathBuf,
+    pub signals_meta: PathBuf,
+    pub expected_semantic_fingerprint: String,
+}
+
+impl CapitalFractionStressSizing {
+    /// Fail-closed shape validation, run BEFORE any subprocess is spawned.
+    fn validate(&self) -> Result<(), String> {
+        if self.scenario_id.trim().is_empty() {
+            return Err("capital-fraction stress scenario_id is empty".to_string());
+        }
+        if !(1..=10_000).contains(&self.allocation_fraction_bps) {
+            return Err(format!(
+                "capital-fraction stress allocation_fraction_bps {} is outside 1..=10000",
+                self.allocation_fraction_bps
+            ));
+        }
+        let fp = &self.expected_semantic_fingerprint;
+        if fp.len() != 64
+            || !fp
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(
+                "capital-fraction stress expected_semantic_fingerprint is not 64 lowercase hex"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
 
 /// Scenario name this module reports under -- part of
 /// `robustness_gauntlet::REQUIRED_ROBUSTNESS_SCENARIO_NAMES`.
@@ -121,8 +166,133 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
     stress_max_position_notional_usd: Option<f64>,
     max_drawdown_ceiling: f64,
 ) -> RobustnessScenarioOutcome {
+    p7a_p7b_stress_scenario_impl(
+        python_executable,
+        research_py_root,
+        registry_db,
+        trial_id,
+        economic_eval_id,
+        expected_strategy_id,
+        stress_out_dir,
+        stress_execution_slippage_bps,
+        stress_execution_volatility_mult_bps,
+        stress_max_target_qty,
+        stress_max_position_notional_usd,
+        max_drawdown_ceiling,
+        None,
+    )
+}
+
+/// The half-exposure variant of [`p7a_p7b_economic_replay_stress_scenario`]: P7B is expressed as a
+/// recomputed capital-fraction quantity (`sizing`), never as a post-sizing cap, so no
+/// `stress_max_*` knob exists on this entry point and the baseline safety caps are carried
+/// unchanged. Same replay authority, same strategy/eval-id cross-checks, same
+/// "mandatory means mandatory" outcome mapping; the returned evidence additionally has to echo the
+/// requested scenario and fraction.
+#[allow(clippy::too_many_arguments)]
+pub fn p7a_p7b_capital_fraction_stress_scenario(
+    python_executable: &str,
+    research_py_root: &Path,
+    registry_db: &Path,
+    trial_id: &str,
+    economic_eval_id: &str,
+    expected_strategy_id: &str,
+    stress_out_dir: &Path,
+    stress_execution_slippage_bps: u32,
+    stress_execution_volatility_mult_bps: u32,
+    max_drawdown_ceiling: f64,
+    sizing: &CapitalFractionStressSizing,
+) -> RobustnessScenarioOutcome {
+    let outcome = p7a_p7b_stress_scenario_impl(
+        python_executable,
+        research_py_root,
+        registry_db,
+        trial_id,
+        economic_eval_id,
+        expected_strategy_id,
+        stress_out_dir,
+        stress_execution_slippage_bps,
+        stress_execution_volatility_mult_bps,
+        None,
+        None,
+        max_drawdown_ceiling,
+        Some(sizing),
+    );
+    require_stress_sizing_echo(outcome, sizing)
+}
+
+/// An `evaluated` capital-fraction stress is only accepted when its evidence names the requested
+/// scenario and fraction; anything else is a genuine FAIL, never a silent pass.
+fn require_stress_sizing_echo(
+    mut outcome: RobustnessScenarioOutcome,
+    sizing: &CapitalFractionStressSizing,
+) -> RobustnessScenarioOutcome {
+    let Some(evidence) = outcome.evidence.as_ref() else {
+        return outcome;
+    };
+    if evidence.get("status").and_then(|v| v.as_str()) != Some("evaluated") {
+        return outcome;
+    }
+    let echoed = evidence
+        .get("stress_spec")
+        .and_then(|s| s.get("stress_sizing"));
+    let ok = echoed.is_some_and(|e| {
+        e.get("allocation_fraction_bps").and_then(|v| v.as_i64())
+            == Some(sizing.allocation_fraction_bps)
+            && e.get("scenario_id").and_then(|v| v.as_str()) == Some(sizing.scenario_id.as_str())
+            && e.get("is_a_trial").and_then(|v| v.as_bool()) == Some(false)
+    });
+    if !ok {
+        let reason = format!(
+            "stress evidence does not echo the requested capital-fraction scenario \
+             {:?} at {} bps: {echoed:?}",
+            sizing.scenario_id, sizing.allocation_fraction_bps
+        );
+        outcome.passed = false;
+        outcome.reason = Some(reason.clone());
+        outcome.detail = reason;
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn p7a_p7b_stress_scenario_impl(
+    python_executable: &str,
+    research_py_root: &Path,
+    registry_db: &Path,
+    trial_id: &str,
+    economic_eval_id: &str,
+    expected_strategy_id: &str,
+    stress_out_dir: &Path,
+    stress_execution_slippage_bps: u32,
+    stress_execution_volatility_mult_bps: u32,
+    stress_max_target_qty: Option<u32>,
+    stress_max_position_notional_usd: Option<f64>,
+    max_drawdown_ceiling: f64,
+    stress_sizing: Option<&CapitalFractionStressSizing>,
+) -> RobustnessScenarioOutcome {
     let name = P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string();
     let research_trial_id = Some(trial_id.to_string());
+
+    // A capital-fraction stress is never expressed as a cap, and its own shape is validated
+    // BEFORE any I/O.
+    if let Some(sizing) = stress_sizing {
+        let defect = sizing.validate().err().or_else(|| {
+            (stress_max_target_qty.is_some() || stress_max_position_notional_usd.is_some())
+                .then(|| "capital-fraction stress forbids stress_max_target_qty / stress_max_position_notional_usd".to_string())
+        });
+        if let Some(reason) = defect {
+            return RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed: false,
+                reason: Some(reason.clone()),
+                detail: reason,
+                research_trial_id,
+                evidence: None,
+            };
+        }
+    }
 
     // P9-P7A-P7B-REAL-STRESS-01: validate the caller-supplied policy
     // threshold BEFORE any I/O -- an invalid ceiling is a real
@@ -168,6 +338,20 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
     }
     if let Some(notional) = stress_max_position_notional_usd {
         cmd.args(["--stress-max-position-notional-usd", &notional.to_string()]);
+    }
+    if let Some(sizing) = stress_sizing {
+        cmd.args([
+            "--stress-allocation-fraction-bps",
+            &sizing.allocation_fraction_bps.to_string(),
+            "--stress-sizing-scenario-id",
+            &sizing.scenario_id,
+            "--stress-sizing-signals-csv",
+            &sizing.signals_csv.display().to_string(),
+            "--stress-sizing-signals-meta",
+            &sizing.signals_meta.display().to_string(),
+            "--stress-sizing-expected-semantic-fingerprint",
+            &sizing.expected_semantic_fingerprint,
+        ]);
     }
 
     let output = match cmd.output() {
@@ -630,5 +814,144 @@ mod tests {
         assert!(outcome.applicable);
         assert!(!outcome.passed);
         assert!(outcome.reason.unwrap().contains("unknown trial_id"));
+    }
+}
+
+#[cfg(test)]
+mod capital_fraction_stress_tests {
+    use super::*;
+
+    fn sizing(bps: i64) -> CapitalFractionStressSizing {
+        CapitalFractionStressSizing {
+            scenario_id: "half_exposure_capital_fraction_500bps_v1".to_string(),
+            allocation_fraction_bps: bps,
+            signals_csv: PathBuf::from("/nonexistent/stress_signals.csv"),
+            signals_meta: PathBuf::from("/nonexistent/stress_meta.json"),
+            expected_semantic_fingerprint: "a".repeat(64),
+        }
+    }
+
+    fn run(sizing: &CapitalFractionStressSizing) -> RobustnessScenarioOutcome {
+        p7a_p7b_capital_fraction_stress_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_eval_id",
+            "some_strategy",
+            Path::new("/nonexistent/stress_out"),
+            15,
+            10,
+            0.40,
+            sizing,
+        )
+    }
+
+    fn assert_refused_before_spawn(outcome: &RobustnessScenarioOutcome, needle: &str) {
+        assert!(
+            outcome.applicable && !outcome.passed,
+            "mandatory scenario must FAIL, not vanish"
+        );
+        let reason = outcome.reason.clone().unwrap_or_default();
+        assert!(reason.contains(needle), "{reason}");
+        assert!(
+            !reason.contains("failed to spawn"),
+            "must be refused BEFORE any spawn: {reason}"
+        );
+        assert!(outcome.evidence.is_none());
+    }
+
+    #[test]
+    fn malformed_sizing_is_refused_before_any_subprocess() {
+        for bps in [0, -1, 10_001] {
+            assert_refused_before_spawn(&run(&sizing(bps)), "allocation_fraction_bps");
+        }
+        let mut s = sizing(500);
+        s.expected_semantic_fingerprint = "A".repeat(64);
+        assert_refused_before_spawn(&run(&s), "64 lowercase hex");
+        s.expected_semantic_fingerprint = "a".repeat(63);
+        assert_refused_before_spawn(&run(&s), "64 lowercase hex");
+        let mut s = sizing(500);
+        s.scenario_id = "  ".to_string();
+        assert_refused_before_spawn(&run(&s), "scenario_id");
+    }
+
+    #[test]
+    fn a_valid_sizing_reaches_the_spawn_stage_so_the_refusals_above_are_the_validator() {
+        let outcome = run(&sizing(500));
+        let reason = outcome.reason.unwrap_or_default();
+        assert!(reason.contains("failed to spawn"), "{reason}");
+    }
+
+    #[test]
+    fn caps_alongside_a_capital_fraction_stress_are_refused_before_any_subprocess() {
+        for (qty, notional) in [
+            (Some(30), None),
+            (None, Some(5000.0)),
+            (None, Some(25000.0)),
+        ] {
+            let outcome = p7a_p7b_stress_scenario_impl(
+                "mqk_this_executable_must_never_be_invoked",
+                Path::new("/nonexistent/research-py"),
+                Path::new("/nonexistent/registry.sqlite3"),
+                "t",
+                "e",
+                "s",
+                Path::new("/nonexistent/stress_out"),
+                15,
+                10,
+                qty,
+                notional,
+                0.40,
+                Some(&sizing(500)),
+            );
+            assert_refused_before_spawn(&outcome, "forbids stress_max_target_qty");
+        }
+    }
+
+    fn evaluated(stress_sizing: serde_json::Value) -> RobustnessScenarioOutcome {
+        let evidence = serde_json::json!({
+            "status": "evaluated",
+            "stress_spec": { "stress_sizing": stress_sizing },
+        });
+        RobustnessScenarioOutcome {
+            name: P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string(),
+            applicable: true,
+            passed: true,
+            reason: None,
+            detail: String::new(),
+            research_trial_id: Some("t".to_string()),
+            evidence: Some(evidence),
+        }
+    }
+
+    #[test]
+    fn evaluated_evidence_must_echo_the_requested_scenario_and_fraction() {
+        let s = sizing(500);
+        let good = serde_json::json!({
+            "scenario_id": s.scenario_id, "allocation_fraction_bps": 500, "is_a_trial": false });
+        assert!(require_stress_sizing_echo(evaluated(good.clone()), &s).passed);
+
+        // A different fraction (501), a different scenario name, a trial flag or a cap-style
+        // evidence block with no stress_sizing cannot satisfy the requested scenario.
+        for bad in [
+            serde_json::json!({ "scenario_id": s.scenario_id, "allocation_fraction_bps": 501, "is_a_trial": false }),
+            serde_json::json!({ "scenario_id": "other", "allocation_fraction_bps": 500, "is_a_trial": false }),
+            serde_json::json!({ "scenario_id": s.scenario_id, "allocation_fraction_bps": 500, "is_a_trial": true }),
+            serde_json::Value::Null,
+        ] {
+            let out = require_stress_sizing_echo(evaluated(bad), &s);
+            assert!(out.applicable && !out.passed, "{:?}", out.reason);
+            assert!(out.reason.unwrap().contains("does not echo"));
+        }
+        // A non-evaluated outcome is returned untouched (its own failure reason stands).
+        let mut failed = evaluated(good);
+        failed.passed = false;
+        failed.evidence = Some(serde_json::json!({"status": "error"}));
+        failed.reason = Some("boom".to_string());
+        assert_eq!(
+            require_stress_sizing_echo(failed, &s).reason.as_deref(),
+            Some("boom")
+        );
     }
 }

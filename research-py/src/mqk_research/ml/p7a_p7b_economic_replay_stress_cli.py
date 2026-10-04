@@ -78,6 +78,8 @@ from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import pandas as pd
+
 from mqk_research.exp_distributed.storage import ResearchResultStore
 from mqk_research.ml.economic_walkforward import (
     AnnualizationSpec,
@@ -96,6 +98,10 @@ from mqk_research.ml.replay_authority import (
     recompute_economic_eval_id as _recompute_economic_eval_id,
     resolve_trial_economic_artifact as _resolve_trial_economic_artifact,
     verify_recorded_input as _verify_recorded_input,
+)
+from mqk_research.ml.native_signal_registry_integration import (
+    NativeSignalError,
+    _load_signals,
 )
 from mqk_research.ml.util_hash import file_record, sha256_file, sha256_json
 from mqk_research.ml.weight_to_share import WEIGHT_TO_SHARE_PROTOCOL_ID_V1, WeightToShareSpec
@@ -134,6 +140,7 @@ def _validate_genuine_p7a_p7b_adversity(
     stress_execution_volatility_mult_bps: int,
     stress_max_target_qty: Optional[int],
     stress_max_position_notional_usd: Optional[float],
+    capital_fraction_stress: bool = False,
 ) -> Optional[str]:
     """Returns a fail-closed reason string if the caller-supplied stress
     configuration is not GENUINE adversity relative to the verified
@@ -164,6 +171,18 @@ def _validate_genuine_p7a_p7b_adversity(
             f"(slippage_bps={baseline_slippage}, volatility_mult_bps={baseline_volatility}) in "
             "both dimensions -- at least one must be strictly worse"
         )
+
+    if capital_fraction_stress:
+        # The P7B tightening is the recomputed (smaller) capital-fraction quantity, validated
+        # separately; a post-sizing cap is never how a capital-fraction stress is expressed.
+        if stress_max_target_qty is not None or stress_max_position_notional_usd is not None:
+            return (
+                "capital-fraction stress sizing forbids stress_max_target_qty / "
+                "stress_max_position_notional_usd: a USD cap applied to a baseline-sized quantity "
+                "is refused by the exact-target replay and is not a half-exposure stress; the "
+                "independent baseline safety caps are carried unchanged"
+            )
+        return None
 
     baseline_wts = baseline_spec.weight_to_share
     baseline_max_qty = baseline_wts.max_target_qty if baseline_wts is not None else None
@@ -235,6 +254,128 @@ def _reconstruct_baseline_spec(econ: Dict[str, Any]) -> EconomicWalkForwardSpec:
     )
 
 
+def _build_capital_fraction_stress_oos(
+    *,
+    stress_sizing: Dict[str, Any],
+    wf_eval: Dict[str, Any],
+    baseline_oos_path: Path,
+    baseline_spec: EconomicWalkForwardSpec,
+    strategy_id: str,
+    stress_out_dir: Path,
+) -> "tuple[Path, Dict[str, Any]]":
+    """Half-exposure stress as a RECOMPUTED target quantity, never a cap on the baseline one.
+
+    `stress_sizing` names an additional native signal stream of the SAME registered trial that the
+    Rust emitter produced with `FixedInitialCapitalFractionV1` at a strictly smaller
+    `allocation_fraction_bps` on the same immutable capital and bars. It is verified through the
+    accepted stream loader (so every positive quantity is an engine-resolved entry), must carry
+    the identical decisions as the authenticated baseline stream, and may never hold more than the
+    baseline. Its quantities replace the baseline OOS `target_qty` row for row; nothing else changes.
+    """
+    required = {"scenario_id", "allocation_fraction_bps", "signals_csv", "signals_meta",
+                "expected_semantic_fingerprint"}
+    if set(stress_sizing) != required:
+        raise ReplayAuthorityError(f"stress_sizing must have exactly the keys {sorted(required)}")
+    stress_bps = stress_sizing["allocation_fraction_bps"]
+    if type(stress_bps) is not int or not 1 <= stress_bps <= 10_000:
+        raise ReplayAuthorityError("stress allocation_fraction_bps must be an explicit integer 1..=10000")
+
+    wf_inputs = wf_eval.get("inputs") or {}
+    base_csv_record = wf_inputs.get("native_signals_csv")
+    base_meta_record = wf_inputs.get("native_signals_meta")
+    if not (base_csv_record and base_meta_record):
+        raise ReplayAuthorityError(
+            "baseline walk-forward artifact records no native signal stream: a capital-fraction stress "
+            "needs the authenticated baseline stream to prove the decisions are unchanged"
+        )
+    base_csv = _verify_recorded_input("inputs.native_signals_csv", base_csv_record)
+    base_meta_path = _verify_recorded_input("inputs.native_signals_meta", base_meta_record)
+    base_meta = json.loads(base_meta_path.read_text(encoding="utf-8"))
+    base_block = base_meta.get("sizing")
+    if not isinstance(base_block, dict) or base_block.get("policy_id") != "fixed_initial_capital_fraction_v1":
+        raise ReplayAuthorityError("the baseline trial is not a capital-fraction trial; no capital-fraction stress exists")
+    base_bps = int(base_block["allocation_fraction_bps"])
+    if stress_bps >= base_bps:
+        raise ReplayAuthorityError(
+            f"capital-fraction stress is not adverse: stress {stress_bps} bps must be strictly below the "
+            f"baseline {base_bps} bps on the same immutable capital"
+        )
+
+    equity_usd = baseline_spec.weight_to_share.equity_usd
+    expected_sizing = {
+        "policy_id": base_block["policy_id"],
+        "allocation_fraction_bps": stress_bps,
+        "initial_allocated_capital_micros": int(base_block["initial_allocated_capital_micros"]),
+        "max_target_qty": base_block.get("max_target_qty"),
+        "max_position_notional_usd": base_block.get("max_position_notional_usd"),
+    }
+    stress_csv = Path(stress_sizing["signals_csv"])
+    stress_meta_path = Path(stress_sizing["signals_meta"])
+    try:
+        stress_signals, stress_meta = _load_signals(
+            stress_csv, stress_meta_path, strategy_id=strategy_id, symbol=str(base_meta["symbol"]),
+            backtest_bars_sha256=str(base_meta["bars_csv_sha256"]),
+            expected_timeframe_secs=int(base_meta["timeframe_secs"]),
+            expected_semantic_fingerprint=str(stress_sizing["expected_semantic_fingerprint"]),
+            expected_required_history_bars=int(base_meta["required_history_bars"]),
+            equity_usd=equity_usd, expected_capital_sizing=expected_sizing,
+        )
+    except NativeSignalError as exc:
+        raise ReplayAuthorityError(f"stress signal stream rejected: {exc}") from exc
+    if stress_meta["semantic_fingerprint"] == base_meta["semantic_fingerprint"]:
+        raise ReplayAuthorityError("stress stream carries the baseline wrapper fingerprint: sizing was not re-resolved")
+
+    base_signals = pd.read_csv(base_csv).sort_values("decision_ts", kind="mergesort").reset_index(drop=True)
+    stress_frame = stress_signals[["decision_ts", "target_qty_micros"]].reset_index(drop=True)
+    if list(base_signals["decision_ts"]) != list(stress_frame["decision_ts"]):
+        raise ReplayAuthorityError("stress stream decision timestamps differ from the baseline stream")
+    base_q = base_signals["target_qty_micros"].astype("int64")
+    stress_q = stress_frame["target_qty_micros"].astype("int64")
+    if ((base_q > 0) != (stress_q > 0)).any():
+        raise ReplayAuthorityError("stress stream changed a long/flat decision: sizing stress must not change decisions")
+    if (stress_q > base_q).any():
+        raise ReplayAuthorityError("stress quantity exceeds the baseline quantity: not a reduced-exposure stress")
+
+    by_ts = {int(ts): int(q) // 1_000_000 for ts, q in zip(stress_frame["decision_ts"], stress_q)}
+    baseline_oos = pd.read_csv(baseline_oos_path)
+    stress_rows = baseline_oos.copy()
+    decision_epoch = (
+        pd.to_datetime(stress_rows["decision_ts"], utc=True) - pd.Timestamp("1970-01-01", tz="UTC")
+    ) // pd.Timedelta(seconds=1)
+    try:
+        stress_rows["target_qty"] = [by_ts[int(ts)] for ts in decision_epoch]
+    except KeyError as exc:
+        raise ReplayAuthorityError(f"baseline OOS decision {exc} has no stress quantity") from exc
+    stress_oos_path = stress_out_dir / "stress_oos_predictions.csv"
+    stress_rows.to_csv(stress_oos_path, index=False, lineterminator="\n")
+
+    base_entries = base_block.get("entries") or []
+    stress_entries = stress_meta["sizing"].get("entries") or []
+    initial = int(base_block["initial_allocated_capital_micros"])
+    evidence = {
+        "scenario_id": stress_sizing["scenario_id"],
+        "policy_id": base_block["policy_id"],
+        "allocation_fraction_bps": stress_bps,
+        "baseline_allocation_fraction_bps": base_bps,
+        "initial_allocated_capital_micros": initial,
+        "nominal_entry_budget_micros": initial * stress_bps // 10_000,
+        "baseline_nominal_entry_budget_micros": initial * base_bps // 10_000,
+        "quantity_rule": "stress Q re-resolved by the capital-fraction resolver; the baseline Q is never capped",
+        "caps_unchanged_from_baseline": True,
+        "baseline_caps": {"max_target_qty": expected_sizing["max_target_qty"],
+                          "max_position_notional_usd": expected_sizing["max_position_notional_usd"]},
+        "baseline_semantic_fingerprint": base_meta["semantic_fingerprint"],
+        "stress_semantic_fingerprint": stress_meta["semantic_fingerprint"],
+        "stress_native_signals_csv_sha256": sha256_file(stress_csv),
+        "stress_native_signals_meta_sha256": sha256_file(stress_meta_path),
+        "stress_oos_predictions_csv_sha256": sha256_file(stress_oos_path),
+        "baseline_entries": len(base_entries),
+        "stress_entries": len(stress_entries),
+        "is_a_trial": False,
+    }
+    return stress_oos_path, evidence
+
+
 def _run_replay_stress(
     *,
     registry_db: Path,
@@ -246,6 +387,7 @@ def _run_replay_stress(
     stress_max_target_qty: Optional[int],
     stress_max_position_notional_usd: Optional[float],
     max_drawdown_ceiling: float,
+    stress_sizing: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     store = ResearchResultStore(registry_db)
     trial = store.get_trial(trial_id)
@@ -373,10 +515,32 @@ def _run_replay_stress(
         stress_execution_volatility_mult_bps=stress_execution_volatility_mult_bps,
         stress_max_target_qty=stress_max_target_qty,
         stress_max_position_notional_usd=stress_max_position_notional_usd,
+        capital_fraction_stress=stress_sizing is not None,
     )
     if adversity_error is not None:
         return {"status": "error", "strategy_id": strategy_id, "reason": adversity_error}
 
+    stress_out_dir.mkdir(parents=True, exist_ok=True)
+    stress_oos_path = oos_path
+    sizing_evidence: Optional[Dict[str, Any]] = None
+    if stress_sizing is None:
+        stressed_weight_to_share = replace(
+            baseline_spec.weight_to_share,
+            max_target_qty=stress_max_target_qty,
+            max_position_notional_usd=stress_max_position_notional_usd,
+        )
+    else:
+        # Half-exposure stress: the SAME decisions re-sized by the Rust capital-fraction resolver
+        # at the stress fraction. The baseline safety caps are carried unchanged.
+        stressed_weight_to_share = baseline_spec.weight_to_share
+        stress_oos_path, sizing_evidence = _build_capital_fraction_stress_oos(
+            stress_sizing=stress_sizing,
+            wf_eval=json.loads(wf_path.read_text(encoding="utf-8")),
+            baseline_oos_path=oos_path,
+            baseline_spec=baseline_spec,
+            strategy_id=strategy_id,
+            stress_out_dir=stress_out_dir,
+        )
     stressed_spec = replace(
         baseline_spec,
         execution_pricing=replace(
@@ -384,20 +548,15 @@ def _run_replay_stress(
             slippage_bps=stress_execution_slippage_bps,
             volatility_mult_bps=stress_execution_volatility_mult_bps,
         ),
-        weight_to_share=replace(
-            baseline_spec.weight_to_share,
-            max_target_qty=stress_max_target_qty,
-            max_position_notional_usd=stress_max_position_notional_usd,
-        ),
+        weight_to_share=stressed_weight_to_share,
     )
 
-    stress_out_dir.mkdir(parents=True, exist_ok=True)
     stressed_path = run_economic_walkforward(
         stress_out_dir,
         bars_csv=bars_path,
         spec=stressed_spec,
         walk_forward_eval_path=wf_path,
-        oos_predictions_path=oos_path,
+        oos_predictions_path=stress_oos_path,
         provenance_manifest=econ.get("bars_provenance"),
     )
     stressed = json.loads(stressed_path.read_text(encoding="utf-8"))
@@ -428,6 +587,7 @@ def _run_replay_stress(
             "execution_pricing_volatility_mult_bps": stress_execution_volatility_mult_bps,
             "max_target_qty": stress_max_target_qty,
             "max_position_notional_usd": stress_max_position_notional_usd,
+            **({"stress_sizing": sizing_evidence} if sizing_evidence is not None else {}),
         },
         "max_drawdown_ceiling": max_drawdown_ceiling,
         "stressed_max_drawdown": stressed_max_drawdown,
@@ -454,6 +614,20 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--stress-max-target-qty", type=int, default=None)
     parser.add_argument("--stress-max-position-notional-usd", type=float, default=None)
     parser.add_argument(
+        "--stress-allocation-fraction-bps",
+        type=int,
+        default=None,
+        help=(
+            "Capital-fraction half-exposure stress: re-resolved target quantities at this strictly "
+            "smaller fraction of the baseline's immutable capital. Requires the other --stress-sizing-* "
+            "arguments and forbids the post-sizing cap arguments."
+        ),
+    )
+    parser.add_argument("--stress-sizing-scenario-id", default=None)
+    parser.add_argument("--stress-sizing-signals-csv", type=Path, default=None)
+    parser.add_argument("--stress-sizing-signals-meta", type=Path, default=None)
+    parser.add_argument("--stress-sizing-expected-semantic-fingerprint", default=None)
+    parser.add_argument(
         "--max-drawdown-ceiling",
         required=True,
         type=float,
@@ -466,6 +640,23 @@ def main(argv: Optional[list] = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    sizing_args = (args.stress_allocation_fraction_bps, args.stress_sizing_scenario_id,
+                   args.stress_sizing_signals_csv, args.stress_sizing_signals_meta,
+                   args.stress_sizing_expected_semantic_fingerprint)
+    if any(a is not None for a in sizing_args) and any(a is None for a in sizing_args):
+        json.dump({"status": "error", "reason": "the capital-fraction stress arguments must be given together"},
+                  sys.stdout)
+        return 1
+    stress_sizing = None
+    if args.stress_allocation_fraction_bps is not None:
+        stress_sizing = {
+            "scenario_id": args.stress_sizing_scenario_id,
+            "allocation_fraction_bps": args.stress_allocation_fraction_bps,
+            "signals_csv": str(args.stress_sizing_signals_csv),
+            "signals_meta": str(args.stress_sizing_signals_meta),
+            "expected_semantic_fingerprint": args.stress_sizing_expected_semantic_fingerprint,
+        }
+
     try:
         result = _run_replay_stress(
             registry_db=args.registry_db,
@@ -477,6 +668,7 @@ def main(argv: Optional[list] = None) -> int:
             stress_max_target_qty=args.stress_max_target_qty,
             stress_max_position_notional_usd=args.stress_max_position_notional_usd,
             max_drawdown_ceiling=args.max_drawdown_ceiling,
+            stress_sizing=stress_sizing,
         )
     except Exception as exc:  # noqa: BLE001 -- deliberate catch-all: fail closed with
         # structured JSON, never a raw Python traceback for the Rust caller to fail to

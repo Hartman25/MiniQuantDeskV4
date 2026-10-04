@@ -9,7 +9,7 @@ mod commands;
 use commands::{
     bkt::{
         run_backtest_csv, run_backtest_db, run_finalize_genuine_shuffled_placebo,
-        run_finalize_p7a_p7b_replay_stress, run_finalize_robustness_sensitivity,
+        run_finalize_p7a_p7b_replay_stress_with_sizing, run_finalize_robustness_sensitivity,
         run_native_fingerprint, run_native_signals, run_regime_detect, run_review_scan,
         run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
         IntegrityCalendarArg, NativeBridgeSizingArgs, ScanConfigFlags,
@@ -758,6 +758,29 @@ enum BacktestCmd {
         /// operator/Research-policy owner must supply one.
         #[arg(long)]
         max_drawdown_ceiling: f64,
+
+        /// Capital-fraction half-exposure stress: the strictly smaller
+        /// `allocation_fraction_bps` the stress stream was re-resolved at.
+        /// Requires the four `--stress-sizing-*` flags and forbids the
+        /// `--stress-max-*` cap knobs.
+        #[arg(long)]
+        stress_allocation_fraction_bps: Option<i64>,
+
+        /// Name of the stress scenario (an evaluation scenario, never a trial).
+        #[arg(long)]
+        stress_sizing_scenario_id: Option<String>,
+
+        /// Native signal CSV emitted at the stress fraction.
+        #[arg(long)]
+        stress_sizing_signals_csv: Option<String>,
+
+        /// Native signal meta JSON emitted at the stress fraction.
+        #[arg(long)]
+        stress_sizing_signals_meta: Option<String>,
+
+        /// Wrapper semantic fingerprint resolved for the stress fraction.
+        #[arg(long)]
+        stress_sizing_expected_semantic_fingerprint: Option<String>,
     },
 
     /// FINAL-P9-ROBUSTNESS-SEMANTICS-01: finalize the genuine shuffled
@@ -1962,8 +1985,34 @@ async fn run_cli() -> Result<()> {
                 stress_max_target_qty,
                 stress_max_position_notional_usd,
                 max_drawdown_ceiling,
+                stress_allocation_fraction_bps,
+                stress_sizing_scenario_id,
+                stress_sizing_signals_csv,
+                stress_sizing_signals_meta,
+                stress_sizing_expected_semantic_fingerprint,
             } => {
-                run_finalize_p7a_p7b_replay_stress(
+                let stress_sizing = match (
+                    stress_allocation_fraction_bps,
+                    stress_sizing_scenario_id,
+                    stress_sizing_signals_csv,
+                    stress_sizing_signals_meta,
+                    stress_sizing_expected_semantic_fingerprint,
+                ) {
+                    (None, None, None, None, None) => None,
+                    (Some(bps), Some(id), Some(csv), Some(meta), Some(fp)) => {
+                        Some(mqk_backtest::CapitalFractionStressSizing {
+                            scenario_id: id,
+                            allocation_fraction_bps: bps,
+                            signals_csv: csv.into(),
+                            signals_meta: meta.into(),
+                            expected_semantic_fingerprint: fp,
+                        })
+                    }
+                    _ => anyhow::bail!(
+                        "the capital-fraction stress flags (--stress-allocation-fraction-bps and the four --stress-sizing-*) must be given together"
+                    ),
+                };
+                run_finalize_p7a_p7b_replay_stress_with_sizing(
                     artifact_root,
                     run_id,
                     registry_db,
@@ -1977,6 +2026,7 @@ async fn run_cli() -> Result<()> {
                     stress_max_target_qty,
                     stress_max_position_notional_usd,
                     max_drawdown_ceiling,
+                    stress_sizing,
                 )?;
             }
             BacktestCmd::FinalizeGenuineShuffledPlacebo {

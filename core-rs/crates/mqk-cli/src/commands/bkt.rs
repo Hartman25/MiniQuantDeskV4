@@ -1925,6 +1925,44 @@ pub fn run_finalize_p7a_p7b_replay_stress(
     stress_max_position_notional_usd: Option<f64>,
     max_drawdown_ceiling: f64,
 ) -> Result<()> {
+    run_finalize_p7a_p7b_replay_stress_with_sizing(
+        artifact_root,
+        run_id,
+        registry_db,
+        trial_id,
+        economic_eval_id,
+        research_py_root,
+        python,
+        stress_out_dir,
+        stress_execution_slippage_bps,
+        stress_execution_volatility_mult_bps,
+        stress_max_target_qty,
+        stress_max_position_notional_usd,
+        max_drawdown_ceiling,
+        None,
+    )
+}
+
+/// [`run_finalize_p7a_p7b_replay_stress`] with an optional capital-fraction half-exposure stress.
+/// With `stress_sizing` the P7B tightening is a recomputed quantity and neither `stress_max_*`
+/// knob may be supplied; without it the historical cap stress is unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn run_finalize_p7a_p7b_replay_stress_with_sizing(
+    artifact_root: String,
+    run_id: String,
+    registry_db: String,
+    trial_id: String,
+    economic_eval_id: String,
+    research_py_root: String,
+    python: String,
+    stress_out_dir: String,
+    stress_execution_slippage_bps: u32,
+    stress_execution_volatility_mult_bps: u32,
+    stress_max_target_qty: Option<u32>,
+    stress_max_position_notional_usd: Option<f64>,
+    max_drawdown_ceiling: f64,
+    stress_sizing: Option<mqk_backtest::CapitalFractionStressSizing>,
+) -> Result<()> {
     let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
     let run_dir = Path::new(&artifact_root).join(run_id.to_string());
 
@@ -1937,20 +1975,43 @@ pub fn run_finalize_p7a_p7b_replay_stress(
             )
         })?;
 
-    let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
-        &python,
-        Path::new(&research_py_root),
-        Path::new(&registry_db),
-        &trial_id,
-        &economic_eval_id,
-        &existing.strategy_name,
-        Path::new(&stress_out_dir),
-        stress_execution_slippage_bps,
-        stress_execution_volatility_mult_bps,
-        stress_max_target_qty,
-        stress_max_position_notional_usd,
-        max_drawdown_ceiling,
-    );
+    if stress_sizing.is_some()
+        && (stress_max_target_qty.is_some() || stress_max_position_notional_usd.is_some())
+    {
+        anyhow::bail!(
+            "a capital-fraction stress forbids --stress-max-target-qty / --stress-max-position-notional-usd"
+        );
+    }
+
+    let stress = match stress_sizing.as_ref() {
+        Some(sizing) => mqk_backtest::p7a_p7b_capital_fraction_stress_scenario(
+            &python,
+            Path::new(&research_py_root),
+            Path::new(&registry_db),
+            &trial_id,
+            &economic_eval_id,
+            &existing.strategy_name,
+            Path::new(&stress_out_dir),
+            stress_execution_slippage_bps,
+            stress_execution_volatility_mult_bps,
+            max_drawdown_ceiling,
+            sizing,
+        ),
+        None => mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
+            &python,
+            Path::new(&research_py_root),
+            Path::new(&registry_db),
+            &trial_id,
+            &economic_eval_id,
+            &existing.strategy_name,
+            Path::new(&stress_out_dir),
+            stress_execution_slippage_bps,
+            stress_execution_volatility_mult_bps,
+            stress_max_target_qty,
+            stress_max_position_notional_usd,
+            max_drawdown_ceiling,
+        ),
+    };
 
     println!("scenario_name={}", stress.name);
     println!("applicable={}", stress.applicable);

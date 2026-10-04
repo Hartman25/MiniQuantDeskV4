@@ -123,8 +123,13 @@ def _require_exact_target_protocol() -> None:
         )
 
 
-def sizing_args(decl: dict) -> list[str]:
+_DESCRIPTIVE_SIZING_FIELDS = {"cap_note", "quantity_rule", "forbidden"}
+
+
+def sizing_args(decl: dict, allocation_fraction_bps: int | None = None) -> list[str]:
     """CLI sizing flags from the declaration's optional `capital_sizing` block.
+    `allocation_fraction_bps` overrides the declared fraction ONLY for the validated
+    robustness stress scenario (never for a trial).
 
     Absent block = the historical fixed-quantity protocol (no flags). A present
     block must name the capital-fraction policy, an explicit integer fraction in
@@ -138,7 +143,8 @@ def sizing_args(decl: dict) -> list[str]:
     if not isinstance(block, dict):
         raise SystemExit("fail-closed: capital_sizing must be an object")
     unknown = set(block) - {"policy_id", "allocation_fraction_bps", "capital_basis", "max_target_qty",
-                            "max_position_notional_usd"}
+                            "max_position_notional_usd", "initial_capital_micros",
+                            "nominal_entry_budget_micros"} - _DESCRIPTIVE_SIZING_FIELDS
     if unknown:
         raise SystemExit(f"fail-closed: capital_sizing has unknown fields {sorted(unknown)}")
     if block.get("policy_id") != SIZING_POLICY_CF:
@@ -148,8 +154,17 @@ def sizing_args(decl: dict) -> list[str]:
         raise SystemExit("fail-closed: capital_sizing.allocation_fraction_bps must be an explicit integer 1..=10000")
     if block.get("capital_basis") != CAPITAL_BASIS:
         raise SystemExit(f"fail-closed: capital_sizing.capital_basis must be {CAPITAL_BASIS!r}")
+    capital = int(decl["native_backtest"]["initial_cash_micros"])
+    if "initial_capital_micros" in block and block["initial_capital_micros"] != capital:
+        raise SystemExit("fail-closed: capital_sizing.initial_capital_micros != native_backtest.initial_cash_micros")
+    if "nominal_entry_budget_micros" in block and block["nominal_entry_budget_micros"] != capital * bps // 10_000:
+        raise SystemExit("fail-closed: capital_sizing.nominal_entry_budget_micros != floor(capital * bps / 10000)")
     if decl["scanner_review"].get("benchmark_policy") != BENCHMARK_CF:
         raise SystemExit(f"fail-closed: capital_sizing requires scanner_review.benchmark_policy {BENCHMARK_CF!r}")
+    if allocation_fraction_bps is not None:
+        if type(allocation_fraction_bps) is not int or not 1 <= allocation_fraction_bps <= 10_000:
+            raise SystemExit("fail-closed: the stress allocation_fraction_bps must be an explicit integer 1..=10000")
+        bps = allocation_fraction_bps
     args = ["--sizing-policy", SIZING_POLICY_CF, "--allocation-fraction-bps", str(bps)]
     for field, flag in (("max_target_qty", "--max-target-qty"),
                         ("max_position_notional_usd", "--max-position-notional-usd")):
@@ -173,18 +188,62 @@ def research_capital_sizing(decl: dict) -> dict | None:
             "max_position_notional_usd": block.get("max_position_notional_usd")}
 
 
-def native_bridge_args(decl: dict) -> list[str]:
+def native_bridge_args(decl: dict, allocation_fraction_bps: int | None = None) -> list[str]:
     """CLI flags for `native-fingerprint` / `native-signals`: the sizing flags plus the explicit
     initial capital (the capital-fraction bridge has no default capital)."""
-    args = sizing_args(decl)
+    args = sizing_args(decl, allocation_fraction_bps)
     if not args:
         return []
     return [*args, "--initial-cash-micros", str(int(decl["native_backtest"]["initial_cash_micros"]))]
 
 
+STRESS_FORBIDDEN_CAP_FIELDS = ("stress_max_position_notional_usd", "stress_max_target_qty")
+STRESS_SIZING_KEYS = {"scenario_id", "policy_id", "allocation_fraction_bps", "initial_capital_micros",
+                      "nominal_entry_budget_micros", "quantity_rule", "is_a_trial", "identity"}
+
+
+def stress_plan(decl: dict) -> dict:
+    """The validated robustness stress contract.
+
+    Fixed-quantity declarations keep the historical P7B cap stress. A capital-fraction declaration
+    must express its half-exposure stress as a RECOMPUTED quantity at a strictly smaller
+    `allocation_fraction_bps` on the same immutable capital: a USD cap on the baseline quantity is
+    refused by the exact-target replay, and a non-binding historical cap is not a half-exposure test.
+    """
+    st = decl["robustness"]["p7a_p7b_stress"]
+    sizing = st.get("stress_sizing")
+    block = decl.get("capital_sizing")
+    if block is None:
+        if sizing is not None:
+            raise SystemExit("fail-closed: stress_sizing requires a capital_sizing declaration")
+        return {"mode": "cap"}
+    sizing_args(decl)  # the baseline block must itself be valid
+    if not isinstance(sizing, dict):
+        raise SystemExit("fail-closed: a capital-fraction declaration requires robustness.p7a_p7b_stress.stress_sizing")
+    present = [f for f in STRESS_FORBIDDEN_CAP_FIELDS if f in st]
+    if present:
+        raise SystemExit(f"fail-closed: a capital-fraction stress must not carry {present}: the half exposure is a "
+                         "recomputed quantity, not a USD cap on the baseline quantity")
+    if set(sizing) != STRESS_SIZING_KEYS:
+        raise SystemExit(f"fail-closed: stress_sizing must have exactly the keys {sorted(STRESS_SIZING_KEYS)}")
+    bps, base_bps = sizing["allocation_fraction_bps"], block["allocation_fraction_bps"]
+    if type(bps) is not int or not 1 <= bps < base_bps:
+        raise SystemExit(f"fail-closed: stress allocation_fraction_bps must be an integer strictly below the "
+                         f"baseline {base_bps}")
+    capital = int(decl["native_backtest"]["initial_cash_micros"])
+    if sizing["policy_id"] != SIZING_POLICY_CF or sizing["initial_capital_micros"] != capital:
+        raise SystemExit("fail-closed: the stress must use the capital-fraction policy on the same immutable capital")
+    if sizing["nominal_entry_budget_micros"] != capital * bps // 10_000:
+        raise SystemExit("fail-closed: stress_sizing.nominal_entry_budget_micros != floor(capital * bps / 10000)")
+    if sizing["is_a_trial"] is not False or not sizing["scenario_id"]:
+        raise SystemExit("fail-closed: a stress scenario is never a trial and must be named")
+    return {"mode": "capital_fraction", "scenario_id": sizing["scenario_id"], "allocation_fraction_bps": bps}
+
+
 def stage_check(_args) -> None:
     _require_exact_target_protocol()
     sizing_args(DECL)
+    stress_plan(DECL)
     assert len(TRIALS) == DECL["universe"]["max_trials"]
     print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()}")
 
@@ -331,11 +390,30 @@ def stage_backtest(_args) -> None:
     _save_index(index)
 
 
+def _capital_fraction_stress_args(strategy: str, sym: str, plan: dict) -> list[str]:
+    """Re-run the SAME native decisions through the Rust capital-fraction resolver at the stress
+    fraction (an evaluation scenario of the registered trial, not a trial) and return the finalize
+    flags that bind that stream. The baseline caps are carried unchanged by `sizing_args`."""
+    bps = plan["allocation_fraction_bps"]
+    emit_dir = RUN / "stress" / strategy / sym / "emit"
+    info = _run_cli("backtest", "native-fingerprint", "--strategy", strategy, "--symbol", sym,
+                    *native_bridge_args(DECL, bps))
+    fingerprint = _parse(info, "semantic_fingerprint")
+    _run_cli("backtest", "native-signals", "--bars-path", str(tdir(strategy, sym) / "bt_bars.csv"),
+             "--strategy", strategy, "--symbol", sym, "--timeframe-secs", str(HYP[strategy]["timeframe_secs"]),
+             "--out-dir", str(emit_dir), *native_bridge_args(DECL, bps))
+    return ["--stress-allocation-fraction-bps", str(bps), "--stress-sizing-scenario-id", plan["scenario_id"],
+            "--stress-sizing-signals-csv", str(emit_dir / "native_signals.csv"),
+            "--stress-sizing-signals-meta", str(emit_dir / "native_signals_meta.json"),
+            "--stress-sizing-expected-semantic-fingerprint", fingerprint]
+
+
 def stage_finalize(_args) -> None:
     index = _load_index()
     sha = (RUN / "judge" / "judge_sha256.txt").read_text(encoding="utf-8").strip()
     rb = DECL["robustness"]
     st = rb["p7a_p7b_stress"]
+    plan = stress_plan(DECL)
     py = sys.executable
     for strategy, sym in TRIALS:
         rec = index[key(strategy, sym)]
@@ -348,12 +426,16 @@ def stage_finalize(_args) -> None:
                  "--block-counts", ",".join(map(str, rb["block_counts"])),
                  "--dsr-max-sensitivity-range", str(rb["dsr_max_sensitivity_range"]),
                  "--pbo-max-sensitivity-range", str(rb["pbo_max_sensitivity_range"]))
+        if plan["mode"] == "capital_fraction":
+            stress_exposure_args = _capital_fraction_stress_args(strategy, sym, plan)
+        else:
+            stress_exposure_args = ["--stress-max-position-notional-usd", str(st["stress_max_position_notional_usd"])]
         _run_cli("backtest", "finalize-p7a-p7b-replay-stress", *common, "--economic-eval-id", rec["economic_eval_id"],
                  "--research-py-root", str(REPO / "research-py"), "--python", py,
                  "--stress-out-dir", str(RUN / "stress" / strategy / sym),
                  "--stress-execution-slippage-bps", str(st["stress_execution_slippage_bps"]),
                  "--stress-execution-volatility-mult-bps", str(st["stress_execution_volatility_mult_bps"]),
-                 "--stress-max-position-notional-usd", str(st["stress_max_position_notional_usd"]),
+                 *stress_exposure_args,
                  "--max-drawdown-ceiling", str(st["max_drawdown_ceiling"]))
         _run_cli("backtest", "finalize-genuine-shuffled-placebo", *common, "--economic-eval-id", rec["economic_eval_id"],
                  "--research-py-root", str(REPO / "research-py"), "--python", py,
