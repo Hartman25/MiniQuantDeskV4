@@ -142,6 +142,15 @@ pub const REQUIRED_JUDGE_PROTOCOL_ID: &str = "research_multiple_testing_judge_v1
 // by `crate::research_registry::load_research_authority`, which reads the
 // durable Research SQLite registry read-only -- see that module's own docs.
 
+/// The robustness stress a capital-fraction candidate was REGISTERED to be
+/// promoted against: read from its registered Research trial identity
+/// (`signal_source.stress_contract`), fixed before the trial's first attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RegisteredStressContract {
+    pub scenario_id: String,
+    pub allocation_fraction_bps: i64,
+}
+
 /// Non-forgeable, structurally VERIFIED OOS evidence for one promotion
 /// candidate. Every field was extracted from, and cross-checked against,
 /// real `economic_walk_forward.json` / multiple-testing-judge JSON content
@@ -179,11 +188,19 @@ pub struct VerifiedPromotionOosEvidence {
     /// trial bound to the promotion identity by `strategy_id` label only. The
     /// production gate compares this to the server-resolved fingerprint.
     native_semantic_fingerprint: Option<String>,
+    /// The stress contract the trial's registered identity declares, if any.
+    registered_stress_contract: Option<RegisteredStressContract>,
 }
 
 impl VerifiedPromotionOosEvidence {
     pub fn native_semantic_fingerprint(&self) -> Option<&str> {
         self.native_semantic_fingerprint.as_deref()
+    }
+
+    /// The stress contract declared by the registered trial identity (`None`
+    /// when the trial predeclared none).
+    pub fn registered_stress_contract(&self) -> Option<&RegisteredStressContract> {
+        self.registered_stress_contract.as_ref()
     }
 
     pub fn trial_id(&self) -> &str {
@@ -480,11 +497,13 @@ pub fn verify_promotion_oos_evidence(
     let mut research_strategy_id: Option<String> = None;
     let mut research_judge_artifact_sha256: Option<String> = None;
     let mut research_native_fingerprint: Option<String> = None;
+    let mut research_stress_contract: Option<RegisteredStressContract> = None;
     match load_research_authority(registry_db_path, trial_id, &economic_eval_id, &judge) {
         Ok(authority) => {
             research_strategy_id = Some(authority.strategy_id);
             research_judge_artifact_sha256 = Some(authority.judge_artifact_sha256);
             research_native_fingerprint = authority.native_semantic_fingerprint;
+            research_stress_contract = authority.registered_stress_contract;
         }
         Err(authority_errs) => errs.extend(authority_errs),
     }
@@ -682,5 +701,6 @@ pub fn verify_promotion_oos_evidence(
         judge_artifact_sha256: research_judge_artifact_sha256
             .expect("no errs means load_research_authority returned Ok above"),
         native_semantic_fingerprint: research_native_fingerprint,
+        registered_stress_contract: research_stress_contract,
     })
 }

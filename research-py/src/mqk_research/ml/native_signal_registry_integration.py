@@ -262,6 +262,30 @@ _CAPITAL_SIZING_KEYS = (
     "max_position_notional_usd",
 )
 
+# The robustness stress a capital-fraction candidate must be promoted against, fixed in the
+# registered trial identity before its first attempt. Promotion compares the P7A/P7B stress
+# evidence with this registered value, never with a caller-supplied one.
+_STRESS_CONTRACT_KEYS = ("scenario_id", "allocation_fraction_bps")
+
+
+def _validated_stress_contract(
+    stress_contract: Dict[str, Any], capital_sizing: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    if capital_sizing is None:
+        raise NativeSignalError("stress_contract requires capital_sizing (the capital-fraction protocol)")
+    if not isinstance(stress_contract, dict) or set(stress_contract) != set(_STRESS_CONTRACT_KEYS):
+        raise NativeSignalError(f"stress_contract must have exactly the keys {_STRESS_CONTRACT_KEYS}")
+    scenario_id, bps = stress_contract["scenario_id"], stress_contract["allocation_fraction_bps"]
+    if not isinstance(scenario_id, str) or not scenario_id.strip():
+        raise NativeSignalError("stress_contract.scenario_id must be a non-empty string")
+    baseline_bps = capital_sizing["allocation_fraction_bps"]
+    if type(bps) is not int or not 1 <= bps < baseline_bps:
+        raise NativeSignalError(
+            f"stress_contract.allocation_fraction_bps must be an integer in [1, {baseline_bps}) "
+            "(strictly below the baseline fraction)"
+        )
+    return {k: stress_contract[k] for k in _STRESS_CONTRACT_KEYS}
+
 
 def _require_declared_sizing(
     meta: Dict[str, Any], expected: Optional[Dict[str, Any]], emitter_cash: int
@@ -422,6 +446,7 @@ def build_native_signal_trial_identity(
     holdout_months: int,
     economic_spec: EconomicWalkForwardSpec,
     capital_sizing: Optional[Dict[str, Any]] = None,
+    stress_contract: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Result-independent identity: strategy semantics, quantity contract, data
     provenance, partition policy and economic protocol only. The signal source
@@ -458,6 +483,11 @@ def build_native_signal_trial_identity(
         if set(capital_sizing) != set(_CAPITAL_SIZING_KEYS):
             raise NativeSignalError(f"capital_sizing must have exactly the keys {_CAPITAL_SIZING_KEYS}")
         identity["signal_source"]["capital_sizing"] = {k: capital_sizing[k] for k in _CAPITAL_SIZING_KEYS}
+    if stress_contract is not None:
+        # Absent unless declared, so every historical trial id is unchanged.
+        identity["signal_source"]["stress_contract"] = _validated_stress_contract(
+            stress_contract, capital_sizing
+        )
     if spec.execution_pricing.is_official_parity_model:
         identity["data_identity"]["bars_pricing_provenance"] = {
             "canonical_pricing_bars_hash": bars_provenance.get("canonical_pricing_bars_hash"),
@@ -487,6 +517,7 @@ def register_native_signal_trial(
     hypothesis_text: Optional[str] = None,
     registry_db: Optional[Path] = None,
     capital_sizing: Optional[Dict[str, Any]] = None,
+    stress_contract: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Register the hypothesis and the trial and NOTHING else: no emission, no
     market data, no attempt, no evaluation. The fingerprint comes from the
@@ -505,7 +536,7 @@ def register_native_signal_trial(
         semantic_fingerprint=semantic_fingerprint, required_history_bars=required_history_bars,
         bars_provenance=bars_provenance, evaluation_start_utc=evaluation_start_utc,
         test_months=test_months, holdout_months=holdout_months, economic_spec=spec,
-        capital_sizing=capital_sizing,
+        capital_sizing=capital_sizing, stress_contract=stress_contract,
     )
     store = ResearchResultStore(registry_db or default_db_path(default_root()))
     store.register_hypothesis(
@@ -540,6 +571,7 @@ def run_registered_native_signal_economic_eval(
     registry_db: Optional[Path] = None,
     expected_timeframe_secs: int = 86_400,
     expected_capital_sizing: Optional[Dict[str, Any]] = None,
+    expected_stress_contract: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Official registered entry point for a native strategy's signals. The
     trial must ALREADY be registered (`register_native_signal_trial`); order is
@@ -590,6 +622,7 @@ def run_registered_native_signal_economic_eval(
         required_history_bars=required_history_bars, bars_provenance=bars_provenance,
         evaluation_start_utc=evaluation_start_utc, test_months=test_months,
         holdout_months=holdout_months, economic_spec=spec, capital_sizing=expected_capital_sizing,
+        stress_contract=expected_stress_contract,
     )
 
     store = ResearchResultStore(registry_db or default_db_path(default_root()))

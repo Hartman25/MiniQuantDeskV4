@@ -6,6 +6,8 @@
 //! stress fraction is required (a 250 bps stress of a 1000 bps baseline is as acceptable as 500 bps).
 //! Defects surface through the list `evaluate_promotion` already refuses on.
 
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -116,6 +118,20 @@ fn resolve_candidate_caps(
     caps: Caps,
     stress_spec: impl FnOnce(&str) -> Value,
 ) -> Vec<String> {
+    resolve_bundle(label, capital_fraction, caps, stress_spec)
+        .robustness_evidence
+        .p7a_p7b_economic_replay_stress_missing_required_evidence_fields
+        .into_iter()
+        .filter(|f| f.starts_with("stress_spec.stress_sizing"))
+        .collect()
+}
+
+fn resolve_bundle(
+    label: &str,
+    capital_fraction: bool,
+    caps: Caps,
+    stress_spec: impl FnOnce(&str) -> Value,
+) -> mqk_promotion::BacktestEvidenceBundle {
     let mut config = BacktestConfig::test_defaults();
     config.max_gross_exposure_mult_micros = 100_000_000;
     config.sizing.max_target_qty = caps.0;
@@ -204,11 +220,6 @@ fn resolve_candidate_caps(
         "fixture: the authenticated report must carry the intended baseline caps"
     );
     bundle
-        .robustness_evidence
-        .p7a_p7b_economic_replay_stress_missing_required_evidence_fields
-        .into_iter()
-        .filter(|f| f.starts_with("stress_spec.stress_sizing"))
-        .collect()
 }
 
 fn capital_fraction_defects(mutate: impl FnOnce(&mut Value)) -> Vec<String> {
@@ -498,4 +509,202 @@ fn cfsb01d_a_fixed_quantity_candidate_is_unaffected() {
     // Historical cap-mode candidates carry no stress_sizing and must not be asked for one.
     let defects = resolve_candidate("fixed", false, |_| json!({ "max_target_qty": 1 }));
     assert!(defects.is_empty(), "{defects:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Predeclared stress authority: the registered Research trial fixes the stress
+// scenario; Promotion compares the candidate's stress evidence with it.
+// ---------------------------------------------------------------------------
+
+const TEST_SCENARIO: &str = "half_exposure_test_v1";
+
+fn native_identity(capital_sizing: Option<i64>, stress_contract: Option<Value>) -> String {
+    let mut source = json!({
+        "kind": "native_strategy_signal_stream_v2",
+        "symbol": "ES",
+        "semantic_fingerprint": hex64('a'),
+        "target_semantics": "absolute_whole_share_target_v1",
+        "required_history_bars": 50,
+    });
+    if let Some(bps) = capital_sizing {
+        source["capital_sizing"] = json!({
+            "policy_id": "fixed_initial_capital_fraction_v1",
+            "allocation_fraction_bps": bps,
+            "initial_allocated_capital_micros": CAPITAL,
+            "max_target_qty": CAPS.0,
+            "max_position_notional_usd": CAPS.1,
+        });
+    }
+    if let Some(contract) = stress_contract {
+        source["stress_contract"] = contract;
+    }
+    json!({
+        "signal_source": source,
+        "economic_protocol": {"signal_policy": {
+            "direction_policy": "native_exact_target_qty_v1",
+            "sizing": "exact_native_target_qty_v1",
+        }},
+    })
+    .to_string()
+}
+
+fn contract(scenario: &str, bps: i64) -> Value {
+    json!({"scenario_id": scenario, "allocation_fraction_bps": bps})
+}
+
+fn registered(identity: String) -> mqk_promotion::VerifiedPromotionOosEvidence {
+    common::valid_oos_evidence_for_testing_with_identity("cf_binding_trial", &identity)
+}
+
+fn cf_bundle(echo: impl FnOnce(&str) -> Value) -> mqk_promotion::BacktestEvidenceBundle {
+    resolve_bundle(
+        "cf_contract",
+        true,
+        CAPS,
+        |fp| json!({ "stress_sizing": echo(fp) }),
+    )
+}
+
+#[test]
+fn cfsb02a_the_registered_contract_is_accepted_only_when_the_evidence_equals_it() {
+    let bundle = cf_bundle(|fp| consistent_echo(fp, 500));
+    let oos = registered(native_identity(
+        Some(1000),
+        Some(contract(TEST_SCENARIO, 500)),
+    ));
+    assert_eq!(
+        oos.registered_stress_contract()
+            .map(|c| (c.scenario_id.as_str(), c.allocation_fraction_bps)),
+        Some((TEST_SCENARIO, 500))
+    );
+    assert_eq!(
+        mqk_promotion::verify_registered_stress_contract(&bundle, &oos),
+        Ok(())
+    );
+}
+
+#[test]
+fn cfsb02b_a_different_scenario_or_fraction_than_the_registered_one_is_refused() {
+    // A friendlier (999 bps) and a harsher-than-registered (250 bps) evidence stress both differ from 500.
+    for echo_bps in [999, 250] {
+        let bundle = cf_bundle(|fp| consistent_echo(fp, echo_bps));
+        let oos = registered(native_identity(
+            Some(1000),
+            Some(contract(TEST_SCENARIO, 500)),
+        ));
+        let err = mqk_promotion::verify_registered_stress_contract(&bundle, &oos).unwrap_err();
+        assert!(
+            err.contains("differs from the scenario"),
+            "{echo_bps}: {err}"
+        );
+    }
+    let bundle = cf_bundle(|fp| consistent_echo(fp, 500));
+    let oos = registered(native_identity(
+        Some(1000),
+        Some(contract("some_other_scenario", 500)),
+    ));
+    assert!(
+        mqk_promotion::verify_registered_stress_contract(&bundle, &oos)
+            .unwrap_err()
+            .contains("differs from the scenario")
+    );
+}
+
+#[test]
+fn cfsb02c_a_capital_fraction_candidate_without_a_registered_contract_is_refused() {
+    let bundle = cf_bundle(|fp| consistent_echo(fp, 500));
+    let oos = registered(native_identity(Some(1000), None));
+    assert!(oos.registered_stress_contract().is_none());
+    assert!(
+        mqk_promotion::verify_registered_stress_contract(&bundle, &oos)
+            .unwrap_err()
+            .contains("predeclares no stress contract")
+    );
+    // A legacy trial with no native signal source at all is not a way around it.
+    let legacy = common::valid_oos_evidence_for_testing("cf_binding_trial");
+    assert!(mqk_promotion::verify_registered_stress_contract(&bundle, &legacy).is_err());
+}
+
+#[test]
+fn cfsb02d_a_candidate_with_no_readable_stress_scenario_is_refused() {
+    let oos = registered(native_identity(
+        Some(1000),
+        Some(contract(TEST_SCENARIO, 500)),
+    ));
+    for missing in ["scenario_id", "allocation_fraction_bps"] {
+        let bundle = cf_bundle(|fp| {
+            let mut echo = consistent_echo(fp, 500);
+            echo.as_object_mut().unwrap().remove(missing);
+            echo
+        });
+        assert!(bundle.stress_sizing_scenario.is_none(), "{missing}");
+        assert!(
+            mqk_promotion::verify_registered_stress_contract(&bundle, &oos)
+                .unwrap_err()
+                .contains("no readable stress_sizing")
+        );
+    }
+}
+
+#[test]
+fn cfsb02e_a_fixed_quantity_candidate_carries_no_contract() {
+    let fixed = resolve_bundle("fq_contract", false, CAPS, |_| json!({}));
+    let without = registered(native_identity(None, None));
+    assert_eq!(
+        mqk_promotion::verify_registered_stress_contract(&fixed, &without),
+        Ok(())
+    );
+    let with = registered(native_identity(
+        Some(1000),
+        Some(contract(TEST_SCENARIO, 500)),
+    ));
+    assert!(
+        mqk_promotion::verify_registered_stress_contract(&fixed, &with)
+            .unwrap_err()
+            .contains("not capital-fraction sized")
+    );
+}
+
+#[test]
+fn cfsb02f_a_malformed_registered_contract_fails_the_research_authority() {
+    let bad_json = |v: Value| native_identity(Some(1000), Some(v));
+    let bad: Vec<(&str, String)> = vec![
+        (
+            "not strictly below baseline",
+            bad_json(contract(TEST_SCENARIO, 1000)),
+        ),
+        ("zero", bad_json(contract(TEST_SCENARIO, 0))),
+        ("empty scenario", bad_json(contract("  ", 500))),
+        (
+            "no baseline",
+            native_identity(None, Some(contract(TEST_SCENARIO, 500))),
+        ),
+        (
+            "float bps",
+            bad_json(json!({"scenario_id": TEST_SCENARIO, "allocation_fraction_bps": 500.5})),
+        ),
+        (
+            "bool bps",
+            bad_json(json!({"scenario_id": TEST_SCENARIO, "allocation_fraction_bps": true})),
+        ),
+        (
+            "extra key",
+            bad_json(json!({"scenario_id": TEST_SCENARIO, "allocation_fraction_bps": 500, "x": 1})),
+        ),
+        (
+            "missing key",
+            bad_json(json!({"scenario_id": TEST_SCENARIO})),
+        ),
+        ("not an object", bad_json(json!("half"))),
+    ];
+    for (label, identity) in bad {
+        let errs =
+            common::try_valid_oos_evidence_for_testing_with_identity("cf_binding_trial", &identity)
+                .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("stress_contract is invalid")),
+            "{label}: {errs:?}"
+        );
+    }
 }

@@ -1054,6 +1054,25 @@ pub(crate) async fn strategy_promotion_transition(
             });
         }
 
+        // A capital-fraction candidate must have been stressed at exactly the
+        // scenario its registered Research trial predeclared.
+        if let Err(msg) =
+            mqk_promotion::verify_registered_stress_contract(&backtest_bundle, &oos_evidence)
+        {
+            return transition_response(TransitionResponseArgs {
+                status: StatusCode::BAD_REQUEST,
+                accepted: false,
+                disposition: "evidence_invalid",
+                strategy_id,
+                symbol,
+                timeframe_secs,
+                previous_state,
+                target_state,
+                transition_id: None,
+                blockers: vec![msg],
+            });
+        }
+
         // Canonical promotion policy config -- trusted daemon config ONLY.
         let policy = match (
             st.promotion_min_sharpe,

@@ -137,3 +137,33 @@ def test_finalize_re_resolves_the_stress_quantity_and_sends_no_cap(tmp_path, mon
     # the baseline robustness scenarios are untouched
     assert len([c for c in fake.calls if c[:2] == ["backtest", "finalize-robustness-sensitivity"]]) == 15
     assert len([c for c in fake.calls if c[:2] == ["backtest", "finalize-genuine-shuffled-placebo"]]) == 15
+
+
+def test_batch02_declaration_registers_no_stress_contract_so_its_trial_ids_are_unchanged():
+    # Batch 02 is a closed historical campaign: its 15 recorded trial identities carry no stress contract.
+    assert "register_stress_contract" not in B2["robustness"]["p7a_p7b_stress"]
+    assert rb.research_stress_contract(B2) is None
+
+
+def test_a_declaration_can_opt_in_to_binding_its_stress_into_the_trial_identity():
+    d = decl()
+    d["robustness"]["p7a_p7b_stress"]["register_stress_contract"] = True
+    assert rb.research_stress_contract(d) == {"scenario_id": "half_exposure_capital_fraction_500bps_v1",
+                                              "allocation_fraction_bps": 500}
+
+
+@pytest.mark.parametrize("flag", ["yes", 1, "true"])
+def test_the_opt_in_flag_must_be_a_literal_true(flag):
+    d = decl()
+    d["robustness"]["p7a_p7b_stress"]["register_stress_contract"] = flag
+    with pytest.raises(SystemExit, match="register_stress_contract"):
+        rb.research_stress_contract(d)
+
+
+def test_opt_in_without_a_capital_fraction_declaration_is_refused():
+    d = decl()
+    d["robustness"]["p7a_p7b_stress"]["register_stress_contract"] = True
+    del d["capital_sizing"]
+    del d["robustness"]["p7a_p7b_stress"]["stress_sizing"]
+    with pytest.raises(SystemExit, match="register_stress_contract"):
+        rb.research_stress_contract(d)

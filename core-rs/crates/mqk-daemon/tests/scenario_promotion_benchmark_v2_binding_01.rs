@@ -439,3 +439,32 @@ fn promotion_route_enforces_the_native_review_binding_before_evaluate_promotion(
     assert!(call.contains("BacktestEvidenceIdentity::from_bundle(&backtest_bundle"));
     assert!(call.contains("evidence.as_ref()"));
 }
+
+/// Wiring guard: the production promotion route must refuse a capital-fraction
+/// candidate whose stress evidence differs from the stress its REGISTERED
+/// Research trial predeclared, using the verified OOS evidence (registry) and
+/// the resolved Backtest bundle -- after the Research gate, before the decision.
+#[test]
+fn promotion_route_enforces_the_registered_stress_contract_before_evaluate_promotion() {
+    let src = include_str!("../src/routes/strategy_promotions.rs").replace(
+        "
+", "
+",
+    );
+    let research = src
+        .find("evaluate_research_evidence_gate(")
+        .expect("research gate call");
+    let stress = src
+        .find("verify_registered_stress_contract(")
+        .expect("registered stress contract binding call");
+    let decide = src
+        .find("mqk_promotion::evaluate_promotion(")
+        .expect("canonical promotion decision");
+    assert!(research < stress && stress < decide);
+    let call: String = src[stress..decide].split_whitespace().collect();
+    assert!(call.contains("(&backtest_bundle,&oos_evidence)"));
+    assert!(
+        call.contains("return transition_response"),
+        "a refusal must end the request"
+    );
+}

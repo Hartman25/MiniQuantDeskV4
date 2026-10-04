@@ -179,6 +179,38 @@ pub fn valid_oos_evidence_for_testing_with_strategy(
     trial_id: &str,
     strategy_id: &str,
 ) -> VerifiedPromotionOosEvidence {
+    valid_oos_evidence_inner(trial_id, strategy_id, None)
+        .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")
+}
+
+/// Like [`valid_oos_evidence_for_testing`], but the registered trial row carries
+/// `identity_json` (the registry's `research_trials.identity_json`).
+pub fn valid_oos_evidence_for_testing_with_identity(
+    trial_id: &str,
+    identity_json: &str,
+) -> VerifiedPromotionOosEvidence {
+    try_valid_oos_evidence_for_testing_with_identity(trial_id, identity_json)
+        .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")
+}
+
+/// Fallible form of [`valid_oos_evidence_for_testing_with_identity`]: the
+/// verifier's refusal reasons are returned (for a malformed registered identity).
+pub fn try_valid_oos_evidence_for_testing_with_identity(
+    trial_id: &str,
+    identity_json: &str,
+) -> Result<VerifiedPromotionOosEvidence, Vec<String>> {
+    valid_oos_evidence_inner(
+        trial_id,
+        &format!("strategy_for_{trial_id}"),
+        Some(identity_json),
+    )
+}
+
+fn valid_oos_evidence_inner(
+    trial_id: &str,
+    strategy_id: &str,
+    identity_json: Option<&str>,
+) -> Result<VerifiedPromotionOosEvidence, Vec<String>> {
     let daily_csv = b"date,net_daily_return\n2021-01-01,0.0010\n2021-01-02,0.0021\n".to_vec();
     let daily_sha = sha256_hex(&daily_csv);
     let economic_eval_id = format!("econ_eval_{trial_id}");
@@ -202,6 +234,15 @@ pub fn valid_oos_evidence_for_testing_with_strategy(
         &format!("hyp_{trial_id}"),
         strategy_id,
     );
+    if let Some(identity_json) = identity_json {
+        Connection::open(&registry.path)
+            .expect("open registry db")
+            .execute(
+                "update research_trials set identity_json = ?1 where trial_id = ?2",
+                rusqlite::params![identity_json, trial_id],
+            )
+            .expect("set identity_json");
+    }
     register_succeeded_attempt(
         &registry.path,
         &format!("{trial_id}:att0001"),
@@ -227,7 +268,6 @@ pub fn valid_oos_evidence_for_testing_with_strategy(
         &daily_csv,
         &judge_json,
     )
-    .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")
 }
 
 /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the EXACT SAME

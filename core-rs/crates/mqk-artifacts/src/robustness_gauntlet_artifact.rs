@@ -401,6 +401,23 @@ impl RobustnessGauntletArtifact {
         defects
     }
 
+    /// The `(scenario_id, allocation_fraction_bps)` the P7A/P7B stress evidence
+    /// echoes in `stress_spec.stress_sizing`; `None` unless both are present and
+    /// well typed (a non-empty string and an integer).
+    pub fn p7a_p7b_stress_sizing_scenario(&self) -> Option<(String, i64)> {
+        let sizing = self
+            .scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME)?
+            .evidence
+            .as_ref()?
+            .get("stress_spec")?
+            .get("stress_sizing")?;
+        let scenario_id = sizing.get("scenario_id")?.as_str()?.trim();
+        let bps = sizing.get("allocation_fraction_bps")?.as_i64()?;
+        (!scenario_id.is_empty()).then(|| (scenario_id.to_string(), bps))
+    }
+
     /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: see
     /// [`Self::scenario_research_trial_id`] for `genuine_shuffled_placebo`.
     pub fn genuine_shuffled_placebo_research_trial_id(&self) -> Option<&str> {

@@ -11,9 +11,12 @@ pub use evaluator::{
     select_best,
 };
 pub use evidence_bundle::{
-    resolve_backtest_evidence, BacktestEvidenceBundle, BacktestEvidenceResolveError,
+    resolve_backtest_evidence, verify_registered_stress_contract, BacktestEvidenceBundle,
+    BacktestEvidenceResolveError,
 }; // PROMOTION-BACKTEST-EVIDENCE-SEAM-01
-pub use research_evidence::{verify_promotion_oos_evidence, VerifiedPromotionOosEvidence}; // P7C-REPAIR-01/-02/-03
+pub use research_evidence::{
+    verify_promotion_oos_evidence, RegisteredStressContract, VerifiedPromotionOosEvidence,
+}; // P7C-REPAIR-01/-02/-03
 pub use types::{
     write_promotion_report_json, Candidate, PromotionConfig, PromotionDecision, PromotionInput,
     PromotionMetrics, PromotionReport, RobustnessEvidence, RunProvenance, StressSuiteResult,

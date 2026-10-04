@@ -253,3 +253,74 @@ def test_real_rust_capital_fraction_flags_fail_closed(tmp_path):
             res = run(*flags)
             assert res.returncode != 0, (run.__name__, flags)
     assert not (tmp_path / "o" / "native_signals.csv").exists(), "no stream is emitted on a refused declaration"
+
+
+# ---------------------------------------------------------------------------
+# Predeclared stress authority: the exact robustness stress is part of the
+# registered trial identity (selected before the first attempt, never from a result).
+# ---------------------------------------------------------------------------
+
+SC = "half_exposure_capital_fraction_500bps_v1"
+
+
+def stress(**over) -> dict:
+    base = {"scenario_id": SC, "allocation_fraction_bps": 500}
+    base.update(over)
+    return base
+
+
+def test_stress_contract_is_identity_bearing_and_absent_means_historical_identity(tmp_path):
+    kw = identity_kwargs(Env(tmp_path))
+
+    def tid(cs=None, sc=None):
+        return build_native_signal_trial_identity(**kw, capital_sizing=cs, stress_contract=sc)[0]
+
+    historical = tid(sizing())
+    assert historical == build_native_signal_trial_identity(**kw, capital_sizing=sizing())[0]
+    with_contract = tid(sizing(), stress())
+    assert with_contract == tid(sizing(), stress()), "deterministic"
+    assert with_contract != historical
+    assert with_contract != tid(sizing(), stress(allocation_fraction_bps=250)), "fraction"
+    assert with_contract != tid(sizing(), stress(scenario_id="other_scenario")), "scenario"
+    assert with_contract != tid(sizing(allocation_fraction_bps=2000), stress()), "baseline"
+    _, identity = build_native_signal_trial_identity(**kw, capital_sizing=sizing(), stress_contract=stress())
+    assert identity["signal_source"]["stress_contract"] == stress()
+    _, plain = build_native_signal_trial_identity(**kw, capital_sizing=sizing())
+    assert "stress_contract" not in plain["signal_source"]
+
+
+@pytest.mark.parametrize("bad", [
+    stress(allocation_fraction_bps=1000),   # not strictly below the 1000 bps baseline
+    stress(allocation_fraction_bps=0),
+    stress(allocation_fraction_bps=True),
+    stress(allocation_fraction_bps=500.0),
+    stress(scenario_id=""),
+    stress(scenario_id=7),
+    {"scenario_id": SC},
+    {**stress(), "extra": 1},
+])
+def test_malformed_stress_contract_is_refused(tmp_path, bad):
+    kw = identity_kwargs(Env(tmp_path))
+    with pytest.raises(NativeSignalError, match="stress_contract"):
+        build_native_signal_trial_identity(**kw, capital_sizing=sizing(), stress_contract=bad)
+
+
+def test_stress_contract_requires_the_capital_fraction_protocol(tmp_path):
+    kw = identity_kwargs(Env(tmp_path))
+    with pytest.raises(NativeSignalError, match="stress_contract requires capital_sizing"):
+        build_native_signal_trial_identity(**kw, stress_contract=stress())
+
+
+def test_registered_stress_contract_cannot_be_swapped_after_registration(tmp_path):
+    env = cf_env(tmp_path)
+    env.register(capital_sizing=sizing(), stress_contract=stress())
+    # The registered contract is what an attempt must present: a friendlier stress, or none, is a
+    # different (unregistered) trial and is refused before any emission.
+    for presented in (stress(allocation_fraction_bps=900), None):
+        with pytest.raises(NativeSignalError, match="not registered"):
+            env.run(register=False, expected_capital_sizing=sizing(), expected_stress_contract=presented)
+    assert env.emit_calls == 0
+    out = env.run(register=False, expected_capital_sizing=sizing(), expected_stress_contract=stress())
+    assert out.exists()
+    registered = json.loads(env.store().get_trial(next(t["trial_id"] for t in env.store().list_trials(experiment_id=EXPERIMENT)))["identity_json"])
+    assert registered["signal_source"]["stress_contract"] == stress()

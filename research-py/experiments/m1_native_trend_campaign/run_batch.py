@@ -188,6 +188,24 @@ def research_capital_sizing(decl: dict) -> dict | None:
             "max_position_notional_usd": block.get("max_position_notional_usd")}
 
 
+def research_stress_contract(decl: dict) -> dict | None:
+    """The robustness stress to bind into every registered trial identity, or None.
+
+    Only a declaration that opts in with a literal `robustness.p7a_p7b_stress.register_stress_contract:
+    true` registers it (Promotion later requires it for a capital-fraction candidate). A closed
+    historical campaign without the flag keeps its recorded trial ids."""
+    st = decl["robustness"]["p7a_p7b_stress"]
+    flag = st.get("register_stress_contract")
+    if flag is None:
+        return None
+    if flag is not True:
+        raise SystemExit("fail-closed: register_stress_contract must be the literal true when present")
+    plan = stress_plan(decl)
+    if plan["mode"] != "capital_fraction":
+        raise SystemExit("fail-closed: register_stress_contract requires a capital-fraction stress declaration")
+    return {"scenario_id": plan["scenario_id"], "allocation_fraction_bps": plan["allocation_fraction_bps"]}
+
+
 def native_bridge_args(decl: dict, allocation_fraction_bps: int | None = None) -> list[str]:
     """CLI flags for `native-fingerprint` / `native-signals`: the sizing flags plus the explicit
     initial capital (the capital-fraction bridge has no default capital)."""
@@ -311,7 +329,7 @@ def expected_trial_ids(fingerprints: dict, manifest: dict) -> list[tuple[str, st
             semantic_fingerprint=fingerprint, required_history_bars=required, bars_provenance=manifest,
             evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]), test_months=part["test_months"],
             holdout_months=part["holdout_months"], economic_spec=_economic_spec(),
-            capital_sizing=research_capital_sizing(DECL))
+            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL))
         out.append((strategy, sym, trial_id, identity))
     return out
 
@@ -387,7 +405,7 @@ def stage_register(_args) -> None:
             economic_spec=_economic_spec(), evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]),
             test_months=part["test_months"], holdout_months=part["holdout_months"],
             hypothesis_text=h["economic_rationale"], registry_db=REGISTRY,
-            capital_sizing=research_capital_sizing(DECL))
+            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL))
         index[key(strategy, sym)] = {"trial_id": trial_id, "hypothesis_id": h["hypothesis_id"],
                                      "semantic_fingerprint": fingerprint, "required_history_bars": required}
         print(key(strategy, sym), trial_id, fingerprint[:12])
@@ -431,7 +449,8 @@ def stage_trials(_args) -> None:
                 test_months=part["test_months"], holdout_months=part["holdout_months"], registry_db=REGISTRY,
                 expected_timeframe_secs=h["timeframe_secs"], expected_semantic_fingerprint=rec["semantic_fingerprint"],
                 required_history_bars=rec["required_history_bars"],
-                expected_capital_sizing=research_capital_sizing(DECL))
+                expected_capital_sizing=research_capital_sizing(DECL),
+                expected_stress_contract=research_stress_contract(DECL))
         except NativeSignalError as exc:  # the failed attempt is already durable
             rec["failed"] = str(exc)
             print(key(strategy, sym), "FAILED attempt kept:", str(exc)[:200])

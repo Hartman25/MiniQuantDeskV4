@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql};
 use serde_json::Value;
 
-use crate::research_evidence::sha256_hex;
+use crate::research_evidence::{sha256_hex, RegisteredStressContract};
 
 // ============================================================================
 // P7C-REPAIR-03 (mission: FINAL WAVE-2 BLOCKER REPAIR, Patch B)
@@ -120,6 +120,9 @@ pub(crate) struct VerifiedResearchAuthority {
     /// classifier trial: bound to the promotion identity by `strategy_id`
     /// label only).
     pub(crate) native_semantic_fingerprint: Option<String>,
+    /// The robustness stress the registered trial identity predeclares
+    /// (`signal_source.stress_contract`), or `None` when it declares none.
+    pub(crate) registered_stress_contract: Option<RegisteredStressContract>,
 }
 
 /// Registered `signal_source.kind` of a native-signal trial -- see
@@ -206,6 +209,56 @@ fn native_fingerprint_from_identity(identity_json: Option<&str>) -> Result<Optio
     Ok(Some(fp.to_string()))
 }
 
+/// Read the predeclared stress contract from a registered trial identity
+/// (`Ok(None)` when absent). A declared but malformed contract fails closed,
+/// including a contract without the baseline `capital_sizing` it must be
+/// strictly below.
+fn stress_contract_from_identity(
+    identity_json: Option<&str>,
+) -> Result<Option<RegisteredStressContract>, String> {
+    let Some(raw) = identity_json else {
+        return Ok(None);
+    };
+    let identity: Value = serde_json::from_str(raw)
+        .map_err(|e| format!("registered trial identity_json is not valid JSON: {e}"))?;
+    let Some(source) = identity.get("signal_source") else {
+        return Ok(None);
+    };
+    let Some(contract) = source.get("stress_contract") else {
+        return Ok(None);
+    };
+    let bad = |what: &str| format!("registered trial's stress_contract is invalid: {what}");
+    let obj = contract
+        .as_object()
+        .filter(|o| o.len() == 2)
+        .ok_or_else(|| {
+            bad("must be an object with exactly scenario_id and allocation_fraction_bps")
+        })?;
+    let scenario_id = obj
+        .get("scenario_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad("scenario_id must be a non-empty string"))?;
+    let bps = obj
+        .get("allocation_fraction_bps")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| bad("allocation_fraction_bps must be an integer"))?;
+    let baseline_bps = source
+        .pointer("/capital_sizing/allocation_fraction_bps")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| bad("the trial declares no capital_sizing baseline"))?;
+    if !(1..baseline_bps).contains(&bps) {
+        return Err(bad(&format!(
+            "allocation_fraction_bps {bps} is not strictly below the registered baseline {baseline_bps}"
+        )));
+    }
+    Ok(Some(RegisteredStressContract {
+        scenario_id: scenario_id.to_string(),
+        allocation_fraction_bps: bps,
+    }))
+}
+
 /// Open the registry read-only and establish authority for `trial_id`
 /// against `economic_eval_id` (the economic artifact's own recorded
 /// `ids.economic_eval_id`) and `supplied_judge` (the ACTUAL supplied judge
@@ -280,6 +333,14 @@ pub(crate) fn load_research_authority(
             }
         };
 
+    let registered_stress_contract = match stress_contract_from_identity(identity_json.as_deref()) {
+        Ok(v) => v,
+        Err(reason) => {
+            errs.push(format!("OOS evidence rejected: {reason}"));
+            None
+        }
+    };
+
     // ---- 2. a succeeded attempt for trial_id whose result_id matches ----
     let attempt_exists = row_exists(
         &conn,
@@ -350,6 +411,7 @@ pub(crate) fn load_research_authority(
             .expect("no errs means the judge row was matched and scope-verified above"),
         strategy_id,
         native_semantic_fingerprint,
+        registered_stress_contract,
     })
 }
 
