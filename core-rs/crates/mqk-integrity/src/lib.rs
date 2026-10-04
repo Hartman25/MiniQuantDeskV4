@@ -13,6 +13,7 @@
 mod arm_state; // Patch L7 — sticky disarm + fail-closed boot
 pub mod calendar; // Patch B3 — trading session calendar
 mod engine;
+pub mod sessions; // us_equity_regular_sessions_v1 — daily session-date authority
 mod types;
 
 pub use arm_state::{ArmState, DisarmReason}; // Patch L7
