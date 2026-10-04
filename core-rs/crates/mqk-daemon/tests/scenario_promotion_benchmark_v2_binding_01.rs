@@ -464,7 +464,7 @@ fn promotion_route_enforces_the_registered_stress_contract_before_evaluate_promo
     let call: String = src[stress..decide].split_whitespace().collect();
     assert!(call.contains("(&backtest_bundle,&oos_evidence)"));
     assert!(
-        call.contains("return transition_response"),
+        call.contains("returntransition_response"),
         "a refusal must end the request"
     );
 }
