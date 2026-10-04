@@ -418,6 +418,21 @@ fn now_fixture() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 8, 12, 15, 30, 0).unwrap()
 }
 
+/// A trading-day instant (18:00 UTC) strictly ahead of the wall clock, chosen by
+/// the production NYSE provider (never a weekend or holiday).
+fn next_trading_instant_after_today() -> DateTime<Utc> {
+    let provider = mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
+    (1..=10)
+        .map(|days| {
+            (Utc::now().date_naive() + chrono::Duration::days(days))
+                .and_hms_opt(18, 0, 0)
+                .unwrap()
+                .and_utc()
+        })
+        .find(|t| provider.session_for(*t).is_trading_day)
+        .expect("a NYSE trading day within the next 10 calendar days (calendar coverage)")
+}
+
 /// MQD-CI-GREEN-01: an instant strictly *ahead* of the real wall clock whose
 /// ET time-of-day is pinned to a fixed mid-session hour.
 ///
@@ -549,6 +564,7 @@ async fn run_cycle_with_deterministic_ingest_stamp(
 
 #[tokio::test]
 async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("aapl_5m_positive_proof").await else {
         return;
     };
@@ -714,6 +730,7 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn interior_gap_specifically_triggers_bounded_historical_bootstrap() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("interior_gap_bootstrap").await else {
         return;
     };
@@ -845,6 +862,7 @@ async fn interior_gap_specifically_triggers_bounded_historical_bootstrap() {
 
 #[tokio::test]
 async fn multi_symbol_positive_proof_every_symbol_evaluated_and_refreshed() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("multi_symbol_positive_proof").await else {
         return;
     };
@@ -945,6 +963,7 @@ async fn multi_symbol_positive_proof_every_symbol_evaluated_and_refreshed() {
 
 #[tokio::test]
 async fn mixed_provider_proof_two_groups_partial_failure_does_not_block_the_other() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("mixed_provider_proof").await else {
         return;
     };
@@ -1062,6 +1081,7 @@ async fn mixed_provider_proof_two_groups_partial_failure_does_not_block_the_othe
 
 #[tokio::test]
 async fn wrong_provider_provenance_negative_control_never_auto_repaired() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("wrong_provider_provenance_negative_control").await else {
         return;
     };
@@ -1157,6 +1177,7 @@ async fn wrong_provider_provenance_negative_control_never_auto_repaired() {
 
 #[tokio::test]
 async fn non_trading_day_makes_zero_provider_calls() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("non_trading_day_proof").await else {
         return;
     };
@@ -1277,6 +1298,7 @@ fn equity_and_crypto_provider_registry_file() -> NamedTempFile {
 /// instrument is genuinely evaluated (not silently skipped).
 #[tokio::test]
 async fn mixed_equity_closed_and_crypto_open_universe_evaluates_crypto_independently() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("mixed_equity_crypto_closed_nyse_day").await else {
         return;
     };
@@ -1352,6 +1374,7 @@ async fn mixed_equity_closed_and_crypto_open_universe_evaluates_crypto_independe
 /// once any resolved requirement is crypto.
 #[tokio::test]
 async fn crypto_only_universe_is_evaluated_on_a_closed_nyse_day() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("crypto_only_closed_nyse_day").await else {
         return;
     };
@@ -1412,6 +1435,7 @@ async fn crypto_only_universe_is_evaluated_on_a_closed_nyse_day() {
 
 #[tokio::test]
 async fn one_stale_required_symbol_blocks_overall_readiness() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("readiness_load_bearing_negative_control").await else {
         return;
     };
@@ -1508,6 +1532,7 @@ async fn one_stale_required_symbol_blocks_overall_readiness() {
 
 #[tokio::test]
 async fn dry_run_makes_zero_provider_calls_and_zero_db_writes() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("dry_run_checkonly_proof").await else {
         return;
     };
@@ -1559,6 +1584,7 @@ async fn dry_run_makes_zero_provider_calls_and_zero_db_writes() {
 
 #[tokio::test]
 async fn ingest_plan_and_autofresh_plan_agree_on_required_symbols() {
+    let _env_serial = env_serial().lock().await;
     use mqk_daemon::market_data_freshness::required_symbols_with_source_from_env;
     use mqk_daemon::state::market_calendar::resolve_market_session_schedule;
     use mqk_daemon::state::required_market_data_autofresh::build_required_market_data_refresh_plan;
@@ -1610,6 +1636,7 @@ async fn ingest_plan_and_autofresh_plan_agree_on_required_symbols() {
 /// needs 20 completed bars.
 #[tokio::test]
 async fn strategy_history_requirement_above_five_bars_is_not_satisfied_by_five_bars() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("strategy_history_requirement_above_five_bars").await else {
         return;
     };
@@ -1713,6 +1740,7 @@ async fn strategy_history_requirement_above_five_bars_is_not_satisfied_by_five_b
 /// their wall-clock age.
 #[tokio::test]
 async fn preopen_previous_session_tail_satisfies_expectation_with_zero_provider_calls() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("preopen_previous_session_tail").await else {
         return;
     };
@@ -1821,6 +1849,7 @@ async fn preopen_previous_session_tail_satisfies_expectation_with_zero_provider_
 /// flattened into `provider_registry_invalid`.
 #[tokio::test]
 async fn instrument_vs_provider_registry_error_truth_is_distinguished() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("instrument_vs_provider_registry_error_truth").await else {
         return;
     };
@@ -1881,6 +1910,7 @@ async fn instrument_vs_provider_registry_error_truth_is_distinguished() {
 /// refusal (no call dispatched) as one.
 #[tokio::test]
 async fn provider_api_call_counter_matches_actual_invocations() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("provider_api_call_counter_matches_actual_invocations").await else {
         return;
     };
@@ -2009,13 +2039,12 @@ async fn provider_api_call_counter_matches_actual_invocations() {
 /// starter -- the other refused with zero state mutation -- and the
 /// immediate controller cycle must run exactly once, never once per
 /// starter.
-// Deliberately does not take `precedence_env_lock()`: that std::sync::Mutex
-// would be held across this test's `.await` points (clippy::await_holding_lock)
-// -- matches the existing convention every other `#[tokio::test]` in this
-// file already follows (only the three sync `#[test]` precedence proofs
-// below use that lock, to serialize against each other).
+// Every test in this file that mutates the process-wide MQK_* environment
+// holds `env_serial()` (a tokio mutex, safe across `.await`) for its whole
+// body, so no two of them observe each other's environment.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_scheduler_start_admits_exactly_one_starter() {
+    let _env_serial = env_serial().lock().await;
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
     std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRCONC");
     std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
@@ -2032,11 +2061,14 @@ async fn concurrent_scheduler_start_admits_exactly_one_starter() {
     // test) -- force the no-DB path so no real Postgres state leaks in.
     st.db = None;
     let st = std::sync::Arc::new(st);
-    // A real trading-day instant (Wednesday, mid-August, no US market
-    // holiday) so the active (env-selected, real NYSE-weekday) calendar
-    // provider `run_and_record_cycle` uses internally reports a trading day
-    // and the plan resolves at least one provider/timeframe group.
-    let now = now_fixture();
+    // A real trading-day instant STRICTLY AHEAD of the wall clock: the spawned
+    // scheduler loop computes its wait against the REAL `Utc::now()`, so a
+    // fixed past instant makes the next cycle immediately overdue and, on a
+    // non-trading real day, settles the scheduler `TerminalNoFutureWork` before
+    // the assertion below runs (a race). The active (env-selected, real NYSE)
+    // calendar provider must also report a trading day for the plan to
+    // resolve at least one provider/timeframe group.
+    let now = next_trading_instant_after_today();
 
     let st1 = st.clone();
     let st2 = st.clone();
@@ -2100,6 +2132,7 @@ async fn concurrent_scheduler_start_admits_exactly_one_starter() {
 /// stopped -- never `running=true` with no task and no future cycle.
 #[tokio::test]
 async fn no_work_scheduler_settles_stopped_after_start() {
+    let _env_serial = env_serial().lock().await;
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
@@ -2149,6 +2182,7 @@ async fn no_work_scheduler_settles_stopped_after_start() {
 /// explicit stop (P3 in the launcher contract).
 #[tokio::test]
 async fn explicit_stop_sets_lifecycle_state_explicitly_stopped() {
+    let _env_serial = env_serial().lock().await;
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
     std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRSTOP");
     std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
@@ -2274,6 +2308,7 @@ async fn status_route_exposes_lifecycle_state_and_is_read_only() {
 /// *provider calls* genuinely overlap in time.
 #[tokio::test]
 async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
+    let _env_serial = env_serial().lock().await;
     let Some(pool) = maybe_db("stop_start_generation_race").await else {
         return;
     };
@@ -2463,9 +2498,9 @@ async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
 /// TIMEFRAME` env vars, so the three precedence tests below (which run
 /// under `cargo test`'s default parallelism, unlike the `#[tokio::test]`
 /// tests above) never race each other's env state.
-fn precedence_env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+fn env_serial() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 /// §45 precedence proof: watchlist-v2 present + legacy env var also set ->
@@ -2478,7 +2513,7 @@ fn precedence_watchlist_wins_over_legacy_when_both_configured() {
         required_symbols_with_source_from_env, SYMBOL_SOURCE_WATCHLIST_V2,
     };
 
-    let _guard = precedence_env_lock().lock().unwrap();
+    let _guard = env_serial().blocking_lock();
     let watchlist_file = watchlist_v2_file(&["ZZWATCH1", "ZZWATCH2"]);
     std::env::set_var("MQK_PAPER_WATCHLIST_PATH", watchlist_file.path());
     std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
@@ -2511,7 +2546,7 @@ fn precedence_legacy_symbol_used_when_no_watchlist_configured() {
         required_symbols_with_source_from_env, SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL,
     };
 
-    let _guard = precedence_env_lock().lock().unwrap();
+    let _guard = env_serial().blocking_lock();
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
     std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
     std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZLEGACYONLY");
@@ -2538,7 +2573,7 @@ fn precedence_nothing_configured_never_expands_to_full_registry() {
         required_symbols_with_source_from_env, SYMBOL_SOURCE_NONE,
     };
 
-    let _guard = precedence_env_lock().lock().unwrap();
+    let _guard = env_serial().blocking_lock();
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
     std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
