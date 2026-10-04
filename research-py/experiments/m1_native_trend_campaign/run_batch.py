@@ -2,7 +2,7 @@
 named by MQK_M1_BATCH_DECLARATION (default PREDECLARED_BATCH_01.json, which this runner
 refuses); nothing result-dependent is chosen here.
 
-Stages (each once, in order): check | reuse_data | register | trials | judge |
+Stages (each once, in order): check | reuse_data | register | gate | trials | judge |
 backtest | finalize | review | summary.
 
 Chronology (hypothesis -> trial registration -> attempt -> evaluation):
@@ -43,7 +43,7 @@ EXPERIMENT = DECL["experiment"]["real_experiment_id"]
 HYP = {h["strategy_id"]: h for h in DECL["hypotheses"]}
 TRIALS = [(t["strategy_id"], t["symbol"]) for t in DECL["universe"]["trials"]]  # frozen order
 STRATEGIES = [h["strategy_id"] for h in DECL["hypotheses"]]
-CLI = REPO / "core-rs" / "target" / "debug" / "mqk-cli.exe"
+CLI = Path(os.environ.get("MQK_M1_CLI") or REPO / "core-rs" / "target" / "debug" / "mqk-cli.exe")
 BARS = RUN / "data" / "research_bars.csv"
 MANIFEST = RUN / "data" / "research_bars_provenance.json"
 INDEX = RUN / "trials_index.json"
@@ -240,11 +240,31 @@ def stress_plan(decl: dict) -> dict:
     return {"mode": "capital_fraction", "scenario_id": sizing["scenario_id"], "allocation_fraction_bps": bps}
 
 
+def _require_frozen_trial_structure() -> None:
+    trials = DECL["universe"]["trials"]
+    if [t["order"] for t in trials] != list(range(1, len(trials) + 1)):
+        raise SystemExit("fail-closed: trial order fields must be exactly 1..N in declaration order")
+    if len(set(TRIALS)) != len(TRIALS):
+        raise SystemExit("fail-closed: duplicate (strategy, symbol) trial in the declaration")
+    symbols = set(DECL["universe"]["symbols"])
+    if any(strategy not in HYP or sym not in symbols for strategy, sym in TRIALS):
+        raise SystemExit("fail-closed: a declared trial names an undeclared strategy or symbol")
+    if len(TRIALS) != DECL["universe"]["max_trials"]:
+        raise SystemExit("fail-closed: the declared trial count differs from max_trials")
+
+
 def stage_check(_args) -> None:
     _require_exact_target_protocol()
     sizing_args(DECL)
     stress_plan(DECL)
+    _require_frozen_trial_structure()
     assert len(TRIALS) == DECL["universe"]["max_trials"]
+    if CLI.exists():  # a stale binary that lacks a declared engine or sizing flag fails here, before any work
+        for strategy, sym in TRIALS:
+            _fingerprint, required = _resolve_native_identity(strategy, sym)
+            if required != HYP[strategy]["required_history_bars"]:
+                raise SystemExit(f"fail-closed: {strategy} requires {required} bars in the CLI but "
+                                 f"{HYP[strategy]['required_history_bars']} in the predeclaration")
     print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()}")
 
 
@@ -269,6 +289,76 @@ def stage_reuse_data(_args) -> None:
                  "corporate_actions_provenance.json"):
         shutil.copyfile(src / name, RUN / "data" / name)
     print("reused", rows, "rows", manifest["artifact_sha256"][:12])
+
+
+def _resolve_native_identity(strategy: str, sym: str) -> tuple[str, int]:
+    """(semantic_fingerprint, required_history_bars) from the native registry; no market data."""
+    info = _run_cli("backtest", "native-fingerprint", "--strategy", strategy, "--symbol", sym,
+                    *native_bridge_args(DECL))
+    return _parse(info, "semantic_fingerprint"), int(_parse(info, "required_history_bars"))
+
+
+def expected_trial_ids(fingerprints: dict, manifest: dict) -> list[tuple[str, str, str, dict]]:
+    """The predeclared (strategy, symbol, trial_id, identity) for every slot, derived only from the
+    declaration, the resolved native fingerprints and the data provenance -- never from a result."""
+    from mqk_research.ml.native_signal_registry_integration import build_native_signal_trial_identity
+    part = DECL["partition"]
+    out = []
+    for strategy, sym in TRIALS:
+        h, (fingerprint, required) = HYP[strategy], fingerprints[(strategy, sym)]
+        trial_id, identity = build_native_signal_trial_identity(
+            experiment_id=EXPERIMENT, hypothesis_id=h["hypothesis_id"], strategy_id=strategy, symbol=sym,
+            semantic_fingerprint=fingerprint, required_history_bars=required, bars_provenance=manifest,
+            evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]), test_months=part["test_months"],
+            holdout_months=part["holdout_months"], economic_spec=_economic_spec(),
+            capital_sizing=research_capital_sizing(DECL))
+        out.append((strategy, sym, trial_id, identity))
+    return out
+
+
+def registration_gate(store, experiment_id: str, expected: list, *, require_zero_attempts: bool) -> dict:
+    """The registry must hold EXACTLY the predeclared trial slots -- no fewer, no more, no duplicate,
+    no foreign symbol/strategy/fingerprint/sizing/provenance (any of those changes the trial id) -- and,
+    before the first attempt, zero attempts."""
+    expected_ids = [e[2] for e in expected]
+    if len(set(expected_ids)) != len(expected_ids):
+        raise SystemExit("fail-closed: the predeclared contract maps two slots to one trial identity")
+    registered = store.list_trials(experiment_id=experiment_id)
+    registered_ids = sorted(t["trial_id"] for t in registered)
+    if len(registered) != len(expected):
+        raise SystemExit(f"fail-closed: {len(registered)} registered trials, the contract requires {len(expected)}")
+    if registered_ids != sorted(expected_ids):
+        missing = sorted(set(expected_ids) - set(registered_ids))
+        unexpected = sorted(set(registered_ids) - set(expected_ids))
+        raise SystemExit(f"fail-closed: registered trial identities differ from the predeclared contract "
+                         f"(missing {len(missing)}, unexpected {len(unexpected)})")
+    by_id = {t["trial_id"]: t for t in registered}
+    for strategy, sym, trial_id, identity in expected:
+        row = by_id[trial_id]
+        canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        if row["strategy_id"] != strategy or row["identity_json"] != canonical:
+            raise SystemExit(f"fail-closed: registered trial {trial_id} does not carry the predeclared identity "
+                             f"of {strategy}/{sym}")
+    attempts = sum(len(store.list_attempts(i)) for i in registered_ids)
+    if require_zero_attempts and attempts != 0:
+        raise SystemExit(f"fail-closed: {attempts} attempts exist; the registration gate requires zero before the first")
+    return {"registered": len(registered), "attempts": attempts}
+
+
+def _run_registration_gate(*, require_zero_attempts: bool) -> dict:
+    from mqk_research.exp_distributed.storage import ResearchResultStore
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    fingerprints = {(strategy, sym): _resolve_native_identity(strategy, sym) for strategy, sym in TRIALS}
+    return registration_gate(ResearchResultStore(REGISTRY), EXPERIMENT,
+                             expected_trial_ids(fingerprints, manifest),
+                             require_zero_attempts=require_zero_attempts)
+
+
+def stage_gate(_args) -> None:
+    """Pre-run gate: every predeclared trial is registered, nothing else is, and no attempt exists."""
+    _require_exact_target_protocol()
+    result = _run_registration_gate(require_zero_attempts=True)
+    print("registration_gate_passed registered", result["registered"], "attempts", result["attempts"])
 
 
 def stage_register(_args) -> None:
@@ -319,6 +409,7 @@ def stage_trials(_args) -> None:
     store = ResearchResultStore(REGISTRY)
     if len(store.list_trials(experiment_id=EXPERIMENT)) != len(TRIALS):
         raise SystemExit("fail-closed: every predeclared trial must be registered before any attempt or emission")
+    _run_registration_gate(require_zero_attempts=False)  # exactly the predeclared identities, retries allowed
     index = _load_index()
     for strategy, sym in TRIALS:  # frozen order; failures never stop the batch
         h, sdir, rec = HYP[strategy], tdir(strategy, sym), index[key(strategy, sym)]
@@ -474,7 +565,8 @@ def stage_summary(_args) -> None:
     print(INDEX.read_text(encoding="utf-8"))
 
 
-STAGES = {"check": stage_check, "reuse_data": stage_reuse_data, "register": stage_register, "trials": stage_trials,
+STAGES = {"check": stage_check, "reuse_data": stage_reuse_data, "register": stage_register, "gate": stage_gate,
+          "trials": stage_trials,
           "judge": stage_judge, "backtest": stage_backtest, "finalize": stage_finalize, "review": stage_review,
           "summary": stage_summary}
 

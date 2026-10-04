@@ -11,11 +11,14 @@ from __future__ import annotations
 import glob
 import json
 import os
+import sys
 from pathlib import Path
 
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from select_batch import REQUIRED_ROBUSTNESS_SCENARIOS  # noqa: E402
 DECL = json.loads((HERE / os.environ.get("MQK_M1_BATCH_DECLARATION", "PREDECLARED_BATCH_01.json")).read_text(encoding="utf-8"))
 RUN = HERE / DECL["run_dir"]
 TRIALS = [(t["strategy_id"], t["symbol"]) for t in DECL["universe"]["trials"]]
@@ -23,6 +26,7 @@ IDX = json.loads((RUN / "trials_index.json").read_text(encoding="utf-8"))
 JUDGE = json.loads((RUN / "judge" / "judge.json").read_text(encoding="utf-8"))
 DSR = {r["trial_id"]: r for r in JUDGE["dsr_results"]}
 EXCLUDED = {r["trial_id"]: r["reason"] for r in JUDGE["excluded_trial_ids"]}
+CAPITAL_FRACTION = DECL["scanner_review"].get("benchmark_policy") == "capital_fraction_matched_passive_buy_hold_v1"
 
 
 def one(pattern: str) -> Path:
@@ -46,7 +50,8 @@ def review_rows() -> dict:
         for row in json.loads(path.read_text(encoding="utf-8")):
             out[(strategy, row["symbol"])] = {
                 "review_state": row["review_state"], "reason_codes": ";".join(row["reason_codes"]),
-                "blockers": ";".join(row["blockers"]), "benchmark_v2": row.get("benchmark_v2")}
+                "blockers": ";".join(row["blockers"]), "benchmark_v2": row.get("benchmark_v2"),
+                "benchmark_capital_fraction": row.get("benchmark_capital_fraction")}
     return out
 
 
@@ -55,6 +60,17 @@ def main() -> None:
     rows = []
     for strategy, sym in TRIALS:
         rec = IDX[f"{strategy}/{sym}"]
+        if "failed" in rec:  # an economic failure stays in the population, finalized failed, never retried
+            rows.append({
+                "strategy": strategy, "symbol": sym, "trial_id": rec["trial_id"], "economic_failed": rec["failed"],
+                "semantic_fingerprint": rec["semantic_fingerprint"], "attempt_index": None,
+                "judge_status": "excluded:" + EXCLUDED[rec["trial_id"]] if rec["trial_id"] in EXCLUDED else "not_in_judge",
+                "dsr": DSR.get(rec["trial_id"], {}).get("deflated_sharpe_ratio"),
+                "robustness_failed": ["economic_failed"], "robustness_not_applicable": [], "stress_failed": [],
+                "review_state": reviews[(strategy, sym)]["review_state"],
+                "reason_codes": reviews[(strategy, sym)]["reason_codes"],
+                "review_blockers": reviews[(strategy, sym)]["blockers"], "benchmark_evidence": None})
+            continue
         econ = json.loads(Path(rec["economic_path"]).read_text(encoding="utf-8"))
         agg = econ["aggregate"]
         daily = Path(econ["outputs"]["economic_daily_returns_csv"]["path"])
@@ -65,6 +81,12 @@ def main() -> None:
         bench = metrics.get("benchmark") or {}
         d = DSR.get(rec["trial_id"], {})
         rev = reviews[(strategy, sym)]
+        # The review alpha is judged against exactly ONE benchmark class per declaration; the other
+        # class's evidence can never stand in for it.
+        if CAPITAL_FRACTION and rev["benchmark_v2"] is not None:
+            raise SystemExit(f"fail-closed: {strategy}/{sym} carries Benchmark V2 evidence in a capital-fraction batch")
+        if not CAPITAL_FRACTION and rev["benchmark_capital_fraction"] is not None:
+            raise SystemExit(f"fail-closed: {strategy}/{sym} carries capital-fraction evidence in a fixed-quantity batch")
         failed_scen = [s["name"] for s in gaunt["scenarios"] if s.get("applicable", True) and not s.get("passed", False)]
         na_scen = [s["name"] for s in gaunt["scenarios"] if not s.get("applicable", True)]
         rows.append({
@@ -82,9 +104,12 @@ def main() -> None:
             "rust_max_drawdown_pct": metrics["max_drawdown_pct"],
             "benchmark": bench,
             "robustness_failed": failed_scen, "robustness_not_applicable": na_scen,
+            "robustness_missing": sorted(set(REQUIRED_ROBUSTNESS_SCENARIOS) - {x["name"] for x in gaunt["scenarios"]})
+            + (["deferred_scenarios_present"] if gaunt.get("deferred") else []),
             "stress_failed": [s["name"] for s in stress["scenarios"] if not s.get("passed", False)],
             "review_state": rev["review_state"], "reason_codes": rev["reason_codes"], "review_blockers": rev["blockers"],
-            "benchmark_v2": rev["benchmark_v2"],
+            "benchmark_v2": rev["benchmark_v2"], "benchmark_capital_fraction": rev["benchmark_capital_fraction"],
+            "benchmark_evidence": rev["benchmark_capital_fraction"] if CAPITAL_FRACTION else rev["benchmark_v2"],
         })
     (RUN / "batch_results.json").write_text(json.dumps(rows, indent=1, sort_keys=True), encoding="utf-8")
     print("| # | strategy | sym | net | gross | Sharpe | DSR | CAGR | maxDD | PF(rust) | prof.mo | agree | trades | cost drag | qty | V2 ret% | alpha V2% | legacy bench% (info) | judge | review | reasons |")
@@ -93,14 +118,17 @@ def main() -> None:
         return "n/a" if v is None else format(v, spec)
 
     def v2(r, field):
-        b = r.get("benchmark_v2")
+        b = r.get("benchmark_evidence")
         return None if not b else b.get(field)
 
     def qty_micros(r):
-        b = r.get("benchmark_v2")
+        b = r.get("benchmark_evidence")
         return "n/a" if not b else b["candidate_target_qty_micros"] / 1e6
 
     for i, r in enumerate(rows, 1):
+        if r.get("economic_failed"):
+            print(f'| {i} | {r["strategy"]} | {r["symbol"]} | FAILED ATTEMPT: {r["economic_failed"][:90]} | | | | | | | | | | | | | | | {r["judge_status"]} | {r["review_state"]} | {r["reason_codes"]} |')
+            continue
         print(f'| {i} | {r["strategy"]} | {r["symbol"]} | {f(r["net_return"])} | {f(r["gross_return"])} | {f(r["sharpe"], ".2f")} | '
               f'{f(r["dsr"])} | {f(r["cagr"])} | {f(r["max_drawdown"])} | {f(r["rust_profit_factor"], ".2f")} | '
               f'{f(r["profitable_months"], ".2f")} | {f(r["position_agreement"])} | {r["rust_trade_count"]} | {f(r["cost_drag"])} | '
