@@ -86,10 +86,10 @@ pub struct BacktestEvidenceBundle {
     /// [`BacktestEvidenceResolveError::ReportContentHashMismatch`] --
     /// tamper-evident via the same mechanism, not a second trust path.
     pub initial_equity_micros: i64,
-    /// The `(scenario_id, allocation_fraction_bps)` the candidate's P7A/P7B stress
-    /// evidence echoes in `stress_spec.stress_sizing`, read from the same
-    /// content-hashed gauntlet. `None` when absent or malformed.
-    pub stress_sizing_scenario: Option<(String, i64)>,
+    /// The stress inputs the candidate's P7A/P7B stress evidence echoes, read
+    /// from the same content-hashed gauntlet. `None` when any is absent or
+    /// malformed.
+    pub stress_echo: Option<mqk_artifacts::P7aP7bStressEcho>,
 }
 
 /// A capital-fraction candidate must have been stressed at exactly the scenario
@@ -123,14 +123,46 @@ pub fn verify_registered_stress_contract(
         "capital-fraction candidate: its registered Research trial predeclares no stress contract (the stress scenario must be fixed before the first attempt)"
             .to_string()
     })?;
-    let (scenario_id, bps) = bundle.stress_sizing_scenario.as_ref().ok_or_else(|| {
-        "capital-fraction candidate: the P7A/P7B stress evidence carries no readable stress_sizing scenario_id / allocation_fraction_bps"
+    let echo = bundle.stress_echo.as_ref().ok_or_else(|| {
+        "capital-fraction candidate: the P7A/P7B stress evidence carries no readable stress scenario (scenario_id, allocation_fraction_bps, execution pricing, drawdown ceiling)"
             .to_string()
     })?;
-    if *scenario_id != contract.scenario_id || *bps != contract.allocation_fraction_bps {
+    let mut differs: Vec<String> = Vec::new();
+    if echo.scenario_id != contract.scenario_id {
+        differs.push(format!(
+            "scenario_id {:?} != {:?}",
+            echo.scenario_id, contract.scenario_id
+        ));
+    }
+    if echo.allocation_fraction_bps != contract.allocation_fraction_bps {
+        differs.push(format!(
+            "allocation_fraction_bps {} != {}",
+            echo.allocation_fraction_bps, contract.allocation_fraction_bps
+        ));
+    }
+    if echo.stress_execution_slippage_bps != contract.stress_execution_slippage_bps {
+        differs.push(format!(
+            "stress_execution_slippage_bps {} != {}",
+            echo.stress_execution_slippage_bps, contract.stress_execution_slippage_bps
+        ));
+    }
+    if echo.stress_execution_volatility_mult_bps != contract.stress_execution_volatility_mult_bps {
+        differs.push(format!(
+            "stress_execution_volatility_mult_bps {} != {}",
+            echo.stress_execution_volatility_mult_bps,
+            contract.stress_execution_volatility_mult_bps
+        ));
+    }
+    if echo.max_drawdown_ceiling_bps != contract.max_drawdown_ceiling_bps {
+        differs.push(format!(
+            "max_drawdown_ceiling_bps {} != {}",
+            echo.max_drawdown_ceiling_bps, contract.max_drawdown_ceiling_bps
+        ));
+    }
+    if !differs.is_empty() {
         return Err(format!(
-            "the stress the candidate was evaluated at ({scenario_id:?}, {bps} bps) differs from the scenario its registered Research trial predeclared ({:?}, {} bps)",
-            contract.scenario_id, contract.allocation_fraction_bps
+            "the stress the candidate was evaluated at differs from the one its registered Research trial predeclared: {} (evidence != registered)",
+            differs.join("; ")
         ));
     }
     Ok(())
@@ -330,7 +362,7 @@ pub fn resolve_backtest_evidence(
         robustness_evidence,
         finalized_robustness_artifact_sha256,
         initial_equity_micros,
-        stress_sizing_scenario: robustness_artifact.p7a_p7b_stress_sizing_scenario(),
+        stress_echo: robustness_artifact.p7a_p7b_stress_echo(),
     })
 }
 

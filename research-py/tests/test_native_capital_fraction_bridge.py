@@ -264,7 +264,9 @@ SC = "half_exposure_capital_fraction_500bps_v1"
 
 
 def stress(**over) -> dict:
-    base = {"scenario_id": SC, "allocation_fraction_bps": 500}
+    base = {"schema_version": "p7a_p7b_stress_contract_v1", "scenario_id": SC, "allocation_fraction_bps": 500,
+            "stress_execution_slippage_bps": 15, "stress_execution_volatility_mult_bps": 10,
+            "max_drawdown_ceiling_bps": 4000}
     base.update(over)
     return base
 
@@ -282,6 +284,9 @@ def test_stress_contract_is_identity_bearing_and_absent_means_historical_identit
     assert with_contract != historical
     assert with_contract != tid(sizing(), stress(allocation_fraction_bps=250)), "fraction"
     assert with_contract != tid(sizing(), stress(scenario_id="other_scenario")), "scenario"
+    for field, other in (("stress_execution_slippage_bps", 16), ("stress_execution_volatility_mult_bps", 11),
+                         ("max_drawdown_ceiling_bps", 3999)):
+        assert with_contract != tid(sizing(), stress(**{field: other})), field
     assert with_contract != tid(sizing(allocation_fraction_bps=2000), stress()), "baseline"
     _, identity = build_native_signal_trial_identity(**kw, capital_sizing=sizing(), stress_contract=stress())
     assert identity["signal_source"]["stress_contract"] == stress()
@@ -298,6 +303,17 @@ def test_stress_contract_is_identity_bearing_and_absent_means_historical_identit
     stress(scenario_id=7),
     {"scenario_id": SC},
     {**stress(), "extra": 1},
+    {k: v for k, v in stress().items() if k != "schema_version"},
+    {k: v for k, v in stress().items() if k != "max_drawdown_ceiling_bps"},
+    {"scenario_id": SC, "allocation_fraction_bps": 500},   # the superseded 2-key contract
+    stress(schema_version="p7a_p7b_stress_contract_v0"),
+    stress(stress_execution_slippage_bps=5, stress_execution_volatility_mult_bps=0),  # == baseline
+    stress(stress_execution_slippage_bps=4),    # below baseline slippage
+    stress(stress_execution_slippage_bps=15.0),
+    stress(stress_execution_volatility_mult_bps=True),
+    stress(max_drawdown_ceiling_bps=0),
+    stress(max_drawdown_ceiling_bps=10001),
+    stress(max_drawdown_ceiling_bps=0.4),
 ])
 def test_malformed_stress_contract_is_refused(tmp_path, bad):
     kw = identity_kwargs(Env(tmp_path))

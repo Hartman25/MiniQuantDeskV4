@@ -145,10 +145,14 @@ pub const REQUIRED_JUDGE_PROTOCOL_ID: &str = "research_multiple_testing_judge_v1
 /// The robustness stress a capital-fraction candidate was REGISTERED to be
 /// promoted against: read from its registered Research trial identity
 /// (`signal_source.stress_contract`), fixed before the trial's first attempt.
+/// Binds every behavior-bearing P7A/P7B stress input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegisteredStressContract {
     pub scenario_id: String,
     pub allocation_fraction_bps: i64,
+    pub stress_execution_slippage_bps: i64,
+    pub stress_execution_volatility_mult_bps: i64,
+    pub max_drawdown_ceiling_bps: i64,
 }
 
 /// Non-forgeable, structurally VERIFIED OOS evidence for one promotion

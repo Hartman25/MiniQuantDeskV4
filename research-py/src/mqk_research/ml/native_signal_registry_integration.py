@@ -264,18 +264,28 @@ _CAPITAL_SIZING_KEYS = (
 )
 
 # The robustness stress a capital-fraction candidate must be promoted against, fixed in the
-# registered trial identity before its first attempt. Promotion compares the P7A/P7B stress
-# evidence with this registered value, never with a caller-supplied one.
-_STRESS_CONTRACT_KEYS = ("scenario_id", "allocation_fraction_bps")
+# registered trial identity before its first attempt. Every behavior-bearing P7A/P7B stress input
+# is bound; Promotion compares the hash-verified stress evidence with this registered value,
+# never with a caller-supplied one. The drawdown ceiling is an integer bps so identity and
+# comparison are exact (no float equality).
+STRESS_CONTRACT_SCHEMA_VERSION = "p7a_p7b_stress_contract_v1"
+_STRESS_CONTRACT_KEYS = (
+    "schema_version", "scenario_id", "allocation_fraction_bps",
+    "stress_execution_slippage_bps", "stress_execution_volatility_mult_bps", "max_drawdown_ceiling_bps",
+)
 
 
 def _validated_stress_contract(
-    stress_contract: Dict[str, Any], capital_sizing: Optional[Dict[str, Any]]
+    stress_contract: Dict[str, Any],
+    capital_sizing: Optional[Dict[str, Any]],
+    baseline_pricing: Any,
 ) -> Dict[str, Any]:
     if capital_sizing is None:
         raise NativeSignalError("stress_contract requires capital_sizing (the capital-fraction protocol)")
     if not isinstance(stress_contract, dict) or set(stress_contract) != set(_STRESS_CONTRACT_KEYS):
         raise NativeSignalError(f"stress_contract must have exactly the keys {_STRESS_CONTRACT_KEYS}")
+    if stress_contract["schema_version"] != STRESS_CONTRACT_SCHEMA_VERSION:
+        raise NativeSignalError(f"stress_contract.schema_version must be {STRESS_CONTRACT_SCHEMA_VERSION!r}")
     scenario_id, bps = stress_contract["scenario_id"], stress_contract["allocation_fraction_bps"]
     if not isinstance(scenario_id, str) or not scenario_id.strip():
         raise NativeSignalError("stress_contract.scenario_id must be a non-empty string")
@@ -285,6 +295,19 @@ def _validated_stress_contract(
             f"stress_contract.allocation_fraction_bps must be an integer in [1, {baseline_bps}) "
             "(strictly below the baseline fraction)"
         )
+    slip = stress_contract["stress_execution_slippage_bps"]
+    vol = stress_contract["stress_execution_volatility_mult_bps"]
+    if type(slip) is not int or type(vol) is not int:
+        raise NativeSignalError("stress_contract execution slippage/volatility must be integers")
+    base_slip, base_vol = baseline_pricing.slippage_bps, baseline_pricing.volatility_mult_bps
+    if slip < base_slip or vol < base_vol or (slip == base_slip and vol == base_vol):
+        raise NativeSignalError(
+            "stress_contract execution pricing must be at least the baseline "
+            f"(slippage {base_slip}, volatility {base_vol}) and strictly worse in one of them"
+        )
+    ceiling = stress_contract["max_drawdown_ceiling_bps"]
+    if type(ceiling) is not int or not 1 <= ceiling <= 10_000:
+        raise NativeSignalError("stress_contract.max_drawdown_ceiling_bps must be an integer in [1, 10000]")
     return {k: stress_contract[k] for k in _STRESS_CONTRACT_KEYS}
 
 
@@ -497,7 +520,7 @@ def build_native_signal_trial_identity(
     if stress_contract is not None:
         # Absent unless declared, so every historical trial id is unchanged.
         identity["signal_source"]["stress_contract"] = _validated_stress_contract(
-            stress_contract, capital_sizing
+            stress_contract, capital_sizing, spec.execution_pricing
         )
     if spec.execution_pricing.is_official_parity_model:
         identity["data_identity"]["bars_pricing_provenance"] = {

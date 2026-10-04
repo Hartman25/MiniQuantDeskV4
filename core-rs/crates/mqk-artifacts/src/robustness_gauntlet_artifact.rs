@@ -20,6 +20,17 @@ use uuid::Uuid;
 
 use crate::RunManifest;
 
+/// The stress inputs a P7A/P7B stress scenario's evidence echoes; compared
+/// field by field with the stress contract registered on the Research trial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct P7aP7bStressEcho {
+    pub scenario_id: String,
+    pub allocation_fraction_bps: i64,
+    pub stress_execution_slippage_bps: i64,
+    pub stress_execution_volatility_mult_bps: i64,
+    pub max_drawdown_ceiling_bps: i64,
+}
+
 /// The candidate's authenticated capital-sizing contract that a capital-fraction
 /// stress echo must be consistent with (taken from its canonical Backtest report
 /// and audited run capital, never from the stress evidence itself).
@@ -401,21 +412,38 @@ impl RobustnessGauntletArtifact {
         defects
     }
 
-    /// The `(scenario_id, allocation_fraction_bps)` the P7A/P7B stress evidence
-    /// echoes in `stress_spec.stress_sizing`; `None` unless both are present and
-    /// well typed (a non-empty string and an integer).
-    pub fn p7a_p7b_stress_sizing_scenario(&self) -> Option<(String, i64)> {
-        let sizing = self
+    /// The behavior-bearing stress inputs the P7A/P7B stress evidence echoes
+    /// (`stress_spec.stress_sizing`, `stress_spec.execution_pricing_*`,
+    /// `max_drawdown_ceiling`); `None` unless every field is present and well
+    /// typed (non-empty scenario id, integers, a ceiling that is an exact whole
+    /// number of bps).
+    pub fn p7a_p7b_stress_echo(&self) -> Option<P7aP7bStressEcho> {
+        let evidence = self
             .scenarios
             .iter()
             .find(|s| s.name == mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME)?
             .evidence
-            .as_ref()?
-            .get("stress_spec")?
-            .get("stress_sizing")?;
+            .as_ref()?;
+        let spec = evidence.get("stress_spec")?;
+        let sizing = spec.get("stress_sizing")?;
         let scenario_id = sizing.get("scenario_id")?.as_str()?.trim();
-        let bps = sizing.get("allocation_fraction_bps")?.as_i64()?;
-        (!scenario_id.is_empty()).then(|| (scenario_id.to_string(), bps))
+        if scenario_id.is_empty() {
+            return None;
+        }
+        let ceiling = evidence.get("max_drawdown_ceiling")?.as_f64()?;
+        let ceiling_bps = (ceiling * 10_000.0).round();
+        if !ceiling.is_finite() || (ceiling * 10_000.0 - ceiling_bps).abs() > 1e-9 {
+            return None;
+        }
+        Some(P7aP7bStressEcho {
+            scenario_id: scenario_id.to_string(),
+            allocation_fraction_bps: sizing.get("allocation_fraction_bps")?.as_i64()?,
+            stress_execution_slippage_bps: spec.get("execution_pricing_slippage_bps")?.as_i64()?,
+            stress_execution_volatility_mult_bps: spec
+                .get("execution_pricing_volatility_mult_bps")?
+                .as_i64()?,
+            max_drawdown_ceiling_bps: ceiling_bps as i64,
+        })
     }
 
     /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: see

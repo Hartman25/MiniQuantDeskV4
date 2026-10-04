@@ -209,10 +209,13 @@ fn native_fingerprint_from_identity(identity_json: Option<&str>) -> Result<Optio
     Ok(Some(fp.to_string()))
 }
 
+/// Schema marker of the only stress contract shape this reader accepts.
+const STRESS_CONTRACT_SCHEMA_VERSION: &str = "p7a_p7b_stress_contract_v1";
+
 /// Read the predeclared stress contract from a registered trial identity
-/// (`Ok(None)` when absent). A declared but malformed contract fails closed,
-/// including a contract without the baseline `capital_sizing` it must be
-/// strictly below.
+/// (`Ok(None)` when absent). A declared but malformed contract (including the
+/// superseded 2-key shape) fails closed, as does a contract without the
+/// baseline `capital_sizing` it must be strictly below.
 fn stress_contract_from_identity(
     identity_json: Option<&str>,
 ) -> Result<Option<RegisteredStressContract>, String> {
@@ -230,20 +233,35 @@ fn stress_contract_from_identity(
     let bad = |what: &str| format!("registered trial's stress_contract is invalid: {what}");
     let obj = contract
         .as_object()
-        .filter(|o| o.len() == 2)
+        .filter(|o| o.len() == 6)
         .ok_or_else(|| {
-            bad("must be an object with exactly scenario_id and allocation_fraction_bps")
+            bad("must be an object with exactly schema_version, scenario_id, allocation_fraction_bps, stress_execution_slippage_bps, stress_execution_volatility_mult_bps and max_drawdown_ceiling_bps")
         })?;
+    if obj.get("schema_version").and_then(Value::as_str) != Some(STRESS_CONTRACT_SCHEMA_VERSION) {
+        return Err(bad(&format!(
+            "schema_version must be {STRESS_CONTRACT_SCHEMA_VERSION:?}"
+        )));
+    }
+    let int = |field: &str| {
+        obj.get(field)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| bad(&format!("{field} must be an integer")))
+    };
     let scenario_id = obj
         .get("scenario_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| bad("scenario_id must be a non-empty string"))?;
-    let bps = obj
-        .get("allocation_fraction_bps")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| bad("allocation_fraction_bps must be an integer"))?;
+    let bps = int("allocation_fraction_bps")?;
+    let slippage = int("stress_execution_slippage_bps")?;
+    let volatility = int("stress_execution_volatility_mult_bps")?;
+    let ceiling = int("max_drawdown_ceiling_bps")?;
+    if slippage < 0 || volatility < 0 || !(1..=10_000).contains(&ceiling) {
+        return Err(bad(
+            "execution slippage/volatility must be non-negative and the drawdown ceiling within 1..=10000 bps",
+        ));
+    }
     let baseline_bps = source
         .pointer("/capital_sizing/allocation_fraction_bps")
         .and_then(Value::as_i64)
@@ -256,6 +274,9 @@ fn stress_contract_from_identity(
     Ok(Some(RegisteredStressContract {
         scenario_id: scenario_id.to_string(),
         allocation_fraction_bps: bps,
+        stress_execution_slippage_bps: slippage,
+        stress_execution_volatility_mult_bps: volatility,
+        max_drawdown_ceiling_bps: ceiling,
     }))
 }
 

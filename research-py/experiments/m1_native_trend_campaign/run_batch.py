@@ -203,7 +203,23 @@ def research_stress_contract(decl: dict) -> dict | None:
     plan = stress_plan(decl)
     if plan["mode"] != "capital_fraction":
         raise SystemExit("fail-closed: register_stress_contract requires a capital-fraction stress declaration")
-    return {"scenario_id": plan["scenario_id"], "allocation_fraction_bps": plan["allocation_fraction_bps"]}
+    from mqk_research.ml.native_signal_registry_integration import STRESS_CONTRACT_SCHEMA_VERSION
+
+    st = decl["robustness"]["p7a_p7b_stress"]
+    ceiling = st["max_drawdown_ceiling"]
+    if type(ceiling) not in (int, float):
+        raise SystemExit("fail-closed: max_drawdown_ceiling must be a number")
+    ceiling_bps = ceiling * 10_000
+    if abs(ceiling_bps - round(ceiling_bps)) > 1e-9:
+        raise SystemExit("fail-closed: max_drawdown_ceiling must be a number that is an exact whole number of bps")
+    return {
+        "schema_version": STRESS_CONTRACT_SCHEMA_VERSION,
+        "scenario_id": plan["scenario_id"],
+        "allocation_fraction_bps": plan["allocation_fraction_bps"],
+        "stress_execution_slippage_bps": st["stress_execution_slippage_bps"],
+        "stress_execution_volatility_mult_bps": st["stress_execution_volatility_mult_bps"],
+        "max_drawdown_ceiling_bps": round(ceiling_bps),
+    }
 
 
 def canonical_timeframe_identity(decl: dict) -> bool:

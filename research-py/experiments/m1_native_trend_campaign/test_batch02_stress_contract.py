@@ -148,8 +148,33 @@ def test_batch02_declaration_registers_no_stress_contract_so_its_trial_ids_are_u
 def test_a_declaration_can_opt_in_to_binding_its_stress_into_the_trial_identity():
     d = decl()
     d["robustness"]["p7a_p7b_stress"]["register_stress_contract"] = True
-    assert rb.research_stress_contract(d) == {"scenario_id": "half_exposure_capital_fraction_500bps_v1",
-                                              "allocation_fraction_bps": 500}
+    assert rb.research_stress_contract(d) == {
+        "schema_version": "p7a_p7b_stress_contract_v1",
+        "scenario_id": "half_exposure_capital_fraction_500bps_v1", "allocation_fraction_bps": 500,
+        "stress_execution_slippage_bps": 15, "stress_execution_volatility_mult_bps": 10,
+        "max_drawdown_ceiling_bps": 4000}
+
+
+@pytest.mark.parametrize("field,value,expected_key", [
+    ("stress_execution_slippage_bps", 16, "stress_execution_slippage_bps"),
+    ("stress_execution_volatility_mult_bps", 11, "stress_execution_volatility_mult_bps"),
+    ("max_drawdown_ceiling", 0.35, "max_drawdown_ceiling_bps"),
+])
+def test_every_stress_input_of_the_declaration_reaches_the_registered_contract(field, value, expected_key):
+    d = decl()
+    d["robustness"]["p7a_p7b_stress"]["register_stress_contract"] = True
+    d["robustness"]["p7a_p7b_stress"][field] = value
+    got = rb.research_stress_contract(d)[expected_key]
+    assert got == (3500 if field == "max_drawdown_ceiling" else value)
+
+
+@pytest.mark.parametrize("ceiling", [0.40005, "0.4", True, None])
+def test_a_ceiling_that_is_not_an_exact_bps_number_is_refused(ceiling):
+    d = decl()
+    d["robustness"]["p7a_p7b_stress"]["register_stress_contract"] = True
+    d["robustness"]["p7a_p7b_stress"]["max_drawdown_ceiling"] = ceiling
+    with pytest.raises(SystemExit, match="max_drawdown_ceiling"):
+        rb.research_stress_contract(d)
 
 
 @pytest.mark.parametrize("flag", ["yes", 1, "true"])

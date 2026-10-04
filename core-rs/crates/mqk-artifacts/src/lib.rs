@@ -23,8 +23,8 @@ pub use stress_suite_artifact::{
 pub mod robustness_gauntlet_artifact; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub use robustness_gauntlet_artifact::{
     finalize_canonical_robustness_gauntlet_with_sensitivity, load_canonical_robustness_gauntlet,
-    write_canonical_robustness_gauntlet, CapitalFractionStressBaseline, RobustnessGauntletArtifact,
-    RobustnessGauntletArtifactError, RobustnessGauntletFinalizeError,
+    write_canonical_robustness_gauntlet, CapitalFractionStressBaseline, P7aP7bStressEcho,
+    RobustnessGauntletArtifact, RobustnessGauntletArtifactError, RobustnessGauntletFinalizeError,
     ROBUSTNESS_GAUNTLET_ARTIFACT_SCHEMA_VERSION,
 }; // BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01
 

@@ -89,7 +89,15 @@ fn consistent_echo_caps(baseline_fp: &str, stress_bps: i64, caps: Caps) -> Value
     })
 }
 
-fn p7a_outcome(stress_spec: Value) -> RobustnessScenarioOutcome {
+/// `stress_spec` may carry `max_drawdown_ceiling` (moved to the evidence top level, as the Python
+/// replay emits it) and the execution-pricing echo; absent ones default to the registered values.
+fn p7a_outcome(mut stress_spec: Value) -> RobustnessScenarioOutcome {
+    let obj = stress_spec.as_object_mut().expect("stress_spec object");
+    let ceiling = obj.remove("max_drawdown_ceiling").unwrap_or(json!(0.4));
+    obj.entry("execution_pricing_slippage_bps")
+        .or_insert(json!(15));
+    obj.entry("execution_pricing_volatility_mult_bps")
+        .or_insert(json!(10));
     RobustnessScenarioOutcome {
         name: mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string(),
         applicable: true,
@@ -97,7 +105,11 @@ fn p7a_outcome(stress_spec: Value) -> RobustnessScenarioOutcome {
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("cf_binding_trial".to_string()),
-        evidence: Some(json!({ "status": "evaluated", "stress_spec": stress_spec })),
+        evidence: Some(json!({
+            "status": "evaluated",
+            "stress_spec": stress_spec,
+            "max_drawdown_ceiling": ceiling,
+        })),
     }
 }
 
@@ -549,7 +561,20 @@ fn native_identity(capital_sizing: Option<i64>, stress_contract: Option<Value>) 
 }
 
 fn contract(scenario: &str, bps: i64) -> Value {
-    json!({"scenario_id": scenario, "allocation_fraction_bps": bps})
+    json!({
+        "schema_version": "p7a_p7b_stress_contract_v1",
+        "scenario_id": scenario,
+        "allocation_fraction_bps": bps,
+        "stress_execution_slippage_bps": 15,
+        "stress_execution_volatility_mult_bps": 10,
+        "max_drawdown_ceiling_bps": 4000,
+    })
+}
+
+fn contract_with(field: &str, value: Value) -> Value {
+    let mut c = contract(TEST_SCENARIO, 500);
+    c[field] = value;
+    c
 }
 
 fn registered(identity: String) -> mqk_promotion::VerifiedPromotionOosEvidence {
@@ -557,12 +582,19 @@ fn registered(identity: String) -> mqk_promotion::VerifiedPromotionOosEvidence {
 }
 
 fn cf_bundle(echo: impl FnOnce(&str) -> Value) -> mqk_promotion::BacktestEvidenceBundle {
-    resolve_bundle(
-        "cf_contract",
-        true,
-        CAPS,
-        |fp| json!({ "stress_sizing": echo(fp) }),
-    )
+    cf_bundle_spec(echo, |_| {})
+}
+
+/// `patch` edits the p7a `stress_spec` (execution-pricing echo, `max_drawdown_ceiling`).
+fn cf_bundle_spec(
+    echo: impl FnOnce(&str) -> Value,
+    patch: impl FnOnce(&mut Value),
+) -> mqk_promotion::BacktestEvidenceBundle {
+    resolve_bundle("cf_contract", true, CAPS, |fp| {
+        let mut spec = json!({ "stress_sizing": echo(fp) });
+        patch(&mut spec);
+        spec
+    })
 }
 
 #[test]
@@ -573,9 +605,14 @@ fn cfsb02a_the_registered_contract_is_accepted_only_when_the_evidence_equals_it(
         Some(contract(TEST_SCENARIO, 500)),
     ));
     assert_eq!(
-        oos.registered_stress_contract()
-            .map(|c| (c.scenario_id.as_str(), c.allocation_fraction_bps)),
-        Some((TEST_SCENARIO, 500))
+        oos.registered_stress_contract().map(|c| (
+            c.scenario_id.as_str(),
+            c.allocation_fraction_bps,
+            c.stress_execution_slippage_bps,
+            c.stress_execution_volatility_mult_bps,
+            c.max_drawdown_ceiling_bps
+        )),
+        Some((TEST_SCENARIO, 500, 15, 10, 4000))
     );
     assert_eq!(
         mqk_promotion::verify_registered_stress_contract(&bundle, &oos),
@@ -593,10 +630,7 @@ fn cfsb02b_a_different_scenario_or_fraction_than_the_registered_one_is_refused()
             Some(contract(TEST_SCENARIO, 500)),
         ));
         let err = mqk_promotion::verify_registered_stress_contract(&bundle, &oos).unwrap_err();
-        assert!(
-            err.contains("differs from the scenario"),
-            "{echo_bps}: {err}"
-        );
+        assert!(err.contains("allocation_fraction_bps"), "{echo_bps}: {err}");
     }
     let bundle = cf_bundle(|fp| consistent_echo(fp, 500));
     let oos = registered(native_identity(
@@ -606,8 +640,57 @@ fn cfsb02b_a_different_scenario_or_fraction_than_the_registered_one_is_refused()
     assert!(
         mqk_promotion::verify_registered_stress_contract(&bundle, &oos)
             .unwrap_err()
-            .contains("differs from the scenario")
+            .contains("scenario_id")
     );
+}
+
+/// Each registered field is compared on its own: a single differing field, with every other field
+/// equal, must refuse (kills the removal of any one comparison).
+#[test]
+fn cfsb02g_a_mismatch_on_any_single_registered_field_is_refused() {
+    let cases: Vec<(&str, Value)> = vec![
+        ("scenario_id", json!("other_scenario")),
+        ("allocation_fraction_bps", json!(499)),
+        ("stress_execution_slippage_bps", json!(16)),
+        ("stress_execution_volatility_mult_bps", json!(11)),
+        ("max_drawdown_ceiling_bps", json!(3500)),
+    ];
+    let bundle = cf_bundle(|fp| consistent_echo(fp, 500));
+    for (field, value) in cases {
+        let oos = registered(native_identity(
+            Some(1000),
+            Some(contract_with(field, value)),
+        ));
+        let err = mqk_promotion::verify_registered_stress_contract(&bundle, &oos).unwrap_err();
+        assert!(err.contains(field), "{field}: {err}");
+    }
+}
+
+/// The evidence side of every execution input: an echo that differs from the registered contract
+/// in exactly one execution-stress input, with the contract untouched, is refused.
+#[test]
+fn cfsb02h_an_execution_stress_echo_that_differs_from_the_registered_value_is_refused() {
+    let oos = registered(native_identity(
+        Some(1000),
+        Some(contract(TEST_SCENARIO, 500)),
+    ));
+    type Patch = fn(&mut Value);
+    let cases: [(&str, Patch); 3] = [
+        ("stress_execution_slippage_bps", |s| {
+            s["execution_pricing_slippage_bps"] = json!(14)
+        }),
+        ("stress_execution_volatility_mult_bps", |s| {
+            s["execution_pricing_volatility_mult_bps"] = json!(9)
+        }),
+        ("max_drawdown_ceiling_bps", |s| {
+            s["max_drawdown_ceiling"] = json!(0.45)
+        }),
+    ];
+    for (needle, patch) in cases {
+        let bundle = cf_bundle_spec(|fp| consistent_echo(fp, 500), patch);
+        let err = mqk_promotion::verify_registered_stress_contract(&bundle, &oos).unwrap_err();
+        assert!(err.contains(needle), "{needle}: {err}");
+    }
 }
 
 #[test]
@@ -637,11 +720,32 @@ fn cfsb02d_a_candidate_with_no_readable_stress_scenario_is_refused() {
             echo.as_object_mut().unwrap().remove(missing);
             echo
         });
-        assert!(bundle.stress_sizing_scenario.is_none(), "{missing}");
+        assert!(bundle.stress_echo.is_none(), "{missing}");
         assert!(
             mqk_promotion::verify_registered_stress_contract(&bundle, &oos)
                 .unwrap_err()
-                .contains("no readable stress_sizing")
+                .contains("no readable stress scenario")
+        );
+    }
+    type Patch = fn(&mut Value);
+    let spec_defects: [(&str, Patch); 4] = [
+        ("no slippage", |s| {
+            s["execution_pricing_slippage_bps"] = Value::Null
+        }),
+        ("float volatility", |s| {
+            s["execution_pricing_volatility_mult_bps"] = json!(10.5)
+        }),
+        ("no ceiling", |s| s["max_drawdown_ceiling"] = Value::Null),
+        ("non-bps ceiling", |s| {
+            s["max_drawdown_ceiling"] = json!(0.40005)
+        }),
+    ];
+    for (label, patch) in spec_defects {
+        let bundle = cf_bundle_spec(|fp| consistent_echo(fp, 500), patch);
+        assert!(bundle.stress_echo.is_none(), "{label}");
+        assert!(
+            mqk_promotion::verify_registered_stress_contract(&bundle, &oos).is_err(),
+            "{label}"
         );
     }
 }
@@ -681,19 +785,43 @@ fn cfsb02f_a_malformed_registered_contract_fails_the_research_authority() {
         ),
         (
             "float bps",
-            bad_json(json!({"scenario_id": TEST_SCENARIO, "allocation_fraction_bps": 500.5})),
+            bad_json(contract_with("allocation_fraction_bps", json!(500.5))),
         ),
         (
             "bool bps",
-            bad_json(json!({"scenario_id": TEST_SCENARIO, "allocation_fraction_bps": true})),
+            bad_json(contract_with("allocation_fraction_bps", json!(true))),
         ),
-        (
-            "extra key",
-            bad_json(json!({"scenario_id": TEST_SCENARIO, "allocation_fraction_bps": 500, "x": 1})),
-        ),
+        ("extra key", bad_json(contract_with("x", json!(1)))),
         (
             "missing key",
             bad_json(json!({"scenario_id": TEST_SCENARIO})),
+        ),
+        (
+            "superseded 2-key contract",
+            bad_json(json!({"scenario_id": TEST_SCENARIO, "allocation_fraction_bps": 500})),
+        ),
+        (
+            "unknown schema_version",
+            bad_json(contract_with("schema_version", json!("v0"))),
+        ),
+        (
+            "float slippage",
+            bad_json(contract_with("stress_execution_slippage_bps", json!(15.5))),
+        ),
+        (
+            "negative volatility",
+            bad_json(contract_with(
+                "stress_execution_volatility_mult_bps",
+                json!(-1),
+            )),
+        ),
+        (
+            "zero ceiling",
+            bad_json(contract_with("max_drawdown_ceiling_bps", json!(0))),
+        ),
+        (
+            "ceiling above 100%",
+            bad_json(contract_with("max_drawdown_ceiling_bps", json!(10001))),
         ),
         ("not an object", bad_json(json!("half"))),
     ];
