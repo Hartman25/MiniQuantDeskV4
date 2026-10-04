@@ -22,6 +22,20 @@
 use chrono::{DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::America::New_York;
 
+/// First and last ET civil dates (inclusive) for which the holiday and
+/// early-close tables below are authoritative. The wall-clock classifiers
+/// (`classify_market_session` / `classify_exchange_calendar`) report `"closed"`
+/// outside it instead of extrapolating weekday arithmetic. Gap detection
+/// (`is_session_bar_end`, `missing_bars_between`) deliberately keeps expecting
+/// weekday bars there: unknown holiday truth must surface a missing bar, not
+/// excuse it.
+pub const TABLE_COVERAGE_START: (i64, i64, i64) = (2023, 1, 1);
+pub const TABLE_COVERAGE_END: (i64, i64, i64) = (2028, 12, 31);
+
+fn within_table_coverage(year: i64, month: i64, day: i64) -> bool {
+    (year, month, day) >= TABLE_COVERAGE_START && (year, month, day) <= TABLE_COVERAGE_END
+}
+
 // ---------------------------------------------------------------------------
 // CalendarSpec
 // ---------------------------------------------------------------------------
@@ -288,7 +302,7 @@ fn nyse_classify_session(now_ts: i64) -> &'static str {
         et_dt.month() as i64,
         et_dt.day() as i64,
     );
-    if is_nyse_holiday(year, month, day) {
+    if !within_table_coverage(year, month, day) || is_nyse_holiday(year, month, day) {
         return "closed";
     }
 
@@ -330,6 +344,9 @@ fn nyse_classify_exchange(now_ts: i64) -> &'static str {
         et_dt.month() as i64,
         et_dt.day() as i64,
     );
+    if !within_table_coverage(year, month, day) {
+        return "closed";
+    }
     if is_nyse_holiday(year, month, day) {
         return "holiday";
     }
@@ -351,12 +368,14 @@ fn nyse_classify_exchange(now_ts: i64) -> &'static str {
 /// Calendar calculation verified 2026-05-27.
 const EARLY_CLOSE_DATES: &[(i64, i64, i64, u32, u32)] = &[
     // ── 2023 ─────────────────────────────────────────────────────────
+    (2023, 7, 3, 13, 0),   // Independence Day Eve (July 4 = Tuesday)
     (2023, 11, 24, 13, 0), // Day after Thanksgiving (Nov 23)
     // ── 2024 ─────────────────────────────────────────────────────────
     (2024, 7, 3, 13, 0),   // Independence Day Eve (July 4 = Thursday)
     (2024, 11, 29, 13, 0), // Day after Thanksgiving (Nov 28)
     (2024, 12, 24, 13, 0), // Christmas Eve (Tuesday)
     // ── 2025 ─────────────────────────────────────────────────────────
+    (2025, 7, 3, 13, 0),   // Independence Day Eve (July 4 = Friday)
     (2025, 11, 28, 13, 0), // Day after Thanksgiving (Nov 27)
     (2025, 12, 24, 13, 0), // Christmas Eve (Wednesday)
     // ── 2026 ─────────────────────────────────────────────────────────
@@ -368,6 +387,7 @@ const EARLY_CLOSE_DATES: &[(i64, i64, i64, u32, u32)] = &[
     (2027, 11, 26, 13, 0), // Day after Thanksgiving (Nov 25 Thanksgiving)
     // ── 2028 ─────────────────────────────────────────────────────────
     // Dec 25, 2028 = Monday. Dec 24 = Sunday (markets closed). No early close.
+    (2028, 7, 3, 13, 0),   // Independence Day Eve (July 4 = Tuesday)
     (2028, 11, 24, 13, 0), // Day after Thanksgiving (Nov 23 Thanksgiving)
 ];
 
@@ -443,6 +463,7 @@ fn is_nyse_holiday(year: i64, month: i64, day: i64) -> bool {
         (2024, 12, 25), // Christmas
         // ── 2025 ─────────────────────────────────────────────────────────
         (2025, 1, 1),   // New Year's Day
+        (2025, 1, 9),   // National day of mourning (President Carter) — full closure
         (2025, 1, 20),  // MLK Day
         (2025, 2, 17),  // Presidents' Day
         (2025, 4, 18),  // Good Friday
@@ -475,16 +496,17 @@ fn is_nyse_holiday(year: i64, month: i64, day: i64) -> bool {
         (2027, 9, 6),   // Labor Day (1st Monday of September)
         (2027, 11, 25), // Thanksgiving (4th Thursday of November)
         (2027, 12, 24), // Christmas (observed Fri — December 25 falls on Saturday)
-        (2027, 12, 31), // New Year's Day 2028 (observed Fri — January 1 2028 falls on Saturday)
+        // 2027-12-31 is a normal session: NYSE does not observe a Saturday
+        // New Year's Day (2028-01-01) on the preceding Friday.
         // ── 2028 ─────────────────────────────────────────────────────────
-        // Jan 1 = Saturday (observed Dec 31 2027, above). 2028 is a leap year.
+        // Jan 1 = Saturday (not observed). 2028 is a leap year.
         // Easter = April 16 (Gregorian algorithm).
         (2028, 1, 17),  // MLK Day (3rd Monday of January)
         (2028, 2, 21),  // Presidents' Day (3rd Monday of February)
         (2028, 4, 14),  // Good Friday (Easter = April 16)
         (2028, 5, 29),  // Memorial Day (last Monday of May)
         (2028, 6, 19),  // Juneteenth (Monday — June 19 falls on Monday)
-        (2028, 7, 4),   // Independence Day (Wednesday)
+        (2028, 7, 4),   // Independence Day (Tuesday)
         (2028, 9, 4),   // Labor Day (1st Monday of September)
         (2028, 11, 23), // Thanksgiving (4th Thursday of November)
         (2028, 12, 25), // Christmas (Monday)
