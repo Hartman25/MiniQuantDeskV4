@@ -620,10 +620,22 @@ STAGES = {"check": stage_check, "reuse_data": stage_reuse_data, "register": stag
           "summary": stage_summary}
 
 
+def require_executable_declaration(decl: dict) -> None:
+    """A declaration carrying an `execution_gate` runs no stage until the gate is explicitly executable.
+    Declarations without the block (closed historical campaigns) are unaffected."""
+    gate = decl.get("execution_gate")
+    if gate is None:
+        return
+    if gate.get("executable") is not True:
+        raise SystemExit(f"fail-closed: {decl['batch_id']} is {gate.get('status')} "
+                         f"(blocker {gate.get('blocker')}); no stage may run until the declaration is re-issued executable")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=sorted(STAGES))
     args = ap.parse_args()
+    require_executable_declaration(DECL)
     STAGES[args.stage](args)
 
 

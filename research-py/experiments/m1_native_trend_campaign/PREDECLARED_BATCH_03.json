@@ -1,0 +1,880 @@
+{
+ "batch_id": "m1_native_hypothesis_batch_03",
+ "mission_id": "V4-M1-SYSTEM-CLOSURE-CORRECTION-PLUS-BATCH03-PREPARATION-01",
+ "predeclared_utc_date": "2026-10-04",
+ "wave_classification": "NEW_HYPOTHESIS_BATCH_TEN_FAMILIES_SIX_SYMBOLS_CAPITAL_FRACTION_SIZING_PROSPECTIVE",
+ "execution_gate": {
+  "status": "BATCH03_PREDECLARED_NOT_EXECUTED",
+  "executable": false,
+  "blocker": "OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT",
+  "rule": "No stage other than `check` may run and no trial may be registered until the stress contract below is finalized by explicit operator authority and this declaration is re-issued as executable. ECONOMIC_ATTEMPTS=0."
+ },
+ "run_dir": "runs/run_batch_03",
+ "declaration_selection": "run_batch.py and summarize_batch.py read this file when MQK_M1_BATCH_DECLARATION names it.",
+ "protocol_note": "Hypothesis != trial != attempt != evaluation slice != robustness scenario: ten families, one trial per (family, symbol) = 60 trials, one disclosed selection population. A robustness stress is an evaluation of the SAME registered trial, never a trial.",
+ "calendar": {
+  "contract_id": "us_equity_regular_sessions_v1",
+  "coverage_start_date": "2016-01-01",
+  "coverage_end_date": "2026-12-31",
+  "expected_content_sha256": "3249ee517cbc6763b9f73b372d5c6a5f8337d872b91d20a5bca1c27b7a1a76de",
+  "authority": "mqk-integrity::sessions (closure list and content identity); the monthly families F01/F05/F08/F10 bind the content hash into their native semantic fingerprints",
+  "binding": "identical contract and content hash to Batch 02"
+ },
+ "hypotheses": [
+  {
+   "hypothesis_id": "m1_batch03_monthly_multihorizon_abs_momentum_consensus_v1",
+   "hypothesis_label": "F01",
+   "strategy_id": "monthly_multihorizon_abs_momentum_consensus_v1",
+   "economic_rationale": "Multi-horizon absolute (time-series) momentum is a documented, economically motivated trend effect; a 2-of-3 consensus across one-, three- and twelve-month horizons is the single predeclared aggregation. Falsifiable; no profitability is assumed.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 275,
+   "direction": "long_only_flat",
+   "rule": "At each canonical month-end session t: vote +1 for each of close[t]>close[t-21], close[t]>close[t-63], close[t]>close[t-252] (strict). TARGET +1 iff votes>=2 of 3; otherwise 0. The target is held unchanged until the next month-end.",
+   "decision_kind": "month_end_decision_hold",
+   "parameters": {
+    "MIN_VOTES": 2,
+    "HORIZONS_SESSIONS": [
+     21,
+     63,
+     252
+    ]
+   },
+   "calendar_contract_bound": true,
+   "restart_recovery": "BoundedHistoryReconstructible",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_trend_filtered_rsi5_reversion_v1",
+   "hypothesis_label": "F02",
+   "strategy_id": "trend_filtered_rsi5_reversion_v1",
+   "economic_rationale": "Short-horizon oversold readings inside a long-term uptrend tend to mean-revert (liquidity-provision/short-term reversal). Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 200,
+   "direction": "long_only_flat",
+   "rule": "trend = close[t] > SMA200 (latest 200 closes including t). RSI5 = Cutler RSI from the five most recent 1-session close differences (RSI=50 when gains+losses==0). While FLAT: enter iff trend and RSI5<30 (strict). While LONG: exit iff RSI5>70 (strict) or trend is false. State is reconstructed from the bounded window by replay.",
+   "decision_kind": "stateful",
+   "parameters": {
+    "TREND_BARS": 200,
+    "RSI_DIFFS": 5,
+    "ENTRY_BELOW": 30,
+    "EXIT_ABOVE": 70
+   },
+   "calendar_contract_bound": false,
+   "restart_recovery": "NotRecoverable",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_trend_filtered_extreme_3d_atr_reversal_v1",
+   "hypothesis_label": "F03",
+   "strategy_id": "trend_filtered_extreme_3d_atr_reversal_v1",
+   "economic_rationale": "An extreme 3-day decline relative to recent range inside an uptrend is a liquidity-shock overreaction that tends to partially reverse. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 200,
+   "direction": "long_only_flat",
+   "rule": "trend as F02. ATR20 = mean true range over the 20 sessions immediately BEFORE t (event bar excluded). drop_fraction=(close[t-3]-close[t])/close[t-3]; atr_fraction=ATR20_prior/close[t-1]. Event iff trend and drop_fraction>1.5*atr_fraction (strict). On an event the target is +1 for EXACTLY 5 subsequent strategy outputs; no extension, no resize, no re-trigger while held.",
+   "decision_kind": "stateful_fixed_hold",
+   "parameters": {
+    "TREND_BARS": 200,
+    "DROP_SESSIONS": 3,
+    "ATR_BARS": 20,
+    "EVENT_MULT": "3/2",
+    "HOLD_OUTPUTS": 5
+   },
+   "calendar_contract_bound": false,
+   "restart_recovery": "NotRecoverable",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_close_channel_100_50_trend_v1",
+   "hypothesis_label": "F04",
+   "strategy_id": "close_channel_100_50_trend_v1",
+   "economic_rationale": "Close-based channel breakouts capture medium-term trend persistence with an asymmetric (slower) exit. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 101,
+   "direction": "long_only_flat",
+   "rule": "While FLAT: enter iff close[t] > max(close[t-100..t-1]) (strict, current bar excluded). While LONG: exit iff close[t] < min(close[t-50..t-1]) (strict, current bar excluded). State reconstructed by replay.",
+   "decision_kind": "stateful",
+   "parameters": {
+    "ENTRY_LOOKBACK": 100,
+    "EXIT_LOOKBACK": 50
+   },
+   "calendar_contract_bound": false,
+   "restart_recovery": "NotRecoverable",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_monthly_10month_trend_timing_v1",
+   "hypothesis_label": "F05",
+   "strategy_id": "monthly_10month_trend_timing_v1",
+   "economic_rationale": "A 10-month moving-average timing rule is a documented, widely replicated tactical trend filter. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 253,
+   "direction": "long_only_flat",
+   "rule": "At each canonical month-end session t: mean10 = mean of the PRIOR 10 month-end closes (the current month-end excluded). TARGET +1 iff close[t] > mean10 (strict); equality is flat. Held until the next month-end.",
+   "decision_kind": "month_end_decision_hold",
+   "parameters": {
+    "PRIOR_MONTH_ENDS": 10
+   },
+   "calendar_contract_bound": true,
+   "restart_recovery": "BoundedHistoryReconstructible",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_trend_filtered_zscore20_reversion_v1",
+   "hypothesis_label": "F06",
+   "strategy_id": "trend_filtered_zscore20_reversion_v1",
+   "economic_rationale": "Short-horizon statistical dislocation below a rolling mean inside an uptrend tends to mean-revert. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 200,
+   "direction": "long_only_flat",
+   "rule": "trend as F02. mean20 and POPULATION std20 over close[t-20..t-1] (current bar excluded). std20<=0: no entry. z=(close[t]-mean20)/std20. While FLAT: enter iff trend and z<-2.0 (strict). While LONG: exit iff close[t]>=mean20 or trend is false.",
+   "decision_kind": "stateful",
+   "parameters": {
+    "TREND_BARS": 200,
+    "Z_BARS": 20,
+    "ENTRY_Z": -2,
+    "STD": "population"
+   },
+   "calendar_contract_bound": false,
+   "restart_recovery": "NotRecoverable",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_volatility_contraction_breakout_v1",
+   "hypothesis_label": "F07",
+   "strategy_id": "volatility_contraction_breakout_v1",
+   "economic_rationale": "Volatility compression followed by a range expansion upward marks the start of directional moves. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 61,
+   "direction": "long_only_flat",
+   "rule": "range10=max(high[t-10..t-1])-min(low[t-10..t-1]); range60 likewise over 60 bars (current bar excluded). contraction iff range60>0 and range10*4<range60 (strict, i.e. range10<25% of range60). level=max(close[t-20..t-1]). While FLAT: enter iff contraction and close[t]>level. While LONG: exit iff close[t]<min(close[t-10..t-1]) (strict).",
+   "decision_kind": "stateful",
+   "parameters": {
+    "SHORT_RANGE_BARS": 10,
+    "LONG_RANGE_BARS": 60,
+    "CONTRACTION": "range10*4<range60",
+    "BREAKOUT_BARS": 20,
+    "EXIT_BARS": 10
+   },
+   "calendar_contract_bound": false,
+   "restart_recovery": "NotRecoverable",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_monthly_12_minus_1_abs_momentum_v1",
+   "hypothesis_label": "F08",
+   "strategy_id": "monthly_12_minus_1_abs_momentum_v1",
+   "economic_rationale": "Twelve-minus-one momentum skips the most recent month to avoid short-term reversal contamination. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 275,
+   "direction": "long_only_flat",
+   "rule": "At each canonical month-end session t: TARGET +1 iff close[t-21] > close[t-252] (strict; the current close is never read). Held until the next month-end.",
+   "decision_kind": "month_end_decision_hold",
+   "parameters": {
+    "SKIP_SESSIONS": 21,
+    "LOOKBACK_SESSIONS": 252
+   },
+   "calendar_contract_bound": true,
+   "restart_recovery": "BoundedHistoryReconstructible",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_delayed_overnight_gap_reversal_v1",
+   "hypothesis_label": "F09",
+   "strategy_id": "delayed_overnight_gap_reversal_v1",
+   "economic_rationale": "Large overnight downside gaps relative to recent range are overreactions that partially reverse; the delayed (post-completion) entry is the only executable form. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 22,
+   "direction": "long_only_flat",
+   "rule": "gap_fraction=(close[t-1]-open[t])/close[t-1]; atr_fraction=ATR20_prior/close[t-1] (ATR20 over the 20 sessions before t). Event iff gap_fraction>1.5*atr_fraction (strict). The signal is emitted only after bar t completes; the target is +1 for EXACTLY 3 subsequent strategy outputs; no extension, no same-day or open fill.",
+   "decision_kind": "stateful_fixed_hold",
+   "parameters": {
+    "ATR_BARS": 20,
+    "EVENT_MULT": "3/2",
+    "HOLD_OUTPUTS": 3
+   },
+   "calendar_contract_bound": false,
+   "restart_recovery": "NotRecoverable",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  },
+  {
+   "hypothesis_id": "m1_batch03_monthly_52week_high_proximity_v1",
+   "hypothesis_label": "F10",
+   "strategy_id": "monthly_52week_high_proximity_v1",
+   "economic_rationale": "Proximity to the 52-week high is a documented anchoring-driven momentum predictor. Falsifiable.",
+   "timeframe_secs": 86400,
+   "required_history_bars": 274,
+   "direction": "long_only_flat",
+   "rule": "At each canonical month-end session t: high252=max(close[t-251..t]) inclusive. TARGET +1 iff close[t]*100 >= high252*95 (integer-safe, inclusive). Held until the next month-end.",
+   "decision_kind": "month_end_decision_hold",
+   "parameters": {
+    "HIGH_SESSIONS": 252,
+    "PROXIMITY_PERCENT": 95
+   },
+   "calendar_contract_bound": true,
+   "restart_recovery": "BoundedHistoryReconstructible",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT (stateful engines hold state)",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other thresholds, horizons, hold lengths, multipliers or stops are registered or evaluated"
+  }
+ ],
+ "universe": {
+  "selection_rule": "Fixed ex-ante liquid ETF list (broad equity, growth, small-cap and three high-volatility sectors). Individual stocks are excluded.",
+  "symbols": [
+   "SPY",
+   "QQQ",
+   "IWM",
+   "SMH",
+   "XBI",
+   "XLE"
+  ],
+  "symbol_roles": {
+   "SPY": "US large-cap equities",
+   "QQQ": "US large-cap growth/technology",
+   "IWM": "US small-cap equities",
+   "SMH": "semiconductor sector",
+   "XBI": "biotechnology sector",
+   "XLE": "energy sector"
+  },
+  "universe_mode": "fixed_ex_ante",
+  "point_in_time_membership": false,
+  "survivorship_note": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean; each symbol is its own registered trial and the judge deflates over all sixty.",
+  "max_trials": 60,
+  "additional_candidate_after_predeclaration": "forbidden",
+  "trials": [
+   {
+    "order": 1,
+    "hypothesis_label": "F01",
+    "strategy_id": "monthly_multihorizon_abs_momentum_consensus_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 2,
+    "hypothesis_label": "F01",
+    "strategy_id": "monthly_multihorizon_abs_momentum_consensus_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 3,
+    "hypothesis_label": "F01",
+    "strategy_id": "monthly_multihorizon_abs_momentum_consensus_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 4,
+    "hypothesis_label": "F01",
+    "strategy_id": "monthly_multihorizon_abs_momentum_consensus_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 5,
+    "hypothesis_label": "F01",
+    "strategy_id": "monthly_multihorizon_abs_momentum_consensus_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 6,
+    "hypothesis_label": "F01",
+    "strategy_id": "monthly_multihorizon_abs_momentum_consensus_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 7,
+    "hypothesis_label": "F02",
+    "strategy_id": "trend_filtered_rsi5_reversion_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 8,
+    "hypothesis_label": "F02",
+    "strategy_id": "trend_filtered_rsi5_reversion_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 9,
+    "hypothesis_label": "F02",
+    "strategy_id": "trend_filtered_rsi5_reversion_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 10,
+    "hypothesis_label": "F02",
+    "strategy_id": "trend_filtered_rsi5_reversion_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 11,
+    "hypothesis_label": "F02",
+    "strategy_id": "trend_filtered_rsi5_reversion_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 12,
+    "hypothesis_label": "F02",
+    "strategy_id": "trend_filtered_rsi5_reversion_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 13,
+    "hypothesis_label": "F03",
+    "strategy_id": "trend_filtered_extreme_3d_atr_reversal_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 14,
+    "hypothesis_label": "F03",
+    "strategy_id": "trend_filtered_extreme_3d_atr_reversal_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 15,
+    "hypothesis_label": "F03",
+    "strategy_id": "trend_filtered_extreme_3d_atr_reversal_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 16,
+    "hypothesis_label": "F03",
+    "strategy_id": "trend_filtered_extreme_3d_atr_reversal_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 17,
+    "hypothesis_label": "F03",
+    "strategy_id": "trend_filtered_extreme_3d_atr_reversal_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 18,
+    "hypothesis_label": "F03",
+    "strategy_id": "trend_filtered_extreme_3d_atr_reversal_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 19,
+    "hypothesis_label": "F04",
+    "strategy_id": "close_channel_100_50_trend_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 20,
+    "hypothesis_label": "F04",
+    "strategy_id": "close_channel_100_50_trend_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 21,
+    "hypothesis_label": "F04",
+    "strategy_id": "close_channel_100_50_trend_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 22,
+    "hypothesis_label": "F04",
+    "strategy_id": "close_channel_100_50_trend_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 23,
+    "hypothesis_label": "F04",
+    "strategy_id": "close_channel_100_50_trend_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 24,
+    "hypothesis_label": "F04",
+    "strategy_id": "close_channel_100_50_trend_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 25,
+    "hypothesis_label": "F05",
+    "strategy_id": "monthly_10month_trend_timing_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 26,
+    "hypothesis_label": "F05",
+    "strategy_id": "monthly_10month_trend_timing_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 27,
+    "hypothesis_label": "F05",
+    "strategy_id": "monthly_10month_trend_timing_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 28,
+    "hypothesis_label": "F05",
+    "strategy_id": "monthly_10month_trend_timing_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 29,
+    "hypothesis_label": "F05",
+    "strategy_id": "monthly_10month_trend_timing_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 30,
+    "hypothesis_label": "F05",
+    "strategy_id": "monthly_10month_trend_timing_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 31,
+    "hypothesis_label": "F06",
+    "strategy_id": "trend_filtered_zscore20_reversion_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 32,
+    "hypothesis_label": "F06",
+    "strategy_id": "trend_filtered_zscore20_reversion_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 33,
+    "hypothesis_label": "F06",
+    "strategy_id": "trend_filtered_zscore20_reversion_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 34,
+    "hypothesis_label": "F06",
+    "strategy_id": "trend_filtered_zscore20_reversion_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 35,
+    "hypothesis_label": "F06",
+    "strategy_id": "trend_filtered_zscore20_reversion_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 36,
+    "hypothesis_label": "F06",
+    "strategy_id": "trend_filtered_zscore20_reversion_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 37,
+    "hypothesis_label": "F07",
+    "strategy_id": "volatility_contraction_breakout_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 38,
+    "hypothesis_label": "F07",
+    "strategy_id": "volatility_contraction_breakout_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 39,
+    "hypothesis_label": "F07",
+    "strategy_id": "volatility_contraction_breakout_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 40,
+    "hypothesis_label": "F07",
+    "strategy_id": "volatility_contraction_breakout_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 41,
+    "hypothesis_label": "F07",
+    "strategy_id": "volatility_contraction_breakout_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 42,
+    "hypothesis_label": "F07",
+    "strategy_id": "volatility_contraction_breakout_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 43,
+    "hypothesis_label": "F08",
+    "strategy_id": "monthly_12_minus_1_abs_momentum_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 44,
+    "hypothesis_label": "F08",
+    "strategy_id": "monthly_12_minus_1_abs_momentum_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 45,
+    "hypothesis_label": "F08",
+    "strategy_id": "monthly_12_minus_1_abs_momentum_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 46,
+    "hypothesis_label": "F08",
+    "strategy_id": "monthly_12_minus_1_abs_momentum_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 47,
+    "hypothesis_label": "F08",
+    "strategy_id": "monthly_12_minus_1_abs_momentum_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 48,
+    "hypothesis_label": "F08",
+    "strategy_id": "monthly_12_minus_1_abs_momentum_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 49,
+    "hypothesis_label": "F09",
+    "strategy_id": "delayed_overnight_gap_reversal_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 50,
+    "hypothesis_label": "F09",
+    "strategy_id": "delayed_overnight_gap_reversal_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 51,
+    "hypothesis_label": "F09",
+    "strategy_id": "delayed_overnight_gap_reversal_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 52,
+    "hypothesis_label": "F09",
+    "strategy_id": "delayed_overnight_gap_reversal_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 53,
+    "hypothesis_label": "F09",
+    "strategy_id": "delayed_overnight_gap_reversal_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 54,
+    "hypothesis_label": "F09",
+    "strategy_id": "delayed_overnight_gap_reversal_v1",
+    "symbol": "XLE"
+   },
+   {
+    "order": 55,
+    "hypothesis_label": "F10",
+    "strategy_id": "monthly_52week_high_proximity_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 56,
+    "hypothesis_label": "F10",
+    "strategy_id": "monthly_52week_high_proximity_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 57,
+    "hypothesis_label": "F10",
+    "strategy_id": "monthly_52week_high_proximity_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 58,
+    "hypothesis_label": "F10",
+    "strategy_id": "monthly_52week_high_proximity_v1",
+    "symbol": "SMH"
+   },
+   {
+    "order": 59,
+    "hypothesis_label": "F10",
+    "strategy_id": "monthly_52week_high_proximity_v1",
+    "symbol": "XBI"
+   },
+   {
+    "order": 60,
+    "hypothesis_label": "F10",
+    "strategy_id": "monthly_52week_high_proximity_v1",
+    "symbol": "XLE"
+   }
+  ]
+ },
+ "experiment": {
+  "real_experiment_id": "M1-NATIVE-HYPOTHESIS-BATCH-03-DISCOVERY",
+  "registry_db_relative_path": "runs/run_batch_03/registry/research.sqlite3",
+  "trial_per_hypothesis_symbol": true,
+  "population_policy": "ONE experiment id holds the ten families and all sixty trials. The multiple-testing judge scope is the experiment id with hypothesis_id unset: ONE batch-wide selection population of all 60; losing and failed trials are never excluded.",
+  "judge_scope": "whole experiment, never a subset",
+  "all_sixty_trials_registered_before_first_economic_evaluation": true
+ },
+ "data": {
+  "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+  "feed": "sip",
+  "timeframe": "1Day",
+  "timeframe_identity": "canonical_semantic_v1",
+  "adjustment": "all",
+  "start_utc": "2016-01-01T00:00:00Z",
+  "end_utc": "2026-09-01T00:00:00Z",
+  "completed_bars_only": true,
+  "verification_required_before_registration": "fetch/verify provider bars for all six symbols, record the provenance manifest and row counts; any symbol without sufficient adjusted history is reported, never substituted"
+ },
+ "partition": {
+  "evaluation_start_utc": "2016-03-01T00:00:00Z",
+  "test_months": 12,
+  "holdout_months": 6,
+  "expected_folds": 10,
+  "holdout_rule": "the final 6 calendar months (from 2026-03-01) are RESERVED / UNCONSUMED; discovery bars are truncated before the holdout start",
+  "warmup_note": "Engines needing 253-275 completed bars are structurally flat in the early part of fold 1; this is disclosed, not corrected."
+ },
+ "economic_protocol": {
+  "protocol_id": "economic_walk_forward_v1",
+  "signal_policy": {
+   "direction_policy": "native_exact_target_qty_v1",
+   "sizing": "exact_native_target_qty_v1",
+   "entry_threshold": 0.5,
+   "long_only": true,
+   "max_gross_exposure": 1.0
+  },
+  "cost_model": {
+   "commission_bps_per_side": 10.0,
+   "slippage_bps_per_side": 0.0
+  },
+  "execution_pricing": {
+   "pricing_model_id": "rust_conservative_bar_range_v1",
+   "slippage_bps": 5,
+   "volatility_mult_bps": 0
+  },
+  "weight_to_share": {
+   "equity_usd": 100000.0,
+   "max_position_notional_usd": 50000.0
+  },
+  "annualization": {
+   "annualization_days": 252,
+   "risk_free_rate_annual": 0.0
+  },
+  "signal_stream_protocol": "native_strategy_signal_stream_v2",
+  "quantity_semantics": {
+   "id": "absolute_target_qty_micros_v1",
+   "rule": "the economic engine holds EXACTLY the native absolute target quantity; ml_score is ignored; no weight re-sizing"
+  }
+ },
+ "native_backtest": {
+  "initial_cash_micros": 100000000000,
+  "timeframe_secs": 86400,
+  "integrity_calendar": "us-equity-regular",
+  "bars": "the same provenance-bound research bars converted deterministically, truncated at the holdout start"
+ },
+ "capital_sizing": {
+  "policy_id": "fixed_initial_capital_fraction_v1",
+  "allocation_fraction_bps": 1000,
+  "capital_basis": "native_backtest.initial_cash_micros",
+  "initial_capital_micros": 100000000000,
+  "nominal_entry_budget_micros": 10000000000,
+  "max_position_notional_usd": 50000,
+  "quantity_rule": "Q = floor(position_budget_micros / close_micros of the fully completed strategy bar on which a FLAT strategy emits its new target); position_budget_micros = floor(initial_capital_micros * 1000 / 10000) = USD 10,000; whole shares; refuse (stay flat) if the budget cannot buy one share; no +1 fallback; no compounding; no family-specific sizing; held exactly for the position lifetime",
+  "forbidden": [
+   "current-equity resizing",
+   "broker buying-power sizing",
+   "compounding",
+   "Kelly",
+   "ATR sizing",
+   "risk parity",
+   "volatility targeting",
+   "portfolio optimizer",
+   "floating-point sizing",
+   "rounding up",
+   "family-specific sizing"
+  ]
+ },
+ "benchmark": {
+  "policy_id": "capital_fraction_matched_passive_buy_hold_v1",
+  "min_alpha_pct": 0.0,
+  "scanner_cli_flag": "--benchmark-policy capital_fraction_matched_passive_buy_hold_v1",
+  "cross_substitution": "capital_matched_exact_target_buy_hold_v1 is not authorized; cross-substitution fails closed"
+ },
+ "robustness": {
+  "block_counts": [
+   8,
+   10,
+   12
+  ],
+  "dsr_max_sensitivity_range": 0.15,
+  "pbo_max_sensitivity_range": 0.15,
+  "p7a_p7b_stress": {
+   "status": "OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT",
+   "contract_schema": "p7a_p7b_stress_contract_v1 (six keys: schema_version, scenario_id, allocation_fraction_bps, stress_execution_slippage_bps, stress_execution_volatility_mult_bps, max_drawdown_ceiling_bps)",
+   "required_operator_decision": {
+    "scenario_id": "non-empty name",
+    "allocation_fraction_bps": "integer, 1 <= x < 1000",
+    "stress_execution_slippage_bps": "number >= baseline 5",
+    "stress_execution_volatility_mult_bps": "number >= baseline 0; at least one execution parameter strictly worse than baseline",
+    "max_drawdown_ceiling_bps": "integer"
+   },
+   "not_authority": "The Batch 02 values (500 bps / 15 / 10 / 0.40) were a Batch 02 predeclaration and are NOT Batch 03 authority; no stress value is invented here.",
+   "register_stress_contract": "deliberately absent until the operator decision is recorded"
+  }
+ },
+ "scanner_review": {
+  "policy": "mqk_backtest::StrategyScanReviewPolicy::default, unchanged; benchmark_policy = capital_fraction_matched_passive_buy_hold_v1",
+  "benchmark_policy": "capital_fraction_matched_passive_buy_hold_v1"
+ },
+ "promotion_policy": {
+  "note": "Thresholds carried over unchanged from Batch 02; no result may reopen them. Discovery never promotes.",
+  "MQK_PROMOTION_MIN_SHARPE": 0.5,
+  "MQK_PROMOTION_MAX_MDD": 0.25,
+  "MQK_PROMOTION_MIN_CAGR": 0.0,
+  "MQK_PROMOTION_MIN_PROFIT_FACTOR": 1.05,
+  "MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT": 0.4,
+  "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO": 0.5,
+  "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING": 0.5,
+  "MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING": 1
+ },
+ "execution_fidelity": {
+  "floor": 0.95,
+  "metric": "fraction of evaluated bars on which the simulator's discrete post-order position equals the native desired target quantity"
+ },
+ "holdout": {
+  "status": "RESERVED / UNCONSUMED",
+  "rule": "never consumed by discovery; consumed holdout data is never fresh again; a rerun requiring the holdout is a hard stop"
+ },
+ "comparison_scope": {
+  "scope": "experiment M1-NATIVE-HYPOTHESIS-BATCH-03-DISCOVERY, hypothesis_id unset",
+  "population": "all sixty predeclared trials",
+  "judge": "canonical research_multiple_testing_judge_v1 over the whole experiment; block counts 8/10/12"
+ },
+ "family_ranking": {
+  "module": "family_ranking.py",
+  "min_evaluable_trials_per_family": 4,
+  "trials_per_family": 6,
+  "non_evaluable_slot_treatment": "worst (never dropped, never imputed)",
+  "rank_keys": [
+   "1: count of symbols with positive cost-aware benchmark alpha (descending)",
+   "2: median DSR across the six slots (descending)",
+   "3: median net alpha versus the capital-fraction matched benchmark (descending)",
+   "4: count of trials clearing robustness (descending)",
+   "5: median drawdown improvement versus the matched benchmark (descending)",
+   "6: lowest family id (ascending)"
+  ],
+  "outcome": "the top 3 families receive DISCOVERY_ADVANCED_TO_CONFIRMATION; this is NOT Promotion; individual symbol trials are never selected; no Promotion candidate is created from discovery"
+ },
+ "confirmation_preparation": {
+  "status": "PREPARED_NOT_REGISTERED",
+  "universe": [
+   "DIA",
+   "MDY",
+   "XLF",
+   "XLI",
+   "XLV",
+   "XLP"
+  ],
+  "future_trials": 18,
+  "rule": "3 advanced families x 6 symbols, registered only under a later explicit authorization; history sufficiency is verified at that time; any symbol without sufficient history is reported and never substituted"
+ },
+ "batch_stopping_rule": {
+  "trials": 60,
+  "stop_status": "BATCH03_PREDECLARED_NOT_EXECUTED",
+  "economic_attempts": 0,
+  "no_additional_variants": [
+   "RSI2/3/7",
+   "alternate thresholds",
+   "Donchian variants",
+   "hold lengths",
+   "ATR multipliers",
+   "MA grids",
+   "stops",
+   "individual stocks"
+  ],
+  "infrastructure_failure": "retry the same trial under a new attempt id; an economic failure is finalized failed and never retried"
+ },
+ "attempt_identity_rules": "A retry is a new attempt of the SAME trial_id. trial_id derives from experiment, strategy family/version, symbol, canonical timeframe, native inner and capital-wrapped semantic fingerprints, bars provenance, partition, economic protocol, capital sizing and the full stress contract; never from a result value.",
+ "paper_live": {
+  "paper": "NOT ACTIVATED",
+  "production_promotion_state": "NOT WRITTEN",
+  "live": "NOT TOUCHED",
+  "daemon_capital_fraction_dispatch": "AUTHORIZED_NEXT / NOT YET COMPLETE"
+ },
+ "forbidden_after_predeclaration": [
+  "changing symbols, families or trial order",
+  "changing any family rule, threshold, horizon, hold length or equality boundary",
+  "changing the 1000 bps baseline sizing or the capital basis",
+  "changing execution chronology",
+  "changing commission or slippage to improve outcomes",
+  "changing the benchmark or falling back to Benchmark V2",
+  "changing scanner, Promotion or robustness thresholds",
+  "changing DSR/PBO policy",
+  "changing the partition",
+  "consuming the holdout",
+  "dropping losing trials",
+  "winner-only registration",
+  "defining identity from results",
+  "retrying economic failures",
+  "adding variants or individual stocks",
+  "shorting",
+  "hand promotion",
+  "Paper activation",
+  "Live activation"
+ ]
+}

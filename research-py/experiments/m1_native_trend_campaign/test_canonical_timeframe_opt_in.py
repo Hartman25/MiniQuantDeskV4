@@ -18,7 +18,7 @@ sys.path.insert(0, str(HERE))
 
 import run_batch as rb  # noqa: E402
 
-HISTORICAL = sorted(HERE.glob("PREDECLARED_BATCH_0*.json"))
+HISTORICAL = sorted(p for p in HERE.glob("PREDECLARED_BATCH_0*.json") if p.name != "PREDECLARED_BATCH_03.json")
 
 
 @pytest.mark.parametrize("path", HISTORICAL, ids=lambda p: p.name)
