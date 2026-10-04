@@ -15,6 +15,45 @@ pub(crate) fn complete_positive_tail(recent: &[BarStub], n: usize) -> Option<&[B
     Some(tail)
 }
 
+/// Like [`complete_positive_tail`], and additionally every open/high/low is positive with
+/// `low <= high` (engines that read the full bar range).
+pub(crate) fn complete_valid_ohlc_tail(recent: &[BarStub], n: usize) -> Option<&[BarStub]> {
+    let tail = complete_positive_tail(recent, n)?;
+    tail.iter()
+        .all(|b| b.open_micros > 0 && b.low_micros > 0 && b.low_micros <= b.high_micros)
+        .then_some(tail)
+}
+
+/// Shared stateful-engine driver: the instance owns `state`; on its first call a fresh
+/// instance replays `step` over every earlier completed bar of that call's window (a no-op
+/// for a one-bar window). A window shorter than `required` resets to `flat`; an incomplete
+/// latest bar holds the state. `step` receives exactly `required` bars ending at the bar
+/// being decided and fails closed to `flat` on a malformed window.
+pub(crate) fn advance_state<S: Copy>(
+    state: &mut S,
+    initialized: &mut bool,
+    bars: &[BarStub],
+    required: usize,
+    flat: S,
+    step: impl Fn(S, &[BarStub]) -> S,
+) {
+    if !*initialized {
+        *initialized = true;
+        for t in 0..bars.len().saturating_sub(1) {
+            if t + 1 >= required && bars[t].is_complete {
+                *state = step(*state, &bars[t + 1 - required..=t]);
+            }
+        }
+    }
+    if bars.len() < required {
+        *state = flat;
+        return;
+    }
+    if bars.last().is_some_and(|b| b.is_complete) {
+        *state = step(*state, &bars[bars.len() - required..]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

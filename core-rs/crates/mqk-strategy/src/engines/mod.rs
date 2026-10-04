@@ -3,15 +3,20 @@ use crate::{PluginRegistry, RegistryError, Strategy};
 use mqk_execution::AssetClass;
 
 pub mod absolute_momentum_252;
+mod daily_math;
 pub mod dual_sma_50_200_trend;
 pub mod halloween_nov_apr;
 pub mod intraday_scalper;
 pub mod mean_reversion;
+mod monthly;
+pub mod monthly_multihorizon_abs_momentum_consensus_v1;
 pub mod near_high_momentum_252_3pct;
 pub mod pullback_mean_reversion_20_2;
 mod session_calendar;
 pub mod swing_momentum;
 pub mod trading_range_breakout_50d_hold10;
+pub mod trend_filtered_extreme_3d_atr_reversal_v1;
+pub mod trend_filtered_rsi5_reversion_v1;
 pub mod trend_pullback_5d_4pct_hold5;
 pub mod trend_sma50;
 pub mod turn_of_month_last1_first3;
@@ -26,10 +31,13 @@ pub use intraday_scalper::{
     IntradayScalperStrategy,
 };
 pub use mean_reversion::MeanReversionStrategy;
+pub use monthly_multihorizon_abs_momentum_consensus_v1::MonthlyMultihorizonAbsMomentumConsensusV1Strategy;
 pub use near_high_momentum_252_3pct::NearHighMomentum2523PctStrategy;
 pub use pullback_mean_reversion_20_2::PullbackMeanReversion202Strategy;
 pub use swing_momentum::SwingMomentumStrategy;
 pub use trading_range_breakout_50d_hold10::TradingRangeBreakout50dHold10Strategy;
+pub use trend_filtered_extreme_3d_atr_reversal_v1::TrendFilteredExtreme3dAtrReversalV1Strategy;
+pub use trend_filtered_rsi5_reversion_v1::TrendFilteredRsi5ReversionV1Strategy;
 pub use trend_pullback_5d_4pct_hold5::TrendPullback5d4pctHold5Strategy;
 pub use trend_sma50::TrendSma50Strategy;
 pub use turn_of_month_last1_first3::TurnOfMonthLast1First3Strategy;
