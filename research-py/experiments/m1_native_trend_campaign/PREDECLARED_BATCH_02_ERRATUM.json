@@ -1,0 +1,166 @@
+{
+  "erratum_id": "m1_native_hypothesis_batch_02_predeclaration_erratum_01",
+  "status": "POST_RUN_NON_ECONOMIC_METADATA_ERRATUM",
+  "mission_id": "V4-M1-NATIVE-HYPOTHESIS-BATCH-02-INDEPENDENT-REVIEW-CORRECTION-01",
+  "finding_id": "IR-B02-01",
+  "original_predeclaration_path": "research-py/experiments/m1_native_trend_campaign/PREDECLARED_BATCH_02.json",
+  "original_predeclaration_sha256": "bee592611550ddbcb282a861754eb2e5dd02e2f0f699b84b203b429fb7ffed05",
+  "original_predeclaration_sha256_lf_blob": "6810358253d2d586b527d0a1588044a9ec31178c94485d567a0a074385952b82",
+  "sha256_note": "original_predeclaration_sha256 is the digest the independent reviewer and this correction observed on the Windows (CRLF) working copy; original_predeclaration_sha256_lf_blob is the digest of the committed LF blob (git cat-file). The two differ by the 645 line endings only; the audit accepts exactly these two forms.",
+  "original_predeclaration_commit": "368c1f478483d6284090161b3de814588171ec71",
+  "discovered_by": "independent review",
+  "discovered_after_results": true,
+  "original_bytes_modified": false,
+  "economic_attempts_rerun": false,
+  "economic_results_modified": false,
+  "strategy_parameters_modified": false,
+  "thresholds_modified": false,
+  "holdout_consumed": false,
+  "defect": "The formal predeclaration copied six descriptive strings verbatim from the Batch 01 corrected declaration. They describe Batch 01 (fixed one-share quantity, Benchmark V2, old warm-ups, old run root) and contradict the Batch 02 contract that the same file states and that actually controlled the run. The original file stays immutable; this erratum is the audit authority for the six paths.",
+  "operative_batch02_truth": {
+    "required_history_bars": {
+      "H1": 1,
+      "H2": 1,
+      "H3": 60
+    },
+    "raw_strategy_direction": "0 / +1 long-flat",
+    "executable_quantity": "capital-fraction WRAPPED Q",
+    "sizing_policy_id": "fixed_initial_capital_fraction_v1",
+    "baseline_allocation_fraction_bps": 1000,
+    "immutable_initial_capital_usd": 100000,
+    "nominal_baseline_entry_budget_usd": 10000,
+    "half_exposure_stress_allocation_fraction_bps": 500,
+    "half_exposure_stress_nominal_entry_budget_usd": 5000,
+    "half_exposure_stress_quantity": "recomputed Q, never a cap on the baseline Q",
+    "benchmark_policy_id": "capital_fraction_matched_passive_buy_hold_v1",
+    "historical_benchmark_v2": "NOT Batch-02 authority",
+    "run_root": "runs/run_batch_02"
+  },
+  "recorded_identity": {
+    "trial_count": 15,
+    "trial_ids_in_declared_order_sha256": "b3f2e2ba18371ab14cf4ce7a567e4d7e213fcf89b81fbef1869784d2051ca5c4",
+    "trial_ids_digest_rule": "sha256 over the 15 canonical trial ids joined by '\\n' (no trailing newline) in universe.trials order, read from the Batch 02 trials_index.json"
+  },
+  "stale_fields": [
+    {
+      "id": "E1",
+      "json_path": "/partition/warmup_note",
+      "original_value": "The partition is carried over unchanged from the closed campaigns. The Rust emitter receives bars from 2016-01-04; the 252/253/204-bar warm-ups end during 2016-2017, so the early part of fold 1 is structurally flat for the affected engines.",
+      "corrected_value": "The partition is carried over unchanged from the closed campaigns. The Rust emitter receives bars from 2016-01-04. Batch 02 requires 1 / 1 / 60 completed bars for H1 / H2 / H3 (hypotheses[].required_history_bars): H1 and H2 target from the first completed bar and only H3 is structurally flat until it has 60 completed bars. The 252/253/204-bar warm-ups belong to Batch 01 and do not apply.",
+      "classification": "NON_EXECUTION_AUTHORITATIVE_DESCRIPTION",
+      "stale_because": "252/253/204 are the Batch 01 SMA warm-ups.",
+      "executable_authority": [
+        "hypotheses[].required_history_bars (1/1/60), checked by run_batch.py against the CLI native-fingerprint required_history_bars",
+        "partition.evaluation_start_utc / test_months / holdout_months / expected_folds"
+      ]
+    },
+    {
+      "id": "E2",
+      "json_path": "/economic_protocol/quantity_semantics/executable_targets",
+      "original_value": "0 or exactly +1 share (every predeclared engine is fixed-one-share and long/flat)",
+      "corrected_value": "The raw native engine direction is 0 or +1 (long/flat). The executable absolute quantity is resolved by the accepted FixedInitialCapitalFractionV1 wrapper (capital_sizing: 1000 bps of USD 100,000 immutable capital) as whole shares Q = floor(position_budget_micros / close_micros of the completed entry bar); the wrapped native target is 0 or Q, held for the position lifetime.",
+      "classification": "NON_EXECUTION_AUTHORITATIVE_DESCRIPTION",
+      "stale_because": "Batch 01 fixed-one-share prose; Batch 02 targets are capital-fraction wrapped Q.",
+      "executable_authority": [
+        "capital_sizing (policy_id, allocation_fraction_bps, capital_basis) via run_batch.sizing_args / research_capital_sizing",
+        "economic_protocol.signal_policy.direction_policy / sizing (native_exact_target_qty_v1 / exact_native_target_qty_v1)",
+        "NATIVE_QUANTITY_SEMANTICS_ID in mqk_research.ml.native_signal_registry_integration"
+      ]
+    },
+    {
+      "id": "E3",
+      "json_path": "/economic_protocol/quantity_semantics/rule",
+      "original_value": "the economic engine holds EXACTLY the native absolute target quantity; ml_score is ignored; no weight re-sizing; a +1 desired / +N held mismatch is a fidelity failure",
+      "corrected_value": "the economic engine holds EXACTLY the native absolute target quantity emitted by the capital-fraction wrapper (0 or the resolved Q); ml_score is ignored; no weight re-sizing; a mismatch between the wrapped desired Q and the held quantity is a fidelity failure. A raw +1 direction is converted to Q by the wrapper and is not itself the desired quantity.",
+      "classification": "NON_EXECUTION_AUTHORITATIVE_DESCRIPTION",
+      "stale_because": "'+1 desired / +N held mismatch' presumes fixed one-share desired quantities and contradicts the accepted wrapper that converts +1 into Q.",
+      "executable_authority": [
+        "execution_fidelity.floor 0.95 enforced by native_exact_target_fidelity / NATIVE_EXECUTION_FIDELITY_FLOOR (library constants, not read from this file)",
+        "the signal-stream loader's expected_capital_sizing verification (research_capital_sizing)"
+      ]
+    },
+    {
+      "id": "E4",
+      "json_path": "/native_backtest/initial_cash_rule",
+      "original_value": "USD 100,000 = economic_protocol.weight_to_share.equity_usd: Research, Backtest, scanner and Benchmark V2 share ONE capital basis; run_batch.py refuses any other value",
+      "corrected_value": "USD 100,000 = economic_protocol.weight_to_share.equity_usd = capital_sizing.initial_capital_micros: Research, Backtest, scanner and the capital_fraction_matched_passive_buy_hold_v1 benchmark share ONE capital basis; run_batch.py refuses any other value. Benchmark V2 (capital_matched_exact_target_buy_hold_v1) is not Batch 02 authority and cross-substitution fails closed.",
+      "classification": "NON_EXECUTION_AUTHORITATIVE_DESCRIPTION",
+      "stale_because": "names the Batch 01 Benchmark V2 as a capital-basis sharer; Batch 02 forbids it.",
+      "executable_authority": [
+        "native_backtest.initial_cash_micros (read by run_batch.py, equality-checked to weight_to_share.equity_usd and capital_sizing.initial_capital_micros)",
+        "benchmark.policy_id and scanner_review.benchmark_policy (BENCHMARK_CF, required by sizing_args)"
+      ]
+    },
+    {
+      "id": "E5",
+      "json_path": "/native_backtest/evidence_root_layout",
+      "original_value": "runs/run_batch_01_corrected/backtest/<strategy_id>/<symbol>",
+      "corrected_value": "runs/run_batch_02/backtest/<strategy_id>/<symbol>",
+      "classification": "NON_EXECUTION_AUTHORITATIVE_DESCRIPTION",
+      "stale_because": "names the Batch 01 corrected run root.",
+      "executable_authority": [
+        "run_dir (runs/run_batch_02), read by run_batch.py, summarize_batch.py, select_batch.py and holdout_guard.py; every artifact path is RUN / 'backtest' / strategy / symbol"
+      ]
+    },
+    {
+      "id": "E6",
+      "json_path": "/universe/survivorship_note",
+      "original_value": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean. Each symbol is its own registered trial and the judge deflates over all five, so selection among them is accounted for; residual survivorship of the list itself is a stated limitation.",
+      "corrected_value": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean. Each (hypothesis, symbol) pair is its own registered trial (15 in total) and the single batch-wide judge deflates over all fifteen, so selection among them is accounted for; residual survivorship of the list itself is a stated limitation.",
+      "classification": "NON_EXECUTION_AUTHORITATIVE_DESCRIPTION",
+      "stale_because": "'each symbol is its own trial ... all five' is the five-trial single-strategy campaign wording; Batch 02 registers 15 (hypothesis, symbol) trials under one batch-wide judge.",
+      "executable_authority": [
+        "universe.trials (15 entries, frozen order) and universe.max_trials, validated by run_batch._require_frozen_trial_structure",
+        "experiment.judge_scope / population_policy: whole experiment, hypothesis_id unset, build_multiple_testing_judge(experiment_id=...)"
+      ]
+    }
+  ],
+  "reviewed_and_already_correct": [
+    {
+      "json_path": "/scanner_review/policy",
+      "result": "matches StrategyScanReviewPolicy::default (252/5/0/0/25/1.05) and names the capital-fraction benchmark"
+    },
+    {
+      "json_path": "/economic_protocol/quantity_semantics/id",
+      "result": "equals NATIVE_QUANTITY_SEMANTICS_ID absolute_target_qty_micros_v1, true for wrapped Q"
+    },
+    {
+      "json_path": "/economic_protocol/signal_policy",
+      "result": "executable (SignalPolicySpec); exact native target quantity is the wrapped Q"
+    },
+    {
+      "json_path": "/execution_fidelity/metric",
+      "result": "compares simulator position with the native desired target quantity, which is the wrapped Q"
+    },
+    {
+      "json_path": "/data/fallback_if_corporate_action_gate_refuses/note",
+      "result": "generic, true"
+    },
+    {
+      "json_path": "/partition/holdout_rule",
+      "result": "generic, true"
+    },
+    {
+      "json_path": "/scanner_review/data",
+      "result": "generic, true"
+    }
+  ],
+  "invariance_proof": {
+    "method": "a disposable in-memory copy of the original declaration has ONLY the stale_fields json_path values replaced by corrected_value; every derived identity and executable input is recomputed through the real run_batch.py functions and compared with the original's",
+    "compared": [
+      "15 canonical trial ids and identity_json",
+      "hypotheses / trial order / required_history_bars",
+      "baseline sizing_args, native_bridge_args and research_capital_sizing",
+      "stress native_bridge_args at the stress allocation_fraction_bps and stress_plan",
+      "_economic_spec derivation",
+      "benchmark policy and the scanner scan-strategies argument vector",
+      "Backtest csv argument vector and integrity arguments",
+      "registration gate inventory (15 registered, 0 attempts)",
+      "selection inputs (promotion_policy, max_trials) and holdout guard inputs"
+    ],
+    "committed_test": "research-py/experiments/m1_native_trend_campaign/test_batch02_predeclaration_erratum.py",
+    "real_artifact_proof": "research-py/experiments/m1_native_trend_campaign/batch02_erratum.py --real reproduces the 15 recorded trial ids from the recorded fingerprints and data provenance under both the original and the corrected declaration",
+    "negative_controls": "the same harness reports a change when an executable field (allocation_fraction_bps, commission, initial cash, benchmark policy, stress bps, a trial id source) is altered, and when an executable path is falsely listed as descriptive"
+  },
+  "future_declaration_rule": "A declaration must not copy descriptive text from an earlier campaign and treat byte-equality with that campaign as proof of correctness. The audit freezes explicit policy values, and every descriptive string leaf (20+ characters, not a bare identifier/hash/timestamp) byte-identical to the Batch 01 corrected declaration must be individually reviewed and listed, otherwise it is a defect (batch02_erratum.unreviewed_copied_descriptions)."
+}

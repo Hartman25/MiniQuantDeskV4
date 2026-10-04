@@ -1,7 +1,10 @@
 """Guards the frozen Batch 02 predeclaration.
 
-Anything an observed result could tempt someone to tune must stay byte-identical to the
-accepted corrected Batch 01 contract, and every new Batch 02 field is pinned literally.
+Every economic policy value an observed result could tempt someone to tune is frozen below BY PATH against
+the accepted corrected Batch 01 contract, and every new Batch 02 field is pinned literally. Descriptive
+prose is deliberately NOT required to equal Batch 01: copied prose is audited separately
+(test_batch02_predeclaration_erratum.py), because byte-equality with an older campaign proves a sentence
+was copied, not that it is true.
 """
 
 from __future__ import annotations
@@ -9,9 +12,14 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import batch02_erratum as ea  # noqa: E402
+
 OLD = json.loads((HERE / "PREDECLARED_BATCH_01_CORRECTED.json").read_text(encoding="utf-8"))
 NEW = json.loads((HERE / "PREDECLARED_BATCH_02.json").read_text(encoding="utf-8"))
 SYMS = ["SPY", "EFA", "IEF", "VNQ", "GLD"]
@@ -34,12 +42,58 @@ def test_identity_and_scope():
     assert NEW["experiment"]["real_experiment_id"] != OLD["experiment"]["real_experiment_id"]
 
 
-def test_frozen_blocks_are_byte_identical_to_the_accepted_contract():
-    for key in ("data", "partition", "economic_protocol", "native_backtest", "promotion_policy", "rejection_gates",
-                "execution_fidelity", "holdout", "activity_report"):
-        assert NEW[key] == OLD[key], key
-    for key in ("block_counts", "dsr_max_sensitivity_range", "pbo_max_sensitivity_range"):
-        assert NEW["robustness"][key] == OLD["robustness"][key], key
+FROZEN_POLICY_PATHS = (
+    # DATA
+    "/data/path", "/data/feed", "/data/timeframe", "/data/adjustment", "/data/start_utc", "/data/end_utc",
+    "/data/asof", "/data/completed_bars_only", "/data/fallback_if_corporate_action_gate_refuses/end_utc",
+    "/data/reuse_verified_data_from/run_dir", "/data/reuse_verified_data_from/expected_artifact_sha256",
+    "/data/reuse_verified_data_from/expected_row_count",
+    "/data/reuse_verified_data_from/expected_canonical_semantic_bars_hash",
+    "/data/reuse_verified_data_from/expected_source_attestation_id",
+    # PARTITION and HOLDOUT
+    "/partition/evaluation_start_utc", "/partition/test_months", "/partition/holdout_months",
+    "/partition/expected_folds", "/partition/holdout_rule", "/holdout/status",
+    # ECONOMIC POLICY
+    "/economic_protocol/protocol_id", "/economic_protocol/signal_stream_protocol",
+    "/economic_protocol/signal_policy/direction_policy", "/economic_protocol/signal_policy/sizing",
+    "/economic_protocol/signal_policy/entry_threshold", "/economic_protocol/signal_policy/long_only",
+    "/economic_protocol/signal_policy/max_gross_exposure",
+    "/economic_protocol/cost_model/commission_bps_per_side", "/economic_protocol/cost_model/slippage_bps_per_side",
+    "/economic_protocol/execution_pricing/pricing_model_id", "/economic_protocol/execution_pricing/slippage_bps",
+    "/economic_protocol/execution_pricing/volatility_mult_bps",
+    "/economic_protocol/weight_to_share/equity_usd", "/economic_protocol/weight_to_share/max_position_notional_usd",
+    "/economic_protocol/annualization/annualization_days", "/economic_protocol/annualization/risk_free_rate_annual",
+    "/economic_protocol/quantity_semantics/id",
+    # CAPITAL and Backtest identity inputs
+    "/native_backtest/initial_cash_micros", "/native_backtest/timeframe_secs", "/native_backtest/integrity_calendar",
+    # PROMOTION THRESHOLDS, rejection gates, fidelity floor
+    "/promotion_policy/MQK_PROMOTION_MIN_SHARPE", "/promotion_policy/MQK_PROMOTION_MAX_MDD",
+    "/promotion_policy/MQK_PROMOTION_MIN_CAGR", "/promotion_policy/MQK_PROMOTION_MIN_PROFIT_FACTOR",
+    "/promotion_policy/MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT",
+    "/promotion_policy/MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO",
+    "/promotion_policy/MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING",
+    "/promotion_policy/MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING",
+    "/rejection_gates/0", "/rejection_gates/1", "/rejection_gates/2", "/rejection_gates/3", "/rejection_gates/4",
+    "/rejection_gates/5", "/execution_fidelity/floor",
+    # ROBUSTNESS: block counts, sensitivity ceilings, non-sizing stress execution knobs
+    "/robustness/block_counts/0", "/robustness/block_counts/1", "/robustness/block_counts/2",
+    "/robustness/dsr_max_sensitivity_range", "/robustness/pbo_max_sensitivity_range",
+    "/robustness/p7a_p7b_stress/stress_execution_slippage_bps",
+    "/robustness/p7a_p7b_stress/stress_execution_volatility_mult_bps",
+    "/robustness/p7a_p7b_stress/max_drawdown_ceiling",
+    "/activity_report/gate", "/activity_report/descriptive_only",
+)
+
+
+def test_frozen_economic_policy_is_carried_over_explicitly_not_by_whole_block():
+    old, new = ea.leaves(OLD), ea.leaves(NEW)
+    for path in FROZEN_POLICY_PATHS:
+        assert path in old and path in new, path
+        assert type(new[path]) is type(old[path]) and new[path] == old[path], path
+    assert len(set(FROZEN_POLICY_PATHS)) == len(FROZEN_POLICY_PATHS)
+    # The only block-level policy that must NOT carry over is the superseded fixed-quantity stress cap.
+    assert "/robustness/p7a_p7b_stress/stress_max_position_notional_usd" in old
+    assert "/robustness/p7a_p7b_stress/stress_max_position_notional_usd" not in new
     assert NEW["promotion_policy"]["MQK_PROMOTION_MIN_SHARPE"] == 0.5
     assert NEW["promotion_policy"]["MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING"] == 1
 
