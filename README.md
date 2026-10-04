@@ -49,7 +49,7 @@ Live trading is disabled and not ready.
 | Research / backtest stack | Native strategy engines, causal Backtest, scanner/review with explicit versioned benchmark policy, Promotion gate, statistical judge |
 | Native Sizing V1 (`fixed_initial_capital_fraction_v1`) | **PUSHED-VERIFIED** — GitHub CI #621 (run 37145565796), SUCCESS, 6/6 jobs, on the exact pushed head |
 | Research Batch 01 | **BATCH_REJECTED** (no `paper_candidate`) |
-| Research Batch 02 | **NOT STARTED — next** (formal predeclaration not yet committed; no hypotheses run, no results) |
+| Research Batch 02 | **BATCH_REJECTED** — 15 trials, 0 `paper_candidate`; local, not pushed, pending independent review (`docs/research/M1_BATCH02_RESULT.md`) |
 | Promotion | **None** — no strategy is selected or promoted |
 | Paper deployment | **Inactive** — no active deployed Paper strategy; pending a valid promotable candidate |
 | Final holdout | **RESERVED / UNCONSUMED** |
@@ -76,7 +76,7 @@ complete and none is the current target.
 
 ```mermaid
 flowchart LR
-  A[Research<br/>Batch 02 next] --> B[Qualified candidate]
+  A[Research<br/>Batches 01-02 rejected] --> B[Qualified candidate]
   B --> C[Promotion eligibility]
   C --> D[Paper deployment<br/>verification - M1.9]
   D --> E[10 countable autonomous<br/>Paper sessions, 5 consecutive clean - M1.10]
@@ -86,16 +86,16 @@ flowchart LR
 Text form: Research → candidate → Promotion eligibility → Paper deployment verification → 10 countable sessions
 with 5 consecutive clean → M1 complete.
 
-Where we are on that path: Batch 01 was rejected, Batch 02 is next, and **every step after Research is still
-open**. In particular:
+Where we are on that path: Batches 01 and 02 were rejected, any further research campaign needs a new operator
+decision, and **every step after Research is still open**. In particular:
 
 - candidate discovery and the promotion path are open — there is no candidate yet;
 - M1.9, verification of the actual deployed Paper state, is open;
 - M1.10, ten countable autonomous Paper sessions including five consecutive clean ones, is open.
 
-Batch 02 is **not started**. The operator-selected/planned hypotheses for its formal predeclaration are turn-of-month,
-Halloween / November–April, and a 50-day range breakout with a 10-day hold. The canonical predeclaration has not yet
-been committed, and none of them has been run.
+Batch 02 (turn-of-month, Halloween / November–April, and a 50-day range breakout with a 10-day hold; 3 hypotheses ×
+5 symbols) ran once under its committed predeclaration and produced no `paper_candidate`. No follow-up hypothesis or
+parameter rescue is authorized.
 
 ## Architecture at a glance
 

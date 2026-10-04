@@ -112,7 +112,7 @@ def main() -> None:
             "benchmark_evidence": rev["benchmark_capital_fraction"] if CAPITAL_FRACTION else rev["benchmark_v2"],
         })
     (RUN / "batch_results.json").write_text(json.dumps(rows, indent=1, sort_keys=True), encoding="utf-8")
-    print("| # | strategy | sym | net | gross | Sharpe | DSR | CAGR | maxDD | PF(rust) | prof.mo | agree | trades | cost drag | qty | V2 ret% | alpha V2% | legacy bench% (info) | judge | review | reasons |")
+    print("| # | strategy | sym | net | gross | Sharpe | DSR | CAGR | maxDD | PF(rust) | prof.mo | agree | trades | cost drag | qty | bench ret% | alpha% | legacy bench% (info) | judge | review | reasons |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     def f(v, spec=".3f"):
         return "n/a" if v is None else format(v, spec)

@@ -6,6 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -28. Native Hypothesis Batch 02 Rejected (2026-10-03, `V4-M1-NATIVE-HYPOTHESIS-BATCH-02-01`)
+
+Local only, **not pushed**. Supersedes the "Batch 02 NOT STARTED" wording of -27 and older entries. Records: `docs/research/M1_BATCH02_RESULT.md`, `docs/research/M1_BATCH02_CENSUS.md`, ledger G2.16.
+
+- Batch 02 (H1 turn-of-month last-1/first-3, H2 Halloween Nov–Apr, H3 50-day range breakout / hold-10; 3 × 5 symbols = 15 trials, one experiment, one judge) ran once under a predeclaration committed (`368c1f47`) before any engine, calendar code, registration or result. All 15 trials were registered with 0 attempts before the first attempt; 15 attempts, 12 evaluable, 3 H1 failed attempts (engine `MaxDrawdownBreached` halt). Judge PBO 0.0913, best DSR 0.0159 (needs 0.5), **0 `paper_candidate`**, 0 eligible, selected trial NONE. Families all `FAMILY_REJECTED`; batch `BATCH_REJECTED`. No H4 or rescue campaign is authorized.
+- New shared authority: `mqk-integrity::sessions` (`us_equity_regular_sessions_v1`, 2016-01-01..2026-12-31, 105 closures, content sha256 `3249ee51…76de`, bound into H1/H2 fingerprints); H1/H2 fail closed flat outside coverage (Paper cannot run them past 2026-12-31 until the calendar is extended under a new identity). Registry universe 14.
+- Half-exposure robustness stress is a recomputed 500 bps capital-fraction quantity (evaluation scenario of the same trial), never a USD cap (the accepted exact-target replay refuses a binding cap; an accidental UI selection of a USD 25,000 cap was voided by the operator).
+- Harness defect found and fixed during the run: the Rust robustness gauntlet/stress suite could never match a capital-fraction candidate's fingerprint (`a360d2c1`); downstream stages were re-run (pass 2); pass-1 robustness verdicts are VOID; no economic attempt was retried.
+- M1 remains `M1_BLOCKED`. Batch 01 and Batch 02 `BATCH_REJECTED`; Promotion NONE; Active Paper strategy/deployment NONE / INACTIVE; final holdout RESERVED / UNCONSUMED (post-run guard clean); Live DISABLED / NOT TOUCHED. M1.9 and M1.10 OPEN; M1 is not complete.
+- Next exact step: independent ChatGPT review of this controller's local commits (at most one correction) → push → exact-head CI; any further research campaign needs a new explicit operator decision.
+
 ## -27. Native Sizing V1 Pushed-Verified (2026-10-03, `V4-README-CURRENT-TRUTH-INTEGRATION-CORRECTION-01`)
 
 Current truth; supersedes the "Not pushed" lines of -26 and -25 (and of older entries for commits at or below `92d337b6`). Record: ledger G2.15A.

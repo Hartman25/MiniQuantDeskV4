@@ -716,6 +716,27 @@ Current-truth addendum; supersedes the "local, not pushed" and "GitHub CI not ve
 - The historical genuine Paper trade lifecycle and genuine no-trade lifecycle remain accepted/frozen evidence; neither implies a strategy is currently deployed.
 - M1 is NOT complete. Docs-only commits above `92d337b6` change no production behavior; their push status is tracked by Git (`git rev-list origin/main..HEAD`), not by this ledger.
 
+### G2.16 M1 Native Hypothesis Batch 02 (`V4-M1-NATIVE-HYPOTHESIS-BATCH-02-01`, 2026-10-03) — `BATCH_REJECTED`
+
+Local, **not pushed** (baseline `e4e9dba6a51c7872565bbd929c657058c2097970` = origin/main, CI #622 green). Result: `docs/research/M1_BATCH02_RESULT.md`; census, defect dispositions and mutation summary: `docs/research/M1_BATCH02_CENSUS.md`. No other G2 status changes.
+
+| Commit | Invariant |
+|---|---|
+| `368c1f47` | Batch 02 predeclaration (3 hypotheses × 5 symbols = 15 ordered trials; calendar contract; 1000 bps baseline; 500 bps recomputed-quantity half-exposure scenario; selection/family/batch semantics) — precedes every engine, calendar change, registration and result |
+| `10aa34b1` | `mqk-integrity::sessions` `us_equity_regular_sessions_v1`: explicit 105-closure table for 2016-01-01..2026-12-31, typed refusals, no weekday fallback; independent rule derivation, published annual counts and provider-date cross-checks; 4 killed mutations |
+| `e165f1a2`, `b20b00f1` | H1 `turn_of_month_last1_first3` and H2 `halloween_nov_apr`: stateless, next-session causal, fingerprints bind the calendar content hash; registry 11 → 13; 9 killed mutations |
+| `37a48f36` | H3 `trading_range_breakout_50d_hold10`: strict 50-prior-bar maximum, 10-bar rolling event window, exactly 60 bars; registry 13 → 14; 7 killed mutations |
+| `496418c4` | Half-exposure stress as a recomputed capital-fraction quantity through the Rust resolver, Python replay, Rust finalize entry point and runner contract; 8 killed mutations |
+| `cb99a2ea` | Registration gate (exact 15 predeclared identities, zero attempts), stale-CLI probe, capital-fraction-aware evidence table, mechanical eligibility/selection (`select_batch.py`); 8 killed mutations |
+| `d365dc6e` | Holdout guard (11 artifact categories, 14 breach-injection tests) |
+| `a360d2c1` | Rust robustness gauntlet / stress suite verify the capital-fraction candidate through the wrapper fingerprint constructor (found by the first real pass; pass-1 robustness VOID; downstream re-run) |
+
+Outcome: 15 registered / 0 attempts before the first attempt; 15 attempts (12 succeeded, 3 H1 failed by engine drawdown halt); judge PBO 0.0913, effective independent trials 10.23, best DSR 0.0159; half-exposure stress, shuffled placebo and DSR/PBO sensitivity pass for all 12 evaluable trials; benchmark alpha negative for all 12; scanner/review 0 `paper_candidate`; Promotion eligibility: no trial reaches the canonical evaluator (DSR < 0.5 and review `rejected` for all); families H1/H2/H3 `FAMILY_REJECTED`; batch `BATCH_REJECTED`; selected trial NONE. Final holdout RESERVED / UNCONSUMED. Paper NOT ACTIVATED, no production promotion state, Live NOT TOUCHED, nothing pushed. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI after independent review and an authorized push.
+
+**M1 status: `M1_BLOCKED`.** The Batch-02 hypotheses lost on economics, not on software. No H4, 10-month-SMA reserve, Batch 02B/03 or rescue is authorized; further research needs a new explicit operator decision. M1.9 and M1.10 stay OPEN; M1 is not complete.
+
+Out-of-scope findings recorded, not fixed: intraday `calendar.rs` holiday/early-close table gaps (2025-01-09, 2027-12-31, 2023-07-03, 2025-07-03); `1D` vs `1Day` manifest label convention in `require_bars_match_manifest`; the promotion verifier does not independently require `stress_sizing` evidence for a capital-fraction candidate; a parallel-fixture race in `scenario_scan_canonical_config_binding_01`.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).
