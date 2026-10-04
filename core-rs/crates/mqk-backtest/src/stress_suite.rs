@@ -175,9 +175,13 @@ fn conservative_risk_limits_config(base: &BacktestConfig) -> BacktestConfig {
 fn checked_strategy(
     make_strategy: &impl Fn() -> Box<dyn Strategy>,
     expected_semantic_fingerprint: &str,
+    base_config: &BacktestConfig,
 ) -> Result<Box<dyn Strategy>, String> {
     let strategy = make_strategy();
-    let actual = strategy.semantic_fingerprint();
+    let actual = crate::robustness_gauntlet::baseline_comparable_fingerprint(
+        base_config,
+        strategy.as_ref(),
+    )?;
     if actual != expected_semantic_fingerprint {
         return Err(format!(
             "strategy semantic fingerprint mismatch: baseline candidate expects \
@@ -318,21 +322,21 @@ pub fn run_backtest_stress_suite(
             "cost_stress_2x",
             cost_stress_config(base_config, 2),
             bars,
-            checked_strategy(&make_strategy, expected_fp),
+            checked_strategy(&make_strategy, expected_fp, base_config),
             Some(baseline_final_equity_micros),
         ),
         evaluate_scenario(
             "cost_stress_3x",
             cost_stress_config(base_config, 3),
             bars,
-            checked_strategy(&make_strategy, expected_fp),
+            checked_strategy(&make_strategy, expected_fp, base_config),
             Some(baseline_final_equity_micros),
         ),
         evaluate_scenario(
             "conservative_risk_limits",
             conservative_risk_limits_config(base_config),
             bars,
-            checked_strategy(&make_strategy, expected_fp),
+            checked_strategy(&make_strategy, expected_fp, base_config),
             None,
         ),
     ];

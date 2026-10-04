@@ -549,6 +549,24 @@ impl RobustnessGauntletOutput {
 // Scenario implementations
 // ---------------------------------------------------------------------------
 
+/// The fingerprint a BASELINE report carries for the UNWRAPPED strategy `instance` under the
+/// baseline `base_config`: the instance's own fingerprint, or -- when the baseline ran under the
+/// capital-fraction policy -- the one pure wrapper constructor Backtest, Research and Promotion
+/// share (`capital_fraction_wrapped_fingerprint`). Comparing a raw instance against a wrapped
+/// baseline fingerprint can never match, which would fail every robustness scenario of every
+/// capital-fraction candidate without testing it.
+pub(crate) fn baseline_comparable_fingerprint(
+    base_config: &BacktestConfig,
+    instance: &dyn Strategy,
+) -> Result<String, String> {
+    let inner = instance.semantic_fingerprint();
+    if !base_config.sizing_policy.is_capital_fraction() {
+        return Ok(inner);
+    }
+    crate::engine::capital_fraction_wrapped_fingerprint(base_config, &inner)
+        .map_err(|e| format!("cannot derive the capital-fraction candidate identity: {e}"))
+}
+
 /// STRESS-TRANSFORM-SEMANTIC-IDENTITY-01: UNDERLYING CANDIDATE IDENTITY --
 /// proves `strategy` (a fresh, UNWRAPPED factory instance) is the same
 /// candidate the baseline was computed from, before it is ever added to an
@@ -563,8 +581,9 @@ impl RobustnessGauntletOutput {
 fn verify_candidate_identity(
     strategy: &dyn Strategy,
     expected_semantic_fingerprint: &str,
+    base_config: &BacktestConfig,
 ) -> Result<(), String> {
-    let actual = strategy.semantic_fingerprint();
+    let actual = baseline_comparable_fingerprint(base_config, strategy)?;
     if actual != expected_semantic_fingerprint {
         return Err(format!(
             "strategy semantic fingerprint mismatch: baseline candidate expects \
@@ -609,8 +628,13 @@ fn run_with_strategy(
     bars: &[BacktestBar],
     strategy: Box<dyn Strategy>,
     expected_semantic_fingerprint: &str,
+    base_config: &BacktestConfig,
 ) -> Result<BacktestReport, String> {
-    verify_candidate_identity(strategy.as_ref(), expected_semantic_fingerprint)?;
+    verify_candidate_identity(
+        strategy.as_ref(),
+        expected_semantic_fingerprint,
+        base_config,
+    )?;
     run_engine(config, bars, strategy)
 }
 
@@ -628,9 +652,11 @@ fn execution_delay_scenario(
         .map(|(_, eq)| *eq)
         .unwrap_or(initial_cash);
     let inner = make_strategy();
-    if let Err(e) =
-        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
-    {
+    if let Err(e) = verify_candidate_identity(
+        inner.as_ref(),
+        &baseline.strategy_semantic_fingerprint,
+        base_config,
+    ) {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -696,9 +722,11 @@ fn execution_delay_scenario_batch_aware(
         .map(|(_, eq)| *eq)
         .unwrap_or(initial_cash);
     let inner = make_strategy();
-    if let Err(e) =
-        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
-    {
+    if let Err(e) = verify_candidate_identity(
+        inner.as_ref(),
+        &baseline.strategy_semantic_fingerprint,
+        base_config,
+    ) {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -808,6 +836,7 @@ fn symbol_leave_one_out_scenario_with_factory(
             &filtered,
             make_strategy_for_bars(&filtered),
             &baseline.strategy_semantic_fingerprint,
+            base_config,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1071,7 +1100,10 @@ fn parameter_neighborhood_scenario(
     let mismatch_detail: std::cell::Cell<Option<String>> = std::cell::Cell::new(None);
     let rows = match run_sweep(bars, base_config, &grid, |_pt| {
         let s = make_strategy();
-        let actual = s.semantic_fingerprint();
+        let actual = match baseline_comparable_fingerprint(base_config, s.as_ref()) {
+            Ok(fp) => fp,
+            Err(e) => e,
+        };
         if actual == expected_fp {
             Some(s)
         } else {
@@ -1162,9 +1194,11 @@ fn placebo_temporal_offset_scenario(
         .unwrap_or(initial_cash);
 
     let inner = make_strategy();
-    if let Err(e) =
-        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
-    {
+    if let Err(e) = verify_candidate_identity(
+        inner.as_ref(),
+        &baseline.strategy_semantic_fingerprint,
+        base_config,
+    ) {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -1247,9 +1281,11 @@ fn placebo_temporal_offset_scenario_batch_aware(
         .unwrap_or(initial_cash);
 
     let inner = make_strategy();
-    if let Err(e) =
-        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
-    {
+    if let Err(e) = verify_candidate_identity(
+        inner.as_ref(),
+        &baseline.strategy_semantic_fingerprint,
+        base_config,
+    ) {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -1349,6 +1385,7 @@ fn conservative_capacity_stress_scenario(
         bars,
         make_strategy(),
         &baseline.strategy_semantic_fingerprint,
+        base_config,
     ) {
         Ok(report) => {
             let (passed, detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
@@ -2325,7 +2362,7 @@ mod stress_transform_semantic_identity_tests {
         let a = FingerprintedStrategy {
             fingerprint: "fp-a",
         };
-        assert!(verify_candidate_identity(&a, "fp-a").is_ok());
+        assert!(verify_candidate_identity(&a, "fp-a", &BacktestConfig::test_defaults()).is_ok());
     }
 
     // 2. raw candidate B presented as baseline A is refused BEFORE wrapping.
@@ -2334,7 +2371,7 @@ mod stress_transform_semantic_identity_tests {
         let b = FingerprintedStrategy {
             fingerprint: "fp-b",
         };
-        let err = verify_candidate_identity(&b, "fp-a")
+        let err = verify_candidate_identity(&b, "fp-a", &BacktestConfig::test_defaults())
             .expect_err("mismatched raw candidate must be refused before any wrapping occurs");
         assert!(err.contains("semantic fingerprint mismatch"));
     }
@@ -2496,7 +2533,7 @@ mod stress_transform_semantic_identity_tests {
             fingerprint: "fp-b",
         };
         assert!(
-            verify_candidate_identity(&b, "fp-a").is_err(),
+            verify_candidate_identity(&b, "fp-a", &BacktestConfig::test_defaults()).is_err(),
             "a candidate presented under the wrong baseline fingerprint must fail closed"
         );
     }
