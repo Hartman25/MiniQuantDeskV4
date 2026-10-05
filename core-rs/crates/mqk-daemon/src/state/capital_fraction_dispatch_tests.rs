@@ -23,12 +23,19 @@ const CF: &str = "fixed_initial_capital_fraction_v1";
 const TREND: &str = "trend_sma50";
 const DUAL: &str = "dual_sma_50_200_trend";
 
+/// Deterministic per-test symbol. Every `uniq`/`fresh` tag in this module must
+/// be distinct (pinned by `fixture_tags_are_unique_within_module`) so parallel
+/// tests never share a symbol.
 fn uniq(tag: &str) -> String {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|t| t.as_nanos())
-        .unwrap_or(0);
-    format!("CF{tag}{}", n % 1_000_000_000)
+    format!("CF{tag}")
+}
+
+/// Deterministic symbol with its durable residue (bars, held sizing state,
+/// seeded promotions) removed, so a rerun on the same database starts clean.
+async fn fresh(pool: &PgPool, tag: &str) -> String {
+    let sym = uniq(tag);
+    cleanup(pool, &[&sym]).await;
+    sym
 }
 
 fn cf_inputs(symbol: &str) -> StrategyBootstrapInputs {
@@ -121,7 +128,26 @@ async fn cleanup(pool: &PgPool, symbols: &[&str]) {
             .bind(s)
             .execute(pool)
             .await;
+        let _ = sqlx::query("delete from sys_strategy_held_sizing_state where symbol = $1")
+            .bind(s)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query(
+            "delete from sys_strategy_promotion_transitions \
+             where symbol = $1 and initiated_by = 'cfd-test-seed'",
+        )
+        .bind(s)
+        .execute(pool)
+        .await;
     }
+}
+
+/// Removes a fixed-identity run row; its outbox rows cascade.
+async fn reset_run(pool: &PgPool, run_id: Uuid) {
+    let _ = sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
 }
 
 fn state_with_db(pool: &PgPool) -> Arc<AppState> {
@@ -263,7 +289,7 @@ async fn stateful_inner_strategy_hold_phase_survives_restart_at_every_boundary()
     let Some(db) = db_or_skip("CFD-02").await else {
         return;
     };
-    let sym = uniq("F03");
+    let sym = fresh(&db, "F03").await;
     let bars = f03_bars(206);
     for (k, b) in bars.iter().enumerate().take(200) {
         seed_ohlc(&db, &sym, k as i64, *b).await;
@@ -304,7 +330,7 @@ async fn daemon_bar_window_carries_true_ohlc_to_the_atr_engine() {
     let Some(db) = db_or_skip("CFD-OHLC").await else {
         return;
     };
-    let sym = uniq("OHL");
+    let sym = fresh(&db, "OHL").await;
     let bars = f03_bars_padded(200, 5 * USD);
     for (k, b) in bars.iter().enumerate() {
         seed_ohlc(&db, &sym, k as i64, *b).await;
@@ -322,7 +348,7 @@ async fn restart_keeps_exact_q_exit_releases_and_reentry_resolves_anew() {
     let Some(db) = db_or_skip("CFD-01").await else {
         return;
     };
-    let sym = uniq("RST");
+    let sym = fresh(&db, "RST").await;
     seed_rising(&db, &sym, 60).await;
     let state = state_with_db(&db);
     let sel = keys(&[(&sym, TREND)]);
@@ -381,7 +407,7 @@ async fn bindings_are_isolated_by_symbol_and_by_strategy() {
     let Some(db) = db_or_skip("CFD-02").await else {
         return;
     };
-    let (s1, s2) = (uniq("ISA"), uniq("ISB"));
+    let (s1, s2) = (fresh(&db, "ISA").await, fresh(&db, "ISB").await);
     seed_rising(&db, &s1, 260).await;
     for k in 0..260 {
         seed_bar(&db, &s2, k, 200 + k).await;
@@ -430,7 +456,7 @@ async fn persistence_failure_returns_no_result_and_poisons_the_host() {
     let Some(db) = db_or_skip("CFD-03").await else {
         return;
     };
-    let sym = uniq("PRF");
+    let sym = fresh(&db, "PRF").await;
     seed_rising(&db, &sym, 60).await;
     let state = state_with_db(&db);
     let sel = keys(&[(&sym, TREND)]);
@@ -503,7 +529,7 @@ async fn whole_tick_fault_in_a_later_binding_commits_no_earlier_durable_transiti
     let Some(db) = db_or_skip("CFD-ATOM-FAULT").await else {
         return;
     };
-    let (a, b_sym) = (uniq("ATA"), uniq("ATB"));
+    let (a, b_sym) = (fresh(&db, "ATA").await, fresh(&db, "ATB").await);
     seed_rising(&db, &a, 60).await;
     seed_rising(&db, &b_sym, 60).await;
     let state = state_with_db(&db);
@@ -556,7 +582,7 @@ async fn batch_commit_failure_rolls_back_every_binding_and_poisons_all() {
     let Some(db) = db_or_skip("CFD-ATOM-DB").await else {
         return;
     };
-    let (a, b_sym) = (uniq("ADA"), uniq("ADB"));
+    let (a, b_sym) = (fresh(&db, "ADA").await, fresh(&db, "ADB").await);
     seed_rising(&db, &a, 60).await;
     seed_rising(&db, &b_sym, 60).await;
     let state = state_with_db(&db);
@@ -617,7 +643,7 @@ async fn two_durable_bindings_commit_one_batch_and_release_both_results() {
     let Some(db) = db_or_skip("CFD-ATOM-OK").await else {
         return;
     };
-    let (a, b_sym) = (uniq("AOA"), uniq("AOB"));
+    let (a, b_sym) = (fresh(&db, "AOA").await, fresh(&db, "AOB").await);
     seed_rising(&db, &a, 60).await;
     seed_rising(&db, &b_sym, 60).await;
     let state = state_with_db(&db);
@@ -651,7 +677,7 @@ async fn runtime_position_cap_clamps_the_executable_target_but_never_the_durable
     let Some(db) = db_or_skip("CFD-CAPQ").await else {
         return;
     };
-    let sym = uniq("CPQ");
+    let sym = fresh(&db, "CPQ").await;
     seed_rising(&db, &sym, 60).await;
     let state = state_with_db(&db);
     state.set_per_symbol_max_position_qty_for_test(Some(10));
@@ -704,7 +730,7 @@ async fn strategy_contract_cap_is_applied_before_commit_and_bound_to_the_stored_
     let Some(db) = db_or_skip("CFD-CAPID").await else {
         return;
     };
-    let sym = uniq("CPI");
+    let sym = fresh(&db, "CPI").await;
     seed_rising(&db, &sym, 60).await;
     let state = state_with_db(&db);
     let sel = keys(&[(&sym, TREND)]);
@@ -755,7 +781,7 @@ async fn recovery_failure_fails_the_pool_build_closed() {
     let Some(db) = db_or_skip("CFD-04").await else {
         return;
     };
-    let sym = uniq("RCF");
+    let sym = fresh(&db, "RCF").await;
     seed_rising(&db, &sym, 60).await;
     let state = state_with_db(&db);
     let sel = keys(&[(&sym, TREND)]);
@@ -788,7 +814,7 @@ async fn pool_build_never_writes_held_state_and_fixed_quantity_stays_stateless()
     let Some(db) = db_or_skip("CFD-05").await else {
         return;
     };
-    let (cf_sym, fx_sym) = (uniq("NWR"), uniq("FXQ"));
+    let (cf_sym, fx_sym) = (fresh(&db, "NWR").await, fresh(&db, "FXQ").await);
     let sel = keys(&[(&cf_sym, TREND), (&fx_sym, TREND)]);
     let mixed = |s: &str| {
         if s == cf_sym {
@@ -1040,7 +1066,7 @@ async fn production_env_path_builds_a_durable_host_from_the_process_environment(
     let Some(db) = db_or_skip("CFD-ENV").await else {
         return;
     };
-    let (cf_sym, fx_sym) = (uniq("ENVC"), uniq("ENVF"));
+    let (cf_sym, fx_sym) = (fresh(&db, "ENVC").await, fresh(&db, "ENVF").await);
     let sel = keys(&[(&cf_sym, TREND)]);
     {
         let _env = SizingEnvRestore::apply(&cf_env_vars());
@@ -1155,7 +1181,12 @@ async fn durable_decision_is_promotion_gated_on_exact_strategy_symbol_timeframe_
         "othertimeframe",
         "demoted",
     ];
-    let syms: Vec<String> = cases.iter().map(|c| uniq(&format!("P{c}"))).collect();
+    let mut syms: Vec<String> = Vec::new();
+    for c in cases {
+        let sym = fresh(&db, &format!("P{c}")).await;
+        cleanup(&db, &[&format!("{sym}X")]).await;
+        syms.push(sym);
+    }
     let registry_path = std::env::temp_dir().join(format!("{}_registry.json", uniq("REG")));
     let entries: Vec<serde_json::Value> = syms
         .iter()
@@ -1193,7 +1224,8 @@ async fn durable_decision_is_promotion_gated_on_exact_strategy_symbol_timeframe_
     st.instrument_registry_path = registry_path.to_string_lossy().into_owned();
     st.set_per_symbol_bar_staleness_secs_for_test(Some(10_000_000_000));
     let state = Arc::new(st);
-    let live_run = Uuid::new_v4();
+    let live_run = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"cfd.test.promo_gate.live_run");
+    reset_run(&db, live_run).await;
     mqk_db::insert_run(
         &db,
         &mqk_db::NewRun {
@@ -1296,8 +1328,9 @@ async fn durable_decision_is_promotion_gated_on_exact_strategy_symbol_timeframe_
     }
     let _ = std::fs::remove_file(&registry_path);
     for s in &syms {
-        cleanup(&db, &[s]).await;
+        cleanup(&db, &[s, &format!("{s}X")]).await;
     }
+    reset_run(&db, live_run).await;
 }
 
 #[tokio::test]
@@ -1305,7 +1338,7 @@ async fn unaffordable_entry_resolves_to_zero_never_one_share_and_holds_nothing()
     let Some(db) = db_or_skip("CFD-ZERO").await else {
         return;
     };
-    let sym = uniq("ZRO");
+    let sym = fresh(&db, "ZRO").await;
     // $20,000+ per share against a $10,000 allocation: floor(10,000 / price) = 0.
     seed_rising(&db, &sym, 60).await;
     sqlx::query("update md_bars set open_micros = open_micros * 200, high_micros = high_micros * 200, low_micros = low_micros * 200, close_micros = close_micros * 200 where symbol = $1 and provider_id = 'cfd_test'")
@@ -1330,4 +1363,19 @@ async fn unaffordable_entry_resolves_to_zero_never_one_share_and_holds_nothing()
         "nothing is held for an unaffordable entry"
     );
     cleanup(&db, &[&sym]).await;
+}
+
+#[test]
+fn fixture_tags_are_unique_within_module() {
+    let src = include_str!("capital_fraction_dispatch_tests.rs");
+    let mut seen = std::collections::BTreeSet::new();
+    for needle in [format!("{}(\"", "uniq"), format!("{}(&db, \"", "fresh")] {
+        for chunk in src.split(needle.as_str()).skip(1) {
+            let Some((tag, _)) = chunk.split_once('"') else {
+                continue;
+            };
+            assert!(seen.insert(tag.to_string()), "duplicate fixture tag {tag}");
+        }
+    }
+    assert!(seen.len() >= 20, "tag scan must see the module's fixtures");
 }
