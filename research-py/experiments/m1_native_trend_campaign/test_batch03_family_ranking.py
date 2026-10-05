@@ -6,7 +6,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import math
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -184,6 +186,85 @@ def test_a_non_numeric_metric_is_worst_not_coerced(bad):
         if s["family"] == "F01":
             s["dsr"] = bad
     assert rank(slots)["metrics"]["F01"]["median_dsr"] is None
+
+
+NON_FINITE_OR_MALFORMED = [float("nan"), float("inf"), float("-inf"), True, False, "0.5", [0.5], {}]
+
+
+def _ev_row(dsr=0.5, alpha=1.0, symbol="SPY", strategy="s"):
+    return {"strategy": strategy, "symbol": symbol, "trial_id": f"{strategy}-{symbol}", "judge_status": "included",
+            "dsr": dsr, "benchmark_evidence": {"alpha_pct": alpha}, "robustness_failed": [],
+            "robustness_missing": []}
+
+
+def _advantaged_family_cannot_win(field):
+    """F10 carries `bad` core evidence on every symbol; every other family has weak-but-valid evidence.
+    Were the bad number accepted as an extremely favourable input, F10 would win key 1 or key 2."""
+    outcomes = []
+    for bad in NON_FINITE_OR_MALFORMED + ([1.5, -0.1] if field == "dsr" else []):
+        slots = []
+        for f in FAMILIES:
+            for sym in SYMBOLS:
+                weak = {"dsr": 0.2, "alpha": -1.0}
+                good = dict(weak, **{field: bad}) if f == "F10" else dict(weak)
+                slots.append(fr.slot_from_evidence(
+                    _ev_row(dsr=good["dsr"], alpha=good["alpha"], symbol=sym, strategy=f), f))
+        r = rank(slots)
+        outcomes.append((bad, r["family_outcomes"]["F10"], r["ranking"]))
+    return outcomes
+
+
+@pytest.mark.parametrize("field", ["dsr", "alpha"])
+def test_non_finite_or_malformed_core_evidence_never_improves_a_family_rank(field):
+    for bad, outcome, ranking in _advantaged_family_cannot_win(field):
+        assert outcome == fr.INSUFFICIENT and "F10" not in ranking, (field, bad)
+        assert len(ranking) == len(FAMILIES) - 1  # the slots stay in the 60-slot population, F10 unrankable
+
+
+@pytest.mark.parametrize("bad", NON_FINITE_OR_MALFORMED + [1.5, -0.1])
+def test_a_malformed_dsr_makes_the_slot_non_evaluable_but_keeps_it_in_the_population(bad):
+    s = fr.slot_from_evidence(_ev_row(dsr=bad), "F01")
+    assert s["evaluable"] is False and s["dsr"] is None and s["alpha_pct"] is None
+    assert s["symbol"] == "SPY" and s["trial_id"] == "s-SPY"
+
+
+@pytest.mark.parametrize("bad", NON_FINITE_OR_MALFORMED)
+def test_a_malformed_alpha_makes_the_slot_non_evaluable_but_keeps_it_in_the_population(bad):
+    s = fr.slot_from_evidence(_ev_row(alpha=bad), "F01")
+    assert s["evaluable"] is False and s["dsr"] is None and s["alpha_pct"] is None
+    assert s["symbol"] == "SPY" and s["trial_id"] == "s-SPY"
+
+
+@pytest.mark.parametrize("dsr", [0.0, 0.5, 1.0, 0, 1])
+@pytest.mark.parametrize("alpha", [-250.0, 0.0, 3.5, 1e9, -3])
+def test_in_domain_finite_core_evidence_stays_evaluable(dsr, alpha):
+    s = fr.slot_from_evidence(_ev_row(dsr=dsr, alpha=alpha), "F01")
+    assert s["evaluable"] is True and s["dsr"] == float(dsr) and s["alpha_pct"] == float(alpha)
+
+
+@pytest.mark.parametrize("field", ["dsr", "alpha_pct"])
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_a_pre_built_slot_with_a_non_finite_core_number_is_still_worst(field, bad):
+    slots = population()
+    for s in slots:
+        if s["family"] == "F01":
+            s[field] = bad
+    m = rank(slots)["metrics"]["F01"]
+    assert m["median_dsr" if field == "dsr" else "median_net_alpha_pct"] is None
+    if field == "alpha_pct":
+        assert m["positive_alpha_symbols"] == 0
+
+
+def test_the_non_finite_controls_fail_under_a_nan_only_finiteness_mutant(monkeypatch):
+    def controls():
+        for field in ("dsr", "alpha"):
+            for bad, outcome, _ in _advantaged_family_cannot_win(field):
+                assert outcome == fr.INSUFFICIENT, (field, bad)
+    controls()
+    nan_only = types.SimpleNamespace(isfinite=lambda v: not math.isnan(v))
+    monkeypatch.setattr(fr, "math", nan_only)
+    with pytest.raises(AssertionError):
+        controls()
 
 
 def test_the_result_selects_no_trial_and_creates_no_promotion_candidate():

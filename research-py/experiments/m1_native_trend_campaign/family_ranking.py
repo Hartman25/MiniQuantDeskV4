@@ -10,6 +10,9 @@ Fail-closed rules:
 * a non-evaluable slot stays in the population and counts as WORST on every key (never dropped,
   never imputed);
 * a family needs at least `min_evaluable_trials_per_family` evaluable slots to be rankable;
+* the core ranking numbers go through one strict authority (`finite_real`): DSR must be a real,
+  finite number in [0, 1] and benchmark alpha a real, finite number (never bool/str, NaN or +/-inf);
+  otherwise the slot is non-evaluable;
 * key 5 is read ONLY from the engine-computed benchmark evidence (candidate and matched passive
   benchmark max drawdown under one verified run identity; improvement = benchmark - candidate, in
   percent of peak equity). Absent, partial, non-finite or inconsistent evidence is worst on key 5 only;
@@ -42,14 +45,26 @@ def median_worst(values: list[float]) -> float:
     return NEG_INF if NEG_INF in (lo, hi) else (lo + hi) / 2
 
 
+DSR_DOMAIN = (0.0, 1.0)  # DSR is a probability: norm_cdf(z) in multiple_testing_stats.probabilistic_sharpe_ratio
+
+
+def finite_real(value, domain: tuple[float, float] | None = None) -> float | None:
+    """The one strict numeric authority for ranking evidence: a real int/float (never bool, never a
+    string), finite (NaN and +/-inf refused), and inside `domain` when one is canonical; else None."""
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    if domain is not None and not domain[0] <= value <= domain[1]:
+        return None
+    return float(value)
+
+
 def _drawdown_improvement(bench: dict) -> float | None:
     """Benchmark-minus-candidate max drawdown (pct), or None unless all three engine numbers agree."""
-    vals = [bench.get(k) for k in ("candidate_max_drawdown_pct", "benchmark_max_drawdown_pct",
-                                   "drawdown_improvement_pct")]
-    if any(v is None or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-           for v in vals):
+    vals = [finite_real(bench.get(k)) for k in ("candidate_max_drawdown_pct", "benchmark_max_drawdown_pct",
+                                                "drawdown_improvement_pct")]
+    if any(v is None for v in vals):
         return None
-    cand, base, imp = (float(v) for v in vals)
+    cand, base, imp = vals
     if not (0.0 <= cand <= 100.0 and 0.0 <= base <= 100.0) or abs(imp - (base - cand)) > 1e-9:
         return None
     return imp
@@ -58,21 +73,20 @@ def _drawdown_improvement(bench: dict) -> float | None:
 def slot_from_evidence(row: dict, family: str) -> dict:
     """Map a batch_results.json row onto the ranking slot (the only place evidence is interpreted)."""
     bench = row.get("benchmark_evidence") or {}
-    alpha = bench.get("alpha_pct")
+    alpha = finite_real(bench.get("alpha_pct"))
+    dsr = finite_real(row.get("dsr"), DSR_DOMAIN)
     evaluable = (not row.get("economic_failed") and str(row.get("judge_status")) == "included"
-                 and row.get("dsr") is not None and alpha is not None)
+                 and dsr is not None and alpha is not None)
     robust = bool(evaluable and not row.get("robustness_failed") and not row.get("robustness_missing"))
     return {"family": family, "symbol": row["symbol"], "trial_id": row["trial_id"], "evaluable": evaluable,
-            "dsr": row.get("dsr") if evaluable else None, "alpha_pct": alpha if evaluable else None,
+            "dsr": dsr if evaluable else None, "alpha_pct": alpha if evaluable else None,
             "robustness_clear": robust,
             "drawdown_improvement": _drawdown_improvement(bench) if evaluable else None}
 
 
 def _worst_if_none(slot: dict, field: str) -> float:
-    value = slot[field] if slot["evaluable"] else None
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
-        return NEG_INF
-    return float(value)
+    value = finite_real(slot[field] if slot["evaluable"] else None, DSR_DOMAIN if field == "dsr" else None)
+    return NEG_INF if value is None else value
 
 
 def family_metrics(slots: list[dict]) -> dict:
