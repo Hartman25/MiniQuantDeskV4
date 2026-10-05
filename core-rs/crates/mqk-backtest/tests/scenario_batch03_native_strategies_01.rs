@@ -465,7 +465,7 @@ fn the_fixture_fires_the_event_and_hold_families_and_every_exit_path() {
 }
 
 /// Stateless monthly engines: a fresh instance fed only its declared bounded history reproduces
-/// the long-running instance. The stateful engines are deliberately NotRecoverable.
+/// the long-running instance. The stateful engines require the durable held-position seed.
 #[test]
 fn fresh_instance_with_only_the_bounded_history_matches_for_stateless_engines() {
     let dates = session_dates();
@@ -510,7 +510,7 @@ fn registry_metadata_declares_history_daily_timeframe_spec_and_restart_class() {
         let expected = if STATELESS.contains(&name) {
             RestartRecovery::BoundedHistoryReconstructible
         } else {
-            RestartRecovery::NotRecoverable
+            RestartRecovery::DurableStateRequired
         };
         assert_eq!(meta.restart_recovery, expected, "{name}");
     }

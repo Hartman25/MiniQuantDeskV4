@@ -1,9 +1,9 @@
 use super::daily_math::close;
-use super::window::{advance_state, complete_valid_ohlc_tail};
+use super::window::{advance_state, complete_valid_ohlc_tail, restore_long_flat};
 use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 use crate::{
-    BarStub, RestartRecovery, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta,
-    StrategyOutput, StrategySpec, TargetPosition,
+    BarStub, HeldPositionSeed, RestartRecovery, Strategy, StrategyContext,
+    StrategyDataRequirements, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
 };
 use mqk_execution::QtyMicros;
 
@@ -31,9 +31,9 @@ pub fn meta() -> StrategyMeta {
     .with_data_requirements(StrategyDataRequirements {
         minimum_completed_bars: REQUIRED_BARS,
     })
-    // A LONG lasts until the close-low exit, with no bound on its duration, so a restart cannot
-    // prove the state from a finite history window.
-    .with_restart_recovery(RestartRecovery::NotRecoverable)
+    // A LONG lasts until its exit rule with no bound on its duration: the durable held-position
+    // record seeds Long/Flat exactly (`restore_held_positions`); a window replay cannot.
+    .with_restart_recovery(RestartRecovery::DurableStateRequired)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +147,17 @@ impl Strategy for VolatilityContractionBreakoutV1Strategy {
             .finish()
     }
 
+    fn restore_held_positions(&mut self, held: &[HeldPositionSeed]) {
+        restore_long_flat(
+            &mut self.state,
+            &mut self.initialized,
+            &self.symbol,
+            held,
+            Position::Flat,
+            Position::Long,
+        );
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         self.advance(&ctx.recent.bars);
         StrategyOutput {
@@ -162,6 +173,7 @@ impl Strategy for VolatilityContractionBreakoutV1Strategy {
 
 #[cfg(test)]
 mod tests {
+    use super::super::window::restart_proof;
     use super::*;
     use crate::RecentBarsWindow;
 
@@ -213,7 +225,10 @@ mod tests {
         assert_eq!(s.required_history_bars(), 61);
         assert_eq!(meta().data_requirements.unwrap().minimum_completed_bars, 61);
         assert_eq!(s.spec(), StrategySpec::new(NAME, TIMEFRAME_SECS));
-        assert_eq!(meta().restart_recovery, RestartRecovery::NotRecoverable);
+        assert_eq!(
+            meta().restart_recovery,
+            RestartRecovery::DurableStateRequired
+        );
     }
 
     #[test]
@@ -341,6 +356,45 @@ mod tests {
         let mut s = VolatilityContractionBreakoutV1Strategy::new("SPY");
         let run: Vec<i64> = (1..=300).map(|i| call(&mut s, &extended[..i])).collect();
         assert_eq!(run, continuous[..300]);
+    }
+
+    #[test]
+    fn durable_restart_at_every_boundary_equals_the_continuous_stream_and_kills_reset_to_flat() {
+        let bars = restart_proof::stamped(cycle_tape());
+        let cont =
+            restart_proof::continuous(VolatilityContractionBreakoutV1Strategy::new("SPY"), &bars);
+        assert!(
+            cont.contains(&1) && cont.contains(&0),
+            "fixture must exercise both"
+        );
+        for cap in [61, usize::MAX] {
+            let bad = restart_proof::diverging_restarts(
+                || VolatilityContractionBreakoutV1Strategy::new("SPY"),
+                Some("SPY"),
+                &cont,
+                &bars,
+                1,
+                cap,
+            );
+            assert!(bad.is_empty(), "cap={cap}: {bad:?}");
+        }
+        let reset_flat = || {
+            let mut s = VolatilityContractionBreakoutV1Strategy::new("SPY");
+            s.initialized = true;
+            s
+        };
+        let flat = restart_proof::diverging_restarts(reset_flat, None, &cont, &bars, 1, usize::MAX);
+        assert!(
+            (1..bars.len()).any(|r| cont[r - 1] == 1 && flat.contains(&r)),
+            "reset-to-flat must diverge while a position is held"
+        );
+        // A record for another symbol restores nothing.
+        let mut other = VolatilityContractionBreakoutV1Strategy::new("SPY");
+        other.restore_held_positions(&[HeldPositionSeed {
+            symbol: "QQQ".into(),
+            entry_bar_end_ts: bars[0].end_ts,
+        }]);
+        assert_eq!(other.state, Position::Flat);
     }
 
     #[test]

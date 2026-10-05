@@ -1,7 +1,7 @@
 //! Capital-fraction sized strategy wrapper.
 //!
-//! Native engines are stateless long/flat signal generators (their positive
-//! target only marks "long"). This wrapper turns that direction into an exact
+//! Native engines are long/flat signal generators (their positive target only
+//! marks "long"). This wrapper turns that direction into an exact
 //! quantity under `FixedInitialCapitalFractionV1`:
 //!
 //! * flat -> long: `Q` is resolved ONCE through
@@ -19,7 +19,10 @@
 //! (one continuous instance). A runtime that can restart must build the wrapper
 //! with [`CapitalFractionSizedStrategy::new_recoverable`] from a validated durable
 //! snapshot, and persist [`SizingStateHandle::drain_transitions`] before it acts
-//! on the bar's output; see `sizing_state`.
+//! on the bar's output; see `sizing_state`. `new_recoverable` also seeds stateful
+//! engines with the Active records' entry anchors via
+//! [`Strategy::restore_held_positions`], so an engine's hold state is never
+//! rebuilt from a bounded window alone.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -35,7 +38,7 @@ use crate::sizing_state::{
     HeldSizingContract, HeldSizingRecord, HeldSizingRecoveryError, HeldSizingScope,
     HeldSizingStatus, HeldSizingTransition, HELD_SIZING_STATE_VERSION,
 };
-use crate::{Strategy, StrategyContext, StrategySpec};
+use crate::{HeldPositionSeed, Strategy, StrategyContext, StrategySpec};
 
 const WRAPPER_NAME: &str = "capital_fraction_sized_strategy";
 const WRAPPER_VERSION: &str = "v1";
@@ -205,6 +208,15 @@ impl CapitalFractionSizedStrategy {
             }
             latest.insert(record.symbol.clone(), record);
         }
+        let seeds: Vec<HeldPositionSeed> = latest
+            .values()
+            .filter(|r| r.status == HeldSizingStatus::Active)
+            .map(|r| HeldPositionSeed {
+                symbol: r.symbol.clone(),
+                entry_bar_end_ts: r.reference_bar_end_ts,
+            })
+            .collect();
+        wrapper.inner.restore_held_positions(&seeds);
         let state = SizingStateHandle::default();
         wrapper.recoverable = Some(Recoverable {
             scope,

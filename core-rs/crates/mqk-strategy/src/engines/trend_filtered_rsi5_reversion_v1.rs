@@ -1,9 +1,9 @@
 use super::daily_math::{above_sma, gain_loss_sums};
-use super::window::{advance_state, complete_positive_tail};
+use super::window::{advance_state, complete_positive_tail, restore_long_flat};
 use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 use crate::{
-    BarStub, RestartRecovery, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta,
-    StrategyOutput, StrategySpec, TargetPosition,
+    BarStub, HeldPositionSeed, RestartRecovery, Strategy, StrategyContext,
+    StrategyDataRequirements, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
 };
 use mqk_execution::QtyMicros;
 
@@ -30,9 +30,9 @@ pub fn meta() -> StrategyMeta {
     .with_data_requirements(StrategyDataRequirements {
         minimum_completed_bars: REQUIRED_BARS,
     })
-    // A LONG lasts until the RSI or trend exit, with no bound on its duration, so a restart
-    // cannot prove the state from a finite history window.
-    .with_restart_recovery(RestartRecovery::NotRecoverable)
+    // A LONG lasts until its exit rule with no bound on its duration: the durable held-position
+    // record seeds Long/Flat exactly (`restore_held_positions`); a window replay cannot.
+    .with_restart_recovery(RestartRecovery::DurableStateRequired)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +122,17 @@ impl Strategy for TrendFilteredRsi5ReversionV1Strategy {
             .finish()
     }
 
+    fn restore_held_positions(&mut self, held: &[HeldPositionSeed]) {
+        restore_long_flat(
+            &mut self.state,
+            &mut self.initialized,
+            &self.symbol,
+            held,
+            Position::Flat,
+            Position::Long,
+        );
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         self.advance(&ctx.recent.bars);
         let qty = i64::from(self.state == Position::Long);
@@ -137,6 +148,7 @@ impl Strategy for TrendFilteredRsi5ReversionV1Strategy {
 
 #[cfg(test)]
 mod tests {
+    use super::super::window::restart_proof;
     use super::*;
     use crate::RecentBarsWindow;
 
@@ -189,7 +201,10 @@ mod tests {
             200
         );
         assert_eq!(s.spec(), StrategySpec::new(NAME, TIMEFRAME_SECS));
-        assert_eq!(meta().restart_recovery, RestartRecovery::NotRecoverable);
+        assert_eq!(
+            meta().restart_recovery,
+            RestartRecovery::DurableStateRequired
+        );
     }
 
     #[test]
@@ -336,11 +351,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restarted_instance_replay_equals_the_continuous_state_and_future_bars_do_not_leak() {
-        // A rising line with an 11-bar dip-and-recover cycle: entries on the dips, RSI exits
-        // on the recoveries.
-        let closes: Vec<i64> = (0..500)
+    fn dip_tape() -> Vec<i64> {
+        (0..500)
             .map(|i: i64| {
                 let dip = match i % 11 {
                     6 => 3,
@@ -352,7 +364,14 @@ mod tests {
                 };
                 BASE + i * 100_000 - dip * 1_000_000
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn restarted_instance_replay_equals_the_continuous_state_and_future_bars_do_not_leak() {
+        // A rising line with an 11-bar dip-and-recover cycle: entries on the dips, RSI exits
+        // on the recoveries.
+        let closes = dip_tape();
         let continuous = run(&closes);
         assert!(
             continuous.contains(&1) && continuous.contains(&0),
@@ -366,6 +385,45 @@ mod tests {
         let mut extended = closes[..300].to_vec();
         extended.extend([1, 900_000_000_000, 5]);
         assert_eq!(&run(&extended)[..300], &continuous[..300]);
+    }
+
+    #[test]
+    fn durable_restart_at_every_boundary_equals_the_continuous_stream_and_kills_reset_to_flat() {
+        let bars = restart_proof::stamped(dip_tape().into_iter().map(bar).collect());
+        let cont =
+            restart_proof::continuous(TrendFilteredRsi5ReversionV1Strategy::new("SPY"), &bars);
+        assert!(
+            cont.contains(&1) && cont.contains(&0),
+            "fixture must exercise both"
+        );
+        for cap in [200, usize::MAX] {
+            let bad = restart_proof::diverging_restarts(
+                || TrendFilteredRsi5ReversionV1Strategy::new("SPY"),
+                Some("SPY"),
+                &cont,
+                &bars,
+                1,
+                cap,
+            );
+            assert!(bad.is_empty(), "cap={cap}: {bad:?}");
+        }
+        let reset_flat = || {
+            let mut s = TrendFilteredRsi5ReversionV1Strategy::new("SPY");
+            s.initialized = true;
+            s
+        };
+        let flat = restart_proof::diverging_restarts(reset_flat, None, &cont, &bars, 1, usize::MAX);
+        assert!(
+            (1..bars.len()).any(|r| cont[r - 1] == 1 && flat.contains(&r)),
+            "reset-to-flat must diverge while a position is held"
+        );
+        // A record for another symbol restores nothing.
+        let mut other = TrendFilteredRsi5ReversionV1Strategy::new("SPY");
+        other.restore_held_positions(&[HeldPositionSeed {
+            symbol: "QQQ".into(),
+            entry_bar_end_ts: bars[0].end_ts,
+        }]);
+        assert_eq!(other.state, Position::Flat);
     }
 
     #[test]

@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 
 use mqk_execution::{QtyMicros, StrategyOutput, TargetPosition};
 use mqk_strategy::{
-    capital_fraction_semantic_fingerprint, BarStub, CapitalFractionSizedStrategy, HeldSizingRecord,
-    HeldSizingRecoveryError, HeldSizingScope, HeldSizingStatus, HeldSizingTransition,
-    PluginRegistry, RecentBarsWindow, RegistryError, RestartRecovery, SizingPolicy, Strategy,
-    StrategyContext, StrategyMeta, StrategySpec, TargetSizing, HELD_SIZING_STATE_VERSION,
-    SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1,
+    capital_fraction_semantic_fingerprint, BarStub, CapitalFractionSizedStrategy, HeldPositionSeed,
+    HeldSizingRecord, HeldSizingRecoveryError, HeldSizingScope, HeldSizingStatus,
+    HeldSizingTransition, PluginRegistry, RecentBarsWindow, RegistryError, RestartRecovery,
+    SizingPolicy, Strategy, StrategyContext, StrategyMeta, StrategySpec, TargetSizing,
+    HELD_SIZING_STATE_VERSION, SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1,
 };
 
 const USD: i64 = 1_000_000;
@@ -453,4 +453,46 @@ fn registry_stateless_seam_refuses_durable_state_entries_but_identity_seam_admit
         marked.instantiate_verified("unrecoverable"),
         Err(RegistryError::NotRestartRecoverable { .. })
     ));
+}
+
+/// Records the seeds `new_recoverable` hands the inner engine.
+type Seeds = Option<Vec<(String, i64)>>;
+
+struct SeedProbe(Arc<Mutex<Seeds>>);
+
+impl Strategy for SeedProbe {
+    fn spec(&self) -> StrategySpec {
+        StrategySpec::new("scripted", 86_400)
+    }
+    fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+        StrategyOutput::new(vec![])
+    }
+    fn restore_held_positions(&mut self, held: &[HeldPositionSeed]) {
+        *self.0.lock().unwrap() = Some(
+            held.iter()
+                .map(|h| (h.symbol.clone(), h.entry_bar_end_ts))
+                .collect(),
+        );
+    }
+}
+
+#[test]
+fn recoverable_wrapper_seeds_the_engine_with_active_entry_anchors_only() {
+    let seen = Arc::new(Mutex::new(None));
+    let mut released = active("QQQ");
+    released.status = HeldSizingStatus::Released;
+    CapitalFractionSizedStrategy::new_recoverable(
+        Box::new(SeedProbe(seen.clone())),
+        SizingPolicy::capital_fraction_v1(BPS).unwrap(),
+        CAPITAL,
+        caps(),
+        scope(),
+        vec![active("SPY"), released],
+    )
+    .unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(vec![("SPY".to_string(), 10)]),
+        "Active record anchors seed the engine; Released records do not"
+    );
 }

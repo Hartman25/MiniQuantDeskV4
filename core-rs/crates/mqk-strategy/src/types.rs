@@ -187,6 +187,22 @@ pub trait Strategy: Send + Sync {
     fn required_history_bars(&self) -> usize {
         0
     }
+
+    /// Seed behavior-bearing runtime state from the durable held-position
+    /// records (one per symbol currently held long; empty = nothing held).
+    /// Called once, before the first `on_bar`, by the capital-fraction recovery
+    /// path. A stateful engine must make its subsequent target stream equal the
+    /// stream of a never-restarted instance, or fail closed to flat. Default:
+    /// no-op (stateless engines have nothing to restore).
+    fn restore_held_positions(&mut self, _held: &[HeldPositionSeed]) {}
+}
+
+/// One durably recorded long position: the symbol and the `end_ts` of the
+/// completed bar on which the position was entered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldPositionSeed {
+    pub symbol: String,
+    pub entry_bar_end_ts: i64,
 }
 
 /// Host-level policy errors (Tier A).

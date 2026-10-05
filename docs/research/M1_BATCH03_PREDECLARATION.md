@@ -45,7 +45,7 @@ When recorded, re-issue the declaration with `execution_gate.executable = true` 
 
 Engines are exact integer (i128) arithmetic in `mqk-strategy::engines`, registered in `REGISTERED_STRATEGY_IDS`; `MAX_STRATEGY_UNIVERSE` was raised to 24 for them.
 
-**Restart recovery (deliberate, recorded).** F01, F05, F08, F10 are stateless month-end rules and are `BoundedHistoryReconstructible`. F02, F03, F04, F06, F07 and F09 carry state (a position or a hold counter) that a bounded window cannot reconstruct, so they are `NotRecoverable` and fail closed rather than guess after a restart. If one of them ever advances to Paper, durable state must be added first.
+**Restart recovery (recorded).** F01, F05, F08, F10 are stateless month-end rules and are `BoundedHistoryReconstructible`. F02, F03, F04, F06, F07 and F09 carry state (a position or a hold counter) that a bounded window cannot reconstruct, so they are `DurableStateRequired`: the production seam (`instantiate_verified`) refuses them unless the held-sizing record is supplied, and `CapitalFractionSizedStrategy::new_recoverable` then seeds the engine through `Strategy::restore_held_positions` from the Active record's entry anchor (no new store, no migration). F03/F09 derive the hold counter from that anchor and fail closed to flat when it is not provable from the window. Per-engine tests prove the continuous target stream equals the restart-at-every-boundary stream and kill reset-to-flat and reset-hold-counter mutants.
 
 ## Family ranking (`family_ranking.py`)
 

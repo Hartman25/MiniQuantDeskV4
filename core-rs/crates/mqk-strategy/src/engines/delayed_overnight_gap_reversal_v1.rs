@@ -1,9 +1,9 @@
 use super::daily_math::{close, prior_true_range_sum};
-use super::window::{advance_state, complete_valid_ohlc_tail};
+use super::window::{advance_state, complete_valid_ohlc_tail, hold_phase_from_anchor};
 use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 use crate::{
-    BarStub, RestartRecovery, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta,
-    StrategyOutput, StrategySpec, TargetPosition,
+    BarStub, HeldPositionSeed, RestartRecovery, Strategy, StrategyContext,
+    StrategyDataRequirements, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
 };
 use mqk_execution::QtyMicros;
 
@@ -31,9 +31,9 @@ pub fn meta() -> StrategyMeta {
     .with_data_requirements(StrategyDataRequirements {
         minimum_completed_bars: REQUIRED_BARS,
     })
-    // The 3-session hold counter is phase-dependent over an unbounded event history (an in-hold
-    // event is ignored), so a restart cannot prove it from a finite window.
-    .with_restart_recovery(RestartRecovery::NotRecoverable)
+    // The hold counter is phase-dependent over an unbounded event history: the durable entry
+    // anchor seeds it (`restore_held_positions`); a window replay cannot.
+    .with_restart_recovery(RestartRecovery::DurableStateRequired)
 }
 
 /// Stateful hold machine; the instance owns `held` (Long outputs already emitted in the active
@@ -43,6 +43,7 @@ pub struct DelayedOvernightGapReversalV1Strategy {
     symbol: String,
     held: u8,
     initialized: bool,
+    pending_anchor: Option<i64>,
 }
 
 impl DelayedOvernightGapReversalV1Strategy {
@@ -51,6 +52,7 @@ impl DelayedOvernightGapReversalV1Strategy {
             symbol: symbol.into(),
             held: 0,
             initialized: false,
+            pending_anchor: None,
         }
     }
 
@@ -79,6 +81,11 @@ impl DelayedOvernightGapReversalV1Strategy {
     }
 
     fn advance(&mut self, bars: &[BarStub]) {
+        if let Some(anchor) = self.pending_anchor.take() {
+            self.held =
+                hold_phase_from_anchor(bars, anchor, REQUIRED_BARS, HOLD_OUTPUTS, Self::step);
+            return;
+        }
         advance_state(
             &mut self.held,
             &mut self.initialized,
@@ -120,6 +127,15 @@ impl Strategy for DelayedOvernightGapReversalV1Strategy {
             .finish()
     }
 
+    fn restore_held_positions(&mut self, held: &[HeldPositionSeed]) {
+        self.initialized = true;
+        self.held = 0;
+        self.pending_anchor = held
+            .iter()
+            .find(|h| h.symbol == self.symbol)
+            .map(|h| h.entry_bar_end_ts);
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         self.advance(&ctx.recent.bars);
         StrategyOutput {
@@ -134,6 +150,7 @@ impl Strategy for DelayedOvernightGapReversalV1Strategy {
 
 #[cfg(test)]
 mod tests {
+    use super::super::window::restart_proof;
     use super::*;
     use crate::RecentBarsWindow;
 
@@ -189,7 +206,10 @@ mod tests {
         assert_eq!(s.required_history_bars(), 22);
         assert_eq!(meta().data_requirements.unwrap().minimum_completed_bars, 22);
         assert_eq!(s.spec(), StrategySpec::new(NAME, TIMEFRAME_SECS));
-        assert_eq!(meta().restart_recovery, RestartRecovery::NotRecoverable);
+        assert_eq!(
+            meta().restart_recovery,
+            RestartRecovery::DurableStateRequired
+        );
     }
 
     #[test]
@@ -287,30 +307,92 @@ mod tests {
         }
     }
 
+    fn fresh() -> DelayedOvernightGapReversalV1Strategy {
+        DelayedOvernightGapReversalV1Strategy::new("SPY")
+    }
+
     #[test]
-    fn a_restart_with_only_the_minimum_window_cannot_recover_the_hold() {
-        let full = hold_tape(None);
-        let continuous = run(&full);
-        assert_eq!(continuous[22], 1, "mid-hold");
-        let t = 22;
-        assert_eq!(
-            sig(&full[t + 1 - 22..=t]),
-            1,
-            "this window happens to hold its own event"
+    fn restart_at_every_boundary_equals_the_continuous_stream() {
+        for (extra, ones) in [(None, 3), (Some(24), 6)] {
+            let full = restart_proof::stamped(hold_tape(extra));
+            let cont = restart_proof::continuous(fresh(), &full);
+            let long: Vec<usize> = (0..cont.len()).filter(|&i| cont[i] == 1).collect();
+            assert_eq!((long[0], long.len()), (21, ones), "{cont:?}");
+            for cap in [usize::MAX, 40] {
+                let bad =
+                    restart_proof::diverging_restarts(fresh, Some("SPY"), &cont, &full, 1, cap);
+                assert!(bad.is_empty(), "extra={extra:?} cap={cap}: {bad:?}");
+            }
+        }
+        // The minimum daemon window (exactly 22 bars) is exact while no cycle boundary lies
+        // before the window.
+        let full = restart_proof::stamped(hold_tape(None));
+        let cont = restart_proof::continuous(fresh(), &full);
+        let bad = restart_proof::diverging_restarts(fresh, Some("SPY"), &cont, &full, 21, 22);
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    #[test]
+    fn restart_mutations_reset_to_flat_and_reset_hold_counter_are_killed() {
+        let full = restart_proof::stamped(hold_tape(None));
+        let cont = restart_proof::continuous(fresh(), &full);
+        let reset_flat = || {
+            let mut s = fresh();
+            s.initialized = true;
+            s
+        };
+        let reset_counter = || {
+            let mut s = fresh();
+            s.initialized = true;
+            s.held = 1;
+            s
+        };
+        let flat =
+            restart_proof::diverging_restarts(reset_flat, None, &cont, &full, 22, usize::MAX);
+        assert!(
+            [22, 23].iter().all(|r| flat.contains(r)),
+            "reset-to-flat must diverge at every mid-hold boundary: {flat:?}"
         );
-        let t = 23;
-        assert_eq!(continuous[t], 1);
+        let counter =
+            restart_proof::diverging_restarts(reset_counter, None, &cont, &full, 22, usize::MAX);
+        assert!(
+            [23, 24].iter().all(|r| counter.contains(r)),
+            "reset-counter must diverge once the hold is past its first bar: {counter:?}"
+        );
+    }
+
+    #[test]
+    fn restore_fails_closed_to_flat_when_the_anchor_is_unprovable() {
+        let full = restart_proof::stamped(hold_tape(None));
+        let seed = |ts: i64| {
+            vec![HeldPositionSeed {
+                symbol: "SPY".into(),
+                entry_bar_end_ts: ts,
+            }]
+        };
+        let decide_at = |seeds: &[HeldPositionSeed], window: &[BarStub]| {
+            let mut s = fresh();
+            s.restore_held_positions(seeds);
+            restart_proof::decide(&mut s, window)
+        };
+        let w = &full[..=23];
+        assert_eq!(decide_at(&seed(full[21].end_ts), w), 1, "provable anchor");
+        assert_eq!(decide_at(&seed(12_345), w), 0, "anchor absent");
         assert_eq!(
-            sig(&full[t + 1 - 22..=t]),
+            decide_at(&seed(full[23].end_ts), w),
             0,
-            "capped-window restart sees no event"
+            "anchor bar that starts no cycle"
         );
-        let mut fresh = DelayedOvernightGapReversalV1Strategy::new("SPY");
         assert_eq!(
-            call(&mut fresh, &full[..=t]),
-            1,
-            "an uncapped window replays the hold"
+            decide_at(&seed(full[21].end_ts), &w[3..]),
+            0,
+            "short window"
         );
+        let other = vec![HeldPositionSeed {
+            symbol: "QQQ".into(),
+            entry_bar_end_ts: full[21].end_ts,
+        }];
+        assert_eq!(decide_at(&other, w), 0, "another symbol's record");
     }
 
     #[test]

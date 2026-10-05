@@ -1,9 +1,9 @@
 use super::daily_math::{above_sma, close, prior_true_range_sum};
-use super::window::{advance_state, complete_valid_ohlc_tail};
+use super::window::{advance_state, complete_valid_ohlc_tail, hold_phase_from_anchor};
 use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 use crate::{
-    BarStub, RestartRecovery, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta,
-    StrategyOutput, StrategySpec, TargetPosition,
+    BarStub, HeldPositionSeed, RestartRecovery, Strategy, StrategyContext,
+    StrategyDataRequirements, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
 };
 use mqk_execution::QtyMicros;
 
@@ -34,9 +34,9 @@ pub fn meta() -> StrategyMeta {
     .with_data_requirements(StrategyDataRequirements {
         minimum_completed_bars: REQUIRED_BARS,
     })
-    // The 5-session hold counter is phase-dependent over an unbounded event history (an
-    // in-hold event is ignored), so a restart cannot prove it from a finite window.
-    .with_restart_recovery(RestartRecovery::NotRecoverable)
+    // The hold counter is phase-dependent over an unbounded event history: the durable entry
+    // anchor seeds it (`restore_held_positions`); a window replay cannot.
+    .with_restart_recovery(RestartRecovery::DurableStateRequired)
 }
 
 /// Stateful hold machine; the instance owns `held` (Long outputs already emitted in the active
@@ -46,6 +46,7 @@ pub struct TrendFilteredExtreme3dAtrReversalV1Strategy {
     symbol: String,
     held: u8,
     initialized: bool,
+    pending_anchor: Option<i64>,
 }
 
 impl TrendFilteredExtreme3dAtrReversalV1Strategy {
@@ -54,6 +55,7 @@ impl TrendFilteredExtreme3dAtrReversalV1Strategy {
             symbol: symbol.into(),
             held: 0,
             initialized: false,
+            pending_anchor: None,
         }
     }
 
@@ -88,6 +90,11 @@ impl TrendFilteredExtreme3dAtrReversalV1Strategy {
     }
 
     fn advance(&mut self, bars: &[BarStub]) {
+        if let Some(anchor) = self.pending_anchor.take() {
+            self.held =
+                hold_phase_from_anchor(bars, anchor, REQUIRED_BARS, HOLD_OUTPUTS, Self::step);
+            return;
+        }
         advance_state(
             &mut self.held,
             &mut self.initialized,
@@ -130,6 +137,15 @@ impl Strategy for TrendFilteredExtreme3dAtrReversalV1Strategy {
             .finish()
     }
 
+    fn restore_held_positions(&mut self, held: &[HeldPositionSeed]) {
+        self.initialized = true;
+        self.held = 0;
+        self.pending_anchor = held
+            .iter()
+            .find(|h| h.symbol == self.symbol)
+            .map(|h| h.entry_bar_end_ts);
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         self.advance(&ctx.recent.bars);
         StrategyOutput {
@@ -144,6 +160,7 @@ impl Strategy for TrendFilteredExtreme3dAtrReversalV1Strategy {
 
 #[cfg(test)]
 mod tests {
+    use super::super::window::restart_proof;
     use super::*;
     use crate::RecentBarsWindow;
 
@@ -212,7 +229,10 @@ mod tests {
             200
         );
         assert_eq!(s.spec(), StrategySpec::new(NAME, TIMEFRAME_SECS));
-        assert_eq!(meta().restart_recovery, RestartRecovery::NotRecoverable);
+        assert_eq!(
+            meta().restart_recovery,
+            RestartRecovery::DurableStateRequired
+        );
     }
 
     #[test]
@@ -312,30 +332,116 @@ mod tests {
         assert_eq!(sig(&inc), 0, "an incomplete candidate event does not enter");
     }
 
-    #[test]
-    fn a_restart_with_only_the_minimum_window_cannot_recover_the_hold() {
+    fn hold_fixture(chain: bool) -> Vec<BarStub> {
         let tail = [
             (98 * M, 0),
             (100 * M, 0),
             (96 * M + M / 2, 5 * M),
             (96 * M + M / 2, M),
-            (96 * M + M / 2, M),
-            (96 * M + M / 2, M),
+            (90 * M, M),
         ];
-        let full = tape(60 * M, &tail);
-        let continuous = run(&full);
-        assert_eq!(continuous[201], 1, "mid-hold");
-        let t = 201;
-        assert_eq!(
-            sig(&full[t + 1 - 200..=t]),
-            0,
-            "capped-window restart sees no event"
+        let mut full = tape(60 * M, &tail);
+        full.extend((0..4).map(|_| ohlc(90 * M, 90 * M, M)));
+        if chain {
+            full.push(ohlc(90 * M, 84 * M, M));
+            full.extend((0..12).map(|_| ohlc(84 * M, 84 * M, M)));
+        } else {
+            full.extend((0..9).map(|_| ohlc(90 * M, 90 * M, M)));
+        }
+        restart_proof::stamped(full)
+    }
+
+    fn fresh() -> TrendFilteredExtreme3dAtrReversalV1Strategy {
+        TrendFilteredExtreme3dAtrReversalV1Strategy::new("SPY")
+    }
+
+    #[test]
+    fn restart_at_every_boundary_equals_the_continuous_stream() {
+        for chain in [false, true] {
+            let full = hold_fixture(chain);
+            let cont = restart_proof::continuous(fresh(), &full);
+            let ones: Vec<usize> = (0..cont.len()).filter(|&i| cont[i] == 1).collect();
+            assert_eq!(ones[0], 199);
+            assert_eq!(ones.len(), if chain { 10 } else { 5 }, "{cont:?}");
+            for cap in [usize::MAX, 260] {
+                let bad =
+                    restart_proof::diverging_restarts(fresh, Some("SPY"), &cont, &full, 1, cap);
+                assert!(bad.is_empty(), "chain={chain} cap={cap}: {bad:?}");
+            }
+        }
+        // The minimum daemon window (exactly 200 bars) is exact while no cycle boundary lies
+        // before the window.
+        let full = hold_fixture(false);
+        let cont = restart_proof::continuous(fresh(), &full);
+        let bad = restart_proof::diverging_restarts(fresh, Some("SPY"), &cont, &full, 199, 200);
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    #[test]
+    fn restart_mutations_reset_to_flat_and_reset_hold_counter_are_killed() {
+        let full = hold_fixture(false);
+        let cont = restart_proof::continuous(fresh(), &full);
+        let reset_flat = || {
+            let mut s = fresh();
+            s.initialized = true;
+            s
+        };
+        let reset_counter = || {
+            let mut s = fresh();
+            s.initialized = true;
+            s.held = 1;
+            s
+        };
+        let flat =
+            restart_proof::diverging_restarts(reset_flat, None, &cont, &full, 200, usize::MAX);
+        assert!(
+            (200..=203).all(|r| flat.contains(&r)),
+            "reset-to-flat must diverge at every mid-hold boundary: {flat:?}"
         );
-        let mut fresh = TrendFilteredExtreme3dAtrReversalV1Strategy::new("SPY");
+        let counter =
+            restart_proof::diverging_restarts(reset_counter, None, &cont, &full, 200, usize::MAX);
+        assert!(
+            (201..=203).all(|r| counter.contains(&r)),
+            "reset-counter must diverge at every mid-hold boundary: {counter:?}"
+        );
+    }
+
+    #[test]
+    fn restore_fails_closed_to_flat_when_the_anchor_is_unprovable() {
+        let full = hold_fixture(false);
+        let seed = |ts: i64| {
+            vec![HeldPositionSeed {
+                symbol: "SPY".into(),
+                entry_bar_end_ts: ts,
+            }]
+        };
+        let decide_at = |seeds: &[HeldPositionSeed], window: &[BarStub]| {
+            let mut s = fresh();
+            s.restore_held_positions(seeds);
+            restart_proof::decide(&mut s, window)
+        };
+        let w = &full[..=201];
+        assert_eq!(decide_at(&seed(full[199].end_ts), w), 1, "provable anchor");
+        assert_eq!(decide_at(&seed(12_345), w), 0, "anchor absent");
         assert_eq!(
-            call(&mut fresh, &full[..=t]),
-            1,
-            "an uncapped window replays the hold"
+            decide_at(&seed(full[200].end_ts), w),
+            0,
+            "anchor bar that starts no cycle"
+        );
+        assert_eq!(
+            decide_at(&seed(full[199].end_ts), &w[10..]),
+            0,
+            "short window"
+        );
+        let other = vec![HeldPositionSeed {
+            symbol: "QQQ".into(),
+            entry_bar_end_ts: full[199].end_ts,
+        }];
+        assert_eq!(decide_at(&seed(full[199].end_ts), &full[..=200]), 1);
+        assert_eq!(
+            decide_at(&other, &full[..=200]),
+            0,
+            "another symbol's record"
         );
     }
 

@@ -180,3 +180,12 @@ def test_family_ranking_contract():
     rank = DECL["family_ranking"]
     assert rank["min_evaluable_trials_per_family"] == 4 and rank["trials_per_family"] == 6
     assert len(rank["rank_keys"]) == 6
+
+
+def test_declared_restart_recovery_matches_the_engine_meta():
+    stateless = {"F01", "F05", "F08", "F10"}
+    for h in DECL["hypotheses"]:
+        want = "BoundedHistoryReconstructible" if h["hypothesis_label"] in stateless else "DurableStateRequired"
+        assert h["restart_recovery"] == want, h["hypothesis_label"]
+        src = (ENGINES / (h["strategy_id"] + ".rs")).read_text(encoding="utf-8")
+        assert ("RestartRecovery::DurableStateRequired" in src) == (want == "DurableStateRequired"), h["strategy_id"]

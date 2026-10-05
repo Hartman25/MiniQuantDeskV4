@@ -520,15 +520,17 @@ mod registered_strategy_ids_tests {
 
     /// IR-2: the production seam `instantiate_verified` must refuse every engine
     /// whose state cannot be reconstructed from the bounded history Paper loads,
-    /// while Backtest/Research (`instantiate`) keep using it. Every other
-    /// registered identity stays deployable. The refused set is stated explicitly
-    /// so a classification change cannot pass silently.
+    /// while Backtest/Research (`instantiate`) keep using it. Engines whose state
+    /// is seeded from the durable held-position record are refused by the same
+    /// seam and admitted only through `instantiate_for_identity` (the durable
+    /// wrapper). The refused sets are stated explicitly so a classification
+    /// change cannot pass silently.
     #[test]
     fn restart_unsafe_engines_are_refused_by_the_verified_production_seam() {
         let mut registry = PluginRegistry::new();
         register_builtin_strategies(&mut registry, "SPY".to_string()).unwrap();
-        let unsafe_ids = [
-            pullback_mean_reversion_20_2::NAME,
+        let not_recoverable = [pullback_mean_reversion_20_2::NAME];
+        let durable = [
             trend_filtered_rsi5_reversion_v1::NAME,
             trend_filtered_extreme_3d_atr_reversal_v1::NAME,
             close_channel_100_50_trend_v1::NAME,
@@ -537,29 +539,50 @@ mod registered_strategy_ids_tests {
             delayed_overnight_gap_reversal_v1::NAME,
         ];
 
-        let classified: Vec<&str> = registry
-            .list()
-            .iter()
-            .filter(|m| m.restart_recovery == crate::RestartRecovery::NotRecoverable)
-            .map(|m| m.name.as_str())
-            .collect();
+        let classified = |class: crate::RestartRecovery| -> Vec<&str> {
+            registry
+                .list()
+                .iter()
+                .filter(|m| m.restart_recovery == class)
+                .map(|m| m.name.as_str())
+                .collect()
+        };
         assert_eq!(
-            classified, unsafe_ids,
+            classified(crate::RestartRecovery::NotRecoverable),
+            not_recoverable,
             "NotRecoverable classification drifted"
         );
+        assert_eq!(
+            classified(crate::RestartRecovery::DurableStateRequired),
+            durable,
+            "DurableStateRequired classification drifted"
+        );
 
-        for name in unsafe_ids {
+        for name in not_recoverable {
             assert!(registry.instantiate(name).is_ok(), "research/backtest path");
             let err = registry
                 .instantiate_verified(name)
                 .err()
                 .expect("verified production instantiation must refuse the engine");
             assert!(err.to_string().contains("restart"), "{err}");
+            assert!(registry.instantiate_for_identity(name).is_err());
+        }
+        for name in durable {
+            assert!(registry.instantiate(name).is_ok(), "research/backtest path");
+            let err = registry
+                .instantiate_verified(name)
+                .err()
+                .expect("the unwrapped production seam must refuse a durable-state engine");
+            assert!(err.to_string().to_lowercase().contains("durable"), "{err}");
+            assert!(
+                registry.instantiate_for_identity(name).is_ok(),
+                "{name} must be admitted to the durable wrapper"
+            );
         }
 
         for id in REGISTERED_STRATEGY_IDS
             .iter()
-            .filter(|id| !unsafe_ids.contains(id))
+            .filter(|id| !not_recoverable.contains(id) && !durable.contains(id))
         {
             assert!(
                 registry.instantiate_verified(id).is_ok(),
