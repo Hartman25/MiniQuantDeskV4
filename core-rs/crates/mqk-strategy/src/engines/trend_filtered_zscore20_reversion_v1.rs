@@ -120,7 +120,7 @@ impl Strategy for TrendFilteredZscore20ReversionV1Strategy {
             .push_str("direction:long_flat")
             .push_str("malformed_window:fail_closed_flat")
             .push_str("incomplete_latest:hold_state")
-            .push_str("state_recovery:first_call_window_replay_v1")
+            .push_str("state_recovery:durable_held_position_seed_v1")
             .finish()
     }
 
@@ -430,9 +430,16 @@ mod tests {
             "direction:long_flat",
             "malformed_window:fail_closed_flat",
             "incomplete_latest:hold_state",
-            "state_recovery:first_call_window_replay_v1",
+            "state_recovery:durable_held_position_seed_v1",
         ];
         assert_eq!(live, fp(VERSION, nums, tokens), "recipe mirrors the engine");
+        let mut stale = tokens;
+        stale[tokens.len() - 1] = "state_recovery:first_call_window_replay_v1";
+        assert_ne!(
+            live,
+            fp(VERSION, nums, stale),
+            "stale window-replay recovery recipe"
+        );
         assert_ne!(live, fp("0.1.1", nums, tokens));
         for i in 0..nums.len() {
             let mut m = nums;
