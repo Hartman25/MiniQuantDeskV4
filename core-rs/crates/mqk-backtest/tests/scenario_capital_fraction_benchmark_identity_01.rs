@@ -273,3 +273,131 @@ fn benchmark_v2_benchmark_run_id_is_unchanged() {
 /// Value produced by the unchanged Benchmark V2 derivation (strategy name, config, data,
 /// execution model and spec-only fingerprint); it must never move.
 const PINNED_V2_BENCHMARK_RUN_ID: &str = "0c85a921-4635-5ac4-8575-8190f07d6439";
+
+/// Long for decision indices `from..to`, flat otherwise.
+struct LongWindow {
+    from: usize,
+    to: usize,
+    seen: usize,
+}
+
+impl Strategy for LongWindow {
+    fn spec(&self) -> StrategySpec {
+        StrategySpec::new("long_window", DAY)
+    }
+    fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+        let i = self.seen;
+        self.seen += 1;
+        let long = (self.from..self.to).contains(&i);
+        StrategyOutput::new(vec![TargetPosition::new(
+            "SPY",
+            if long {
+                QtyMicros::from_whole_units(1).unwrap()
+            } else {
+                QtyMicros::ZERO
+            },
+        )])
+    }
+}
+
+/// Close 100 for 6 bars, then a 20% drop to 80 for the rest.
+fn drop_bars() -> Vec<BacktestBar> {
+    (0..12)
+        .map(|i| {
+            let c = if i < 6 { 100 } else { 80 };
+            BacktestBar::new(
+                "SPY",
+                DAY * (i + 1),
+                c * M,
+                c * M + M,
+                c * M - M,
+                c * M,
+                1_000,
+            )
+        })
+        .collect()
+}
+
+fn windowed_section(from: usize, to: usize) -> CapitalFractionBenchmarkSection {
+    let (c, bars) = (cfg(1_000), drop_bars());
+    let mut e = BacktestEngine::new(c.clone());
+    e.add_strategy(Box::new(LongWindow { from, to, seen: 0 }))
+        .unwrap();
+    let report = e.run(&bars).unwrap();
+    compute_capital_fraction_benchmark(&report, &bars, &c, DAY, 0.0).unwrap()
+}
+
+#[test]
+fn drawdown_improvement_is_benchmark_minus_candidate_under_one_matched_evidence() {
+    // Candidate is flat before the 20% drop; the matched passive hold (100 shares) eats it:
+    // 100 shares x $20 = $2,000 = 2% of the $100,000 peak.
+    let s = windowed_section(1, 4);
+    assert!(
+        (s.benchmark_max_drawdown_pct - 2.0).abs() < 0.25,
+        "{}",
+        s.benchmark_max_drawdown_pct
+    );
+    assert!(s.candidate_max_drawdown_pct < 0.5, "{s:?}");
+    assert!(s.drawdown_improvement_pct > 1.5, "{s:?}");
+    assert!(
+        (s.drawdown_improvement_pct
+            - (s.benchmark_max_drawdown_pct - s.candidate_max_drawdown_pct))
+            .abs()
+            < 1e-12
+    );
+
+    // Candidate holds through the drop exactly like the benchmark: zero improvement.
+    let same = windowed_section(1, 12);
+    assert!(same.drawdown_improvement_pct.abs() < 1e-9, "{same:?}");
+    assert!(same.benchmark_max_drawdown_pct > 1.5);
+}
+
+#[test]
+fn max_drawdown_helper_matches_a_hand_computed_oracle() {
+    use mqk_backtest::benchmark_capital_fraction::max_drawdown_pct_from_equity as dd;
+    // Peak 110 -> trough 99 = 10%; the later 105 does not matter.
+    assert!((dd(100, &[(1, 110), (2, 99), (3, 105)]).unwrap() - 10.0).abs() < 1e-12);
+    // Never above the initial peak: 90 vs 100 = 10%.
+    assert!((dd(100, &[(1, 90), (2, 95)]).unwrap() - 10.0).abs() < 1e-12);
+    assert_eq!(dd(100, &[(1, 100), (2, 120)]), Some(0.0));
+    assert_eq!(dd(100, &[]), None);
+    assert_eq!(dd(0, &[(1, 5)]), None);
+}
+
+#[test]
+fn drawdown_evidence_is_verified_all_or_none_and_tamper_evident() {
+    let good = genuine_evidence();
+    good.verify_internal().expect("control");
+    assert!(good.drawdown_improvement_pct.is_some());
+
+    let mut legacy = good.clone();
+    legacy.candidate_max_drawdown_pct = None;
+    legacy.benchmark_max_drawdown_pct = None;
+    legacy.drawdown_improvement_pct = None;
+    legacy
+        .verify_internal()
+        .expect("absent drawdown evidence is non-evaluable, not forged");
+
+    type Tamper = fn(&mut ScanCapitalFractionBenchmarkEvidence);
+    let tampers: Vec<(&str, Tamper)> = vec![
+        ("partial", |e| e.benchmark_max_drawdown_pct = None),
+        ("improvement forged", |e| {
+            e.drawdown_improvement_pct = Some(e.drawdown_improvement_pct.unwrap() + 1.0)
+        }),
+        ("inverted direction", |e| {
+            e.drawdown_improvement_pct = Some(
+                e.candidate_max_drawdown_pct.unwrap() - e.benchmark_max_drawdown_pct.unwrap() + 0.5,
+            )
+        }),
+        ("nan", |e| e.candidate_max_drawdown_pct = Some(f64::NAN)),
+        ("out of range", |e| {
+            e.benchmark_max_drawdown_pct = Some(150.0);
+            e.drawdown_improvement_pct = Some(150.0 - e.candidate_max_drawdown_pct.unwrap());
+        }),
+    ];
+    for (name, tamper) in tampers {
+        let mut e = good.clone();
+        tamper(&mut e);
+        assert!(e.verify_internal().is_err(), "{name} must be refused");
+    }
+}

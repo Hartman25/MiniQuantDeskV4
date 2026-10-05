@@ -10,8 +10,10 @@ Fail-closed rules:
 * a non-evaluable slot stays in the population and counts as WORST on every key (never dropped,
   never imputed);
 * a family needs at least `min_evaluable_trials_per_family` evaluable slots to be rankable;
-* an evaluable slot without drawdown-improvement evidence is worst on key 5 only. The
-  capital-fraction benchmark section carries no benchmark drawdown today, so no value is invented.
+* key 5 is read ONLY from the engine-computed benchmark evidence (candidate and matched passive
+  benchmark max drawdown under one verified run identity; improvement = benchmark - candidate, in
+  percent of peak equity). Absent, partial, non-finite or inconsistent evidence is worst on key 5 only;
+  row-level caller-supplied numbers are never read.
 """
 
 from __future__ import annotations
@@ -40,6 +42,19 @@ def median_worst(values: list[float]) -> float:
     return NEG_INF if NEG_INF in (lo, hi) else (lo + hi) / 2
 
 
+def _drawdown_improvement(bench: dict) -> float | None:
+    """Benchmark-minus-candidate max drawdown (pct), or None unless all three engine numbers agree."""
+    vals = [bench.get(k) for k in ("candidate_max_drawdown_pct", "benchmark_max_drawdown_pct",
+                                   "drawdown_improvement_pct")]
+    if any(v is None or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+           for v in vals):
+        return None
+    cand, base, imp = (float(v) for v in vals)
+    if not (0.0 <= cand <= 100.0 and 0.0 <= base <= 100.0) or abs(imp - (base - cand)) > 1e-9:
+        return None
+    return imp
+
+
 def slot_from_evidence(row: dict, family: str) -> dict:
     """Map a batch_results.json row onto the ranking slot (the only place evidence is interpreted)."""
     bench = row.get("benchmark_evidence") or {}
@@ -50,7 +65,7 @@ def slot_from_evidence(row: dict, family: str) -> dict:
     return {"family": family, "symbol": row["symbol"], "trial_id": row["trial_id"], "evaluable": evaluable,
             "dsr": row.get("dsr") if evaluable else None, "alpha_pct": alpha if evaluable else None,
             "robustness_clear": robust,
-            "drawdown_improvement": row.get("drawdown_improvement") if evaluable else None}
+            "drawdown_improvement": _drawdown_improvement(bench) if evaluable else None}
 
 
 def _worst_if_none(slot: dict, field: str) -> float:

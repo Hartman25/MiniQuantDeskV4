@@ -208,6 +208,70 @@ def test_slot_from_evidence_maps_the_batch_row_and_fails_closed():
     assert fr.slot_from_evidence({**base, "robustness_missing": ["a"]}, "F01")["robustness_clear"] is False
 
 
+def _bench(cand=2.0, base=5.0, imp=None, alpha=2.5):
+    return {"alpha_pct": alpha, "candidate_max_drawdown_pct": cand, "benchmark_max_drawdown_pct": base,
+            "drawdown_improvement_pct": base - cand if imp is None else imp}
+
+
+def _row(bench, **extra):
+    return {"strategy": "x", "symbol": "SPY", "trial_id": "t1", "judge_status": "included", "dsr": 0.6,
+            "benchmark_evidence": bench, "robustness_failed": [], "robustness_missing": [], **extra}
+
+
+def test_key5_is_read_only_from_engine_benchmark_drawdown_evidence():
+    s = fr.slot_from_evidence(_row(_bench(2.0, 5.0)), "F01")
+    assert s["drawdown_improvement"] == pytest.approx(3.0)  # benchmark minus candidate: lower drawdown is better
+    assert fr.slot_from_evidence(_row(_bench(6.0, 5.0)), "F01")["drawdown_improvement"] == pytest.approx(-1.0)
+    # a caller-supplied row-level number never substitutes for engine evidence
+    s = fr.slot_from_evidence(_row({"alpha_pct": 2.5}, drawdown_improvement=9.9), "F01")
+    assert s["evaluable"] and s["drawdown_improvement"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    {"candidate_max_drawdown_pct": None},
+    {"benchmark_max_drawdown_pct": None},
+    {"drawdown_improvement_pct": None},
+    {"drawdown_improvement_pct": -3.0},  # inverted direction (candidate minus benchmark)
+    {"drawdown_improvement_pct": 3.5},  # not benchmark minus candidate
+    {"candidate_max_drawdown_pct": float("nan")},
+    {"benchmark_max_drawdown_pct": float("inf")},
+    {"candidate_max_drawdown_pct": True},
+    {"candidate_max_drawdown_pct": -1.0, "drawdown_improvement_pct": 6.0},
+    {"benchmark_max_drawdown_pct": 120.0, "drawdown_improvement_pct": 118.0},
+])
+def test_partial_or_inconsistent_drawdown_evidence_is_worst_on_key_five_only(bad):
+    s = fr.slot_from_evidence(_row({**_bench(2.0, 5.0), **bad}), "F01")
+    assert s["evaluable"] and s["drawdown_improvement"] is None and s["alpha_pct"] == 2.5
+
+
+def _key5_only_population():
+    slots = population()
+    for s in slots:
+        s["drawdown_improvement"] = 2.0 if s["family"] == "F10" else 0.1
+    return slots
+
+
+def test_key5_mutations_are_killed(monkeypatch):
+    # Control: F10 wins the key-5-only population (it is last by id, so only key 5 can lift it).
+    assert rank(_key5_only_population())["ranking"][0] == "F10"
+    real = fr.rank_key
+
+    def inverted(fid, m):  # worse drawdown improvement ranked better
+        k = list(real(fid, m))
+        k[4] = -k[4]
+        return tuple(k)
+
+    def removed(fid, m):  # key 5 dropped
+        k = list(real(fid, m))
+        k[4] = 0
+        return tuple(k)
+
+    for mutant in (inverted, removed):
+        monkeypatch.setattr(fr, "rank_key", mutant)
+        assert rank(_key5_only_population())["ranking"][0] != "F10", mutant.__name__
+        monkeypatch.setattr(fr, "rank_key", real)
+
+
 def test_median_worst_semantics():
     n = fr.NEG_INF
     assert fr.median_worst([1, 2, 3, 4, 5, 6]) == 3.5

@@ -354,6 +354,15 @@ pub struct ScanCapitalFractionBenchmarkEvidence {
     pub evaluation_end_ts: i64,
     /// INFORMATIONAL ONLY: never an input to alpha or any review decision.
     pub legacy_buy_and_hold_return_pct: Option<f64>,
+    /// Max drawdown (% of running peak) of the candidate run and of the matched passive benchmark
+    /// run under this one authenticated evidence. All three are present or all absent (absent =
+    /// not evaluable); `drawdown_improvement_pct = benchmark - candidate`. Not identity-bearing.
+    #[serde(default)]
+    pub candidate_max_drawdown_pct: Option<f64>,
+    #[serde(default)]
+    pub benchmark_max_drawdown_pct: Option<f64>,
+    #[serde(default)]
+    pub drawdown_improvement_pct: Option<f64>,
 }
 
 impl ScanCapitalFractionBenchmarkEvidence {
@@ -457,6 +466,23 @@ impl ScanCapitalFractionBenchmarkEvidence {
                 > 1e-9
         {
             return bad("alpha_pct is not candidate return minus benchmark return");
+        }
+        match (
+            self.candidate_max_drawdown_pct,
+            self.benchmark_max_drawdown_pct,
+            self.drawdown_improvement_pct,
+        ) {
+            (None, None, None) => {}
+            (Some(c), Some(b), Some(i))
+                if [c, b, i].iter().all(|v| v.is_finite())
+                    && (0.0..=100.0).contains(&c)
+                    && (0.0..=100.0).contains(&b)
+                    && (b - c - i).abs() <= 1e-9 => {}
+            _ => {
+                return bad(
+                    "drawdown evidence is partial, out of range, or improvement is not benchmark minus candidate",
+                )
+            }
         }
         // The benchmark run id is recomputed from the benchmark's own
         // behavior-bearing inputs (exact quantity and causal entry included), so
@@ -1080,6 +1106,9 @@ fn capital_fraction_benchmark_evidence(
         input_data_hash: report.input_data_hash.clone(),
         evaluation_end_ts: bars.last().map(|b| b.end_ts).unwrap_or(0),
         legacy_buy_and_hold_return_pct,
+        candidate_max_drawdown_pct: Some(bench.candidate_max_drawdown_pct),
+        benchmark_max_drawdown_pct: Some(bench.benchmark_max_drawdown_pct),
+        drawdown_improvement_pct: Some(bench.drawdown_improvement_pct),
     })
 }
 

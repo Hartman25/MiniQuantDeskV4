@@ -117,6 +117,27 @@ pub struct CapitalFractionBenchmarkSection {
     pub benchmark_run_id: String,
     pub account_return_pct: f64,
     pub alpha_pct: f64,
+    pub candidate_max_drawdown_pct: f64,
+    pub benchmark_max_drawdown_pct: f64,
+    /// `benchmark_max_drawdown_pct - candidate_max_drawdown_pct`, in percentage points of peak
+    /// equity: positive means the candidate's drawdown was smaller than the matched passive hold.
+    pub drawdown_improvement_pct: f64,
+}
+
+/// Worst peak-to-trough equity decline as a percentage of the running peak, the peak starting at
+/// `initial_cash_micros`. `None` when the curve is empty or the initial cash is not positive.
+pub fn max_drawdown_pct_from_equity(initial_cash_micros: i64, curve: &[(i64, i64)]) -> Option<f64> {
+    if curve.is_empty() || initial_cash_micros <= 0 {
+        return None;
+    }
+    let mut peak = initial_cash_micros;
+    let mut worst = 0.0f64;
+    for &(_, equity) in curve {
+        peak = peak.max(equity);
+        let dd = peak.saturating_sub(equity) as f64 / peak as f64 * 100.0;
+        worst = worst.max(dd);
+    }
+    Some(worst)
 }
 
 #[derive(Debug)]
@@ -126,6 +147,8 @@ pub enum CapitalFractionBenchmarkError {
     /// The candidate never resolved a valid entry: nothing to match.
     CandidateNeverEntered,
     EmptyBars,
+    /// The candidate or benchmark run has no equity curve to measure drawdown on.
+    EquityCurveUnavailable,
     /// Report provenance disagrees with the config (capital, fraction, policy).
     ProvenanceMismatch(&'static str),
     /// The recorded reference bar is not in the evaluated bars.
@@ -150,6 +173,9 @@ impl fmt::Display for CapitalFractionBenchmarkError {
                 "candidate never resolved a valid capital-fraction entry; no benchmark quantity exists"
             ),
             Self::EmptyBars => write!(f, "empty bar sequence"),
+            Self::EquityCurveUnavailable => {
+                write!(f, "candidate or benchmark equity curve is unavailable")
+            }
             Self::ProvenanceMismatch(what) => {
                 write!(f, "candidate sizing provenance disagrees with config: {what}")
             }
@@ -315,6 +341,13 @@ pub fn compute_capital_fraction_benchmark(
         0.0
     };
 
+    let candidate_max_drawdown_pct =
+        max_drawdown_pct_from_equity(initial_cash_micros, &candidate_report.equity_curve)
+            .ok_or(CapitalFractionBenchmarkError::EquityCurveUnavailable)?;
+    let benchmark_max_drawdown_pct =
+        max_drawdown_pct_from_equity(initial_cash_micros, &report.equity_curve)
+            .ok_or(CapitalFractionBenchmarkError::EquityCurveUnavailable)?;
+
     Ok(CapitalFractionBenchmarkSection {
         policy_id: BENCHMARK_CAPITAL_FRACTION_POLICY_ID.to_string(),
         symbol: first.symbol.clone(),
@@ -332,5 +365,8 @@ pub fn compute_capital_fraction_benchmark(
         benchmark_run_id: report.run_id.to_string(),
         account_return_pct,
         alpha_pct: candidate_total_return_pct - account_return_pct,
+        candidate_max_drawdown_pct,
+        benchmark_max_drawdown_pct,
+        drawdown_improvement_pct: benchmark_max_drawdown_pct - candidate_max_drawdown_pct,
     })
 }
