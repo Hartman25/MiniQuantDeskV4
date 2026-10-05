@@ -11,7 +11,7 @@
 
 ## Batch-wide judge (`research_multiple_testing_judge_v1`, one judge over all 60)
 
-- judge sha256 `4d38c99141a535d131a35012ba3f6d5ca5cfbe841ac3b6b414bedc9186cf788f`; 53 included, 7 excluded (`no_successful_attempt`); PBO = 0.0714 (252 combinations, 10 blocks); effective independent trial count 39.53 of 53 raw; judge holdout status `reserved_not_evaluated`.
+- judge sha256 `4d38c99141a535d131a35012ba3f6d5ca5cfbe841ac3b6b414bedc9186cf788f`; 53 included, 7 excluded (`no_successful_attempt`); PBO = 0.0714 (252 combinations, 10 blocks); effective independent trial count 39.53 of 53 raw; judge holdout status `reserved_not_evaluated`. The registry holds three judge artifacts for this one judge id, one per predeclared block-count sensitivity (8/10/12; PBO 0.0714 / 0.0714 / 0.1288, range 0.057 inside the predeclared 0.15 limit); the 10-block artifact above is the one on disk (`judge/judge.json`).
 - Scanner review: 60/60 `rejected` (0 `paper_candidate`). Positive cost-aware benchmark alpha: 0/60.
 
 ## Per-family six-slot dispositions
