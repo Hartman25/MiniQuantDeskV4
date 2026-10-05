@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -31. M1 System-Closure Correction + Batch 03 preparation (2026-10-04, `V4-M1-SYSTEM-CLOSURE-CORRECTION-PLUS-BATCH03-PREPARATION-01`)
+
+Local commits on top of `fac22592`, **not pushed**. Records: `docs/M1_SYSTEM_CLOSURE_01.md` (Correction 01), `docs/research/M1_BATCH03_PREDECLARATION.md`; ledger G2.19.
+
+- Corrected: canonical daily timeframe identity for future trials (`1D` == `1Day`, opt-in, historical ids unchanged); the full six-key P7A/P7B stress contract bound into the registered trial and compared field by field at Promotion; M1.10 soak sessions bound to the deployed identity.
+- Prepared: Batch 03 (ten long/flat native ETF families F01-F10 x SPY, QQQ, IWM, SMH, XBI, XLE = 60 trials, 1000 bps capital-fraction sizing on USD 100,000, canonical daily identity, one batch-wide judge population), the engines with independent integer-reference parity, the 60/0 registration gate (59 and 61 refused), and a family ranking that advances at most the top 3 families to Confirmation (never trials, never Promotion). Confirmation universe DIA, MDY, XLF, XLI, XLV, XLP is prepared, not registered.
+- **Final status `BATCH03_PREDECLARED_NOT_EXECUTED` + hard stop `OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT`:** no repository authority exists for the Batch 03 stress contract. Operator must supply `scenario_id`, `allocation_fraction_bps` (<1000), `stress_execution_slippage_bps` and `stress_execution_volatility_mult_bps` (each >= baseline, one strictly worse) and `max_drawdown_ceiling_bps`. Batch 02's 500 bps values are not authority.
+- Zero trials registered, zero economic attempts, no result, no family winner, no Promotion candidate. Holdout RESERVED / UNCONSUMED. Daemon capital-fraction Paper dispatch remains `AUTHORIZED_NEXT / NOT YET COMPLETE`; M1 `M1_BLOCKED`; Paper INACTIVE; Live NOT TOUCHED.
+- Known gaps: family-ranking key 5 has no benchmark-drawdown evidence source (fail-closed to worst); F02/F03/F04/F06/F07/F09 are `NotRecoverable` engines; the `mqk-daemon` crate was not compiled locally. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI after an authorized push.
+
 ## -30. M1 System Closure (2026-10-04, `V4-M1-SYSTEM-CLOSURE-CANDIDATE-READY-01`)
 
 Local commits on top of `fac22592`, **not pushed**. Record: `docs/M1_SYSTEM_CLOSURE_01.md`; runbook `docs/runbooks/m1_10_finite_validation.md`; ledger G2.18. Supersedes the "local, not pushed" wording of -29 and -28: Batch 02 and its independent-review correction are **PUSHED-VERIFIED** at `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (GitHub CI #623, run `37222460113`, SUCCESS, 6/6).

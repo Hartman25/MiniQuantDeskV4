@@ -1255,3 +1255,7 @@ Unchanged: M1 is the CURRENT TARGET and `M1_BLOCKED`; Batch 01 `BATCH_REJECTED`;
 ## M1 system closure addendum (2026-10-04)
 
 Batch 02 is PUSHED-VERIFIED (`fac22592`, CI #623 SUCCESS 6/6). `docs/M1_SYSTEM_CLOSURE_01.md` records the closure matrix. M1.9: candidate-independent items verified read-only off-market (`PREDEPLOYMENT_READY`); candidate deployment and market-hours observation remain open. M1.10: a derived ledger and runbook (`docs/runbooks/m1_10_finite_validation.md`) now exist; not started, still open (10 countable + 5 consecutive clean real sessions, after the final repair). Open code gap: daemon dispatch of capital-fraction strategies (operator decision). M1 remains `M1_BLOCKED`; the earlier waiver is code-completion accounting only.
+
+## M1 correction + Batch 03 preparation addendum (2026-10-04)
+
+`docs/M1_SYSTEM_CLOSURE_01.md` (Correction 01) records three corrections: canonical daily trial identity (opt-in, historical ids unchanged), the full six-key stress contract bound to the registered trial and verified field by field at Promotion, and M1.10 deployment-identity binding. `docs/research/M1_BATCH03_PREDECLARATION.md` records the prospective Batch 03 declaration: engines F01-F10, the 60/0 registration gate, and the family ranking are code-complete and proven; the batch is `BATCH03_PREDECLARED_NOT_EXECUTED` pending `OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT`. No trial, attempt or result exists. Open code gaps: daemon capital-fraction dispatch; ranking key 5 benchmark-drawdown evidence. M1 remains `M1_BLOCKED`.

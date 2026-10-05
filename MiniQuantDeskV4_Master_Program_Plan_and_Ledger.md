@@ -768,6 +768,23 @@ Local, not pushed (baseline `fac22592`). Full record, matrix, census, second swe
 
 Open: `OPERATOR_DECISION_REQUIRED_CAPITAL_FRACTION_PAPER_DISPATCH` (daemon cannot trade a capital-fraction strategy). M1 status `M1_BLOCKED` (no qualified candidate; M1.9 deployment; M1.10 real sessions). `M1_SYSTEM_CANDIDATE_READY = false` until the dispatch decision is resolved. G2.17's blocked stress-authority item (IR-B02-02 b) is closed by `3ba296c7`.
 
+### G2.19 M1 system-closure correction + Batch 03 preparation (`V4-M1-SYSTEM-CLOSURE-CORRECTION-PLUS-BATCH03-PREPARATION-01`, 2026-10-04) - `BATCH03_PREDECLARED_NOT_EXECUTED`
+
+Local, not pushed (baseline `fac22592`). Records: `docs/M1_SYSTEM_CLOSURE_01.md` (Correction 01), `docs/research/M1_BATCH03_PREDECLARATION.md`.
+
+| Commit | Invariant |
+|---|---|
+| `b1cebdfb` | `1D` and `1Day` give one canonical daily trial identity for opted-in declarations; unknown labels refused; historical ids unchanged |
+| `b9521471` | six-key `p7a_p7b_stress_contract_v1` bound into the registered trial; Promotion compares every field; 2-key shape refused |
+| `24500e17` | M1.10 soak sessions carry and must match the deployed identity (`WrongDeployment`) |
+| `67055ead`, `cbd1b1c9`, `b386d9b6` | native engines F01-F10 (exact integer math; registry 24; `NotRecoverable` for the stateful six) |
+| `6d1733f2` | Batch 03 predeclaration (60 trials, withheld: not executable) |
+| `d2c2b9c3` | registration gate proof: 60 exact / 0 attempts; 59, 61, duplicates, attempt-before-gate refused |
+| `2cbc1850` | engines match an independent integer reference bar-for-bar; capital-fraction sizing identity |
+| `7ceb4349` | family ranking (top-3 families to Confirmation, never trials) + execution-stop tests |
+
+Open: `OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT`. No trial registered, `ECONOMIC_ATTEMPTS = 0`. Ranking key 5 has no drawdown evidence source (deferred). Daemon capital-fraction dispatch still `AUTHORIZED_NEXT / NOT YET COMPLETE`. M1 `M1_BLOCKED`.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).

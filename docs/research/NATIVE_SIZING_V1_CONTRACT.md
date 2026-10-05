@@ -82,6 +82,10 @@ Restart safety (`mqk-runtime` `capital_fraction_host.rs`, `mqk-strategy` `sizing
 
 A PREDECLARED FUTURE POLICY DECISION, not a default and not executed here: next M1 hypothesis campaign sizing is `fixed_initial_capital_fraction_v1` with `allocation_fraction_bps = 1000` (10% of immutable initial allocated strategy capital); for the current M1 capital basis of USD 100,000 the nominal entry budget is USD 10,000. The infrastructure still requires the fraction explicitly; 1000 is not a code default and is never substituted for a missing value. Batch 02 is NOT STARTED, no Batch-02 hypotheses are declared, no trials are registered and no results exist; the holdout is RESERVED / UNCONSUMED.
 
+## Batch 03 use (prospective, not executed)
+
+Batch 03 (`docs/research/M1_BATCH03_PREDECLARATION.md`) uses this contract unchanged: 1000 bps of USD 100,000, quantity floor(USD 10,000 / completed signal-bar close), whole shares, no fallback, no compounding, no family-specific sizing, the same capital-fraction matched benchmark. Its P7A/P7B stress contract is the registered six-key `p7a_p7b_stress_contract_v1` and is deliberately not chosen here: `OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT`. The Batch 02 stress values are not authority for it.
+
 ## Remaining (not required by this contract)
 
 - Paper activation (daemon dispatch wiring of the durable host) requires its own authorized mission.
