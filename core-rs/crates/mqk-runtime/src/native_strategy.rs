@@ -45,9 +45,9 @@
 //! - multi-strategy fleet execution
 
 use mqk_strategy::{
-    BarStub, PluginRegistry, RecentBarsWindow, ShadowMode, SizingPolicy, StrategyBarResult,
-    StrategyContext, StrategyHost, TargetSizing, SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1,
-    SIZING_POLICY_FIXED_QUANTITY_V1,
+    BarStub, HeldSizingScope, PluginRegistry, RecentBarsWindow, ShadowMode, SizingPolicy,
+    StrategyBarResult, StrategyContext, StrategyHost, TargetSizing,
+    SIZING_POLICY_FIXED_INITIAL_CAPITAL_FRACTION_V1, SIZING_POLICY_FIXED_QUANTITY_V1,
 };
 
 // ---------------------------------------------------------------------------
@@ -713,6 +713,53 @@ pub fn resolve_native_deployment_identity(
         semantic_fingerprint,
         timeframe_secs,
     })
+}
+
+const CAPITAL_FRACTION_PAPER_DEPLOYMENT_DOMAIN: &str = "mqk.capital_fraction.paper_deployment.v1";
+
+/// Everything the daemon needs to recover one durable capital-fraction host.
+/// `scope.deployment_id` is a pure function of the Paper domain, strategy,
+/// symbol, timeframe and the wrapper fingerprint (which already covers the
+/// sizing contract), so it is stable across restarts and distinct across
+/// every one of those dimensions. Never a random or per-run value.
+pub struct CapitalFractionPaperBinding {
+    pub contract: CapitalFractionDeploymentContract,
+    pub registry: PluginRegistry,
+    pub scope: HeldSizingScope,
+    pub semantic_fingerprint: String,
+    pub timeframe_secs: i64,
+}
+
+/// `Ok(None)` = the fixed-quantity contract (stateless path, unchanged).
+pub fn resolve_capital_fraction_paper_binding(
+    inputs: &StrategyBootstrapInputs,
+    strategy_id: &str,
+) -> Result<Option<CapitalFractionPaperBinding>, NativeIdentityError> {
+    let Some(contract) =
+        resolve_capital_fraction_deployment(inputs).map_err(NativeIdentityError::Sizing)?
+    else {
+        return Ok(None);
+    };
+    let identity = resolve_native_deployment_identity(inputs, strategy_id)?;
+    let registry =
+        build_plugin_registry_from_inputs(inputs).map_err(NativeIdentityError::Sizing)?;
+    let name = format!(
+        "{CAPITAL_FRACTION_PAPER_DEPLOYMENT_DOMAIN}|{strategy_id}|{}|{}|{}",
+        inputs.symbol.trim(),
+        identity.timeframe_secs,
+        identity.semantic_fingerprint
+    );
+    let deployment_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).to_string();
+    Ok(Some(CapitalFractionPaperBinding {
+        contract,
+        registry,
+        scope: HeldSizingScope {
+            deployment_id,
+            strategy_id: strategy_id.to_string(),
+        },
+        semantic_fingerprint: identity.semantic_fingerprint,
+        timeframe_secs: identity.timeframe_secs,
+    }))
 }
 
 /// Build the production plugin registry from explicit inputs. Every asset

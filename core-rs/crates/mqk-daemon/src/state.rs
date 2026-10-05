@@ -15,6 +15,8 @@ pub mod autonomous_daily_outcome;
 pub mod autonomous_retry_policy;
 pub mod autonomous_runtime_context;
 mod broker;
+#[cfg(test)]
+mod capital_fraction_dispatch_tests;
 pub(crate) mod closed_trade_attribution;
 pub mod crypto_execution_policy;
 pub mod crypto_fee_ingestion;
@@ -5071,18 +5073,45 @@ operator_reconcile_or_repair_required"
             // bool. Permanently `false` in production.
             let inject_panic_for_test = self.panic_on_symbol_for_test.lock().await.as_deref()
                 == Some(binding.symbol.as_str());
-            let bar_result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                if inject_panic_for_test {
-                    panic!("A1_TEST_INJECTED_PANIC for symbol {}", binding.symbol);
+            // The durable capital-fraction host persists its held-sizing
+            // transition inside `on_bar_durable` BEFORE returning the
+            // result, so a persistence failure surfaces here as an `Err`
+            // and no result (hence no decision) ever leaves this call.
+            let evaluated: Result<Result<mqk_strategy::StrategyBarResult, String>, _> = match host {
+                crate::dynamic_selection_host_pool::RuntimeSelectedStrategyHost::Stateless(h) => {
+                    std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        if inject_panic_for_test {
+                            panic!("A1_TEST_INJECTED_PANIC for symbol {}", binding.symbol);
+                        }
+                        h.on_bar(&ctx).map_err(|e| format!("{e:?}"))
+                    }))
                 }
-                host.on_bar(&ctx)
-            })) {
+                crate::dynamic_selection_host_pool::RuntimeSelectedStrategyHost::DurableCapitalFraction(h) => {
+                    match self.db.as_ref() {
+                        None => Ok(Err(
+                            "durable capital-fraction host requires the database pool".to_string()
+                        )),
+                        Some(db) => {
+                            futures_util::FutureExt::catch_unwind(AssertUnwindSafe(async {
+                                if inject_panic_for_test {
+                                    panic!("A1_TEST_INJECTED_PANIC for symbol {}", binding.symbol);
+                                }
+                                h.on_bar_durable(db, &ctx, chrono::Utc::now())
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            }))
+                            .await
+                        }
+                    }
+                }
+            };
+            let bar_result = match evaluated {
                 Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
+                Ok(Err(detail)) => {
                     return Err(SelectedHostDispatchFault::HostOnBarError {
                         symbol: binding.symbol.clone(),
                         strategy_id: binding.strategy_id.clone(),
-                        detail: format!("{e:?}"),
+                        detail,
                     })
                 }
                 Err(panic_payload) => {

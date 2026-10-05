@@ -1220,10 +1220,12 @@ impl AppState {
         authorized_bindings.sort();
 
         let dispatch_authority =
-            crate::multi_strategy_runtime_dispatch::build_explicit_multi_strategy_dispatch_authority(
+            crate::multi_strategy_runtime_dispatch::build_explicit_multi_strategy_dispatch_authority_durable(
                 run_id,
                 &authorized_bindings,
+                self.db.as_ref(),
             )
+            .await
             .map_err(|e| {
                 RuntimeLifecycleError::forbidden(
                     "runtime.start_refused.explicit_multi_strategy_dispatch_authority_invalid",

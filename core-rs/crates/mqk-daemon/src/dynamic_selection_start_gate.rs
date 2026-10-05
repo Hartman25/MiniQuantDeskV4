@@ -434,7 +434,37 @@ fn selected_host_expected_fingerprints(
 /// produces a `PaperEnforced*` disposition -- this function is only ever
 /// reached on the `paper_enforced` path (see module docs, "`not_applicable`
 /// vs `allowed`").
+#[cfg(test)]
 fn evaluate_plan_for_start_gate(plan: DynamicSelectionPlan) -> DynamicSelectionStartGateOutcome {
+    match prevalidate_plan_for_start_gate(plan) {
+        Err(outcome) => *outcome,
+        Ok((plan, selected)) => {
+            let built = DynamicSelectionHostPool::build(&selected);
+            finish_plan_for_start_gate(plan, selected, built)
+        }
+    }
+}
+
+/// Production form of the start gate's pool step: capital-fraction keys
+/// recover their durable held-sizing state here, before the outcome (and
+/// therefore the start barrier) can be produced. A recovery failure is a
+/// `HostPoolBuildFailed` refusal.
+async fn evaluate_plan_for_start_gate_durable(
+    plan: DynamicSelectionPlan,
+    db: Option<&sqlx::PgPool>,
+) -> DynamicSelectionStartGateOutcome {
+    match prevalidate_plan_for_start_gate(plan) {
+        Err(outcome) => *outcome,
+        Ok((plan, selected)) => {
+            let built = DynamicSelectionHostPool::build_with_durable_state(&selected, db).await;
+            finish_plan_for_start_gate(plan, selected, built)
+        }
+    }
+}
+
+fn prevalidate_plan_for_start_gate(
+    plan: DynamicSelectionPlan,
+) -> Result<(DynamicSelectionPlan, Vec<HostPoolKey>), Box<DynamicSelectionStartGateOutcome>> {
     let mut reasons = Vec::new();
 
     let refused = |plan: DynamicSelectionPlan, reasons: Vec<DynamicSelectionStartGateReason>| {
@@ -452,7 +482,7 @@ fn evaluate_plan_for_start_gate(plan: DynamicSelectionPlan) -> DynamicSelectionS
         reasons.push(DynamicSelectionStartGateReason::PlanInvalid {
             truth_state: plan.truth_state.clone(),
         });
-        return refused(plan, reasons);
+        return Err(Box::new(refused(plan, reasons)));
     }
 
     if plan.selected_count() == 0 {
@@ -469,7 +499,7 @@ fn evaluate_plan_for_start_gate(plan: DynamicSelectionPlan) -> DynamicSelectionS
     }
 
     if !reasons.is_empty() {
-        return refused(plan, reasons);
+        return Err(Box::new(refused(plan, reasons)));
     }
 
     // IR2: prove selected-row coherence before deriving any host-pool key
@@ -485,12 +515,30 @@ fn evaluate_plan_for_start_gate(plan: DynamicSelectionPlan) -> DynamicSelectionS
                 },
             )
             .collect();
-        return refused(plan, reasons);
+        return Err(Box::new(refused(plan, reasons)));
     }
 
     let selected = selected_host_pool_keys(&plan);
+    Ok((plan, selected))
+}
+
+fn finish_plan_for_start_gate(
+    plan: DynamicSelectionPlan,
+    selected: Vec<HostPoolKey>,
+    built: Result<DynamicSelectionHostPool, HostPoolBuildError>,
+) -> DynamicSelectionStartGateOutcome {
+    let refused = |plan: DynamicSelectionPlan, reasons: Vec<DynamicSelectionStartGateReason>| {
+        DynamicSelectionStartGateOutcome {
+            disposition: DynamicSelectionStartGateDisposition::PaperEnforcedRefused,
+            not_applicable: false,
+            allowed: false,
+            plan: Some(plan),
+            host_pool: None,
+            reasons,
+        }
+    };
     let selected_count = plan.selected_count();
-    match DynamicSelectionHostPool::build(&selected) {
+    match built {
         Ok(pool) => {
             // IR2 defense-in-depth: host-key count and pool count must equal
             // selected count. `DynamicSelectionHostPool::build` already
@@ -802,7 +850,7 @@ pub async fn evaluate_dynamic_selection_start_gate(
     )
     .await;
 
-    evaluate_plan_for_start_gate(plan)
+    evaluate_plan_for_start_gate_durable(plan, ctx.db).await
 }
 
 #[cfg(test)]

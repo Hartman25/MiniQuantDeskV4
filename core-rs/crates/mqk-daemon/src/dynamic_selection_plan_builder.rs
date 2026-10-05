@@ -261,17 +261,35 @@ pub(crate) async fn evaluate_candidate(
     // against a registry that failed to build (which would make every
     // subsequent `instantiate_verified` call fail with the far less
     // informative `UnknownStrategy`).
-    let registry_construction =
-        mqk_strategy::engines::register_builtin_strategies(&mut registry, p.symbol.clone())
-            .map_err(|_| CandidateEvidenceReason::RegistryConstructionFailed);
-
-    let (plugin_probe_ok, timeframe_matches) = match registry_construction {
-        Ok(()) => match registry.instantiate_verified(&p.strategy_id) {
-            Ok(strategy) => (true, strategy.spec().timeframe_secs == p.timeframe_secs),
-            Err(_) => (false, false),
-        },
-        Err(_) => (false, false),
+    //
+    // Under a capital-fraction deployment the engine runs only through the
+    // durable runtime host, so the probe resolves the same deployment binding
+    // the host pool will recover (stateless `instantiate_verified` refuses
+    // `DurableStateRequired` engines by design).
+    let capital_fraction_binding =
+        mqk_runtime::native_strategy::resolve_capital_fraction_paper_binding(
+            &mqk_runtime::native_strategy::StrategyBootstrapInputs::from_process_env_for_symbol(
+                &p.symbol,
+            ),
+            &p.strategy_id,
+        );
+    let registry_construction = match &capital_fraction_binding {
+        Err(mqk_runtime::native_strategy::NativeIdentityError::Sizing(_)) => {
+            Err(CandidateEvidenceReason::RegistryConstructionFailed)
+        }
+        _ => mqk_strategy::engines::register_builtin_strategies(&mut registry, p.symbol.clone())
+            .map_err(|_| CandidateEvidenceReason::RegistryConstructionFailed),
     };
+
+    let (plugin_probe_ok, timeframe_matches) =
+        match (&registry_construction, &capital_fraction_binding) {
+            (Err(_), _) | (_, Err(_)) => (false, false),
+            (Ok(()), Ok(Some(b))) => (true, b.timeframe_secs == p.timeframe_secs),
+            (Ok(()), Ok(None)) => match registry.instantiate_verified(&p.strategy_id) {
+                Ok(strategy) => (true, strategy.spec().timeframe_secs == p.timeframe_secs),
+                Err(_) => (false, false),
+            },
+        };
 
     let synthetic_binding = EffectiveRuntimeBinding {
         effective_runtime_strategy_id: Some(p.strategy_id.clone()),

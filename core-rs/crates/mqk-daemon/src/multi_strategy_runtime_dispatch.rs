@@ -360,6 +360,7 @@ pub(crate) async fn resolve_authorized_explicit_bindings(
 /// — constructs nothing — if zero bindings independently passed their gate,
 /// any authorized binding's `timeframe_secs` has no known DB label, or host
 /// pool construction itself fails for any authorized binding.
+#[cfg(test)]
 pub(crate) fn build_explicit_multi_strategy_dispatch_authority(
     run_id: Uuid,
     authorized_bindings: &[HostPoolKey],
@@ -367,11 +368,34 @@ pub(crate) fn build_explicit_multi_strategy_dispatch_authority(
     if authorized_bindings.is_empty() {
         return Err(ExplicitMultiStrategyBuildError::NoAuthorizedBindings);
     }
-
-    let plan_id = derive_explicit_multi_strategy_plan_id(run_id, authorized_bindings);
-
     let host_pool = DynamicSelectionHostPool::build(authorized_bindings)
         .map_err(ExplicitMultiStrategyBuildError::HostPoolBuildFailed)?;
+    assemble_explicit_multi_strategy_dispatch_authority(run_id, authorized_bindings, host_pool)
+}
+
+/// Production form: capital-fraction bindings recover their durable
+/// held-sizing state while the pool is built, i.e. before the authority (and
+/// the Phase-7A start barrier that consumes it) exists.
+pub(crate) async fn build_explicit_multi_strategy_dispatch_authority_durable(
+    run_id: Uuid,
+    authorized_bindings: &[HostPoolKey],
+    db: Option<&sqlx::PgPool>,
+) -> Result<RuntimeStrategyDispatchAuthority, ExplicitMultiStrategyBuildError> {
+    if authorized_bindings.is_empty() {
+        return Err(ExplicitMultiStrategyBuildError::NoAuthorizedBindings);
+    }
+    let host_pool = DynamicSelectionHostPool::build_with_durable_state(authorized_bindings, db)
+        .await
+        .map_err(ExplicitMultiStrategyBuildError::HostPoolBuildFailed)?;
+    assemble_explicit_multi_strategy_dispatch_authority(run_id, authorized_bindings, host_pool)
+}
+
+fn assemble_explicit_multi_strategy_dispatch_authority(
+    run_id: Uuid,
+    authorized_bindings: &[HostPoolKey],
+    host_pool: DynamicSelectionHostPool,
+) -> Result<RuntimeStrategyDispatchAuthority, ExplicitMultiStrategyBuildError> {
+    let plan_id = derive_explicit_multi_strategy_plan_id(run_id, authorized_bindings);
 
     let mut bindings = Vec::with_capacity(authorized_bindings.len());
     for (symbol, strategy_id, timeframe_secs) in authorized_bindings {

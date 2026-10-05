@@ -43,8 +43,13 @@
 
 use std::collections::BTreeMap;
 
-use mqk_runtime::native_strategy::build_daemon_plugin_registry_for_symbol;
+use mqk_runtime::capital_fraction_host::CapitalFractionRuntimeHost;
+use mqk_runtime::native_strategy::{
+    build_daemon_plugin_registry_for_symbol, resolve_capital_fraction_paper_binding,
+    NativeIdentityError, StrategyBootstrapInputs,
+};
 use mqk_strategy::{RegistryError, ShadowMode, StrategyHost};
+use sqlx::PgPool;
 
 /// `(symbol, strategy_id, timeframe_secs)` — the exact identity triple the
 /// pure selector uses, so a pool key can always be derived directly from one
@@ -101,6 +106,24 @@ pub enum HostPoolBuildError {
         strategy_id: String,
         reason: String,
     },
+    /// The capital-fraction sizing contract in the process environment was
+    /// refused (partial/unknown/malformed) or the strategy cannot run under
+    /// it. No default is substituted.
+    CapitalFractionContractRefused {
+        symbol: String,
+        strategy_id: String,
+        reason: String,
+    },
+    /// A capital-fraction deployment needs the durable held-sizing store and
+    /// no database pool was supplied.
+    DurableStateUnavailable { symbol: String, strategy_id: String },
+    /// Durable recovery of the held sizing state failed or the recovered host
+    /// does not carry the identity the deployment resolved.
+    DurableRecoveryFailed {
+        symbol: String,
+        strategy_id: String,
+        reason: String,
+    },
 }
 
 impl HostPoolBuildError {
@@ -112,14 +135,40 @@ impl HostPoolBuildError {
             Self::SpecNameMismatch { .. } => "host_pool_spec_name_mismatch",
             Self::SpecTimeframeMismatch { .. } => "host_pool_spec_timeframe_mismatch",
             Self::HostRegistrationFailed { .. } => "host_pool_host_registration_failed",
+            Self::CapitalFractionContractRefused { .. } => {
+                "host_pool_capital_fraction_contract_refused"
+            }
+            Self::DurableStateUnavailable { .. } => "host_pool_durable_state_unavailable",
+            Self::DurableRecoveryFailed { .. } => "host_pool_durable_recovery_failed",
         }
     }
 }
 
-/// One isolated, single-registration [`StrategyHost`] per selected
-/// `(symbol, strategy_id, timeframe_secs)` key, for exactly one active run.
+/// The one authoritative host for a binding: the stateless fixed-quantity
+/// host, or the restart-recovered capital-fraction runtime host that persists
+/// held sizing before returning any result.
+pub enum RuntimeSelectedStrategyHost {
+    Stateless(StrategyHost),
+    DurableCapitalFraction(Box<CapitalFractionRuntimeHost>),
+}
+
+impl RuntimeSelectedStrategyHost {
+    pub fn semantic_fingerprint(&self) -> Result<String, String> {
+        match self {
+            Self::Stateless(h) => h.semantic_fingerprint().map_err(|e| format!("{e:?}")),
+            Self::DurableCapitalFraction(h) => h.semantic_fingerprint().map_err(|e| e.to_string()),
+        }
+    }
+
+    pub fn is_durable(&self) -> bool {
+        matches!(self, Self::DurableCapitalFraction(_))
+    }
+}
+
+/// One isolated host per selected `(symbol, strategy_id, timeframe_secs)`
+/// key, for exactly one active run.
 pub struct DynamicSelectionHostPool {
-    hosts: BTreeMap<HostPoolKey, StrategyHost>,
+    hosts: BTreeMap<HostPoolKey, RuntimeSelectedStrategyHost>,
 }
 
 impl DynamicSelectionHostPool {
@@ -137,63 +186,122 @@ impl DynamicSelectionHostPool {
     /// against the key, then registers it into a brand new
     /// `StrategyHost::new(ShadowMode::Off)`.
     pub fn build(selected: &[HostPoolKey]) -> Result<Self, HostPoolBuildError> {
-        let mut hosts: BTreeMap<HostPoolKey, StrategyHost> = BTreeMap::new();
-
+        let mut hosts: BTreeMap<HostPoolKey, RuntimeSelectedStrategyHost> = BTreeMap::new();
         for (symbol, strategy_id, timeframe_secs) in selected {
-            let key = (symbol.clone(), strategy_id.clone(), *timeframe_secs);
-            if hosts.contains_key(&key) {
-                return Err(HostPoolBuildError::DuplicateKey {
-                    symbol: symbol.clone(),
-                    strategy_id: strategy_id.clone(),
-                    timeframe_secs: *timeframe_secs,
-                });
-            }
+            let key = Self::fresh_key(&hosts, symbol, strategy_id, *timeframe_secs)?;
+            let host = build_stateless_host(symbol, strategy_id, *timeframe_secs)?;
+            hosts.insert(key, RuntimeSelectedStrategyHost::Stateless(host));
+        }
+        Ok(Self { hosts })
+    }
 
-            let registry = build_daemon_plugin_registry_for_symbol(symbol);
-            let strategy = registry
-                .instantiate_verified(strategy_id)
-                .map_err(|e| match e {
-                    RegistryError::UnknownStrategy { .. } => HostPoolBuildError::UnknownStrategy {
+    /// Same contract as [`Self::build`], additionally resolving the
+    /// capital-fraction deployment per key from the process environment (read
+    /// once, here, at start). A fixed-quantity key builds the identical
+    /// stateless host; a capital-fraction key awaits
+    /// `CapitalFractionRuntimeHost::recover` exactly once, so a recovery
+    /// failure fails the whole build (and therefore the start) closed.
+    pub async fn build_with_durable_state(
+        selected: &[HostPoolKey],
+        db: Option<&PgPool>,
+    ) -> Result<Self, HostPoolBuildError> {
+        Self::build_with_durable_state_from(selected, db, |symbol: &str| {
+            StrategyBootstrapInputs::from_process_env_for_symbol(symbol)
+        })
+        .await
+    }
+
+    /// [`Self::build_with_durable_state`] with an explicit per-symbol sizing
+    /// input source (the process environment in production).
+    pub async fn build_with_durable_state_from(
+        selected: &[HostPoolKey],
+        db: Option<&PgPool>,
+        inputs_for_symbol: impl Fn(&str) -> StrategyBootstrapInputs,
+    ) -> Result<Self, HostPoolBuildError> {
+        let mut hosts: BTreeMap<HostPoolKey, RuntimeSelectedStrategyHost> = BTreeMap::new();
+        for (symbol, strategy_id, timeframe_secs) in selected {
+            let key = Self::fresh_key(&hosts, symbol, strategy_id, *timeframe_secs)?;
+            let inputs = inputs_for_symbol(symbol);
+            let binding =
+                resolve_capital_fraction_paper_binding(&inputs, strategy_id).map_err(|e| {
+                    HostPoolBuildError::CapitalFractionContractRefused {
                         symbol: symbol.clone(),
                         strategy_id: strategy_id.clone(),
-                    },
-                    other => HostPoolBuildError::RegistryInconsistent {
-                        symbol: symbol.clone(),
-                        strategy_id: strategy_id.clone(),
-                        reason: other.to_string(),
-                    },
+                        reason: match e {
+                            NativeIdentityError::Sizing(s) => format!("{s:?}"),
+                            NativeIdentityError::UnsupportedStrategy => {
+                                "strategy is unknown or not restart-recoverable".to_string()
+                            }
+                        },
+                    }
                 })?;
-
-            let spec = strategy.spec();
-            if spec.name != *strategy_id {
-                return Err(HostPoolBuildError::SpecNameMismatch {
-                    symbol: symbol.clone(),
-                    strategy_id: strategy_id.clone(),
-                    expected: strategy_id.clone(),
-                    actual: spec.name,
-                });
-            }
-            if spec.timeframe_secs != *timeframe_secs {
-                return Err(HostPoolBuildError::SpecTimeframeMismatch {
-                    symbol: symbol.clone(),
-                    strategy_id: strategy_id.clone(),
-                    expected: *timeframe_secs,
-                    actual: spec.timeframe_secs,
-                });
-            }
-
-            let mut host = StrategyHost::new(ShadowMode::Off);
-            host.register(strategy)
-                .map_err(|e| HostPoolBuildError::HostRegistrationFailed {
-                    symbol: symbol.clone(),
-                    strategy_id: strategy_id.clone(),
-                    reason: format!("{e:?}"),
-                })?;
-
+            let host = match binding {
+                None => RuntimeSelectedStrategyHost::Stateless(build_stateless_host(
+                    symbol,
+                    strategy_id,
+                    *timeframe_secs,
+                )?),
+                Some(b) => {
+                    let Some(pool) = db else {
+                        return Err(HostPoolBuildError::DurableStateUnavailable {
+                            symbol: symbol.clone(),
+                            strategy_id: strategy_id.clone(),
+                        });
+                    };
+                    if b.timeframe_secs != *timeframe_secs {
+                        return Err(HostPoolBuildError::SpecTimeframeMismatch {
+                            symbol: symbol.clone(),
+                            strategy_id: strategy_id.clone(),
+                            expected: *timeframe_secs,
+                            actual: b.timeframe_secs,
+                        });
+                    }
+                    let recovery_failed =
+                        |reason: String| HostPoolBuildError::DurableRecoveryFailed {
+                            symbol: symbol.clone(),
+                            strategy_id: strategy_id.clone(),
+                            reason,
+                        };
+                    let host = CapitalFractionRuntimeHost::recover(
+                        pool,
+                        &b.registry,
+                        &b.contract,
+                        b.scope,
+                    )
+                    .await
+                    .map_err(|e| recovery_failed(e.to_string()))?;
+                    if !matches!(
+                        host.semantic_fingerprint(),
+                        Ok(ref fp) if *fp == b.semantic_fingerprint
+                    ) {
+                        return Err(recovery_failed(
+                            "recovered host fingerprint differs from the resolved deployment identity"
+                                .to_string(),
+                        ));
+                    }
+                    RuntimeSelectedStrategyHost::DurableCapitalFraction(Box::new(host))
+                }
+            };
             hosts.insert(key, host);
         }
-
         Ok(Self { hosts })
+    }
+
+    fn fresh_key(
+        hosts: &BTreeMap<HostPoolKey, RuntimeSelectedStrategyHost>,
+        symbol: &str,
+        strategy_id: &str,
+        timeframe_secs: i64,
+    ) -> Result<HostPoolKey, HostPoolBuildError> {
+        let key = (symbol.to_string(), strategy_id.to_string(), timeframe_secs);
+        if hosts.contains_key(&key) {
+            return Err(HostPoolBuildError::DuplicateKey {
+                symbol: symbol.to_string(),
+                strategy_id: strategy_id.to_string(),
+                timeframe_secs,
+            });
+        }
+        Ok(key)
     }
 
     /// Number of hosts in the pool.
@@ -217,7 +325,7 @@ impl DynamicSelectionHostPool {
         symbol: &str,
         strategy_id: &str,
         timeframe_secs: i64,
-    ) -> Option<&mut StrategyHost> {
+    ) -> Option<&mut RuntimeSelectedStrategyHost> {
         self.hosts
             .get_mut(&(symbol.to_string(), strategy_id.to_string(), timeframe_secs))
     }
@@ -226,6 +334,54 @@ impl DynamicSelectionHostPool {
         self.hosts
             .contains_key(&(symbol.to_string(), strategy_id.to_string(), timeframe_secs))
     }
+}
+
+fn build_stateless_host(
+    symbol: &str,
+    strategy_id: &str,
+    timeframe_secs: i64,
+) -> Result<StrategyHost, HostPoolBuildError> {
+    let registry = build_daemon_plugin_registry_for_symbol(symbol);
+    let strategy = registry
+        .instantiate_verified(strategy_id)
+        .map_err(|e| match e {
+            RegistryError::UnknownStrategy { .. } => HostPoolBuildError::UnknownStrategy {
+                symbol: symbol.to_string(),
+                strategy_id: strategy_id.to_string(),
+            },
+            other => HostPoolBuildError::RegistryInconsistent {
+                symbol: symbol.to_string(),
+                strategy_id: strategy_id.to_string(),
+                reason: other.to_string(),
+            },
+        })?;
+
+    let spec = strategy.spec();
+    if spec.name != strategy_id {
+        return Err(HostPoolBuildError::SpecNameMismatch {
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            expected: strategy_id.to_string(),
+            actual: spec.name,
+        });
+    }
+    if spec.timeframe_secs != timeframe_secs {
+        return Err(HostPoolBuildError::SpecTimeframeMismatch {
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            expected: timeframe_secs,
+            actual: spec.timeframe_secs,
+        });
+    }
+
+    let mut host = StrategyHost::new(ShadowMode::Off);
+    host.register(strategy)
+        .map_err(|e| HostPoolBuildError::HostRegistrationFailed {
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            reason: format!("{e:?}"),
+        })?;
+    Ok(host)
 }
 
 #[cfg(test)]
