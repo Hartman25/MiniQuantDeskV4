@@ -4891,7 +4891,48 @@ operator_reconcile_or_repair_required"
     /// lets `AAPL/strategy_A` and `AAPL/strategy_B` have independent
     /// pending work at the same time without one starving or being
     /// evaluated against the other's trigger identity.
+    ///
+    /// Durable capital-fraction hosts are two-phase: each binding only PREPARES
+    /// (stages) its held-sizing transitions inside the loop; they are committed
+    /// in ONE transaction after every binding evaluated and passed coherence.
+    /// Any fault aborts (poisons) every prepared host and commits nothing, so a
+    /// whole-tick failure can never leave an earlier binding's sizing advanced.
     pub(crate) async fn tick_strategy_dispatch_selected_hosts_with_bar_facts(
+        &self,
+        run_id: Uuid,
+        bindings: &[crate::dynamic_selection_dispatch_authority::SelectedDispatchBinding],
+        host_pool: &mut crate::dynamic_selection_host_pool::DynamicSelectionHostPool,
+    ) -> Result<
+        Vec<(
+            SymbolStrategyAssignment,
+            mqk_strategy::StrategyBarResult,
+            Option<EvaluatedBarFacts>,
+        )>,
+        SelectedHostDispatchFault,
+    > {
+        let results = match self
+            .evaluate_selected_hosts_prepared(run_id, bindings, host_pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(fault) => {
+                host_pool.abort_prepared("whole-tick selected-host fault");
+                return Err(fault);
+            }
+        };
+        if let Some(db) = self.db.as_ref() {
+            if let Err(detail) = host_pool.commit_prepared(db, Utc::now()).await {
+                return Err(SelectedHostDispatchFault::HostOnBarError {
+                    symbol: "*".to_string(),
+                    strategy_id: "held_sizing_batch_commit".to_string(),
+                    detail,
+                });
+            }
+        }
+        Ok(results)
+    }
+
+    async fn evaluate_selected_hosts_prepared(
         &self,
         // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 2: the active
         // frozen dispatch authority's exact `run_id` — never the mutable
@@ -5073,10 +5114,9 @@ operator_reconcile_or_repair_required"
             // bool. Permanently `false` in production.
             let inject_panic_for_test = self.panic_on_symbol_for_test.lock().await.as_deref()
                 == Some(binding.symbol.as_str());
-            // The durable capital-fraction host persists its held-sizing
-            // transition inside `on_bar_durable` BEFORE returning the
-            // result, so a persistence failure surfaces here as an `Err`
-            // and no result (hence no decision) ever leaves this call.
+            // The durable capital-fraction host only PREPARES here: its
+            // held-sizing transitions are staged and committed as one batch by
+            // the caller of this function before any result is released.
             let evaluated: Result<Result<mqk_strategy::StrategyBarResult, String>, _> = match host {
                 crate::dynamic_selection_host_pool::RuntimeSelectedStrategyHost::Stateless(h) => {
                     std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -5087,21 +5127,17 @@ operator_reconcile_or_repair_required"
                     }))
                 }
                 crate::dynamic_selection_host_pool::RuntimeSelectedStrategyHost::DurableCapitalFraction(h) => {
-                    match self.db.as_ref() {
-                        None => Ok(Err(
+                    if self.db.is_none() {
+                        Ok(Err(
                             "durable capital-fraction host requires the database pool".to_string()
-                        )),
-                        Some(db) => {
-                            futures_util::FutureExt::catch_unwind(AssertUnwindSafe(async {
-                                if inject_panic_for_test {
-                                    panic!("A1_TEST_INJECTED_PANIC for symbol {}", binding.symbol);
-                                }
-                                h.on_bar_durable(db, &ctx, chrono::Utc::now())
-                                    .await
-                                    .map_err(|e| e.to_string())
-                            }))
-                            .await
-                        }
+                        ))
+                    } else {
+                        std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            if inject_panic_for_test {
+                                panic!("A1_TEST_INJECTED_PANIC for symbol {}", binding.symbol);
+                            }
+                            h.prepare_bar(&ctx).map_err(|e| e.to_string())
+                        }))
                     }
                 }
             };

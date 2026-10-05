@@ -7,11 +7,16 @@
 //!    snapshot for `(deployment, strategy)`, proves every record against the
 //!    deployment contract, and only then builds the wrapper. Any foreign,
 //!    stale, malformed or contract-mismatched record refuses the build.
-//! 2. [`CapitalFractionRuntimeHost::on_bar_durable`] runs the strategy, then
-//!    persists the held-state transitions it produced BEFORE returning the
-//!    result, so a caller can never submit a decision whose sizing state is not
-//!    durable. If persistence fails the host is poisoned: memory and DB may
+//! 2. Evaluation is two-phase. [`CapitalFractionRuntimeHost::prepare_bar`]
+//!    runs the strategy and stages its held-state transitions;
+//!    [`commit_prepared_batch`] persists the staged transitions of one or more
+//!    hosts in ONE transaction BEFORE any result is released, so a caller can
+//!    never submit a decision whose sizing state is not durable, and a
+//!    multi-binding tick never partially commits. If persistence fails or the
+//!    prepared bar is aborted the host is poisoned: memory and DB may
 //!    disagree, so it refuses further bars until rebuilt from the DB.
+//!    [`CapitalFractionRuntimeHost::on_bar_durable`] is the single-host
+//!    prepare-then-commit.
 //!
 //! Nothing here touches a broker, reads broker equity, or activates Paper.
 
@@ -111,6 +116,7 @@ pub struct CapitalFractionRuntimeHost {
     state: SizingStateHandle,
     audit: SizingAuditHandle,
     poisoned: Option<String>,
+    pending: Option<Vec<HeldSizingTransitionRow>>,
 }
 
 impl CapitalFractionRuntimeHost {
@@ -155,6 +161,7 @@ impl CapitalFractionRuntimeHost {
             state,
             audit,
             poisoned: None,
+            pending: None,
         })
     }
 
@@ -173,6 +180,59 @@ impl CapitalFractionRuntimeHost {
         self.poisoned.is_some()
     }
 
+    /// True while a prepared bar's transitions are staged and not yet
+    /// committed or aborted.
+    pub fn has_pending_commit(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Phase 1: run the strategy on `ctx` and stage the held-state
+    /// transitions it produced WITHOUT writing the database. The returned
+    /// result must not be released until [`commit_prepared_batch`] succeeds.
+    /// The host refuses another bar until the staged transitions are
+    /// finalized by that commit or the host is poisoned by an abort. An
+    /// `on_bar` failure poisons the host: its in-memory held state may have
+    /// advanced past the database.
+    pub fn prepare_bar(
+        &mut self,
+        ctx: &StrategyContext,
+    ) -> Result<StrategyBarResult, CapitalFractionRuntimeError> {
+        if let Some(reason) = &self.poisoned {
+            return Err(err(format!(
+                "capital-fraction host is poisoned and must be rebuilt from durable state: {reason}"
+            )));
+        }
+        if self.pending.is_some() {
+            let reason = "a prepared bar was never committed or aborted".to_string();
+            self.poisoned = Some(reason.clone());
+            return Err(err(reason));
+        }
+        // Poisoned for the duration of the evaluation so an unwinding
+        // `on_bar` (panic) leaves the host unusable; cleared only on success.
+        self.poisoned = Some("bar evaluation did not complete".to_string());
+        match self.host.on_bar(ctx) {
+            Ok(result) => {
+                self.pending = Some(transition_rows(self.state.drain_transitions()));
+                self.poisoned = None;
+                Ok(result)
+            }
+            Err(e) => {
+                self.state.drain_transitions();
+                let reason = format!("on_bar failed: {e:?}");
+                self.poisoned = Some(reason.clone());
+                Err(err(reason))
+            }
+        }
+    }
+
+    /// Invalidate a prepared bar that will never be committed (its memory
+    /// state is ahead of the database). No-op when nothing is staged.
+    pub fn abort_prepared(&mut self, reason: &str) {
+        if self.pending.take().is_some() && self.poisoned.is_none() {
+            self.poisoned = Some(format!("prepared bar aborted: {reason}"));
+        }
+    }
+
     /// Run the strategy on `ctx`, persist the resulting held-state
     /// transitions (idempotent, one transaction), then return the result.
     pub async fn on_bar_durable(
@@ -181,23 +241,44 @@ impl CapitalFractionRuntimeHost {
         ctx: &StrategyContext,
         now_utc: DateTime<Utc>,
     ) -> Result<StrategyBarResult, CapitalFractionRuntimeError> {
-        if let Some(reason) = &self.poisoned {
-            return Err(err(format!(
-                "capital-fraction host is poisoned and must be rebuilt from durable state: {reason}"
-            )));
-        }
-        let result = self
-            .host
-            .on_bar(ctx)
-            .map_err(|e| err(format!("on_bar failed: {e:?}")))?;
-        let transitions = transition_rows(self.state.drain_transitions());
-        if !transitions.is_empty() {
-            if let Err(e) = held_sizing_apply(pool, &transitions, now_utc).await {
-                let reason = format!("held sizing persistence failed: {e:#}");
-                self.poisoned = Some(reason.clone());
-                return Err(err(reason));
-            }
-        }
+        let result = self.prepare_bar(ctx)?;
+        commit_prepared_batch(pool, &mut [self], now_utc).await?;
         Ok(result)
     }
+}
+
+/// Phase 2: persist every staged transition of `hosts`, in slice order, in ONE
+/// `held_sizing_apply` transaction, then finalize the hosts. On failure the
+/// transaction has rolled back, so no host's transitions are durable; every
+/// host is poisoned and the caller must release no result.
+pub async fn commit_prepared_batch(
+    pool: &PgPool,
+    hosts: &mut [&mut CapitalFractionRuntimeHost],
+    now_utc: DateTime<Utc>,
+) -> Result<(), CapitalFractionRuntimeError> {
+    let mut batch = Vec::new();
+    for h in hosts.iter() {
+        match &h.pending {
+            Some(rows) if h.poisoned.is_none() => batch.extend(rows.iter().cloned()),
+            _ => {
+                return Err(err(
+                    "a host in the commit batch has no prepared bar or is poisoned",
+                ))
+            }
+        }
+    }
+    if !batch.is_empty() {
+        if let Err(e) = held_sizing_apply(pool, &batch, now_utc).await {
+            let reason = format!("held sizing persistence failed: {e:#}");
+            for h in hosts.iter_mut() {
+                h.pending = None;
+                h.poisoned = Some(reason.clone());
+            }
+            return Err(err(reason));
+        }
+    }
+    for h in hosts.iter_mut() {
+        h.pending = None;
+    }
+    Ok(())
 }

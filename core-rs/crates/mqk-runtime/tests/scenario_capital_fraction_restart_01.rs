@@ -372,6 +372,68 @@ async fn persistence_failure_poisons_the_host_and_nothing_is_returned() {
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL (disposable test database)"]
+async fn prepared_bars_persist_nothing_until_the_batch_commit_and_abort_poisons() {
+    let pool = pool().await;
+    let (da, db_) = (dep("dep-prep-a"), dep("dep-prep-b"));
+    let mut a = host(&pool, &da).await;
+    let mut b = host(&pool, &db_).await;
+    let ctx = window([100, 100, 125], 2);
+
+    a.prepare_bar(&ctx).expect("prepare a");
+    b.prepare_bar(&ctx).expect("prepare b");
+    assert!(a.has_pending_commit() && b.has_pending_commit());
+    for d in [&da, &db_] {
+        assert!(held_sizing_fetch(&pool, d, STRATEGY)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    assert!(
+        a.prepare_bar(&window([100, 100, 100], 3)).is_err() && a.is_poisoned(),
+        "a second prepare before commit/abort poisons the host"
+    );
+
+    // Abort: nothing durable, host unusable, commit refused.
+    b.abort_prepared("peer failed");
+    assert!(b.is_poisoned() && !b.has_pending_commit());
+    let mut fresh_a = host(&pool, &da).await;
+    fresh_a.prepare_bar(&ctx).expect("prepare fresh a");
+    assert!(
+        mqk_runtime::capital_fraction_host::commit_prepared_batch(
+            &pool,
+            &mut [&mut fresh_a, &mut b],
+            now()
+        )
+        .await
+        .is_err(),
+        "a batch containing a poisoned host commits nothing"
+    );
+    assert!(held_sizing_fetch(&pool, &da, STRATEGY)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Two healthy prepared hosts commit in one batch.
+    let mut fresh_b = host(&pool, &db_).await;
+    fresh_b.prepare_bar(&ctx).expect("prepare fresh b");
+    mqk_runtime::capital_fraction_host::commit_prepared_batch(
+        &pool,
+        &mut [&mut fresh_a, &mut fresh_b],
+        now(),
+    )
+    .await
+    .expect("batch commit");
+    for d in [&da, &db_] {
+        assert_eq!(
+            held_sizing_fetch(&pool, d, STRATEGY).await.unwrap().len(),
+            1
+        );
+    }
+    assert!(!fresh_a.has_pending_commit() && !fresh_a.is_poisoned());
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL (disposable test database)"]
 async fn retrying_the_same_persisted_transition_is_idempotent_at_the_store() {
     let pool = pool().await;
     let d = dep("dep-retry");

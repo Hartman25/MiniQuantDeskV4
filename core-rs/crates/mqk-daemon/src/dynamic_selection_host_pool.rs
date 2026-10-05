@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 
-use mqk_runtime::capital_fraction_host::CapitalFractionRuntimeHost;
+use mqk_runtime::capital_fraction_host::{commit_prepared_batch, CapitalFractionRuntimeHost};
 use mqk_runtime::native_strategy::{
     build_daemon_plugin_registry_for_symbol, resolve_capital_fraction_paper_binding,
     NativeIdentityError, StrategyBootstrapInputs,
@@ -328,6 +328,44 @@ impl DynamicSelectionHostPool {
     ) -> Option<&mut RuntimeSelectedStrategyHost> {
         self.hosts
             .get_mut(&(symbol.to_string(), strategy_id.to_string(), timeframe_secs))
+    }
+
+    fn prepared_durable_hosts(&mut self) -> Vec<&mut CapitalFractionRuntimeHost> {
+        self.hosts
+            .values_mut()
+            .filter_map(|h| match h {
+                RuntimeSelectedStrategyHost::DurableCapitalFraction(b)
+                    if b.has_pending_commit() =>
+                {
+                    Some(&mut **b)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Persist every prepared durable host's held-sizing transitions in ONE
+    /// transaction, in deterministic key order. On failure every prepared host
+    /// is poisoned and nothing is durable.
+    pub async fn commit_prepared(
+        &mut self,
+        db: &PgPool,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), String> {
+        let mut hosts = self.prepared_durable_hosts();
+        if hosts.is_empty() {
+            return Ok(());
+        }
+        commit_prepared_batch(db, &mut hosts, now_utc)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Invalidate every prepared durable host after a whole-tick fault.
+    pub fn abort_prepared(&mut self, reason: &str) {
+        for h in self.prepared_durable_hosts() {
+            h.abort_prepared(reason);
+        }
     }
 
     pub fn contains_key(&self, symbol: &str, strategy_id: &str, timeframe_secs: i64) -> bool {

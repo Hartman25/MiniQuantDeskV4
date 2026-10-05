@@ -487,6 +487,269 @@ async fn persistence_failure_returns_no_result_and_poisons_the_host() {
     cleanup(&db, &[&sym]).await;
 }
 
+fn host_is_poisoned(p: &mut DynamicSelectionHostPool, sym: &str, strategy: &str) -> bool {
+    let RuntimeSelectedStrategyHost::DurableCapitalFraction(h) =
+        p.get_mut(sym, strategy, DAY).expect("host")
+    else {
+        panic!("capital-fraction binding must own a durable host");
+    };
+    h.is_poisoned()
+}
+
+/// IR-CF-01: a later binding's whole-tick fault must not leave an earlier
+/// binding's held sizing advanced.
+#[tokio::test]
+async fn whole_tick_fault_in_a_later_binding_commits_no_earlier_durable_transition() {
+    let Some(db) = db_or_skip("CFD-ATOM-FAULT").await else {
+        return;
+    };
+    let (a, b_sym) = (uniq("ATA"), uniq("ATB"));
+    seed_rising(&db, &a, 60).await;
+    seed_rising(&db, &b_sym, 60).await;
+    let state = state_with_db(&db);
+    let sel = keys(&[(&a, TREND), (&b_sym, TREND)]);
+    let bindings = vec![binding(&a, TREND), binding(&b_sym, TREND)];
+
+    let mut p = build(&sel, &db).await.expect("pool");
+    state
+        .set_panic_on_symbol_for_test(Some(b_sym.clone()))
+        .await;
+    let out = tick(&state, &bindings, &mut p, 59).await;
+    assert!(
+        matches!(
+            out,
+            Err(SelectedHostDispatchFault::HostOnBarPanicked { .. })
+        ),
+        "binding B fails after binding A evaluated: {out:?}"
+    );
+    assert!(
+        rows(&db, &a, TREND).await.is_empty(),
+        "A's entry must not be durable when the tick failed closed"
+    );
+    assert!(rows(&db, &b_sym, TREND).await.is_empty());
+    assert!(
+        host_is_poisoned(&mut p, &a, TREND),
+        "prepared A is invalidated"
+    );
+    assert!(
+        !host_is_poisoned(&mut p, &b_sym, TREND),
+        "B faulted before it evaluated, so it holds no un-persisted state"
+    );
+    state.set_panic_on_symbol_for_test(None).await;
+    assert!(
+        tick(&state, &bindings, &mut p, 59).await.is_err(),
+        "an aborted prepared host is never reused without recovery"
+    );
+
+    // Recovery starts from the old durable state, not the aborted tick's memory.
+    drop(p);
+    let mut p = build(&sel, &db).await.expect("recovered pool");
+    let out = tick(&state, &bindings, &mut p, 59).await;
+    assert_eq!((qty_of(&out, 0), qty_of(&out, 1)), (62 * USD, 62 * USD));
+    assert_eq!(rows(&db, &a, TREND).await[0].entry_generation, 1);
+    cleanup(&db, &[&a, &b_sym]).await;
+}
+
+/// IR-CF-01: a DB failure in the batch rolls back every binding's transition.
+#[tokio::test]
+async fn batch_commit_failure_rolls_back_every_binding_and_poisons_all() {
+    let Some(db) = db_or_skip("CFD-ATOM-DB").await else {
+        return;
+    };
+    let (a, b_sym) = (uniq("ADA"), uniq("ADB"));
+    seed_rising(&db, &a, 60).await;
+    seed_rising(&db, &b_sym, 60).await;
+    let state = state_with_db(&db);
+    let sel = keys(&[(&a, TREND), (&b_sym, TREND)]);
+    let bindings = vec![binding(&a, TREND), binding(&b_sym, TREND)];
+    let dep_b = deployment_id(&b_sym, TREND);
+    let fname = format!("cfd_atom_{}", b_sym.to_lowercase());
+    sqlx::query(&format!(
+        "create function {fname}() returns trigger language plpgsql as $$ begin \
+         if new.deployment_id = '{dep_b}' then raise exception 'forced batch failure'; end if; \
+         return new; end $$"
+    ))
+    .execute(&db)
+    .await
+    .expect("create fault fn");
+    sqlx::query(&format!(
+        "create trigger {fname} before insert or update on sys_strategy_held_sizing_state \
+         for each row execute function {fname}()"
+    ))
+    .execute(&db)
+    .await
+    .expect("create fault trigger");
+
+    let mut p = build(&sel, &db).await.expect("pool");
+    let out = tick(&state, &bindings, &mut p, 59).await;
+    assert!(
+        matches!(out, Err(SelectedHostDispatchFault::HostOnBarError { .. })),
+        "{out:?}"
+    );
+    assert!(
+        rows(&db, &a, TREND).await.is_empty(),
+        "A was applied before B in the same transaction and must roll back"
+    );
+    assert!(rows(&db, &b_sym, TREND).await.is_empty());
+    assert!(host_is_poisoned(&mut p, &a, TREND));
+    assert!(host_is_poisoned(&mut p, &b_sym, TREND));
+
+    sqlx::query(&format!(
+        "drop trigger {fname} on sys_strategy_held_sizing_state"
+    ))
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(&format!("drop function {fname}()"))
+        .execute(&db)
+        .await
+        .unwrap();
+    drop(p);
+    let mut p = build(&sel, &db).await.expect("recovered pool");
+    let out = tick(&state, &bindings, &mut p, 59).await;
+    assert_eq!((qty_of(&out, 0), qty_of(&out, 1)), (62 * USD, 62 * USD));
+    cleanup(&db, &[&a, &b_sym]).await;
+}
+
+/// IR-CF-01: two bindings with transitions commit together and release results.
+#[tokio::test]
+async fn two_durable_bindings_commit_one_batch_and_release_both_results() {
+    let Some(db) = db_or_skip("CFD-ATOM-OK").await else {
+        return;
+    };
+    let (a, b_sym) = (uniq("AOA"), uniq("AOB"));
+    seed_rising(&db, &a, 60).await;
+    seed_rising(&db, &b_sym, 60).await;
+    let state = state_with_db(&db);
+    let sel = keys(&[(&a, TREND), (&b_sym, TREND)]);
+    let bindings = vec![binding(&a, TREND), binding(&b_sym, TREND)];
+    let mut p = build(&sel, &db).await.expect("pool");
+    let out = tick(&state, &bindings, &mut p, 59).await;
+    assert_eq!((qty_of(&out, 0), qty_of(&out, 1)), (62 * USD, 62 * USD));
+    for s in [&a, &b_sym] {
+        let r = rows(&db, s, TREND).await;
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            (r[0].status.as_str(), r[0].resolved_target_qty_micros),
+            ("active", 62 * USD)
+        );
+    }
+    assert!(!host_is_poisoned(&mut p, &a, TREND));
+    // Finalized hosts evaluate the next bar normally.
+    seed_bar(&db, &a, 60, 300).await;
+    seed_bar(&db, &b_sym, 60, 300).await;
+    let out = tick(&state, &bindings, &mut p, 60).await;
+    assert_eq!((qty_of(&out, 0), qty_of(&out, 1)), (62 * USD, 62 * USD));
+    cleanup(&db, &[&a, &b_sym]).await;
+}
+
+/// IR-CF-02: durable Q is the strategy-contract-capped target; the runtime
+/// per-symbol position cap is a separate downstream clamp on the executable
+/// target and never mutates, re-resolves or is baked into stored Q.
+#[tokio::test]
+async fn runtime_position_cap_clamps_the_executable_target_but_never_the_durable_q() {
+    let Some(db) = db_or_skip("CFD-CAPQ").await else {
+        return;
+    };
+    let sym = uniq("CPQ");
+    seed_rising(&db, &sym, 60).await;
+    let state = state_with_db(&db);
+    state.set_per_symbol_max_position_qty_for_test(Some(10));
+    let sel = keys(&[(&sym, TREND)]);
+    let b = vec![binding(&sym, TREND)];
+
+    let mut p = build(&sel, &db).await.expect("pool");
+    let mut out = tick(&state, &b, &mut p, 59).await.expect("tick");
+    assert_eq!(
+        out[0].1.intents.output.targets[0].qty.raw(),
+        62 * USD,
+        "the dispatcher returns the raw durable Q, independent of the runtime cap"
+    );
+    let stored = rows(&db, &sym, TREND).await;
+    assert_eq!(stored[0].resolved_target_qty_micros, 62 * USD);
+    let clamped = AppState::clamp_targets_to_per_symbol_position_cap(
+        &mut out[0].1.intents.output.targets,
+        10,
+    );
+    assert_eq!(clamped.len(), 1);
+    assert_eq!(out[0].1.intents.output.targets[0].qty.raw(), 10 * USD);
+
+    // Restart: stored Q is unchanged and the downstream clamp re-applies identically.
+    drop(p);
+    let mut p = build(&sel, &db).await.expect("recovered pool");
+    seed_bar(&db, &sym, 60, 300).await;
+    let mut out = tick(&state, &b, &mut p, 60).await.expect("tick");
+    assert_eq!(out[0].1.intents.output.targets[0].qty.raw(), 62 * USD);
+    AppState::clamp_targets_to_per_symbol_position_cap(&mut out[0].1.intents.output.targets, 10);
+    assert_eq!(out[0].1.intents.output.targets[0].qty.raw(), 10 * USD);
+
+    // Removing or loosening the runtime cap cannot change stored Q.
+    state.set_per_symbol_max_position_qty_for_test(None);
+    let mut loose = out;
+    loose[0].1.intents.output.targets[0].qty =
+        mqk_schemas::QtyMicros::from_whole_units(62).unwrap();
+    assert!(AppState::clamp_targets_to_per_symbol_position_cap(
+        &mut loose[0].1.intents.output.targets,
+        100
+    )
+    .is_empty());
+    assert_eq!(rows(&db, &sym, TREND).await, stored);
+    cleanup(&db, &[&sym]).await;
+}
+
+/// IR-CF-02: the strategy-contract caps are applied BEFORE the durable commit
+/// and are bound to the stored record, so changing one refuses recovery.
+#[tokio::test]
+async fn strategy_contract_cap_is_applied_before_commit_and_bound_to_the_stored_record() {
+    let Some(db) = db_or_skip("CFD-CAPID").await else {
+        return;
+    };
+    let sym = uniq("CPI");
+    seed_rising(&db, &sym, 60).await;
+    let state = state_with_db(&db);
+    let sel = keys(&[(&sym, TREND)]);
+    let b = vec![binding(&sym, TREND)];
+    let capped = |cap: &'static str| {
+        move |s: &str| {
+            let mut i = cf_inputs(s);
+            i.raw_max_target_qty = Some(cap.to_string());
+            i
+        }
+    };
+    let build_capped = |cap: &'static str| {
+        let (sel, db) = (sel.clone(), db.clone());
+        async move {
+            DynamicSelectionHostPool::build_with_durable_state_from(&sel, Some(&db), capped(cap))
+                .await
+        }
+    };
+    let dep = |cap: &'static str| {
+        resolve_capital_fraction_paper_binding(&capped(cap)(&sym), TREND)
+            .unwrap()
+            .unwrap()
+            .scope
+            .deployment_id
+    };
+    assert_ne!(
+        dep("30"),
+        dep("40"),
+        "a strategy-contract cap is part of identity"
+    );
+    assert_ne!(dep("30"), deployment_id(&sym, TREND));
+
+    let mut p = build_capped("30").await.expect("pool");
+    let out = tick(&state, &b, &mut p, 59).await;
+    assert_eq!(
+        qty_of(&out, 0),
+        30 * USD,
+        "62 shares capped to 30 before commit"
+    );
+    let stored = held_sizing_fetch(&db, &dep("30"), TREND).await.unwrap();
+    assert_eq!(stored[0].resolved_target_qty_micros, 30 * USD);
+    assert_eq!(stored[0].max_target_qty_micros, Some(30 * USD));
+    cleanup(&db, &[&sym]).await;
+}
+
 #[tokio::test]
 async fn recovery_failure_fails_the_pool_build_closed() {
     let Some(db) = db_or_skip("CFD-04").await else {
