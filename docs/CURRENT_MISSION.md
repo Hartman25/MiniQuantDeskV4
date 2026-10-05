@@ -6,6 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -32. Combined-stack final closeout correction (2026-10-04, `V4-M1-CORRECTION-PLUS-BATCH03-FINAL-CLOSEOUT-02`)
+
+Local commits, **not pushed**. Head accounting (no history rewrite): full-stack base `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (origin/main); combined-controller start `68d442536b92fe50f6d16458258ef46ebf8ad021`; closeout-correction start `7fdbebf6361e62e5b4119344a175fc557537d85d`; final head = the head of the branch at the time this file is read (`git rev-parse HEAD`).
+
+- Recovery: F02/F03/F04/F06/F07/F09 are `DurableStateRequired`, seeded from durable `HeldSizingRecord` anchors (continuous run == restart at every boundary; mutation-proven). F01/F05/F08/F10 are `BoundedHistoryReconstructible`. The dynamic-selection daemon path still refuses `DurableStateRequired`; capital-fraction Paper dispatch is `AUTHORIZED_NEXT / NOT YET COMPLETE`.
+- Daemon: `cargo check -p mqk-daemon --all-targets -j 2` passes with the 24-strategy universe; plan-builder lib tests pass.
+- Family-ranking key 5 now reads engine-computed matched-benchmark drawdown evidence (benchmark minus candidate max drawdown, one verified run identity); absent/inconsistent stays worst on key 5 only.
+- Batch 03 stress contract frozen by the operator (`half_exposure_capital_fraction_500bps_v1`, 500 bps, slippage 15, vol mult 10, ceiling 4000 bps) and bound into all 60 trial identities; baseline sizing unchanged. `execution_gate.executable = false`, blocker `OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03`.
+- Unchanged: 60 trial definitions, 0 registered, 0 attempts, no result, no family winner, no Promotion candidate; holdout RESERVED / UNCONSUMED; Paper INACTIVE; Live NOT TOUCHED; M1 `M1_BLOCKED`. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI after an authorized push.
+- Supersedes the -31 wording "hard stop `OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT`", "key 5 has no evidence source" and "`mqk-daemon` not compiled locally".
+
 ## -31. M1 System-Closure Correction + Batch 03 preparation (2026-10-04, `V4-M1-SYSTEM-CLOSURE-CORRECTION-PLUS-BATCH03-PREPARATION-01`)
 
 Local commits on top of `fac22592`, **not pushed**. Records: `docs/M1_SYSTEM_CLOSURE_01.md` (Correction 01), `docs/research/M1_BATCH03_PREDECLARATION.md`; ledger G2.19.

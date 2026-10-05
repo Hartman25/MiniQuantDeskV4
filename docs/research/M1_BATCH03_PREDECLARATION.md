@@ -64,7 +64,7 @@ Preferred universe DIA, MDY, XLF, XLI, XLV, XLP; 3 advanced families x 6 = 18 fu
 - Registration gate and predeclaration: `test_batch03_predeclaration.py` (24), `test_batch03_registration_gate.py` (19: 60/0 passes; 59, 61, duplicates and an attempt before the gate are refused; `1D` and `1Day` give one identity; moving any fingerprint parameter moves identity).
 - Engines: `scenario_batch03_native_strategies_01.rs` runs each engine against an independent integer reference at every bar of a deterministic fixture, checks stateless freshness, registry metadata, distinct fingerprints, and capital-fraction sizing identity. Its fixture stress value (500 bps) is a test constant, explicitly not the Batch 03 stress contract. Mutation proofs were taken per family (the F01..F10 edits listed in the controller) and restored byte for byte.
 - Ranking and execution stop: `test_batch03_family_ranking.py` (36), including that the declaration is non-executable, attempts are 0, no `runs/run_batch_03` result artifact exists, and `main()` refuses. Ranking mutants (floor, key order, top-N, median, trial selection, imputation, id tie-break) are killed.
-- The `mqk-daemon` crate was not compiled locally: its tests that count registered strategies were edited by inspection for the 24-entry universe. Broad workspace acceptance is delegated to GitHub CI.
+- `mqk-daemon` compiles (`cargo check -p mqk-daemon --all-targets -j 2`) with the 24-strategy universe; the dynamic-selection plan-builder lib tests (including the 24-id fleet/universe-bound tests) pass at `-j 2`. Broad workspace acceptance is delegated to GitHub CI.
 
 ## Second adversarial sweep (Batch 03 preparation)
 
