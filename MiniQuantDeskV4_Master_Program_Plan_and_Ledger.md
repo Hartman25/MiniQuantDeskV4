@@ -785,6 +785,10 @@ Local, not pushed (baseline `fac22592`). Records: `docs/M1_SYSTEM_CLOSURE_01.md`
 
 Open: `OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03` (stress contract frozen and bound into identity; see `docs/research/M1_BATCH03_PREDECLARATION.md`). No trial registered, `ECONOMIC_ATTEMPTS = 0`. Ranking key 5 reads engine-computed matched-benchmark drawdown evidence. Daemon capital-fraction dispatch still `AUTHORIZED_NEXT / NOT YET COMPLETE`. M1 `M1_BLOCKED`.
 
+### G2.20 Batch 03 Discovery execution (`V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01` Phase A, 2026-10-05) - `BATCH03_DISCOVERY_EXECUTED`
+
+Local, not pushed. Record: `docs/research/M1_BATCH03_DISCOVERY_RESULT.md`. 60 registered / 60 attempts / 0 retries; 53 evaluable results, 7 deterministic no-signal failures kept in the population; one batch-wide judge (PBO 0.0714); scanner 60/60 `rejected`, 0/60 positive benchmark alpha; F05, F04, F01 advance to Confirmation by the predeclared mechanical ranking (not Promotion, not an edge claim). Confirmation trials, final holdout, Promotion, Paper and Live: not touched. `PREDECLARED_BATCH_03.json` is left byte-identical (it is the predeclaration; its `BATCH03_PREDECLARED_NOT_EXECUTED` status describes the pre-execution state).
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).

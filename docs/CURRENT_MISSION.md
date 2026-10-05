@@ -6,6 +6,14 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -33. Batch 03 Discovery executed (2026-10-05, `V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01` Phase A)
+
+Local commits, **not pushed**. Record: `docs/research/M1_BATCH03_DISCOVERY_RESULT.md`.
+
+- Status `BATCH03_DISCOVERY_EXECUTED`: 60 trials registered and attempted exactly once (60 attempts, 0 retries); 53 produced a result, 7 failed deterministically (`no native signals inside fold N`; F02 x4, F03 x3) and were not retried. One batch-wide judge: 53 included / 7 excluded, PBO 0.0714. Scanner review 60/60 `rejected`; 0/60 positive cost-aware benchmark alpha; 0 `paper_candidate`.
+- Family ranking (predeclared keys, no invented threshold): F05, F04, F01 are `DISCOVERY_ADVANCED_TO_CONFIRMATION` (mechanical top three; all have non-positive alpha, median DSR 0.013-0.025, 0 robustness-clear slots); F02/F03 `DISCOVERY_INSUFFICIENT_EVALUABLE_TRIALS`; others `DISCOVERY_NOT_ADVANCED`. This is not Promotion; `selected_trial_ids`/`promotion_candidates` empty.
+- Confirmation trials NOT registered/run; final holdout RESERVED / UNCONSUMED (guard clean); no Promotion candidate; Paper INACTIVE; Live NOT TOUCHED; M1 remains `M1_BLOCKED`.
+
 ## -32. Combined-stack final closeout correction (2026-10-04, `V4-M1-CORRECTION-PLUS-BATCH03-FINAL-CLOSEOUT-02`)
 
 Local commits, **not pushed**. Head accounting (no history rewrite): full-stack base `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (origin/main); combined-controller start `68d442536b92fe50f6d16458258ef46ebf8ad021`; closeout-correction start `7fdbebf6361e62e5b4119344a175fc557537d85d`; final head = the head of the branch at the time this file is read (`git rev-parse HEAD`).
