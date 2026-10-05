@@ -632,10 +632,23 @@ def stage_finalize(_args) -> None:
         print(key(strategy, sym), "finalized")
 
 
+SCAN_REGISTRY_SUPPLEMENT = {
+    "XBI": {"instrument_id": "equity:US:XBI", "symbol": "XBI", "asset_class": "equity", "provider": "twelvedata",
+            "provider_symbol": "XBI", "venue": "NYSEARCA", "currency": "USD", "enabled": True, "timeframes": ["1D"],
+            "notes": "per-run scan identity row; not in config/instruments/equities.json"},
+}
+
+
 def stage_review(_args) -> None:
     reg = json.loads((REPO / "config" / "instruments" / "equities.json").read_text(encoding="utf-8"))
     symbols = sorted({s for _, s in TRIALS})
     sub = [i for i in reg if i["symbol"] in symbols]
+    # XBI is absent from the production instrument registry; the scanner needs an identity row only,
+    # so a per-run row in the seeded-universe schema is supplied. Any other absent symbol is refused.
+    for sym in symbols:
+        if sym not in {i["symbol"] for i in sub} and sym in SCAN_REGISTRY_SUPPLEMENT:
+            sub.append(dict(SCAN_REGISTRY_SUPPLEMENT[sym]))
+    sub.sort(key=lambda i: i["symbol"])
     assert sorted(i["symbol"] for i in sub) == symbols
     for strategy in STRATEGIES:
         base = RUN / "scan" / strategy
