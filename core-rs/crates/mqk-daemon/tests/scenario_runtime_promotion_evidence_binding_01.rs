@@ -433,31 +433,6 @@ fn signal_req(body: serde_json::Value) -> Request<axum::body::Body> {
         .unwrap()
 }
 
-/// The decision seam requires the symbol to be an enabled canonical legacy
-/// Equity. A per-run synthetic symbol is added to a copy of the canonical
-/// registry (AAPL row cloned) so that authority is satisfied genuinely.
-fn registry_path_with_synthetic_symbol(symbol: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("mqk_c2_registry_{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("create registry fixture dir");
-    let mut rows: Vec<serde_json::Value> = serde_json::from_slice(
-        &std::fs::read(common::canonical_equity_registry_path()).expect("read registry"),
-    )
-    .expect("parse registry");
-    let mut row = rows
-        .iter()
-        .find(|r| r["symbol"] == "AAPL")
-        .cloned()
-        .expect("canonical registry has an AAPL row");
-    row["symbol"] = symbol.into();
-    row["provider_symbol"] = symbol.into();
-    row["instrument_id"] = format!("equity:US:{symbol}").into();
-    rows.push(row);
-    let path = dir.join("equities_with_synthetic_symbol.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&rows).unwrap())
-        .expect("write registry fixture");
-    path.to_string_lossy().into_owned()
-}
-
 async fn make_external_signal_state(
     pool: sqlx::PgPool,
     synthetic_symbol: Option<&str>,
@@ -470,7 +445,7 @@ async fn make_external_signal_state(
         ),
     );
     if let Some(symbol) = synthetic_symbol {
-        app_state.instrument_registry_path = registry_path_with_synthetic_symbol(symbol);
+        app_state.instrument_registry_path = common::registry_path_with_synthetic_symbol(symbol);
     }
     let st = Arc::new(app_state);
     st.update_ws_continuity(state::AlpacaWsContinuityState::Live {

@@ -755,14 +755,21 @@ fn signal_req(body: serde_json::Value) -> Request<axum::body::Body> {
 /// timestamp (2024-01-08 Mon 10:00 ET) — mirrors the setup convention
 /// already used by `scenario_paper_alpaca_proof_bundle_brk00r06.rs`'s
 /// `reaches_db_gate`-style tests.
-async fn make_external_signal_state(pool: sqlx::PgPool) -> Arc<state::AppState> {
-    let st = Arc::new(common::with_canonical_equity_registry(
+async fn make_external_signal_state(
+    pool: sqlx::PgPool,
+    synthetic_symbol: Option<&str>,
+) -> Arc<state::AppState> {
+    let mut app_state = common::with_canonical_equity_registry(
         state::AppState::new_for_test_with_db_mode_and_broker(
             pool,
             state::DeploymentMode::Paper,
             state::BrokerKind::Alpaca,
         ),
-    ));
+    );
+    if let Some(symbol) = synthetic_symbol {
+        app_state.instrument_registry_path = common::registry_path_with_synthetic_symbol(symbol);
+    }
+    let st = Arc::new(app_state);
     st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
         last_message_id: "alpaca:rtg01:new:2024-01-08T14:00:00Z".to_string(),
         last_event_at: "2024-01-08T14:00:00Z".to_string(),
@@ -794,7 +801,7 @@ async fn external_no_promotion_refused_before_outbox() {
     let pool = make_db_pool().await;
     let sid = unique_id("rtg01e_none");
     seed_registry(&pool, &sid, true).await;
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), None).await;
 
     let signal_id = unique_id("sig");
     let (status, json) = call(
@@ -820,7 +827,7 @@ async fn external_missing_timeframe_fails_closed() {
     let sid = unique_id("rtg01e_notf");
     seed_registry(&pool, &sid, true).await;
     seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, "active_paper").await;
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), None).await;
 
     let signal_id = unique_id("sig");
     let (status, json) = call(
@@ -840,7 +847,7 @@ async fn external_mismatched_symbol_and_timeframe_refused() {
     let sid = unique_id("rtg01e_mismatch");
     seed_registry(&pool, &sid, true).await;
     seed_promotion_state(&pool, &sid, "MSFT", TIMEFRAME_SECS, "active_paper").await;
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), None).await;
 
     let signal_id = unique_id("sig");
     let (status, json) = call(
@@ -868,7 +875,7 @@ async fn assert_external_denied(
     seed_registry(&pool, &sid, true).await;
     let effective_target = if expired { "expired" } else { target_state };
     seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, effective_target).await;
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), None).await;
 
     let signal_id = unique_id("sig");
     let (status, json) = call(
@@ -990,7 +997,7 @@ async fn external_active_paper_exact_identity_is_refused_at_promotion_gate() {
     .expect("swing_momentum must resolve");
     seed_registry(&pool, &sid, true).await;
     seed_active_paper_with_fingerprint(&pool, &sid, &symbol, TIMEFRAME_SECS, &fingerprint).await;
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), Some(&symbol)).await;
 
     let signal_id = unique_id("sig");
     let (status, json) = call(
@@ -1051,7 +1058,7 @@ async fn external_active_paper_full_happy_path_is_refused_at_promotion_gate() {
     mqk_db::persist_arm_state(&pool, "ARMED", None)
         .await
         .expect("persist ARMED");
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), Some(&symbol)).await;
     let _run_id = seed_active_run(&st).await;
 
     let signal_id = unique_id("sig");
@@ -1088,7 +1095,7 @@ async fn external_promotion_denial_never_deposits_bar_input() {
     let sid = unique_id("rtg01e_nobarinput");
     seed_registry(&pool, &sid, true).await;
     // No promotion seeded — must be denied at Gate 2b.
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), None).await;
 
     let signal_id = unique_id("sig");
     let (status, _json) = call(
