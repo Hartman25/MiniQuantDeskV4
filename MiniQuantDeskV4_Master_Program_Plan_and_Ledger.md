@@ -783,7 +783,7 @@ Local, not pushed (baseline `fac22592`). Records: `docs/M1_SYSTEM_CLOSURE_01.md`
 | `2cbc1850` | engines match an independent integer reference bar-for-bar; capital-fraction sizing identity |
 | `7ceb4349` | family ranking (top-3 families to Confirmation, never trials) + execution-stop tests |
 
-Open: `OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT`. No trial registered, `ECONOMIC_ATTEMPTS = 0`. Ranking key 5 has no drawdown evidence source (deferred). Daemon capital-fraction dispatch still `AUTHORIZED_NEXT / NOT YET COMPLETE`. M1 `M1_BLOCKED`.
+Open: `OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03` (stress contract frozen and bound into identity; see `docs/research/M1_BATCH03_PREDECLARATION.md`). No trial registered, `ECONOMIC_ATTEMPTS = 0`. Ranking key 5 reads engine-computed matched-benchmark drawdown evidence. Daemon capital-fraction dispatch still `AUTHORIZED_NEXT / NOT YET COMPLETE`. M1 `M1_BLOCKED`.
 
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
