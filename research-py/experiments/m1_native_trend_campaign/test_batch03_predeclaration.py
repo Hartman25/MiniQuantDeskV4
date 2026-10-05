@@ -1,8 +1,8 @@
 """Guards the Batch 03 prospective predeclaration (60 trials, ten families, six ETFs).
 
-The declaration is deliberately NOT executable: the P7A/P7B stress contract needs explicit operator
-authority and no stress value is invented. These tests pin the frozen structure and prove the runner
-refuses every stage until the gate is lifted.
+The declaration is deliberately NOT executable: execution needs separate explicit operator authority.
+The operator-frozen P7A/P7B stress contract is pinned here; these tests prove the runner refuses every
+stage until the gate is lifted.
 """
 
 from __future__ import annotations
@@ -112,26 +112,40 @@ def test_capital_fraction_sizing_is_the_frozen_1000_bps_on_100k(rb):
     assert rb.sizing_args(DECL)  # the baseline block validates under the shared sizing authority
 
 
-def test_stress_contract_is_unfinalized_and_no_batch02_value_is_borrowed(rb):
+def test_stress_contract_is_the_operator_frozen_half_exposure_contract(rb):
     stress = DECL["robustness"]["p7a_p7b_stress"]
-    assert stress["status"] == "OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT"
-    assert "stress_sizing" not in stress
-    assert stress["register_stress_contract"].startswith("deliberately absent")
-    with pytest.raises(SystemExit):
-        rb.stress_plan(DECL)
-    with pytest.raises(SystemExit):
-        rb.research_stress_contract(DECL)
-    old = BATCH02["robustness"]["p7a_p7b_stress"]
-    text = json.dumps(stress)
-    assert old["stress_sizing"]["scenario_id"] not in text
-    assert '"allocation_fraction_bps": 500' not in text
+    assert stress["status"] == "OPERATOR_FROZEN_BATCH03_STRESS_CONTRACT"
+    assert stress["register_stress_contract"] is True
+    sizing = stress["stress_sizing"]
+    assert sizing["scenario_id"] == "half_exposure_capital_fraction_500bps_v1"
+    assert sizing["allocation_fraction_bps"] == 500 and sizing["nominal_entry_budget_micros"] == 5_000_000_000
+    assert sizing["is_a_trial"] is False
+    assert not any(f in stress for f in rb.STRESS_FORBIDDEN_CAP_FIELDS)  # not a USD 5,000 cap
+    assert rb.stress_plan(DECL) == {"mode": "capital_fraction", "scenario_id": sizing["scenario_id"],
+                                    "allocation_fraction_bps": 500}
+    contract = rb.research_stress_contract(DECL)
+    assert contract["scenario_id"] == "half_exposure_capital_fraction_500bps_v1"
+    assert (contract["allocation_fraction_bps"], contract["stress_execution_slippage_bps"],
+            contract["stress_execution_volatility_mult_bps"], contract["max_drawdown_ceiling_bps"]) == (
+        500, 15, 10, 4000)
+    # the baseline sizing (and so every trial identity input) stays 1000 bps / USD 10,000
+    assert DECL["capital_sizing"]["allocation_fraction_bps"] == 1000
+    assert DECL["capital_sizing"]["nominal_entry_budget_micros"] == 10_000_000_000
+
+
+def test_stress_is_at_least_as_adverse_as_the_canonical_baseline_execution_and_strictly_worse_in_one():
+    base = DECL["economic_protocol"]["execution_pricing"]
+    stress = DECL["robustness"]["p7a_p7b_stress"]
+    s_slip, s_vol = stress["stress_execution_slippage_bps"], stress["stress_execution_volatility_mult_bps"]
+    assert s_slip >= base["slippage_bps"] and s_vol >= base["volatility_mult_bps"]
+    assert s_slip > base["slippage_bps"] or s_vol > base["volatility_mult_bps"]
 
 
 def test_the_gate_refuses_every_stage_and_is_a_noop_for_closed_declarations(rb):
     gate = DECL["execution_gate"]
     assert gate["status"] == "BATCH03_PREDECLARED_NOT_EXECUTED" and gate["executable"] is False
-    assert gate["blocker"] == "OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT"
-    with pytest.raises(SystemExit, match="OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT"):
+    assert gate["blocker"] == "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03"
+    with pytest.raises(SystemExit, match="OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03"):
         rb.require_executable_declaration(DECL)
     for bad in (False, None, "true", 1):
         mutated = copy.deepcopy(DECL)

@@ -6,8 +6,8 @@
  "execution_gate": {
   "status": "BATCH03_PREDECLARED_NOT_EXECUTED",
   "executable": false,
-  "blocker": "OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT",
-  "rule": "No stage other than `check` may run and no trial may be registered until the stress contract below is finalized by explicit operator authority and this declaration is re-issued as executable. ECONOMIC_ATTEMPTS=0."
+  "blocker": "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03",
+  "rule": "No stage other than `check` may run and no trial may be registered until explicit operator execution authority re-issues this declaration as executable (the stress contract below is frozen and bound through IR-SYS-02, but it does not authorize execution). ECONOMIC_ATTEMPTS=0."
  },
  "run_dir": "runs/run_batch_03",
  "declaration_selection": "run_batch.py and summarize_batch.py read this file when MQK_M1_BATCH_DECLARATION names it.",
@@ -764,17 +764,23 @@
   "dsr_max_sensitivity_range": 0.15,
   "pbo_max_sensitivity_range": 0.15,
   "p7a_p7b_stress": {
-   "status": "OPERATOR_DECISION_REQUIRED_BATCH03_STRESS_CONTRACT",
-   "contract_schema": "p7a_p7b_stress_contract_v1 (six keys: schema_version, scenario_id, allocation_fraction_bps, stress_execution_slippage_bps, stress_execution_volatility_mult_bps, max_drawdown_ceiling_bps)",
-   "required_operator_decision": {
-    "scenario_id": "non-empty name",
-    "allocation_fraction_bps": "integer, 1 <= x < 1000",
-    "stress_execution_slippage_bps": "number >= baseline 5",
-    "stress_execution_volatility_mult_bps": "number >= baseline 0; at least one execution parameter strictly worse than baseline",
-    "max_drawdown_ceiling_bps": "integer"
+   "status": "OPERATOR_FROZEN_BATCH03_STRESS_CONTRACT",
+   "register_stress_contract": true,
+   "stress_execution_slippage_bps": 15,
+   "stress_execution_volatility_mult_bps": 10,
+   "max_drawdown_ceiling": 0.4,
+   "stress_sizing": {
+    "scenario_id": "half_exposure_capital_fraction_500bps_v1",
+    "policy_id": "fixed_initial_capital_fraction_v1",
+    "allocation_fraction_bps": 500,
+    "initial_capital_micros": 100000000000,
+    "nominal_entry_budget_micros": 5000000000,
+    "quantity_rule": "resolve a new stress Q from the same causal completed-bar reference price; do not cap a 1000-bps baseline Q",
+    "is_a_trial": false,
+    "identity": "the stress is an evaluation scenario of the SAME registered trial; the trial identity stays bound to the 1000 bps baseline; the scenario artifact separately binds the stress sizing, the stress signal stream hash and the execution-stress parameters"
    },
-   "not_authority": "The Batch 02 values (500 bps / 15 / 10 / 0.40) were a Batch 02 predeclaration and are NOT Batch 03 authority; no stress value is invented here.",
-   "register_stress_contract": "deliberately absent until the operator decision is recorded"
+   "stress_notional_cap_policy": "stress_max_position_notional_usd and stress_max_target_qty are NOT used. A USD 5,000 cap on a 1000-bps quantity is not a half-exposure mechanism and is not a Production default; the independent baseline notional safety cap (USD 50,000) is carried unchanged into the stress.",
+   "baseline_adversity_check": "baseline execution slippage_bps 5 / volatility_mult_bps 0 (economic_protocol.execution_pricing) -> stress 15 / 10: both at least as adverse, both strictly worse."
   }
  },
  "scanner_review": {

@@ -1,10 +1,9 @@
 """The Batch 03 pre-run registration gate: exactly the 60 predeclared trial identities, nothing else,
 and zero attempts before the first economic attempt.
 
-The shipped declaration carries NO finalized stress contract (operator decision pending), so identity
-construction refuses on it. These controls therefore apply a TEST-FIXTURE stress contract to a
-restored copy of the declaration. The fixture values are not authority and are never written to the
-declaration; they exist only so the real identity construction can be exercised end to end.
+These controls apply a TEST-FIXTURE stress contract (distinct from the operator-frozen one, so that
+"a different contract changes every identity" is exercised) to a restored copy of the declaration.
+The fixture values are not authority and are never written to the declaration.
 """
 
 from __future__ import annotations
@@ -129,9 +128,18 @@ def ids(expected):
     return {e[2] for e in expected}
 
 
-def test_the_shipped_declaration_cannot_derive_any_trial_identity(tmp_path):
-    with pytest.raises(SystemExit):
-        rb.expected_trial_ids(fingerprints(), manifest(tmp_path))
+def test_the_shipped_declaration_binds_the_frozen_stress_contract_into_all_sixty_identities(tmp_path):
+    shipped = rb.expected_trial_ids(fingerprints(), manifest(tmp_path))
+    assert len(shipped) == 60 and len(ids(shipped)) == 60
+    frozen = rb.research_stress_contract(rb.DECL)
+    assert frozen["scenario_id"] == "half_exposure_capital_fraction_500bps_v1"
+    assert (frozen["allocation_fraction_bps"], frozen["stress_execution_slippage_bps"],
+            frozen["stress_execution_volatility_mult_bps"], frozen["max_drawdown_ceiling_bps"]) == (500, 15, 10, 4000)
+    for variant in ("stress_execution_slippage_bps", "stress_execution_volatility_mult_bps"):
+        rb.DECL["robustness"]["p7a_p7b_stress"][variant] += 1
+        other = rb.expected_trial_ids(fingerprints(), manifest(tmp_path))
+        assert ids(shipped).isdisjoint(ids(other)), variant
+        rb.DECL["robustness"]["p7a_p7b_stress"][variant] -= 1
 
 
 def test_exactly_the_sixty_predeclared_identities_with_zero_attempts_pass(world):
