@@ -952,7 +952,9 @@ impl Drop for SizingEnvRestore {
     }
 }
 
-fn cf_env_vars() -> Vec<(&'static str, &'static str)> {
+type EnvVars = Vec<(&'static str, &'static str)>;
+
+fn cf_env_vars() -> EnvVars {
     vec![
         (SIZING_ENV_NAMES[0], CF),
         (SIZING_ENV_NAMES[1], "1000"),
@@ -981,7 +983,7 @@ async fn production_env_path_refuses_or_builds_stateless_without_a_database() {
             "capital-fraction env without a database must refuse"
         );
     }
-    let refused = |mutate: &dyn Fn(&mut Vec<(&'static str, &'static str)>)| {
+    let refused = |mutate: &dyn Fn(&mut EnvVars)| {
         let mut v = cf_env_vars();
         mutate(&mut v);
         v
