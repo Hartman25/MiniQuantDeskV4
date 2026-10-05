@@ -7,7 +7,7 @@
   "status": "BATCH03_PREDECLARED_NOT_EXECUTED",
   "executable": false,
   "blocker": "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03",
-  "rule": "No stage other than `check` may run and no trial may be registered until explicit operator execution authority re-issues this declaration as executable (the stress contract below is frozen and bound through IR-SYS-02, but it does not authorize execution). ECONOMIC_ATTEMPTS=0."
+  "rule": "NO runner stage (including `check`) may run and no trial may be registered until explicit operator execution authorization re-issues this declaration as executable (the stress contract below is frozen and bound through IR-SYS-02, but it does not authorize execution). ECONOMIC_ATTEMPTS=0."
  },
  "run_dir": "runs/run_batch_03",
  "declaration_selection": "run_batch.py and summarize_batch.py read this file when MQK_M1_BATCH_DECLARATION names it.",

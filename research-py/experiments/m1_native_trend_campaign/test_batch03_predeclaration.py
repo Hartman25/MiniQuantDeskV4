@@ -158,6 +158,23 @@ def test_the_gate_refuses_every_stage_and_is_a_noop_for_closed_declarations(rb):
     rb.require_executable_declaration(ok)
 
 
+def test_the_declaration_text_matches_the_gate_it_describes(rb, monkeypatch):
+    gate = DECL["execution_gate"]
+    assert gate["executable"] is False
+    rule = gate["rule"]
+    assert rule.startswith("NO runner stage (including `check`) may run"), rule
+    assert "other than" not in rule and "except" not in rule.lower()
+    # the behavior the text describes: every real runner stage, `check` included, refuses
+    called = []
+    monkeypatch.setattr(rb, "STAGES", {name: (lambda _a, n=name: called.append(n)) for name in rb.STAGES})
+    assert "check" in rb.STAGES and len(rb.STAGES) > 1
+    for name in sorted(rb.STAGES):
+        monkeypatch.setattr(sys, "argv", ["run_batch.py", name])
+        with pytest.raises(SystemExit, match="BATCH03_PREDECLARED_NOT_EXECUTED"):
+            rb.main()
+    assert called == []
+
+
 @pytest.mark.parametrize("stage", ["check", "register"])
 def test_main_runs_no_stage_for_the_unfinalized_declaration(rb, stage, monkeypatch):
     called = []
