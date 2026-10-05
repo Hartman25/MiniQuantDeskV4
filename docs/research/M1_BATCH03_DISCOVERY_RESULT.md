@@ -7,7 +7,7 @@
 - Registry: 10 hypotheses, 60 trials, 60 attempts (exactly one attempt per trial, attempt_index 1). No retries; no infrastructure failure occurred.
 - Success / failure: 53 attempts produced an economic result; 7 failed deterministically with `no native signals inside fold N` and were NOT retried (outcome-dependent retry is not authorized): F02 x4 (IWM f10, SMH f9, XBI f7, XLE f9), F03 x3 (SMH f9, XBI f10, XLE f10). They stay in the population as non-evaluable (worst on every ranking key).
 - Evaluable: F01, F04-F10 = 6/6 each; F02 = 2/6; F03 = 3/6.
-- Run notes: scanner review needed an identity row for XBI, which is absent from `config/instruments/equities.json`; a per-run row was supplied in `run_batch.py` (`SCAN_REGISTRY_SUPPLEMENT`; identity only, no bars or economics).
+- Run notes: scanner review needed an identity row for XBI, which is absent from `config/instruments/equities.json`; a per-run row was supplied in `run_batch.py` (`SCAN_REGISTRY_SUPPLEMENT`; identity only, no bars or economics). Independent-review disposition: the scanner consumes registry rows only through `enabled_equity_symbols`; provider, venue, timeframes and currency of a row are never read downstream, and the bars provenance for XBI is the Alpaca bars artifact, not the registry row. The supplement therefore cannot affect any economic output; it is pinned membership-only by `test_batch03_scan_registry_supplement.py`. No fix was required.
 
 ## Batch-wide judge (`research_multiple_testing_judge_v1`, one judge over all 60)
 

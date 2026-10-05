@@ -4,7 +4,7 @@ Baseline `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (= origin/main, GitHub CI #6
 
 ## Verdict
 
-`M1_SYSTEM_CANDIDATE_READY = true` as of the capital-fraction daemon closure (Phase B of `V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01`, 2026-10-05; see Finding E). Before it, the value was `false` for exactly one reason: Finding E. Every candidate-independent defect found is fixed and proven. M1 stays `M1_BLOCKED` (no qualified candidate, M1.9 deployment, M1.10 real sessions).
+`M1_SYSTEM_CANDIDATE_READY = true` as of the capital-fraction daemon closure (Phase B of `V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01`, 2026-10-05; see Finding E). Before it, the value was `false` for exactly one reason: Finding E. Every candidate-independent defect found is fixed and proven. M1 stays `M1_BLOCKED` (no qualified candidate, M1.9 deployment, M1.10 real sessions). The value was held `false` while the independent-review correction (`V4-BATCH03-CAPFRAC-INDEPENDENT-REVIEW-CORRECTION-01`: whole-tick atomic durable commit, cap-vs-durable-Q disposition, direct env-path tests, fresh-DB regression isolation) was open, and is `true` again now that it is closed.
 
 ## Closure matrix (category = exactly one)
 
