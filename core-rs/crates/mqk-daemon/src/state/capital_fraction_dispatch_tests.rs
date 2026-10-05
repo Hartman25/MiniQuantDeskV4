@@ -219,6 +219,10 @@ async fn seed_ohlc(pool: &PgPool, symbol: &str, k: i64, ohlc: (i64, i64, i64, i6
 /// F03 fixture: flat 60 -> ramp to 100 -> flat 100 (true range 2), then a >1.5-ATR 3-day drop whose
 /// decision bar is index 199 (close 96.5), then closes of 90. Every bar's open equals its close.
 fn f03_bars(n: usize) -> Vec<(i64, i64, i64, i64)> {
+    f03_bars_padded(n, USD)
+}
+
+fn f03_bars_padded(n: usize, flat_pad: i64) -> Vec<(i64, i64, i64, i64)> {
     const M: i64 = USD;
     let mut v: Vec<(i64, i64, i64, i64)> = Vec::new();
     let push = |prev: i64, c: i64, pad: i64, v: &mut Vec<(i64, i64, i64, i64)>| {
@@ -233,7 +237,7 @@ fn f03_bars(n: usize) -> Vec<(i64, i64, i64, i64)> {
         push(prev, c, 0, &mut v);
     }
     for _ in 150..=196 {
-        push(100 * M, 100 * M, M, &mut v);
+        push(100 * M, 100 * M, flat_pad, &mut v);
     }
     for (c, pad) in [
         (98 * M, 0),
@@ -290,6 +294,26 @@ async fn stateful_inner_strategy_hold_phase_survives_restart_at_every_boundary()
         (r[0].status.as_str(), r[0].entry_generation),
         ("released", 1)
     );
+    cleanup(&db, &[&sym]).await;
+}
+
+/// Same close path as the F03 entry fixture, but every flat session has a true range of 10 (ATR
+/// ~9.2), so the 3.5 drop is NOT an event. Close-only bars (range 0, ATR ~0.2) would enter.
+#[tokio::test]
+async fn daemon_bar_window_carries_true_ohlc_to_the_atr_engine() {
+    let Some(db) = db_or_skip("CFD-OHLC").await else {
+        return;
+    };
+    let sym = uniq("OHL");
+    let bars = f03_bars_padded(200, 5 * USD);
+    for (k, b) in bars.iter().enumerate() {
+        seed_ohlc(&db, &sym, k as i64, *b).await;
+    }
+    let state = state_with_db(&db);
+    let mut p = build(&keys(&[(&sym, F03)]), &db).await.expect("pool");
+    let out = tick(&state, &[binding(&sym, F03)], &mut p, 199).await;
+    assert_eq!(qty_of(&out, 0), 0, "wide true ranges: no entry");
+    assert!(rows(&db, &sym, F03).await.is_empty(), "nothing held");
     cleanup(&db, &[&sym]).await;
 }
 
@@ -441,10 +465,6 @@ async fn persistence_failure_returns_no_result_and_poisons_the_host() {
         panic!("capital-fraction binding must own a durable host");
     };
     assert!(h.is_poisoned());
-    assert!(
-        tick(&state, &b, &mut p, 59).await.is_err(),
-        "a poisoned host refuses further bars until rebuilt from the DB"
-    );
 
     sqlx::query(&format!(
         "drop trigger {fname} on sys_strategy_held_sizing_state"
@@ -456,6 +476,11 @@ async fn persistence_failure_returns_no_result_and_poisons_the_host() {
         .execute(&db)
         .await
         .unwrap();
+    assert!(
+        tick(&state, &b, &mut p, 59).await.is_err(),
+        "a poisoned host refuses further bars even once the DB is healthy; it is never silently rebuilt"
+    );
+    assert!(rows(&db, &sym, TREND).await.is_empty());
     drop(p);
     let mut p = build(&sel, &db).await.expect("pool");
     assert_eq!(qty_of(&tick(&state, &b, &mut p, 59).await, 0), 62 * USD);
