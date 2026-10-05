@@ -781,6 +781,10 @@ async fn recovery_failure_fails_the_pool_build_closed() {
 
 #[tokio::test]
 async fn pool_build_never_writes_held_state_and_fixed_quantity_stays_stateless() {
+    // The stateless host build reads the process environment.
+    let _env = shared_test_locks::strategy_fleet_env_test_lock()
+        .lock()
+        .await;
     let Some(db) = db_or_skip("CFD-05").await else {
         return;
     };
@@ -822,6 +826,10 @@ async fn pool_build_never_writes_held_state_and_fixed_quantity_stays_stateless()
 
 #[tokio::test]
 async fn capital_fraction_binding_without_a_database_is_refused() {
+    // The stateless host build reads the process environment.
+    let _env = shared_test_locks::strategy_fleet_env_test_lock()
+        .lock()
+        .await;
     let sym = "CFNODB";
     let sel = keys(&[(sym, TREND)]);
     let err =
@@ -902,6 +910,167 @@ async fn partial_unknown_or_malformed_capital_fraction_config_is_refused_without
             "{label}"
         );
     }
+}
+
+/// Sizing/cap env vars the production build reads; `SizingEnvRestore` sets exactly
+/// the requested subset and restores every prior value (set or unset) on drop.
+const SIZING_ENV_NAMES: [&str; 6] = [
+    mqk_runtime::native_strategy::SIZING_POLICY_ENV,
+    mqk_runtime::native_strategy::ALLOCATION_FRACTION_BPS_ENV,
+    mqk_runtime::native_strategy::ALLOCATED_CAPITAL_MICROS_ENV,
+    mqk_strategy::engines::intraday_scalper::TARGET_QTY_ENV,
+    mqk_strategy::engines::intraday_scalper::MAX_TARGET_QTY_ENV,
+    mqk_strategy::engines::intraday_scalper::MAX_NOTIONAL_USD_ENV,
+];
+
+struct SizingEnvRestore(Vec<(&'static str, Option<String>)>);
+
+impl SizingEnvRestore {
+    fn apply(vars: &[(&'static str, &str)]) -> Self {
+        let saved = SIZING_ENV_NAMES
+            .iter()
+            .map(|n| (*n, std::env::var(n).ok()))
+            .collect();
+        for n in SIZING_ENV_NAMES {
+            std::env::remove_var(n);
+        }
+        for (n, v) in vars {
+            std::env::set_var(n, v);
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for SizingEnvRestore {
+    fn drop(&mut self) {
+        for (n, v) in &self.0 {
+            match v {
+                Some(v) => std::env::set_var(n, v),
+                None => std::env::remove_var(n),
+            }
+        }
+    }
+}
+
+fn cf_env_vars() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (SIZING_ENV_NAMES[0], CF),
+        (SIZING_ENV_NAMES[1], "1000"),
+        (SIZING_ENV_NAMES[2], "100000000000"),
+    ]
+}
+
+#[tokio::test]
+async fn production_env_path_refuses_or_builds_stateless_without_a_database() {
+    let _guard = shared_test_locks::strategy_fleet_env_test_lock()
+        .lock()
+        .await;
+    let before: Vec<_> = SIZING_ENV_NAMES
+        .iter()
+        .map(|n| std::env::var(n).ok())
+        .collect();
+    let sel = keys(&[("CFENV", TREND)]);
+    let code = |r: Result<DynamicSelectionHostPool, HostPoolBuildError>| {
+        r.err().map(|e| e.code()).unwrap_or("built")
+    };
+    {
+        let _env = SizingEnvRestore::apply(&cf_env_vars());
+        assert_eq!(
+            code(DynamicSelectionHostPool::build_with_durable_state(&sel, None).await),
+            "host_pool_durable_state_unavailable",
+            "capital-fraction env without a database must refuse"
+        );
+    }
+    let refused = |mutate: &dyn Fn(&mut Vec<(&'static str, &'static str)>)| {
+        let mut v = cf_env_vars();
+        mutate(&mut v);
+        v
+    };
+    let cases = [
+        (
+            "partial config (no capital)",
+            refused(&|v| v.retain(|(n, _)| *n != SIZING_ENV_NAMES[2])),
+        ),
+        (
+            "partial config (no bps)",
+            refused(&|v| v.retain(|(n, _)| *n != SIZING_ENV_NAMES[1])),
+        ),
+        (
+            "malformed fraction",
+            refused(&|v| v[1] = (SIZING_ENV_NAMES[1], "10x")),
+        ),
+        (
+            "fraction over 100%",
+            refused(&|v| v[1] = (SIZING_ENV_NAMES[1], "10001")),
+        ),
+        (
+            "fixed qty mixed with fraction",
+            refused(&|v| v.push((SIZING_ENV_NAMES[3], "2"))),
+        ),
+    ];
+    for (label, vars) in cases {
+        let _env = SizingEnvRestore::apply(&vars);
+        assert_eq!(
+            code(DynamicSelectionHostPool::build_with_durable_state(&sel, None).await),
+            "host_pool_capital_fraction_contract_refused",
+            "{label}"
+        );
+    }
+    {
+        let _env = SizingEnvRestore::apply(&[(SIZING_ENV_NAMES[3], "3")]);
+        let mut p = DynamicSelectionHostPool::build_with_durable_state(&sel, None)
+            .await
+            .expect("fixed-quantity env builds without a database");
+        assert!(!p.get_mut("CFENV", TREND, DAY).unwrap().is_durable());
+    }
+    let after: Vec<_> = SIZING_ENV_NAMES
+        .iter()
+        .map(|n| std::env::var(n).ok())
+        .collect();
+    assert_eq!(before, after, "sizing env restored exactly");
+}
+
+#[tokio::test]
+async fn production_env_path_builds_a_durable_host_from_the_process_environment() {
+    let _guard = shared_test_locks::strategy_fleet_env_test_lock()
+        .lock()
+        .await;
+    let Some(db) = db_or_skip("CFD-ENV").await else {
+        return;
+    };
+    let (cf_sym, fx_sym) = (uniq("ENVC"), uniq("ENVF"));
+    let sel = keys(&[(&cf_sym, TREND)]);
+    {
+        let _env = SizingEnvRestore::apply(&cf_env_vars());
+        let mut p = DynamicSelectionHostPool::build_with_durable_state(&sel, Some(&db))
+            .await
+            .expect("capital-fraction env builds a durable host");
+        assert!(
+            p.get_mut(&cf_sym, TREND, DAY).unwrap().is_durable(),
+            "the env-reading production build must construct the durable host"
+        );
+        let expect = resolve_capital_fraction_paper_binding(&cf_inputs(&cf_sym), TREND)
+            .unwrap()
+            .unwrap()
+            .semantic_fingerprint;
+        assert_eq!(
+            p.get_mut(&cf_sym, TREND, DAY)
+                .unwrap()
+                .semantic_fingerprint()
+                .unwrap(),
+            expect,
+            "env-derived identity equals the explicit-input identity"
+        );
+    }
+    {
+        let _env = SizingEnvRestore::apply(&[(SIZING_ENV_NAMES[3], "3")]);
+        let fx_sel = keys(&[(&fx_sym, TREND)]);
+        let mut p = DynamicSelectionHostPool::build_with_durable_state(&fx_sel, Some(&db))
+            .await
+            .expect("fixed-quantity env builds stateless");
+        assert!(!p.get_mut(&fx_sym, TREND, DAY).unwrap().is_durable());
+    }
+    assert!(rows(&db, &cf_sym, TREND).await.is_empty());
 }
 
 #[test]

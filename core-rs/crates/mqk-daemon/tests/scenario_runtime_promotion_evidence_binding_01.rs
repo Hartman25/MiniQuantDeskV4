@@ -433,14 +433,46 @@ fn signal_req(body: serde_json::Value) -> Request<axum::body::Body> {
         .unwrap()
 }
 
-async fn make_external_signal_state(pool: sqlx::PgPool) -> Arc<state::AppState> {
-    let st = Arc::new(common::with_canonical_equity_registry(
+/// The decision seam requires the symbol to be an enabled canonical legacy
+/// Equity. A per-run synthetic symbol is added to a copy of the canonical
+/// registry (AAPL row cloned) so that authority is satisfied genuinely.
+fn registry_path_with_synthetic_symbol(symbol: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("mqk_c2_registry_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create registry fixture dir");
+    let mut rows: Vec<serde_json::Value> = serde_json::from_slice(
+        &std::fs::read(common::canonical_equity_registry_path()).expect("read registry"),
+    )
+    .expect("parse registry");
+    let mut row = rows
+        .iter()
+        .find(|r| r["symbol"] == "AAPL")
+        .cloned()
+        .expect("canonical registry has an AAPL row");
+    row["symbol"] = symbol.into();
+    row["provider_symbol"] = symbol.into();
+    row["instrument_id"] = format!("equity:US:{symbol}").into();
+    rows.push(row);
+    let path = dir.join("equities_with_synthetic_symbol.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&rows).unwrap())
+        .expect("write registry fixture");
+    path.to_string_lossy().into_owned()
+}
+
+async fn make_external_signal_state(
+    pool: sqlx::PgPool,
+    synthetic_symbol: Option<&str>,
+) -> Arc<state::AppState> {
+    let mut app_state = common::with_canonical_equity_registry(
         state::AppState::new_for_test_with_db_mode_and_broker(
             pool,
             state::DeploymentMode::Paper,
             state::BrokerKind::Alpaca,
         ),
-    ));
+    );
+    if let Some(symbol) = synthetic_symbol {
+        app_state.instrument_registry_path = registry_path_with_synthetic_symbol(symbol);
+    }
+    let st = Arc::new(app_state);
     st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
         last_message_id: "alpaca:c2:new:2024-01-08T14:00:00Z".to_string(),
         last_event_at: "2024-01-08T14:00:00Z".to_string(),
@@ -493,7 +525,7 @@ async fn external_unresolvable_strategy_identity_fails_closed() {
         "verified_v1",
     )
     .await;
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), None).await;
 
     let signal_id = unique_id("sig");
     let (status, json) = call(
@@ -551,7 +583,7 @@ async fn external_forged_fingerprint_field_has_no_effect() {
     mqk_db::persist_arm_state(&pool, "ARMED", None)
         .await
         .expect("persist ARMED");
-    let st = make_external_signal_state(pool.clone()).await;
+    let st = make_external_signal_state(pool.clone(), Some(&symbol)).await;
     seed_active_run(&st).await;
 
     let signal_id = unique_id("sig");

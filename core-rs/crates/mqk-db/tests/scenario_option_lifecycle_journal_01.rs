@@ -54,11 +54,18 @@ async fn require_pool() -> PgPool {
     pool
 }
 
+/// Unique deployment mode per call: journal rows are replayed per mode, so a
+/// shared "paper" label would leak unsubsumed rows into unrelated runs on the
+/// shared test DB.
 async fn account(pool: &PgPool, label: &str) -> BrokerAccountAuthority {
+    account_in_mode(pool, label, &format!("m{}", Uuid::new_v4().simple())).await
+}
+
+async fn account_in_mode(pool: &PgPool, label: &str, mode: &str) -> BrokerAccountAuthority {
     let a = BrokerAccountAuthority::new(
         "alpaca",
         &format!("j-{label}-{}", Uuid::new_v4().simple()),
-        "paper",
+        mode,
     )
     .unwrap();
     verify_or_register_broker_account_authority(pool, &a, Utc::now())
@@ -568,9 +575,9 @@ async fn j09_reconciled_is_compare_and_set_and_reconciled_entries_subsume() {
 async fn j11_two_accounts_of_one_deployment_mode_never_see_each_others_lifecycle() {
     use OptionLifecycleActivityType::Exercise;
     let pool = require_pool().await;
-    // Both accounts are registered under deployment_mode "paper".
-    let a = account(&pool, "j11a").await;
-    let b = account(&pool, "j11b").await;
+    let mode = format!("m{}", Uuid::new_v4().simple());
+    let a = account_in_mode(&pool, "j11a", &mode).await;
+    let b = account_in_mode(&pool, "j11b", &mode).await;
     assert_eq!(a.deployment_mode(), b.deployment_mode());
     let (ka, kb) = (a.key(), b.key());
     for k in [&ka, &kb] {
