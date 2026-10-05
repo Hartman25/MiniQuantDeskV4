@@ -376,20 +376,15 @@ def test_family_ids_symbols_and_rule_match_the_declaration():
     assert rule["min_evaluable_trials_per_family"] == 4
 
 
-# ---- execution stop: BATCH03_PREDECLARED_NOT_EXECUTED ------------------------------------------
+# ---- a closed gate ranks nothing ------------------------------------------------------------
 
-def test_the_closed_gate_leaves_no_batch03_result_artifacts_and_zero_attempts():
-    gate = DECL["execution_gate"]
-    assert gate["executable"] is False and gate["status"] == "BATCH03_PREDECLARED_NOT_EXECUTED"
-    assert DECL["batch_stopping_rule"]["economic_attempts"] == 0
-    run = HERE / DECL["run_dir"]
-    produced = [p for name in ("batch_results.json", "batch_outcome.json", "family_ranking.json",
-                               "trials_index.json", "judge", "scan", "backtest", "promotion_eligibility.json")
-                if (p := run / name).exists()]
-    assert produced == [], f"Batch 03 result artifacts exist while the gate is closed: {produced}"
-
-
-def test_main_refuses_to_rank_while_the_gate_is_closed(monkeypatch):
-    monkeypatch.setitem(os.environ, "MQK_M1_BATCH_DECLARATION", "PREDECLARED_BATCH_03.json")
+def test_main_refuses_to_rank_while_the_gate_is_closed(monkeypatch, tmp_path):
+    import copy
+    import json
+    closed = copy.deepcopy(DECL)
+    closed["execution_gate"].update({"status": "BATCH03_PREDECLARED_NOT_EXECUTED", "executable": False})
+    path = tmp_path / "closed_batch03.json"
+    path.write_text(json.dumps(closed), encoding="utf-8")
+    monkeypatch.setitem(os.environ, "MQK_M1_BATCH_DECLARATION", str(path))
     with pytest.raises(SystemExit, match="BATCH03_PREDECLARED_NOT_EXECUTED"):
         fr.main()

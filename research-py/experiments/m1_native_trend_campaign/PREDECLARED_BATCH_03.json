@@ -4,10 +4,11 @@
  "predeclared_utc_date": "2026-10-04",
  "wave_classification": "NEW_HYPOTHESIS_BATCH_TEN_FAMILIES_SIX_SYMBOLS_CAPITAL_FRACTION_SIZING_PROSPECTIVE",
  "execution_gate": {
-  "status": "BATCH03_PREDECLARED_NOT_EXECUTED",
-  "executable": false,
-  "blocker": "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03",
-  "rule": "NO runner stage (including `check`) may run and no trial may be registered until explicit operator execution authorization re-issues this declaration as executable (the stress contract below is frozen and bound through IR-SYS-02, but it does not authorize execution). ECONOMIC_ATTEMPTS=0."
+  "status": "BATCH03_DISCOVERY_EXECUTION_AUTHORIZED",
+  "executable": true,
+  "blocker": null,
+  "authorized_utc_date": "2026-10-05",
+  "rule": "The operator authorized execution of the 60 predeclared discovery trials only (mission V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01). Required order: fetch and verify bars, register all 60 trials, prove 60 trials and 0 attempts, then execute. No confirmation trial, holdout consumption, Promotion, Paper deployment or Live action is authorized."
  },
  "run_dir": "runs/run_batch_03",
  "declaration_selection": "run_batch.py and summarize_batch.py read this file when MQK_M1_BATCH_DECLARATION names it.",

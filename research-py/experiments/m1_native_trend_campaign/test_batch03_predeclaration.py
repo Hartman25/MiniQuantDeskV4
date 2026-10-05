@@ -1,8 +1,7 @@
 """Guards the Batch 03 prospective predeclaration (60 trials, ten families, six ETFs).
 
-The declaration is deliberately NOT executable: execution needs separate explicit operator authority.
-The operator-frozen P7A/P7B stress contract is pinned here; these tests prove the runner refuses every
-stage until the gate is lifted.
+The operator-frozen P7A/P7B stress contract is pinned here. The execution gate is authorized for the
+discovery population only; a closed gate must still refuse every runner stage.
 """
 
 from __future__ import annotations
@@ -185,48 +184,55 @@ def test_stress_is_at_least_as_adverse_as_the_canonical_baseline_execution_and_s
     assert s_slip > base["slippage_bps"] or s_vol > base["volatility_mult_bps"]
 
 
-def test_the_gate_refuses_every_stage_and_is_a_noop_for_closed_declarations(rb):
+CLOSED_STATUS = "BATCH03_PREDECLARED_NOT_EXECUTED"
+
+
+def closed_copy():
+    closed = copy.deepcopy(DECL)
+    closed["execution_gate"].update({"status": CLOSED_STATUS, "executable": False,
+                                     "blocker": "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03"})
+    return closed
+
+
+def test_the_authorized_gate_is_executable_and_scoped_to_discovery_only(rb):
     gate = DECL["execution_gate"]
-    assert gate["status"] == "BATCH03_PREDECLARED_NOT_EXECUTED" and gate["executable"] is False
-    assert gate["blocker"] == "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03"
+    assert gate["status"] == "BATCH03_DISCOVERY_EXECUTION_AUTHORIZED" and gate["executable"] is True
+    assert gate["blocker"] is None
+    rule = gate["rule"]
+    for forbidden in ("confirmation trial", "holdout consumption", "Promotion", "Paper deployment", "Live"):
+        assert forbidden in rule
+    rb.require_executable_declaration(DECL)
+
+
+def test_a_non_literal_true_gate_refuses_and_closed_declarations_are_unaffected(rb):
     with pytest.raises(SystemExit, match="OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED_BATCH03"):
-        rb.require_executable_declaration(DECL)
+        rb.require_executable_declaration(closed_copy())
     for bad in (False, None, "true", 1):
         mutated = copy.deepcopy(DECL)
         mutated["execution_gate"]["executable"] = bad
         with pytest.raises(SystemExit):
             rb.require_executable_declaration(mutated)
     rb.require_executable_declaration(BATCH02)
-    ok = copy.deepcopy(DECL)
-    ok["execution_gate"]["executable"] = True
-    rb.require_executable_declaration(ok)
 
 
-def test_the_declaration_text_matches_the_gate_it_describes(rb, monkeypatch):
-    gate = DECL["execution_gate"]
-    assert gate["executable"] is False
-    rule = gate["rule"]
-    assert rule.startswith("NO runner stage (including `check`) may run"), rule
-    assert "other than" not in rule and "except" not in rule.lower()
-    # the behavior the text describes: every real runner stage, `check` included, refuses
+def test_a_closed_gate_refuses_every_runner_stage_including_fetch(rb, monkeypatch):
     called = []
+    monkeypatch.setattr(rb, "DECL", closed_copy())
     monkeypatch.setattr(rb, "STAGES", {name: (lambda _a, n=name: called.append(n)) for name in rb.STAGES})
-    assert "check" in rb.STAGES and len(rb.STAGES) > 1
+    assert {"check", "fetch", "register"} <= set(rb.STAGES)
     for name in sorted(rb.STAGES):
         monkeypatch.setattr(sys, "argv", ["run_batch.py", name])
-        with pytest.raises(SystemExit, match="BATCH03_PREDECLARED_NOT_EXECUTED"):
+        with pytest.raises(SystemExit, match=CLOSED_STATUS):
             rb.main()
     assert called == []
 
 
-@pytest.mark.parametrize("stage", ["check", "register"])
-def test_main_runs_no_stage_for_the_unfinalized_declaration(rb, stage, monkeypatch):
+def test_the_open_gate_dispatches_the_requested_stage(rb, monkeypatch):
     called = []
-    monkeypatch.setattr(rb, "STAGES", {stage: lambda _a: called.append(stage)})
-    monkeypatch.setattr(sys, "argv", ["run_batch.py", stage])
-    with pytest.raises(SystemExit, match="BATCH03_PREDECLARED_NOT_EXECUTED"):
-        rb.main()
-    assert called == []
+    monkeypatch.setattr(rb, "STAGES", {"check": lambda _a: called.append("check")})
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "check"])
+    rb.main()
+    assert called == ["check"]
 
 
 def test_stopping_rule_variants_and_paper_live_posture():
