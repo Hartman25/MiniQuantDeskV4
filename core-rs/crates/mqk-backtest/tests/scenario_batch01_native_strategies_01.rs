@@ -169,10 +169,11 @@ fn registry_metadata_declares_the_history_requirement_daily_timeframe_and_spec()
     }
 }
 
-/// Paper loads 256 bars per dispatch; every batch engine's requirement must fit.
+/// Paper loads 275 bars per dispatch (`STRATEGY_CONTEXT_LOAD_LIMIT`, guarded against the whole
+/// registered universe in `mqk-daemon`); every batch engine's requirement must fit.
 #[test]
 fn every_batch_engine_fits_the_paper_context_window() {
     for (name, required) in ENGINES {
-        assert!(required <= 256, "{name} needs {required} bars");
+        assert!(required <= 275, "{name} needs {required} bars");
     }
 }

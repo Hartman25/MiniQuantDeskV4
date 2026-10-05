@@ -291,20 +291,52 @@ pub const STRATEGY_MD_TIMEFRAME_ENV: &str = "MQK_STRATEGY_MD_TIMEFRAME";
 /// AUTON-SIGNAL-CONTEXT-01: Number of recent completed bars to load per dispatch.
 /// Must be at least every registered engine's `minimum_completed_bars`: a
 /// shorter window leaves a longer-lookback rule silently flat (a false,
-/// truthful-looking no-trade). Guarded by `strategy_context_load_limit_tests`.
-const STRATEGY_CONTEXT_LOAD_LIMIT: i64 = 256;
+/// truthful-looking no-trade). Guarded by `strategy_context_load_limit_tests`,
+/// which fails if a registered engine's requirement ever exceeds this bound.
+const STRATEGY_CONTEXT_LOAD_LIMIT: i64 = 275;
 
 #[cfg(test)]
 mod strategy_context_load_limit_tests {
     use super::STRATEGY_CONTEXT_LOAD_LIMIT;
+    use mqk_strategy::{BarStub, PluginRegistry, RecentBarsWindow, StrategyContext};
+
+    const DAY: i64 = 86_400;
+    const MONTHLY_STATELESS: [&str; 4] = [
+        "monthly_multihorizon_abs_momentum_consensus_v1",
+        "monthly_10month_trend_timing_v1",
+        "monthly_12_minus_1_abs_momentum_v1",
+        "monthly_52week_high_proximity_v1",
+    ];
+
+    fn builtin_registry() -> PluginRegistry {
+        let mut registry = PluginRegistry::new();
+        mqk_strategy::engines::register_builtin_strategies(&mut registry, "SPY".to_string())
+            .expect("builtin registration");
+        registry
+    }
+
+    /// The one enumeration of the registered universe shared by the guard and its
+    /// completeness check.
+    fn registered_metas(registry: &PluginRegistry) -> Vec<&mqk_strategy::StrategyMeta> {
+        registry.list()
+    }
+
+    fn requirement(registry: &PluginRegistry, name: &str) -> usize {
+        registered_metas(registry)
+            .into_iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("engine {name} not registered"))
+            .data_requirements
+            .as_ref()
+            .unwrap_or_else(|| panic!("engine {name} declares no data requirement"))
+            .minimum_completed_bars
+    }
 
     #[test]
     fn load_limit_covers_every_registered_engine_lookback() {
-        let mut registry = mqk_strategy::PluginRegistry::new();
-        mqk_strategy::engines::register_builtin_strategies(&mut registry, "SPY".to_string())
-            .expect("builtin registration");
+        let registry = builtin_registry();
         let mut widest = 0usize;
-        for meta in registry.list() {
+        for meta in registered_metas(&registry) {
             let need = meta
                 .data_requirements
                 .as_ref()
@@ -317,10 +349,87 @@ mod strategy_context_load_limit_tests {
             );
             widest = widest.max(need);
         }
-        assert!(
-            widest >= 200,
-            "the dual SMA engine's 200-bar requirement must be covered"
-        );
+        assert_eq!(widest, 275, "widest registered history requirement");
+    }
+
+    /// The guard above is only as strong as the universe it enumerates: the registry
+    /// it walks must be exactly the canonical built-in identity list.
+    #[test]
+    fn guard_enumerates_the_complete_registered_universe() {
+        let registry = builtin_registry();
+        let mut got: Vec<&str> = registered_metas(&registry)
+            .into_iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        let mut canonical: Vec<&str> = mqk_strategy::engines::REGISTERED_STRATEGY_IDS.to_vec();
+        got.sort_unstable();
+        canonical.sort_unstable();
+        assert_eq!(got, canonical);
+    }
+
+    /// 00:00 America/New_York label of a covered session (EST or EDT offset, verified by
+    /// the session calendar itself rather than assumed).
+    fn daily_label(d: chrono::NaiveDate) -> i64 {
+        let utc_midnight = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+        [5 * 3600, 4 * 3600]
+            .into_iter()
+            .map(|off| utc_midnight + off)
+            .find(|&ts| mqk_integrity::sessions::session_of_daily_bar(ts) == Ok(d))
+            .expect("00:00 ET label")
+    }
+
+    /// Strictly rising completed daily bars over consecutive real sessions.
+    fn rising_bars(n: usize) -> Vec<BarStub> {
+        let mut out = Vec::with_capacity(n);
+        let mut d = chrono::NaiveDate::from_ymd_opt(2021, 1, 4).unwrap();
+        while out.len() < n {
+            if mqk_integrity::sessions::is_session(d).unwrap() {
+                let close = (100 + out.len() as i64) * 1_000_000;
+                out.push(BarStub::new(daily_label(d), true, close, 1));
+            }
+            d = d.succ_opt().unwrap();
+        }
+        out
+    }
+
+    /// Run `name` over every window of `window_len` bars that ends inside a stretch longer
+    /// than one month, returning how many of those windows decided long.
+    fn long_decisions(registry: &PluginRegistry, name: &str, window_len: usize) -> (usize, usize) {
+        const ENDS: usize = 70;
+        let bars = rising_bars(window_len + ENDS);
+        let (mut long, mut total) = (0, 0);
+        for end in window_len..=window_len + ENDS {
+            let window = bars[end - window_len..end].to_vec();
+            let ctx = StrategyContext::new(DAY, 0, RecentBarsWindow::new(window_len, window));
+            let mut engine = registry.instantiate(name).expect("instantiate");
+            let out = engine.on_bar(&ctx);
+            total += 1;
+            if out.targets.first().is_some_and(|t| t.qty.raw() > 0) {
+                long += 1;
+            }
+        }
+        (long, total)
+    }
+
+    /// The window the daemon actually loads (`STRATEGY_CONTEXT_LOAD_LIMIT` bars) must not
+    /// starve the widest engines; one bar fewer than their requirement must.
+    #[test]
+    fn exact_load_limit_window_does_not_starve_the_widest_engines() {
+        let registry = builtin_registry();
+        for name in MONTHLY_STATELESS {
+            let need = requirement(&registry, name);
+            let (long, total) =
+                long_decisions(&registry, name, STRATEGY_CONTEXT_LOAD_LIMIT as usize);
+            assert_eq!(long, total, "{name}: starved inside the daemon load window");
+            let (short_long, short_total) = long_decisions(&registry, name, need - 1);
+            assert_eq!(
+                short_long,
+                0,
+                "{name}: a {}-bar window must be flat",
+                need - 1
+            );
+            assert!(short_total > 0);
+        }
     }
 }
 
