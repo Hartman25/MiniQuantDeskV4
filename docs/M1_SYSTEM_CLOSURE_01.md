@@ -4,7 +4,7 @@ Baseline `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (= origin/main, GitHub CI #6
 
 ## Verdict
 
-`M1_SYSTEM_CANDIDATE_READY = false`, for exactly one reason: capital-fraction strategies cannot yet be traded by the daemon (Finding E, `OPERATOR_DECISION_REQUIRED_CAPITAL_FRACTION_PAPER_DISPATCH`). Every other candidate-independent defect found is fixed and proven. M1 stays `M1_BLOCKED` (no qualified candidate, M1.9 deployment, M1.10 real sessions).
+`M1_SYSTEM_CANDIDATE_READY = true` as of the capital-fraction daemon closure (Phase B of `V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01`, 2026-10-05; see Finding E). Before it, the value was `false` for exactly one reason: Finding E. Every candidate-independent defect found is fixed and proven. M1 stays `M1_BLOCKED` (no qualified candidate, M1.9 deployment, M1.10 real sessions).
 
 ## Closure matrix (category = exactly one)
 
@@ -18,7 +18,7 @@ Baseline `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (= origin/main, GitHub CI #6
 | D | parallel fixture race | `scenario_scan_canonical_config_binding_01` | FIX_NOW: fixed + proven (`e78806b6`) | none |
 | D2 | env race in autofresh scheduler tests | `scenario_market_data_autofresh_required_universe_01` | FIX_NOW: fixed + proven (`2101f410`) | none |
 | M1.10-machinery | derived 10/5 count | none existed | FIX_NOW: `soak_ledger` (`f825e994`) + runbook; bound to the deployed identity by Correction 01 (`24500e17`) | none |
-| E | daemon dispatch of capital-fraction strategies | `mqk-runtime::capital_fraction_host` not used by the daemon | BLOCKED, hard stop | operator decision |
+| E | daemon dispatch of capital-fraction strategies | `mqk-runtime::capital_fraction_host` routed by the daemon host pool | FIX_NOW: fixed + proven (`fbf2a362`, `ae93f170`, `6ad76924`) | none (M1.9 prerequisite: verify migration 0091 on the real Paper DB) |
 | M1.9 candidate deployment | a promoted candidate deployed to Paper | - | BLOCKED_NO_CANDIDATE | candidate |
 | M1.9 market-hours observation | deployed runtime under an open session | - | WAITING_MARKET_SESSION | market |
 | M1.10 | 10 countable / 5 consecutive clean real sessions | `soak_ledger`, runbook `docs/runbooks/m1_10_finite_validation.md` | WAITING_MARKET_SESSION (after a candidate) | candidate + 10 sessions |
@@ -37,6 +37,8 @@ Baseline `fac225922d3b46bb842bea22f2c9676f7cfb5b58` (= origin/main, GitHub CI #6
 **D. Fixture race.** Per-fixture unique directory: 25/25 failures at `--test-threads=4` before, 0/25 after. A second, independent race (shared process env across 19 async + 3 sync tests of the autofresh scheduler file; failed 3 of 4 local runs) is fixed by one tokio mutex; 0/45 failures after.
 
 **E. Capital-fraction Paper dispatch (hard stop).** With `MQK_STRATEGY_SIZING_POLICY` selecting the capital-fraction policy the daemon builds a `DurableStateRequired` registry; every stateless seam (`instantiate_verified`: bootstrap, host pool, promotion identity, dry run) refuses it, so no capital-fraction strategy can run. `mqk-runtime::capital_fraction_host` (persist-before-act, recover from `sys_strategy_held_sizing_state`) exists and is tested but has no daemon caller; `EffectiveRuntimeBinding` readers (readiness, coverage, outcome, bar driver) derive identity from the bootstrap and would also need the contract path. This was recorded as deferred in G2.15; it is a multi-seam runtime change (not an ordinary defect fix) and therefore is not attempted here. Decision required (smallest): authorize a dedicated daemon-wiring controller for capital-fraction dispatch **or** choose the historical fixed-quantity sizing for the next campaign. Until then the system fails closed (no capital-fraction order can be created).
+
+**E RESOLVED (2026-10-05).** The operator authorized the dedicated controller. The daemon host pool now holds a typed host per `(symbol, strategy_id, timeframe)`; capital-fraction bindings use `CapitalFractionRuntimeHost` (recover once before the start barrier, persist held sizing before the result is returned, one deployment id per binding), fixed-quantity bindings stay stateless, and Promotion Gate 3b/risk/halt/reconcile/OMS are unchanged. The daemon bar windows also now carry true OHLCV (close-only bars had starved ATR/range engines). Proof: 12 DB-backed tests and 13/13 mutations killed; see `docs/CURRENT_MISSION.md` §-34 for residuals. The sentence above is historical.
 
 ## M1.9 candidate-independent matrix (read-only, off-market; no secrets)
 

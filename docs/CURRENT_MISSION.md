@@ -6,6 +6,17 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -34. Capital-fraction daemon dispatch closed (2026-10-05, `V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01` Phase B)
+
+Local commits `ae93f170`, `fbf2a362`, `6ad76924`, **not pushed**. Finding E of `docs/M1_SYSTEM_CLOSURE_01.md` is FIXED + PROVEN.
+
+- The canonical daemon Paper strategy dispatch now routes a capital-fraction binding through the existing restart-safe `CapitalFractionRuntimeHost` (host enum keyed `(symbol, strategy_id, timeframe_secs)`; async `recover` once before the start barrier, failure fails the start closed; deployment id = UUIDv5 over strategy, symbol, timeframe and semantic fingerprint; strict contract only via `mqk_runtime::native_strategy`, no default bps/cap). Held sizing is persisted BEFORE the result is returned; a persistence failure yields no decision/outbox row and poisons the host. Result → decision → Gate 3b Promotion/risk/halt/reconcile → OMS/outbox is unchanged. Fixed-quantity strategies keep the stateless path; `instantiate_verified` and the stateless `DurableStateRequired` refusal are unchanged.
+- Daemon OHLC parity fix: the daemon bar windows were built with close-only `BarStub`s, giving degenerate bars to ATR/range engines (F03/F07/F09); they now carry true OHLCV.
+- Proof: 12 DB-backed tests (`state/capital_fraction_dispatch_tests.rs`, disposable test DB) and 13/13 required mutations killed with byte-exact restoration (stateless bypass, evaluate-before-recover, wrong deployment id, recompute after restart, deferred persist, escaping +Q on persist error, host rebuilt every bar, config defaults, +1 fallback, Promotion bypass, shared binding state, fixed-qty through durable host, OHLC revert).
+- `M1_SYSTEM_CANDIDATE_READY = true` (Finding E was the only candidate-independent blocker). M1 stays `M1_BLOCKED` (no qualified candidate, M1.9 deployment, M1.10 sessions). Paper INACTIVE; Live NOT TOUCHED; no broker order.
+- **M1.9 DEPLOYMENT PREREQUISITE:** migration 0091 (`sys_strategy_held_sizing_state`) must be verified on the real Paper DB before deployment; that DB was not touched.
+- Residuals (not fixed): a multi-binding tick faults as a whole if a later binding fails after an earlier durable binding persisted; downstream position-cap clamps could reduce a quantity after durable Q was persisted; the env-reading `build_with_durable_state` is exercised only through `_from`; `scenario_runtime_promotion_evidence_binding_01` has 4/9 environmental failures from an options-lifecycle PENDING_EVIDENCE row left in the shared test DB (not caused by this work).
+
 ## -33. Batch 03 Discovery executed (2026-10-05, `V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01` Phase A)
 
 Local commits, **not pushed**. Record: `docs/research/M1_BATCH03_DISCOVERY_RESULT.md`.
