@@ -73,6 +73,50 @@ def test_identity_scope_and_window():
     assert DECL["holdout"]["status"] == "RESERVED / UNCONSUMED"
 
 
+def _bars(rb, per_symbol: dict[str, int]):
+    import pandas as pd
+    return pd.DataFrame([{"symbol": s, "end_ts": i} for s, n in per_symbol.items() for i in range(n)])
+
+
+def test_data_declares_an_explicit_asof_and_no_fallback_window():
+    data = DECL["data"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", data["asof"])
+    assert "fallback_if_corporate_action_gate_refuses" not in data
+
+
+def test_fetch_verification_accepts_the_exact_universe_with_sufficient_history(rb):
+    need = max(h["required_history_bars"] for h in DECL["hypotheses"])
+    counts = rb.verify_fetched_bars(DECL, _bars(rb, {s: need for s in SYMBOLS}))
+    assert counts == {s: need for s in SYMBOLS}
+
+
+@pytest.mark.parametrize("mutate", ["missing", "extra", "short"])
+def test_fetch_verification_fails_closed_without_substitution(rb, mutate):
+    need = max(h["required_history_bars"] for h in DECL["hypotheses"])
+    per = {s: need for s in SYMBOLS}
+    if mutate == "missing":
+        del per["XLE"]
+    elif mutate == "extra":
+        per["DIA"] = need
+    else:
+        per["XBI"] = need - 1
+    with pytest.raises(SystemExit, match="fail-closed"):
+        rb.verify_fetched_bars(DECL, _bars(rb, per))
+
+
+def test_fetch_requires_execute_and_never_overwrites(rb, tmp_path, monkeypatch):
+    class A:
+        execute = False
+    with pytest.raises(SystemExit, match="--execute"):
+        rb.stage_fetch(A())
+    monkeypatch.setattr(rb, "RUN", tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "research_bars.csv").write_text("x", encoding="utf-8")
+    A.execute = True
+    with pytest.raises(SystemExit, match="refusing to overwrite"):
+        rb.stage_fetch(A())
+
+
 def test_sixty_trials_in_family_major_order_over_the_declared_universe(rb):
     assert DECL["universe"]["symbols"] == SYMBOLS
     assert DECL["universe"]["max_trials"] == 60

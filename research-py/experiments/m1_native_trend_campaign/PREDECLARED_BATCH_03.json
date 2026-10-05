@@ -678,6 +678,7 @@
   "adjustment": "all",
   "start_utc": "2016-01-01T00:00:00Z",
   "end_utc": "2026-09-01T00:00:00Z",
+  "asof": "2026-10-04",
   "completed_bars_only": true,
   "verification_required_before_registration": "fetch/verify provider bars for all six symbols, record the provenance manifest and row counts; any symbol without sufficient adjusted history is reported, never substituted"
  },

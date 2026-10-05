@@ -336,6 +336,55 @@ def stage_reuse_data(_args) -> None:
     print("reused", rows, "rows", manifest["artifact_sha256"][:12])
 
 
+def _load_alpaca_env() -> None:
+    """Load only the two research-data credential keys from .env.local (values are never printed)."""
+    want = {"ALPACA_API_KEY_PAPER", "ALPACA_API_SECRET_PAPER"}
+    if all(os.environ.get(k) for k in want):
+        return
+    env_file = REPO / ".env.local"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            k, _, v = line.partition("=")
+            if k.strip() in want and v.strip():
+                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+    missing = [k for k in sorted(want) if not os.environ.get(k)]
+    if missing:
+        raise SystemExit(f"fail-closed: credentials unavailable: {missing}")
+
+
+def verify_fetched_bars(decl: dict, bars: pd.DataFrame) -> dict[str, int]:
+    """Every declared symbol present exactly (no extras, no substitution) with enough history to cover the
+    widest declared strategy requirement. Returns per-symbol row counts."""
+    symbols = list(decl["universe"]["symbols"])
+    present = sorted(bars["symbol"].unique())
+    if present != sorted(symbols):
+        raise SystemExit(f"fail-closed: fetched symbols {present} differ from the declared universe {sorted(symbols)}")
+    need = max(h["required_history_bars"] for h in decl["hypotheses"])
+    counts = {s: int((bars["symbol"] == s).sum()) for s in symbols}
+    short = {s: n for s, n in counts.items() if n < need}
+    if short:
+        raise SystemExit(f"fail-closed: insufficient adjusted history (need >= {need} bars): {short}")
+    return counts
+
+
+def stage_fetch(args) -> None:
+    if not args.execute:
+        raise SystemExit("fetch contacts the data provider; pass --execute")
+    dest = RUN / "data"
+    if (dest / "research_bars.csv").exists():
+        raise SystemExit("fail-closed: bars already fetched for this run; refusing to overwrite")
+    from mqk_research.data.alpaca_historical import (
+        extract_research_bars_with_provenance, write_research_extraction_artifacts)
+    _load_alpaca_env()
+    d = DECL["data"]
+    result = extract_research_bars_with_provenance(
+        symbols=list(DECL["universe"]["symbols"]), start_utc=pd.Timestamp(d["start_utc"]),
+        end_utc=pd.Timestamp(d["end_utc"]), asof=d["asof"], timeframe=d["timeframe"], feed=d["feed"])
+    counts = verify_fetched_bars(DECL, result["bars"])
+    paths = write_research_extraction_artifacts(dest, result)
+    print("rows", counts, {k: v.name for k, v in paths.items()})
+
+
 def _resolve_native_identity(strategy: str, sym: str) -> tuple[str, int]:
     """(semantic_fingerprint, required_history_bars) from the native registry; no market data."""
     info = _run_cli("backtest", "native-fingerprint", "--strategy", strategy, "--symbol", sym,
@@ -614,7 +663,8 @@ def stage_summary(_args) -> None:
     print(INDEX.read_text(encoding="utf-8"))
 
 
-STAGES = {"check": stage_check, "reuse_data": stage_reuse_data, "register": stage_register, "gate": stage_gate,
+STAGES = {"check": stage_check, "reuse_data": stage_reuse_data, "fetch": stage_fetch, "register": stage_register,
+          "gate": stage_gate,
           "trials": stage_trials,
           "judge": stage_judge, "backtest": stage_backtest, "finalize": stage_finalize, "review": stage_review,
           "summary": stage_summary}
@@ -634,6 +684,7 @@ def require_executable_declaration(decl: dict) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=sorted(STAGES))
+    ap.add_argument("--execute", action="store_true")
     args = ap.parse_args()
     require_executable_declaration(DECL)
     STAGES[args.stage](args)
