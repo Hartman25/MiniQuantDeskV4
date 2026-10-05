@@ -4029,7 +4029,17 @@ operator_reconcile_or_repair_required"
         let bars_loaded = db_bars.len();
         let stubs: Vec<mqk_strategy::BarStub> = db_bars
             .iter()
-            .map(|b| mqk_strategy::BarStub::new(b.end_ts, b.is_complete, b.close_micros, b.volume))
+            .map(|b| {
+                mqk_strategy::BarStub::with_ohlcv(
+                    b.end_ts,
+                    b.is_complete,
+                    b.open_micros,
+                    b.high_micros,
+                    b.low_micros,
+                    b.close_micros,
+                    b.volume,
+                )
+            })
             .collect();
         // STRATEGY-DECISION-OBSERVABILITY-01: compute diagnostic snapshot from
         // the bar window before consuming stubs into the strategy context.
