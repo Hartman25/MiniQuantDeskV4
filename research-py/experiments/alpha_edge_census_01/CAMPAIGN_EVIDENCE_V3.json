@@ -1,0 +1,44 @@
+{
+ "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+ "conditional_edges": {
+  "DISCOVERED_MODERATE": 72,
+  "DISCOVERED_STRONG": 135,
+  "DISCOVERED_WEAK": 215
+ },
+ "conditional_positive_below_floor": 0,
+ "confirmation": "NOT_RUN",
+ "eligible_symbol_count": 88,
+ "experiment_id": "alpha_edge_census_01_corrected",
+ "factor_attempts": 1095,
+ "factor_attempts_failed": 0,
+ "factor_statuses": {
+  "not_evaluable": 30,
+  "succeeded": 1065
+ },
+ "fdr_alpha": 0.1,
+ "fdr_declared_population": 1095,
+ "fdr_status": "complete",
+ "judge_status": "DEFERRED_FULL_POPULATION",
+ "output_sha256": {
+  "edge_registry_summary_v3.json": "deec6b38f954ab270115d557f5d90e6c3e58f9b0311779f02fd9ecbafbcbed8a",
+  "edge_registry_v3.jsonl": "8532132a50f43ee4ffe38bdff708bb58284a3d5104ecc782413a9fae854bb4d0",
+  "factor_fdr_report_v3.json": "e71a4c07cd8cc11eae262593502b55bdfc640f7b1143f8d4b29451c776d8d9df",
+  "factor_ledger_v3.jsonl": "f99ddcf583c05c9b3cca7e53c12effbfaa79bd9c8a4062f0260b97415c0c702a",
+  "search_ledger_v3.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5"
+ },
+ "promotion_authority": "NONE",
+ "registered_factor_count": 1095,
+ "schema_version": "alpha_census_campaign_evidence_v3",
+ "semantic_condition_count": 219,
+ "strategy_attempts": 38192,
+ "strategy_attempts_failed": 0,
+ "strategy_edge_config_count": 434,
+ "strategy_edge_trial_count": 38192,
+ "strategy_edges": {
+  "DISCOVERED_MODERATE": 789,
+  "DISCOVERED_STRONG": 0,
+  "DISCOVERED_WEAK": 2851
+ },
+ "strategy_positive_below_floor": 4780,
+ "validation_status": "NOT_VALIDATED"
+}

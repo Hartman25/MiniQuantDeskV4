@@ -1989,3 +1989,19 @@ def test_d4_committed_factor_freeze_proof_binds_manifests_population_and_the_acc
     assert disp["v2_factor_count"] == len(v2) == 2170 and disp["v2_population_root"] == ss.sha256_canonical(v2)
     assert not set(v2) & set(v3) and disp["authoritative"] is False and disp["v2_results_used_to_choose_v3_parameters"] is False
     assert pd.Timestamp(proof["max_economic_input_end_ts"]) <= pd.Timestamp("2023-12-29T23:59:59", tz="UTC")
+
+
+def test_d5_committed_v3_campaign_evidence_is_bound_to_the_freeze_and_leaves_strategy_results_unchanged():
+    ev3, ev2, proof = _load("CAMPAIGN_EVIDENCE_V3.json"), _load("CAMPAIGN_EVIDENCE_V2.json"), _load("FACTOR_FREEZE_PROOF_V3.json")
+    assert ev3["semantic_condition_count"] == 219 and ev3["registered_factor_count"] == ev3["fdr_declared_population"] == 1095
+    assert ev3["factor_attempts"] == 1095 and ev3["factor_attempts_failed"] == 0, "one attempt per factor, no retries"
+    assert ev3["factor_statuses"] == {"succeeded": 1065, "not_evaluable": 30} and ev3["fdr_status"] == "complete"
+    assert sum(ev3["conditional_edges"].values()) == 422 and ev3["fdr_alpha"] == 0.10
+    for k in ("strategy_edges", "strategy_attempts", "strategy_attempts_failed", "strategy_edge_trial_count",
+              "strategy_edge_config_count", "strategy_positive_below_floor", "judge_status", "bars_manifest_sha256"):
+        assert ev3[k] == ev2[k], k
+    assert ev3["strategy_attempts"] == proof["strategy_binding"]["strategy_attempts"] == 38192
+    assert ev3["output_sha256"]["search_ledger_v3.jsonl"] == ev2["output_sha256"]["search_ledger_v2.jsonl"]
+    assert ev3["output_sha256"]["search_ledger_v3.jsonl"] == proof["strategy_binding"]["strategy_search_ledger_sha256"]
+    assert ev3["validation_status"] == "NOT_VALIDATED" and ev3["promotion_authority"] == "NONE" and ev3["confirmation"] == "NOT_RUN"
+    assert ev3["conditional_edges"] != ev2["conditional_edges"], "V2 conditional result is not the V3 result"
