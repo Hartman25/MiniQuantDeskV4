@@ -1,0 +1,32 @@
+{
+ "authoritative": false,
+ "campaign_evidence_v2_normalized_sha256": "c72034ca5b187e5da23623b1ca1b3f7c07abd21fddaabba152237b37bee671a9",
+ "disposition": "REJECTED_SEMANTIC_DUPLICATE_FACTOR_POPULATION",
+ "evidence_preserved_unmodified": true,
+ "evidence_sha256": {
+  "edge_registry_summary_v2.json": "b0124fbdf1ce38eed905e4cb7058ed69509e2688087aabf4d156024756b74095",
+  "edge_registry_v2.jsonl": "7df0e878f6af2a83c8aaebab5609e43c7eb767061760e945d5677e6c3357477b",
+  "factor_fdr_report_v2.json": "1af0c5a65cd0091d2b608233901b58a748911b51f92e0ff6fce408c97b50ebc3",
+  "factor_ledger_v2.jsonl": "d75520ac3d73e756642bc511386713868eab676509ccba299be67f78b05c63fb",
+  "search_ledger_v2.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5"
+ },
+ "experiment_id": "alpha_edge_census_01_corrected",
+ "reason": "V2 identity carried the full Strategy configuration (incl. exit/hold execution state) into the FactorSpec, minting duplicate hypotheses for identical conditional relationships (434 configs x 5 horizons = 2,170 vs 219 semantic conditions x 5 = 1,095)",
+ "schema_version": "alpha_census_conditional_v2_disposition",
+ "v2_attempts_by_status": {
+  "not_evaluable": 50,
+  "succeeded": 2120
+ },
+ "v2_conditional_edges": {
+  "DISCOVERED_MODERATE": 112,
+  "DISCOVERED_STRONG": 265,
+  "DISCOVERED_WEAK": 371
+ },
+ "v2_factor_count": 2170,
+ "v2_factor_family": "alpha_census_conditional_v2",
+ "v2_fdr_declared_population": 2170,
+ "v2_fdr_status": "complete",
+ "v2_population_root": "b069832b0934e1566f027b412d90e30127837bb612a9f1853c60f0e52d6793e9",
+ "v2_results_used_to_choose_v3_parameters": false,
+ "v3_population_disjoint_from_v2": true
+}

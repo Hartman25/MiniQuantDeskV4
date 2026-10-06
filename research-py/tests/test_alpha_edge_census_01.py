@@ -1868,3 +1868,124 @@ def test_d2_driver_resumes_per_factor_and_registry_outranks_result_files(tmp_pat
     assert rc._eval_condition((ci, c)) == (ci, "ok", {"reused": 4, "reconstructed": 1})
     assert cd.read_factor_record(env.rec, env.fids[5]) == json.loads(good)
     assert all(len(env.attempts(h)) == (2 if h == 3 else 1) for h in HORIZONS)
+
+
+# ----------------------------------------------------------------- V3 factor-only freeze gate (D4)
+
+FAKE_BINDING = {"strategy_population_root": "r" * 64, "strategy_cell_count": 7, "manifest_order_root": "m" * 64,
+                "strategy_attempts": 7, "strategy_attempts_succeeded": 7, "strategy_attempts_failed": 0,
+                "strategy_chunks_root_sha256": "c" * 64, "strategy_search_ledger_sha256": "l" * 64}
+
+
+@pytest.fixture(scope="module")
+def frozen_v3(tmp_path_factory, cctx):
+    db = tmp_path_factory.mktemp("v3") / "f.sqlite"
+    gid = ss.build_condition_grammar(ss.build_configs())["condition_grammar_id"]
+    freeze = cd.factor_freeze_record(CONDS, cctx, gid, FAKE_BINDING)
+    ids = cd.register_factor_population(db, CONDS, cctx, freeze)
+    return db, freeze, ids, gid
+
+
+def _copy_db(frozen_v3, tmp_path):
+    import shutil
+    dst = tmp_path / "copy.sqlite"
+    shutil.copy(frozen_v3[0], dst)
+    return dst
+
+
+def test_d4_factor_freeze_registers_all_1095_with_zero_attempts_and_binds_the_strategy_state(frozen_v3, cctx):
+    db, freeze, ids, _gid = frozen_v3
+    r = cd.require_frozen_factor_population(db, CONDS, cctx, freeze, allow_attempts=False)
+    assert r["registered"] == len(ids) == 1095 and r["attempts"] == 0
+    assert freeze["condition_count"] == 219 and freeze["conditional_horizons"] == HORIZONS
+    assert freeze["strategy_binding"] == FAKE_BINDING and freeze["v2_conditional_disposition"] == ss.V2_CONDITIONAL_DISPOSITION
+    assert freeze["conditional_factor_population_root"] == ss.sha256_canonical(sorted(ids))
+
+
+def test_d4_gate_refuses_attempts_a_different_marker_a_changed_population_and_partial_registries(frozen_v3, cctx, tmp_path):
+    db, freeze, ids, gid = frozen_v3
+    work = _copy_db(frozen_v3, tmp_path)
+    other = {**freeze, "strategy_binding": {**FAKE_BINDING, "strategy_search_ledger_sha256": "x" * 64}}
+    with pytest.raises(cd.FactorFreezeRefusal, match="marker absent or different"):
+        cd.require_frozen_factor_population(work, CONDS, cctx, other, allow_attempts=True)
+    with pytest.raises(cd.FactorFreezeRefusal, match="does not describe"):
+        cd.require_frozen_factor_population(work, CONDS[:-1], cctx, freeze, allow_attempts=True)
+    with pytest.raises(cd.FactorFreezeRefusal, match="extra=5"):
+        cd.require_frozen_factor_population(work, CONDS[:-1], cctx, cd.factor_freeze_record(CONDS[:-1], cctx, gid, FAKE_BINDING),
+                                            allow_attempts=True)
+    ResearchResultStore(work).begin_factor_evaluation_attempt(factor_id=ids[0], evaluation_id="e" * 32, origin="x")
+    with pytest.raises(cd.FactorFreezeRefusal, match="attempts already exist"):
+        cd.require_frozen_factor_population(work, CONDS, cctx, freeze, allow_attempts=False)
+    assert cd.require_frozen_factor_population(work, CONDS, cctx, freeze, allow_attempts=True)["attempts"] == 1
+    with __import__("contextlib").closing(ResearchResultStore(work)._connect()) as con:  # noqa: SLF001
+        con.execute("delete from research_factors where factor_id=?", (ids[-1],))
+        con.commit()
+    with pytest.raises(cd.FactorFreezeRefusal, match="missing=1"):
+        cd.require_frozen_factor_population(work, CONDS, cctx, freeze, allow_attempts=True)
+
+
+def test_d4_a_v2_only_registry_cannot_satisfy_the_v3_freeze(tmp_path, cctx, frozen_v3):
+    db = tmp_path / "v2.sqlite"
+    for c in ss.build_configs():
+        for h in HORIZONS:
+            cd.register_factor(db, cd.v2_factor_spec(c, h, cctx))
+    with pytest.raises(cd.FactorFreezeRefusal, match="missing=1095"):
+        cd.require_frozen_factor_population(db, CONDS, cctx, frozen_v3[1], allow_attempts=True)
+
+
+def test_d4_strategy_binding_requires_the_accepted_terminal_state_chunks_and_ledger(tmp_path, mini, reference_run):
+    root, st = reference_run
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("accepted\n", encoding="utf-8")
+    good = cs.sha256_file(ledger)
+    kw = dict(chunk_size=13, ledger_path=ledger, expected_ledger_sha256=good)
+    b = cs.strategy_binding(st, mini["space"], mini["cells"], root, **kw)
+    n = len(mini["cells"])
+    assert b["strategy_attempts"] == b["strategy_attempts_succeeded"] == b["strategy_cell_count"] == n
+    assert b["strategy_search_ledger_sha256"] == good and len(b["strategy_chunks_root_sha256"]) == 64
+    with pytest.raises(cs.GateRefusal, match="search ledger differs"):
+        cs.strategy_binding(st, mini["space"], mini["cells"], root, **{**kw, "expected_ledger_sha256": "0" * 64})
+    import shutil
+    work = tmp_path / "w"
+    shutil.copytree(root / "chunks", work / "chunks")
+    p0 = cs.chunk_path(work, 0)
+    p0.write_text(p0.read_text(encoding="utf-8").replace("EVALUABLE", "EVALUABLF", 1), encoding="utf-8")
+    assert cs.strategy_binding(st, mini["space"], mini["cells"], work, **kw)["strategy_chunks_root_sha256"] != b["strategy_chunks_root_sha256"]
+    p0.unlink()
+    with pytest.raises(cs.GateRefusal, match="missing StrategyEdge chunk"):
+        cs.strategy_binding(st, mini["space"], mini["cells"], work, **kw)
+    (tmp_path / "fresh").mkdir()
+    fresh = _fresh_store(tmp_path / "fresh", mini)
+    with pytest.raises(cs.GateRefusal, match="not in the accepted terminal state"):
+        cs.strategy_binding(fresh, mini["space"], mini["cells"], root, **kw)
+
+
+def test_d4_committed_factor_freeze_proof_binds_manifests_population_and_the_accepted_strategy_state():
+    proof, disp = _load("FACTOR_FREEZE_PROOF_V3.json"), _load("CONDITIONAL_V2_DISPOSITION.json")
+    ev2, space, grammar = _load("CAMPAIGN_EVIDENCE_V2.json"), _load("ALPHA_CENSUS_SEARCH_SPACE_V2.json"), _load("ALPHA_CENSUS_GRAMMAR_V2.json")
+    assert proof["scope"] == "FACTOR_ONLY" and proof["strategy_attempts_created_by_this_mission"] == 0
+    assert proof["semantic_condition_count"] == 219 and proof["registered_factors"] == proof["conditional_factor_count"] == 1095
+    assert proof["factor_evaluation_attempts"] == 0 and proof["conditional_horizons"] == HORIZONS
+    assert proof["per_family_condition_counts"] == ss.EXPECTED_CONDITION_FAMILY_COUNTS
+    b = proof["strategy_binding"]
+    assert b["strategy_cell_count"] == b["strategy_attempts"] == b["strategy_attempts_succeeded"] == space["strategy_trial_count"] == 38192
+    assert b["strategy_attempts_failed"] == 0 and proof["strategy_edge_config_count"] == len(grammar["configs"]) == 434
+    assert b["strategy_search_ledger_sha256"] == ev2["output_sha256"]["search_ledger_v2.jsonl"]
+    assert proof["strategy_edges_accepted"] == {"DISCOVERED_WEAK": 2851, "DISCOVERED_MODERATE": 789, "DISCOVERED_STRONG": 0}
+    cg = ss.build_condition_grammar(ss.build_configs())
+    assert _load("ALPHA_CENSUS_CONDITION_GRAMMAR_V3.json") == cg and proof["condition_grammar_id"] == cg["condition_grammar_id"]
+    assert proof["condition_source_mapping_sha256"] == cg["source_mapping_sha256"]
+    for name, digest in proof["manifest_file_sha256"].items():
+        assert _norm_sha(EXP / name) == digest, name
+    eq = proof["condition_equivalence_real_data"]
+    assert eq["conditions"] == 219 and eq["mismatches"] == 0 and eq["multi_source_conditions"] == 150
+    assert eq["source_config_series_compared"] == 434 * eq["symbols"] == 38192
+    uni = _load("ALPHA_CENSUS_UNIVERSE_V2.json")
+    ctx = cd.population_context(uni, ss.build_protocol(), ss.build_partitions(), _load("ALPHA_CENSUS_BARS_MANIFEST_V2.json"))
+    v3 = cd.expected_factor_ids(CONDS, ctx)
+    assert ss.sha256_canonical(sorted(v3)) == proof["conditional_factor_population_root"]
+    v2 = sorted(cd.v2_factor_spec(c, h, ctx).compute_factor_id() for c in ss.build_configs() for h in HORIZONS)
+    assert disp["disposition"] == proof["v2_conditional_disposition"] == "REJECTED_SEMANTIC_DUPLICATE_FACTOR_POPULATION"
+    assert disp["v2_factor_count"] == len(v2) == 2170 and disp["v2_population_root"] == ss.sha256_canonical(v2)
+    assert not set(v2) & set(v3) and disp["authoritative"] is False and disp["v2_results_used_to_choose_v3_parameters"] is False
+    assert pd.Timestamp(proof["max_economic_input_end_ts"]) <= pd.Timestamp("2023-12-29T23:59:59", tz="UTC")

@@ -204,6 +204,39 @@ def require_frozen_population(store: ResearchResultStore, space: dict, cells, *,
             "strategy_started": sum(d["started"] for d in digest.values()), **freeze}
 
 
+def sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def strategy_binding(store: ResearchResultStore, space: dict, cells, run_dir: Path, *, chunk_size: int,
+                     ledger_path: Path, expected_ledger_sha256: str) -> dict:
+    """The immutable, accepted StrategyEdge state a ConditionalEdge freeze binds to: the frozen population, every
+    attempt terminal and succeeded (no failed/started), the raw result chunks and the accepted search ledger. Any
+    drift refuses, so a V3 factor run can never proceed over a changed or incomplete Strategy result."""
+    gate = require_frozen_population(store, space, cells, allow_attempts=True)
+    n = len(cells)
+    if not (gate["strategy_attempts"] == gate["strategy_succeeded"] == n and not gate["strategy_failed"]
+            and not gate["strategy_started"]):
+        raise GateRefusal("StrategyEdge population is not in the accepted terminal state (one succeeded attempt per trial)")
+    h = hashlib.sha256()
+    for k in range((n + chunk_size - 1) // chunk_size):
+        path = chunk_path(run_dir, k)
+        if not path.exists():
+            raise GateRefusal(f"missing StrategyEdge chunk file {path.name}")
+        h.update(f"{path.name}:{sha256_file(path)}\n".encode("utf-8"))
+    ledger = sha256_file(ledger_path)
+    if ledger != expected_ledger_sha256:
+        raise GateRefusal("StrategyEdge search ledger differs from the accepted ledger hash")
+    return {"strategy_population_root": gate["strategy_population_root"], "strategy_cell_count": n,
+            "manifest_order_root": gate["manifest_order_root"], "strategy_attempts": gate["strategy_attempts"],
+            "strategy_attempts_succeeded": gate["strategy_succeeded"], "strategy_attempts_failed": 0,
+            "strategy_chunks_root_sha256": h.hexdigest(), "strategy_search_ledger_sha256": ledger}
+
+
 def _line_count(p: Path) -> int:
     with open(p, "rb") as f:
         return sum(1 for _ in f)

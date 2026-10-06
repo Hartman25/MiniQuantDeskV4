@@ -175,6 +175,59 @@ def registered_population_digest(registry_db: Path, expected_ids: list[str]) -> 
     return {"registered": len(reg), "attempts": attempts, "population_sha256": ss.sha256_canonical(sorted(exp))}
 
 
+FACTOR_FREEZE_PREFIX = f"{FACTOR_FAMILY}:FACTOR_FREEZE:"
+FREEZE_EXPERIMENT_ID = ss.EXPERIMENT_ID + ":conditional_v3"
+
+
+class FactorFreezeRefusal(RuntimeError):
+    pass
+
+
+def factor_freeze_record(conditions: list[dict], ctx: dict, condition_grammar_id: str, strategy_binding: dict) -> dict:
+    """Factor-only V3 population freeze: the semantic condition grammar, the registered factor population, the accepted
+    Strategy state it is bound to, and the identities every factor binds. Result-independent."""
+    ids = expected_factor_ids(conditions, ctx)
+    if len(set(ids)) != len(ids):
+        raise FactorFreezeRefusal("duplicate factor id in the V3 conditional population")
+    return {"family": FACTOR_FAMILY, "protocol_version": FACTOR_PROTOCOL_VERSION,
+            "condition_grammar_id": condition_grammar_id, "condition_count": len(conditions),
+            "conditional_horizons": list(ss.CONDITIONAL_HORIZONS), "conditional_factor_count": len(ids),
+            "conditional_factor_population_root": ss.sha256_canonical(sorted(ids)),
+            "strategy_binding": strategy_binding, "v2_conditional_disposition": ss.V2_CONDITIONAL_DISPOSITION,
+            "universe_identity": ctx["universe_identity"], "data_provenance_identity": ctx["data_provenance_identity"]}
+
+
+def register_factor_population(registry_db: Path, conditions: list[dict], ctx: dict, freeze: dict) -> list[str]:
+    """Register every V3 FactorSpec, then the freeze marker. Must run (with zero attempts) before attempt #1."""
+    ids = register_all_factors(registry_db, conditions, ctx)
+    ResearchResultStore(Path(registry_db)).register_hypothesis(
+        hypothesis_id=FACTOR_FREEZE_PREFIX + freeze["conditional_factor_population_root"], experiment_id=FREEZE_EXPERIMENT_ID,
+        hypothesis_text=json.dumps(freeze, sort_keys=True, separators=(",", ":")))
+    return ids
+
+
+def require_frozen_factor_population(registry_db: Path, conditions: list[dict], ctx: dict, freeze: dict, *,
+                                     allow_attempts: bool) -> dict:
+    """Refuse unless the V3 registry holds exactly the expected factor population, the freeze marker equals the
+    expected freeze (including the bound Strategy state), and (before attempt #1) V3 attempts == 0."""
+    ids = expected_factor_ids(conditions, ctx)
+    if freeze.get("conditional_factor_population_root") != ss.sha256_canonical(sorted(ids)) or \
+            freeze.get("conditional_factor_count") != len(ids):
+        raise FactorFreezeRefusal("freeze does not describe the expected V3 factor population")
+    try:
+        dig = registered_population_digest(registry_db, ids)
+    except RuntimeError as exc:
+        raise FactorFreezeRefusal(str(exc)) from None
+    with __import__("contextlib").closing(ResearchResultStore(Path(registry_db))._connect()) as con:  # noqa: SLF001
+        row = con.execute("select hypothesis_text from research_hypotheses where hypothesis_id=?",
+                          (FACTOR_FREEZE_PREFIX + freeze["conditional_factor_population_root"],)).fetchone()
+    if row is None or json.loads(row[0]) != json.loads(json.dumps(freeze)):
+        raise FactorFreezeRefusal("V3 factor freeze marker absent or different; attempt before the factor freeze refused")
+    if not allow_attempts and dig["attempts"]:
+        raise FactorFreezeRefusal("V3 factor attempts already exist; freeze check demands attempts == 0")
+    return {**dig, "freeze": freeze}
+
+
 class ConditionEquivalenceError(RuntimeError):
     pass
 

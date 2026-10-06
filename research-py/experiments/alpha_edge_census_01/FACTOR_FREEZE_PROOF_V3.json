@@ -1,0 +1,102 @@
+{
+ "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+ "condition_equivalence_real_data": {
+  "condition_series_sha256": "cdb2e21f7a71d64dc886724a872a862aa38ace6ab1c167dcfc1f63e56f7c8f63",
+  "conditions": 219,
+  "mismatches": 0,
+  "multi_source_conditions": 150,
+  "source_config_series_compared": 38192,
+  "symbols": 88
+ },
+ "condition_grammar_id": "be883012dfd38c186fd9b8651f67a209",
+ "condition_source_mapping_sha256": "4d637fb9e9e65eba47aff65add0a36d9d09e2ebfa60b45e0da290bcc93af2343",
+ "conditional_factor_count": 1095,
+ "conditional_factor_population_root": "6d51d30d384fb347364524fa90285e7f6f1b425927683458b9a0d6bab064c72c",
+ "conditional_horizons": [
+  1,
+  3,
+  5,
+  10,
+  20
+ ],
+ "data_provenance_identity": {
+  "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+  "partitions_id": "5e2a018cc5fd82486859f1f1c4a4d8b5",
+  "protocol_id": "1916cbc84d6cbefccbd33a0ffe8ac300",
+  "request_contract_sha256": "395ef26bf1b2381b72803ce65c3e7da75153d0cc518a9e584a71c95cfaac2f83"
+ },
+ "discovery_end_exclusive": "2024-01-01 00:00:00+00:00",
+ "experiment_id": "alpha_edge_census_01_corrected",
+ "factor_evaluation_attempts": 0,
+ "factor_family": "alpha_census_conditional_v3",
+ "grammar_id": "2dd48b2525441ba5d4e92c6050c69c63",
+ "manifest_file_sha256": {
+  "ALPHA_CENSUS_BARS_MANIFEST_V2.json": "6e4a4befe3797d45b97ba474374f3326e4b3cbec6efa3666307c339459e596d6",
+  "ALPHA_CENSUS_CONDITION_GRAMMAR_V3.json": "fd8039d1add1638fbdba14e81afa2c1257e8beafc34f6b012f1dea7d467dfddb",
+  "ALPHA_CENSUS_GRAMMAR_V2.json": "d7ccafea17b1944d5a67bb35fd562fce55c2ce739bed86b225ff4963c46ca50c",
+  "ALPHA_CENSUS_PARTITIONS_V2.json": "9549618bd8fae8a57716e50bcd3f22be1c8b67791645389933772c3d379b9c4d",
+  "ALPHA_CENSUS_PROTOCOL_V2.json": "89cb014cde1453383b4aadb69a3a3794b4549c892b80b3642ac62b1dac651f9f",
+  "ALPHA_CENSUS_SEARCH_SPACE_V2.json": "9b6670732bcb6082713e9fcc6c3598376d47de4d9b0e54ad180d927515b8cdc0",
+  "ALPHA_CENSUS_SEED_UNIVERSE_V2.json": "ff9a3eff44d688ca092fc4e297fd87d216efcc0433dd34f4c33e545bab0698a7",
+  "ALPHA_CENSUS_UNIVERSE_V2.json": "e0be5e6ce1491947314b133eb93f40b8ce579db78397b0d23cdcbf7d02a47dea",
+  "CONDITIONAL_V2_DISPOSITION.json": "431058cb76d95b950a229e30637a411365bce9eb8fd3ad540a0c2e0e91fc3a23"
+ },
+ "max_economic_input_end_ts": "2023-12-29 05:00:00+00:00",
+ "mission": "V4-ALPHA-EDGE-CENSUS-01-FINAL-CONDITIONAL-CORRECTION-02",
+ "partition_ids": {
+  "partitions_id": "5e2a018cc5fd82486859f1f1c4a4d8b5",
+  "partitions_sha256": "5e2a018cc5fd82486859f1f1c4a4d8b557f120254f78b2b73ab5a1d890b9757f"
+ },
+ "per_family_condition_counts": {
+  "S01": 8,
+  "S02": 6,
+  "S03": 14,
+  "S04": 5,
+  "S05": 36,
+  "S06": 24,
+  "S07": 36,
+  "S08": 12,
+  "S09": 32,
+  "S10": 12,
+  "S11": 6,
+  "S12": 16,
+  "S13": 8,
+  "S14": 4
+ },
+ "protocol_id": "1916cbc84d6cbefccbd33a0ffe8ac300",
+ "registered_factors": 1095,
+ "schema_version": "alpha_census_factor_freeze_proof_v3",
+ "scope": "FACTOR_ONLY",
+ "search_space_id": "220e7a096df79bdcc6674017631b7f80",
+ "semantic_condition_count": 219,
+ "strategy_attempts_created_by_this_mission": 0,
+ "strategy_binding": {
+  "manifest_order_root": "1f8b6c8f251effdaef1055d6513a60a44efb81086b8767e260c8103417b9c00d",
+  "strategy_attempts": 38192,
+  "strategy_attempts_failed": 0,
+  "strategy_attempts_succeeded": 38192,
+  "strategy_cell_count": 38192,
+  "strategy_chunks_root_sha256": "f66aa88998bc2aa0bc784841d540e69a394633abf3763df86a25f7ac1b6866d3",
+  "strategy_population_root": "6e8cf8133f408d1054e346238ec644c12bf3ae4865aff6b18f583a04cf103208",
+  "strategy_search_ledger_sha256": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5"
+ },
+ "strategy_edge_config_count": 434,
+ "strategy_edges_accepted": {
+  "DISCOVERED_MODERATE": 789,
+  "DISCOVERED_STRONG": 0,
+  "DISCOVERED_WEAK": 2851
+ },
+ "strategy_registry_sqlite_sha256_before_after": "4286bad9d1bd7238b19f4e3ee4445a3091582abe520082f8023100c71966189d",
+ "strategy_trial_count": 38192,
+ "universe_id": "a32b4de2b515d93c4042e6b8368bf4a5",
+ "universe_identity": {
+  "survivorship_classification": "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME",
+  "symbol_count": 88,
+  "symbols_sha256": "ba7b2ab4fac35ab2637198152403820015c26533ee4ca67979c53d690e546c8c",
+  "universe_id": "a32b4de2b515d93c4042e6b8368bf4a5",
+  "universe_mode": "fixed_ex_ante"
+ },
+ "v2_conditional_disposition": "REJECTED_SEMANTIC_DUPLICATE_FACTOR_POPULATION",
+ "v2_factor_count": 2170,
+ "v2_population_root": "b069832b0934e1566f027b412d90e30127837bb612a9f1853c60f0e52d6793e9"
+}

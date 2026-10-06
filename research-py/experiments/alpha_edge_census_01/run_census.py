@@ -5,11 +5,13 @@ Stages (each idempotent; frozen manifests are immutable once written):
   acquire        per-symbol SIP/adjustment=all bars for [2016-01-01, 2024-01-01) -> typed ELIGIBLE/EXCLUDED_* dispositions
                  -> eligible-universe + search-space manifests
   bars-manifest  immutable census bars/provenance manifest over the eligible universe
-  freeze         registers the whole StrategyEdge trial population and ConditionalEdge FactorSpec population
-                 (attempts must be 0) and writes the POPULATION_FREEZE_PROOF
+  freeze         registers the whole StrategyEdge trial population (attempts must be 0) and writes the
+                 POPULATION_FREEZE_PROOF (V2; historical, immutable)
+  freeze-factors V3 factor-only freeze: semantic condition grammar, V2 rejection record, 1,095 FactorSpecs in the V3
+                 registry bound to the accepted Strategy state; must be committed before V3 factor attempt #1
   run-strategy   resumable StrategyEdge Pass-1 execution (frozen-population gate first)
   run-factors    resumable registered ConditionalEdge factor evaluations (factor-level resume; a terminal factor is never re-attempted)
-  registry       complete-family FDR + qualification ledgers + Edge Registry V2 + campaign evidence
+  registry       complete-family V3 FDR + qualification ledgers + Edge Registry V3 + campaign evidence
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import argparse
 import hashlib
 import json
 import multiprocessing as mp
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -42,8 +45,14 @@ FACTOR_REGISTRY_DB = RUN_DIR / "registry_conditional_v3.sqlite"
 BARS_MANIFEST = HERE / "ALPHA_CENSUS_BARS_MANIFEST_V2.json"
 FREEZE_PROOF = HERE / "POPULATION_FREEZE_PROOF_V2.json"
 CAMPAIGN_EVIDENCE = HERE / "CAMPAIGN_EVIDENCE_V3.json"
+CAMPAIGN_EVIDENCE_V2 = HERE / "CAMPAIGN_EVIDENCE_V2.json"
+FACTOR_FREEZE_PROOF = HERE / "FACTOR_FREEZE_PROOF_V3.json"
+V2_DISPOSITION_FILE = HERE / "CONDITIONAL_V2_DISPOSITION.json"
+V2_LEDGER = RUN_DIR / "search_ledger_v2.jsonl"
+ACCEPTED_STRATEGY_EDGES = {"DISCOVERED_WEAK": 2851, "DISCOVERED_MODERATE": 789, "DISCOVERED_STRONG": 0}
 _MANIFESTS = (ss.SEED_UNIVERSE_FILE, ss.GRAMMAR_FILE, ss.PARTITIONS_FILE, ss.PROTOCOL_FILE, ss.UNIVERSE_FILE,
               ss.SEARCH_SPACE_FILE, BARS_MANIFEST)
+_V3_MANIFESTS = (*_MANIFESTS, ss.CONDITION_GRAMMAR_FILE, V2_DISPOSITION_FILE)
 
 
 def _load(path: Path) -> dict:
@@ -168,6 +177,109 @@ def _run_context():
     return uni, part, prot, space, bm, ctx, cells
 
 
+def _norm_sha(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
+def _factor_setup():
+    """Everything the V3 factor freeze binds, recomputed from authority: the semantic conditions, the grammar file, and the
+    accepted Strategy state (population, terminal attempts, raw chunks, accepted search ledger)."""
+    uni, part, prot, space, grammar, bm, ctx, cells = _setup()
+    configs, conditions = ce.cell_configs(cells), ce.cell_conditions(cells)
+    ss.assert_condition_authority(conditions, configs)
+    cg = ss.build_condition_grammar(configs)
+    if ss.CONDITION_GRAMMAR_FILE.exists() and _load(ss.CONDITION_GRAMMAR_FILE) != cg:
+        raise ce.GateRefusal("condition grammar file is immutable and differs from the regenerated authority")
+    ev2 = _load(CAMPAIGN_EVIDENCE_V2)
+    binding = ce.strategy_binding(ResearchResultStore(REGISTRY_DB), space, cells, RUN_DIR,
+                                  chunk_size=prot["chunking"]["cells_per_chunk"], ledger_path=V2_LEDGER,
+                                  expected_ledger_sha256=ev2["output_sha256"]["search_ledger_v2.jsonl"])
+    freeze = cd.factor_freeze_record(conditions, ctx, cg["condition_grammar_id"], binding)
+    return uni, part, prot, space, grammar, bm, ctx, cells, conditions, cg, ev2, freeze
+
+
+def _factor_context():
+    uni, _part, prot, space, _grammar, bm, ctx, cells, conditions, _cg, _ev2, freeze = _factor_setup()
+    cd.require_frozen_factor_population(FACTOR_REGISTRY_DB, conditions, ctx, freeze, allow_attempts=True)
+    return uni, prot, space, bm, ctx, cells, conditions
+
+
+def _v2_disposition(configs: list[dict], ctx: dict, ev2: dict) -> dict:
+    """Preserve-and-relabel record of the rejected V2 conditional population. Read-only over the V2 evidence."""
+    con = sqlite3.connect(f"file:{REGISTRY_DB.as_posix()}?mode=ro", uri=True)
+    try:
+        v2_reg = sorted(r[0] for r in con.execute("select factor_id from research_factors where family=?",
+                                                  (cd.FACTOR_FAMILY_V2,)))
+        att = dict(con.execute("select status, count(*) from research_factor_evaluation_attempts where factor_id in "
+                               "(select factor_id from research_factors where family=?) group by status",
+                               (cd.FACTOR_FAMILY_V2,)).fetchall())
+    finally:
+        con.close()
+    expected = sorted(cd.v2_factor_spec(c, h, ctx).compute_factor_id() for c in configs for h in ss.CONDITIONAL_HORIZONS)
+    if v2_reg != expected or sum(att.values()) != ev2["factor_attempts"]:
+        raise ce.GateRefusal("V2 conditional evidence differs from the recorded V2 population/attempts")
+    names = (er.OUT_SEARCH_LEDGER.replace("v3", "v2"), er.OUT_FACTOR_LEDGER.replace("v3", "v2"),
+             er.OUT_EDGES.replace("v3", "v2"), er.OUT_SUMMARY.replace("v3", "v2"), "factor_fdr_report_v2.json")
+    return {"schema_version": "alpha_census_conditional_v2_disposition", "experiment_id": ss.EXPERIMENT_ID,
+            "disposition": ss.V2_CONDITIONAL_DISPOSITION, "authoritative": False,
+            "reason": "V2 identity carried the full Strategy configuration (incl. exit/hold execution state) into the "
+                      "FactorSpec, minting duplicate hypotheses for identical conditional relationships (434 configs x 5 "
+                      "horizons = 2,170 vs 219 semantic conditions x 5 = 1,095)",
+            "v2_factor_family": cd.FACTOR_FAMILY_V2, "v2_factor_count": len(v2_reg),
+            "v2_population_root": ss.sha256_canonical(v2_reg), "v2_attempts_by_status": dict(sorted(att.items())),
+            "v2_conditional_edges": ev2["conditional_edges"], "v2_fdr_status": ev2["fdr_status"],
+            "v2_fdr_declared_population": ev2["fdr_declared_population"],
+            "evidence_sha256": {n: ce.sha256_file(RUN_DIR / n) for n in names},
+            "campaign_evidence_v2_normalized_sha256": _norm_sha(CAMPAIGN_EVIDENCE_V2),
+            "evidence_preserved_unmodified": True, "v2_results_used_to_choose_v3_parameters": False,
+            "v3_population_disjoint_from_v2": True}
+
+
+def cmd_freeze_factors(_a) -> None:
+    uni, part, prot, space, grammar, bm, ctx, cells, conditions, cg, ev2, freeze = _factor_setup()
+    max_ts = _max_input_ts(bm)
+    pt.require_discovery_only([max_ts], what="census bars manifest max timestamp")
+    if ev2["strategy_edges"] != ACCEPTED_STRATEGY_EDGES:
+        raise ce.GateRefusal("accepted StrategyEdge classification counts differ from the verified result")
+    reg_before = ce.sha256_file(REGISTRY_DB)
+    configs = ce.cell_configs(cells)
+    _write_immutable(ss.CONDITION_GRAMMAR_FILE, cg, "condition grammar")
+    disp = _v2_disposition(configs, ctx, ev2)
+    _write_immutable(V2_DISPOSITION_FILE, disp, "V2 conditional disposition")
+    equivalence = cd.condition_equivalence_proof(_load_universe(uni, bm), configs, conditions)
+    ids = cd.register_factor_population(FACTOR_REGISTRY_DB, conditions, ctx, freeze)
+    gate = cd.require_frozen_factor_population(FACTOR_REGISTRY_DB, conditions, ctx, freeze, allow_attempts=False)
+    if gate["attempts"] or gate["registered"] != ss.EXPECTED_CONDITIONAL_FACTOR_COUNT or len(ids) != gate["registered"]:
+        raise ce.GateRefusal("V3 factor freeze requires 1,095 registered factors and zero attempts")
+    if ce.sha256_file(REGISTRY_DB) != reg_before:
+        raise ce.GateRefusal("the accepted StrategyEdge registry changed during the factor freeze")
+    proof = {
+        "schema_version": "alpha_census_factor_freeze_proof_v3", "experiment_id": ss.EXPERIMENT_ID,
+        "mission": "V4-ALPHA-EDGE-CENSUS-01-FINAL-CONDITIONAL-CORRECTION-02", "scope": "FACTOR_ONLY",
+        "strategy_edge_config_count": len(configs), "strategy_trial_count": len(cells),
+        "strategy_binding": freeze["strategy_binding"], "strategy_edges_accepted": ev2["strategy_edges"],
+        "strategy_attempts_created_by_this_mission": 0, "strategy_registry_sqlite_sha256_before_after": reg_before,
+        "semantic_condition_count": len(conditions), "per_family_condition_counts": cg["per_family_condition_counts"],
+        "condition_grammar_id": cg["condition_grammar_id"], "condition_source_mapping_sha256": cg["source_mapping_sha256"],
+        "conditional_horizons": list(ss.CONDITIONAL_HORIZONS), "registered_factors": gate["registered"],
+        "conditional_factor_count": freeze["conditional_factor_count"], "factor_evaluation_attempts": gate["attempts"],
+        "conditional_factor_population_root": freeze["conditional_factor_population_root"],
+        "factor_family": cd.FACTOR_FAMILY, "v2_conditional_disposition": disp["disposition"],
+        "v2_factor_count": disp["v2_factor_count"], "v2_population_root": disp["v2_population_root"],
+        "condition_equivalence_real_data": equivalence, "universe_identity": ctx["universe_identity"],
+        "data_provenance_identity": ctx["data_provenance_identity"], "bars_manifest_sha256": bm["manifest_sha256"],
+        "partition_ids": {"partitions_id": space["partitions_id"], "partitions_sha256": ss.sha256_canonical(part)},
+        "universe_id": space["universe_id"], "protocol_id": space["protocol_id"], "search_space_id": space["search_space_id"],
+        "grammar_id": grammar["grammar_id"], "max_economic_input_end_ts": max_ts,
+        "discovery_end_exclusive": str(pt.DISCOVERY_END_EXCLUSIVE),
+        "manifest_file_sha256": {pth.name: _sha(pth) for pth in _V3_MANIFESTS}}
+    _write_immutable(FACTOR_FREEZE_PROOF, proof, "V3 factor freeze proof")
+    print(json.dumps({k: proof[k] for k in ("semantic_condition_count", "registered_factors", "factor_evaluation_attempts",
+                                            "strategy_attempts_created_by_this_mission", "v2_conditional_disposition")},
+                     sort_keys=True))
+    print("equivalence:", json.dumps({k: v for k, v in equivalence.items()}, sort_keys=True))
+
+
 def _load_universe(uni: dict, bm: dict):
     return sg.Universe(ce.load_bars(uni, DATA_DIR, bm))
 
@@ -204,8 +316,7 @@ def _eval_condition(item: tuple[int, dict]) -> tuple[int, str, dict]:
 
 
 def cmd_run_factors(a) -> None:
-    uni, _part, _prot, _space, bm, ctx, cells = _run_context()
-    conditions = ce.cell_conditions(cells)
+    uni, _prot, _space, bm, ctx, _cells, conditions = _factor_context()
     FACTOR_REC_DIR.mkdir(parents=True, exist_ok=True)
     pending = cd.pending_conditions(FACTOR_REGISTRY_DB, FACTOR_REC_DIR, conditions, ctx)
     if a.max_configs is not None:
@@ -227,8 +338,7 @@ def cmd_run_factors(a) -> None:
 
 
 def cmd_registry(_a) -> None:
-    uni, _part, prot, space, bm, ctx, cells = _run_context()
-    configs = ce.cell_conditions(cells)
+    uni, prot, space, bm, ctx, cells, configs = _factor_context()
     records = cd.load_factor_records(FACTOR_REGISTRY_DB, FACTOR_REC_DIR, configs, ctx)
     store = ResearchResultStore(REGISTRY_DB)
     digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)
@@ -273,6 +383,7 @@ def main() -> None:
     sub.add_parser("acquire").set_defaults(fn=cmd_acquire)
     sub.add_parser("bars-manifest").set_defaults(fn=cmd_bars_manifest)
     sub.add_parser("freeze").set_defaults(fn=cmd_freeze)
+    sub.add_parser("freeze-factors").set_defaults(fn=cmd_freeze_factors)
     r = sub.add_parser("run-strategy")
     r.add_argument("--max-chunks", type=int, default=None)
     r.set_defaults(fn=cmd_run_strategy)
