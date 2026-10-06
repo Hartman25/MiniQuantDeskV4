@@ -1,0 +1,323 @@
+{
+ "PASS2_PROTOCOL_ID": "a712c301c2c527d8bc37b1ba7e72e6889c16a3ae0b2cd6e10f4dfbf2ee62db15",
+ "cohort": {
+  "cohort_manifest_sha256": "3d56d8848fb00d59d71bc17383bc4213a25e234346ed72c3b3d942d0066a1538",
+  "conditional_cohort_root": "fadf698ad709b436ad6d891ba2cea7a893be56d6fa21190f160f213114f0656f",
+  "conditional_count": 135,
+  "strategy_cohort_root": "04b3ad34d6eb40ee46d28a94af42da14b8c65355930ed51205c9d23634a8fa57",
+  "strategy_count": 789
+ },
+ "confirmation": "NOT_RUN",
+ "final_holdout": "RESERVED_UNCONSUMED",
+ "freeze_base_head": "f1df90d86aa8feb10c53031551ddf31196f15282",
+ "input_fence": {
+  "discovery_end_exclusive": "2024-01-01 00:00:00+00:00",
+  "max_end_ts": "2023-12-29 05:00:00+00:00",
+  "rows_in_forbidden_partitions": 0,
+  "rows_loaded": 155088,
+  "symbols": 88
+ },
+ "labels": {
+  "EVIDENCE_GRADE": "DISCOVERY_ROBUSTNESS_NOT_P9_PROMOTION_GRADE",
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED"
+ },
+ "live": "DISABLED",
+ "paper": "INACTIVE",
+ "partitions": {
+  "discovery": "[2016-01-01,2024-01-01)",
+  "forbidden": [
+   "[2024-01-01,2025-01-01) CONTAMINATED_BY_REJECTED_RUN",
+   "[2025-01-01,2026-03-01) REMAINING_CONFIRMATION_RESERVE",
+   "[2026-03-01,) FINAL_HOLDOUT"
+  ]
+ },
+ "pass1_evidence": {
+  "attempt_counts": {
+   "conditional_v3": {
+    "not_evaluable": 30,
+    "succeeded": 1065
+   },
+   "conditional_v3_total": 1095,
+   "strategy": {
+    "succeeded": 38192
+   },
+   "strategy_total": 38192
+  },
+  "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+  "committed_files_sha256_lf": {
+   "ALPHA_CENSUS_BARS_MANIFEST_V2.json": "6e4a4befe3797d45b97ba474374f3326e4b3cbec6efa3666307c339459e596d6",
+   "ALPHA_CENSUS_CONDITION_GRAMMAR_V3.json": "fd8039d1add1638fbdba14e81afa2c1257e8beafc34f6b012f1dea7d467dfddb",
+   "ALPHA_CENSUS_GRAMMAR_V2.json": "d7ccafea17b1944d5a67bb35fd562fce55c2ce739bed86b225ff4963c46ca50c",
+   "ALPHA_CENSUS_PARTITIONS_V2.json": "9549618bd8fae8a57716e50bcd3f22be1c8b67791645389933772c3d379b9c4d",
+   "ALPHA_CENSUS_PROTOCOL_V2.json": "89cb014cde1453383b4aadb69a3a3794b4549c892b80b3642ac62b1dac651f9f",
+   "ALPHA_CENSUS_SEARCH_SPACE_V2.json": "9b6670732bcb6082713e9fcc6c3598376d47de4d9b0e54ad180d927515b8cdc0",
+   "ALPHA_CENSUS_SEED_UNIVERSE_V2.json": "ff9a3eff44d688ca092fc4e297fd87d216efcc0433dd34f4c33e545bab0698a7",
+   "ALPHA_CENSUS_UNIVERSE_V2.json": "e0be5e6ce1491947314b133eb93f40b8ce579db78397b0d23cdcbf7d02a47dea",
+   "CAMPAIGN_EVIDENCE_V2.json": "c72034ca5b187e5da23623b1ca1b3f7c07abd21fddaabba152237b37bee671a9",
+   "CAMPAIGN_EVIDENCE_V3.json": "568b0e886e723e63f4d3b8767dafedbd78a122290408ae1ad4bdf0fd26f78a67",
+   "CONDITIONAL_V2_DISPOSITION.json": "431058cb76d95b950a229e30637a411365bce9eb8fd3ad540a0c2e0e91fc3a23",
+   "FACTOR_FREEZE_PROOF_V3.json": "b00baf1d3ec85c12461e4a61ce571629200431ad7a3d4216e997e6975958c0f2",
+   "POPULATION_FREEZE_PROOF_V2.json": "a9e6943dac4b38fae667d570d4fe07006e6958328a3cdcc0b964c5ccf69cf69c"
+  },
+  "factor_freeze_conditional_population_root": "6d51d30d384fb347364524fa90285e7f6f1b425927683458b9a0d6bab064c72c",
+  "run_files_sha256": {
+   "edge_registry_summary_v3.json": "deec6b38f954ab270115d557f5d90e6c3e58f9b0311779f02fd9ecbafbcbed8a",
+   "edge_registry_v3.jsonl": "8532132a50f43ee4ffe38bdff708bb58284a3d5104ecc782413a9fae854bb4d0",
+   "factor_fdr_report_v3.json": "e71a4c07cd8cc11eae262593502b55bdfc640f7b1143f8d4b29451c776d8d9df",
+   "factor_ledger_v3.jsonl": "f99ddcf583c05c9b3cca7e53c12effbfaa79bd9c8a4062f0260b97415c0c702a",
+   "registry.sqlite": "4286bad9d1bd7238b19f4e3ee4445a3091582abe520082f8023100c71966189d",
+   "registry_conditional_v3.sqlite": "5ef1b9a7b62ab1071910c8becf7eb651ac5099f4736aad80e9a3b74c6a9d8a5a",
+   "search_ledger_v2.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5",
+   "search_ledger_v3.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5"
+  },
+  "strategy_chunks_root_sha256": "f66aa88998bc2aa0bc784841d540e69a394633abf3763df86a25f7ac1b6866d3",
+  "strategy_population_root": "6e8cf8133f408d1054e346238ec644c12bf3ae4865aff6b18f583a04cf103208"
+ },
+ "pass1_identities": {
+  "partitions_id": "5e2a018cc5fd82486859f1f1c4a4d8b5",
+  "protocol_id": "1916cbc84d6cbefccbd33a0ffe8ac300",
+  "search_space_id": "220e7a096df79bdcc6674017631b7f80",
+  "universe_id": "a32b4de2b515d93c4042e6b8368bf4a5"
+ },
+ "pre_freeze_engine_smoke_disclosure": "Before this freeze the Strategy scenario engine was smoke-executed once in memory over the real 789-candidate cohort (stdout aggregate counts only: no durable attempt, no persisted per-candidate result). The protocol thresholds and scenario rules were written before that run and are unchanged since (PASS2_PROTOCOL_ID is pinned by test); after it the gate logic was only refactored into pure helpers. The Conditional engine was NOT executed on real data before the freeze.",
+ "protocol": {
+  "attempts": {
+   "outcome_based_retry": "forbidden",
+   "retry_eligible_only": "infrastructure_interrupted",
+   "started_before_evaluation": true,
+   "stress_runs_are_trials": false,
+   "terminal_never_reexecuted": true,
+   "unit": "one durable attempt per robustness candidate covering every scenario (stored in the ResearchResultStore attempt seam under a Pass-2-only experiment_id/registry)"
+  },
+  "candidate_identity": {
+   "result_independent": true,
+   "retry": "same candidate, new attempt; a poor result never mints a candidate",
+   "robustness_candidate_id": "sha256(PASS2_PROTOCOL_ID, kind, Pass-1 edge_id, Pass-1 trial_id|factor_id, Pass-1 search_space/protocol/universe/partitions ids)[:32]"
+  },
+  "cohorts": {
+   "conditional": {
+    "expected_count": 135,
+    "rule": "every Pass-1 ConditionalEdge with edge_class == DISCOVERED_STRONG",
+    "weak_or_moderate_advance": false
+   },
+   "count_mismatch": "REFUSE_BEFORE_ATTEMPT_1",
+   "strategy": {
+    "expected_count": 789,
+    "rule": "every Pass-1 StrategyEdge with edge_class == DISCOVERED_MODERATE",
+    "strong_present_refuses": true,
+    "weak_advances": false
+   }
+  },
+  "conditional": {
+   "C1": {
+    "gate": true,
+    "rule": "factor_id, evaluation_id, observation content hash, event count, direction-adjusted effect, empirical-null p, FDR status/q all reproduce the accepted Pass-1 evidence"
+   },
+   "C2": {
+    "gate": true,
+    "min_positive_years": 6,
+    "rule": "E on each calendar-year slice (baseline recomputed within the year); a year with no events is not positive; PASS iff positive years >= MIN_POSITIVE_YEARS of 8",
+    "years": [
+     2016,
+     2017,
+     2018,
+     2019,
+     2020,
+     2021,
+     2022,
+     2023
+    ]
+   },
+   "C3": {
+    "gate": true,
+    "min_events": 30,
+    "rule": "year with the largest positive aggregate event contribution (sum of accepted labels; earliest on ties) removed; E on the remaining rows > 0 AND remaining events >= MIN_EVENTS"
+   },
+   "C4": {
+    "gate": true,
+    "max_share": 0.5,
+    "rule": "top_symbol_event_share <= MAX and more than one represented symbol (single symbol FAILS)"
+   },
+   "C5": {
+    "gate": true,
+    "min_events": 30,
+    "rule": "for EVERY represented symbol: effect on the remaining rows > 0 AND remaining events >= MIN_EVENTS; a slice below the floor FAILS (never dropped)"
+   },
+   "C6": {
+    "gate": true,
+    "min_share": 0.25,
+    "rule": "same horizon, adjacent semantic numeric condition parameter (Pass-1 conditional neighbor authority, 219-condition grid, execution-only params forbidden); neighbor supports iff it is a Pass-1 DISCOVERED_STRONG ConditionalEdge; PASS iff share >= MIN; zero neighbors => NOT_APPLICABLE",
+    "supporting_class": "DISCOVERED_STRONG"
+   },
+   "C7": {
+    "gate": false,
+    "max_share": 0.8,
+    "role": "classification",
+    "rule": "regime share = max positive / sum positive of (effect x n) over risk_on/risk_off/unknown; > MAX => REGIME_CONCENTRATED else GENERAL_REGIME"
+   },
+   "C8": {
+    "gate": false,
+    "horizons": [
+     1,
+     3,
+     5,
+     10,
+     20
+    ],
+    "p_max": 0.1,
+    "role": "classification",
+    "rule": "adjacent horizon (frozen 1,3,5,10,20) of the SAME condition with positive finite effect and empirical-null p <= P_MAX in Pass 1 => HORIZON_SUPPORTED; evaluable adjacent horizons but none supporting => HORIZON_ISOLATED; no evaluable adjacent horizon => NOT_APPLICABLE"
+   },
+   "effect_estimator": "E(S): over observation rows S, per-symbol baseline = mean raw close_{t+h}/close_t-1 of that symbol's rows in S; effect = mean over event rows in S of (return - symbol baseline); direction higher_is_better; on the full frame E equals the accepted Pass-1 effect exactly",
+   "executable_pnl": false
+  },
+  "confirmation": "NOT_RUN",
+  "evidence_grade": "DISCOVERY_ROBUSTNESS_NOT_P9_PROMOTION_GRADE",
+  "executable_pnl": false,
+  "experiment_id": "alpha_edge_pass2_01",
+  "final_holdout": "RESERVED_UNCONSUMED",
+  "labels": {
+   "EVIDENCE_GRADE": "DISCOVERY_ROBUSTNESS_NOT_P9_PROMOTION_GRADE",
+   "PROMOTION_AUTHORITY": "NONE",
+   "VALIDATION_STATUS": "NOT_VALIDATED"
+  },
+  "multiple_testing": {
+   "conditional_fdr": "accepted complete family BH/FDR alpha 0.10 over 1,095 (unchanged)",
+   "strategy_dsr_pbo": "DEFERRED_FULL_POPULATION unless the accepted judge consumes the Pass-1 artifacts directly; population narrowing forbidden; denominator 38,192"
+  },
+  "p9_disposition": "generic S01-S14 research configs are not production-native strategies and have no P9 registration seam; the same accepted concepts (cost stress x2, decision delay, year stability, regime concentration, MAIN risk bar) are re-implemented as the narrow research analogue",
+  "partitions": {
+   "discovery": "[2016-01-01,2024-01-01)",
+   "forbidden": [
+    "[2024-01-01,2025-01-01) CONTAMINATED_BY_REJECTED_RUN",
+    "[2025-01-01,2026-03-01) REMAINING_CONFIRMATION_RESERVE",
+    "[2026-03-01,) FINAL_HOLDOUT"
+   ],
+   "read_only_inputs": "census bars manifest V2 (discovery-fenced)"
+  },
+  "ranking_readonly_not_selection": {
+   "alters_pass_fail_or_identity": false,
+   "conditional": [
+    "min_leave_one_symbol_out_effect_desc",
+    "leave_best_year_out_effect_desc",
+    "positive_years_desc",
+    "q_value_asc",
+    "factor_id_asc"
+   ],
+   "strategy": [
+    "passes_3x_cost_true_first",
+    "alpha_2x_desc",
+    "alpha_delayed_desc",
+    "leave_best_year_out_alpha_desc",
+    "positive_years_desc",
+    "max_drawdown_usd_asc",
+    "trial_id_asc"
+   ]
+  },
+  "robustness_attempt_count_at_freeze": 0,
+  "schema_version": "alpha_edge_pass2_protocol_v1",
+  "scope": "Discovery-period robustness purge of the accepted Pass-1 census; no new families, no new trials",
+  "strategy": {
+   "S1": {
+    "gate": true,
+    "rule": "accepted evaluate_cell replay equals the Pass-1 registry metrics (canonical JSON, exact; no tolerance); the net P&L stream behind the metrics must reproduce net_pnl_usd exactly"
+   },
+   "S10": {
+    "gate": true,
+    "initial_capital_usd": 100000.0,
+    "max_drawdown_frac": 0.2,
+    "min_rolling_return": -0.06,
+    "rolling_sessions": 5,
+    "rule": "strategy daily net P&L over the evaluation window on the accepted initial capital: max drawdown (peak-to-trough of cumulative net incl. zero start) <= MAX_DD x capital AND worst rolling ROLLING_SESSIONS-session net P&L / capital >= MIN_ROLLING",
+    "source": "docs/specs/strategy_evaluation_and_ranking.md MAIN hard gates (no code implementation exists)"
+   },
+   "S11": {
+    "broadly_share": 0.5,
+    "gate": false,
+    "role": "classification",
+    "rule": "per frozen config over evaluable symbols: ZERO moderate => contradiction (BLOCKED); exactly 1 => SYMBOL_SPECIFIC; moderate share >= BROADLY_SHARE => BROADLY_REPLICATED; else CLUSTER_REPLICATED"
+   },
+   "S2": {
+    "gate": true,
+    "min_trades": 30,
+    "rule": "trade_count >= MIN_TRADES (accepted Pass-1 trade definition: entries with qty>0)"
+   },
+   "S3": {
+    "gate": true,
+    "multiplier": 2,
+    "rule": "every commission and execution-slippage input x2; SAME matched passive benchmark under the SAME stressed costs; PASS iff stressed net P&L > 0 AND stressed benchmark alpha > 0"
+   },
+   "S4": {
+    "gate": false,
+    "multiplier": 3,
+    "role": "diagnostic strength",
+    "rule": "as S3 at x3"
+   },
+   "S5": {
+    "delay_sessions": 1,
+    "gate": true,
+    "rule": "own completed-bar decision stream delayed by exactly one completed session; causal fill rule unchanged; benchmark and evaluation window identical to Pass 1; PASS iff delayed net P&L > 0 AND delayed alpha > 0"
+   },
+   "S6": {
+    "gate": true,
+    "min_positive_years": 6,
+    "rule": "baseline per-bar benchmark-relative alpha by calendar year; a year absent from the evaluation window contributes 0 (not positive); PASS iff positive years >= MIN_POSITIVE_YEARS of 8",
+    "years": [
+     2016,
+     2017,
+     2018,
+     2019,
+     2020,
+     2021,
+     2022,
+     2023
+    ]
+   },
+   "S7": {
+    "gate": true,
+    "rule": "remove the year with the largest positive alpha contribution (earliest year on ties); PASS iff remaining total alpha > 0"
+   },
+   "S8": {
+    "gate": true,
+    "max_share": 0.8,
+    "rule": "Pass-1 regime_concentration_share (max positive bucket / sum positive buckets; RISK_ON iff SPY prior-completed-bar close > SPY SMA200) <= MAX; absent share is BLOCKED"
+   },
+   "S9": {
+    "gate": true,
+    "min_share": 0.25,
+    "rule": "same family/symbol, exactly one numeric param moved to the adjacent frozen-grid value (Pass-1 neighbor authority); neighbor supports iff it is a Pass-1 DISCOVERED_MODERATE StrategyEdge; PASS iff supported share >= MIN; zero valid neighbors => NOT_APPLICABLE",
+    "supporting_class": "DISCOVERED_MODERATE"
+   }
+  },
+  "verdict_rule": {
+   "BLOCKED": "no applicable hard gate FAILs but required proof is genuinely unavailable (never poor economics)",
+   "NOT_APPLICABLE": "scenario excluded from the applicable gate set; never a fabricated pass or failure",
+   "REJECTED": "at least one applicable hard gate FAIL (complete ordered failure list recorded; no early stop)",
+   "SURVIVOR": "every applicable hard gate PASS",
+   "baseline_contradiction": "S1/C1 disagreement is a deterministic system contradiction: attempt fails, run hard-stops"
+  }
+ },
+ "robustness_attempt_count": 0,
+ "schema_version": "alpha_edge_pass2_predeclaration_v1",
+ "starting_head": "48173dd25f07c2f12c8e75cd55fe47c83ffbd29a",
+ "universe": {
+  "data_provenance_identity": {
+   "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+   "partitions_id": "5e2a018cc5fd82486859f1f1c4a4d8b5",
+   "protocol_id": "1916cbc84d6cbefccbd33a0ffe8ac300",
+   "request_contract_sha256": "395ef26bf1b2381b72803ce65c3e7da75153d0cc518a9e584a71c95cfaac2f83"
+  },
+  "point_in_time_membership": false,
+  "survivorship_caveat": "current-registry snapshot, NOT point-in-time; mandatory",
+  "survivorship_classification": "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME",
+  "symbol_count": 88,
+  "universe_identity": {
+   "survivorship_classification": "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME",
+   "symbol_count": 88,
+   "symbols_sha256": "ba7b2ab4fac35ab2637198152403820015c26533ee4ca67979c53d690e546c8c",
+   "universe_id": "a32b4de2b515d93c4042e6b8368bf4a5",
+   "universe_mode": "fixed_ex_ante"
+  }
+ }
+}

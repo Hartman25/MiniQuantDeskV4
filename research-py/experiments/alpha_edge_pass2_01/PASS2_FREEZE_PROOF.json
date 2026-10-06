@@ -1,0 +1,38 @@
+{
+ "PASS2_PROTOCOL_ID": "a712c301c2c527d8bc37b1ba7e72e6889c16a3ae0b2cd6e10f4dfbf2ee62db15",
+ "cohort_manifest_sha256_lf": "9c9080edfc6fb78dd594dbd14e5fa69a8600e1a856a4452685a0de625ed10e86",
+ "conditional_cohort": 135,
+ "conditional_cohort_root": "fadf698ad709b436ad6d891ba2cea7a893be56d6fa21190f160f213114f0656f",
+ "freeze_marker": {
+  "conditional_cohort_root": "fadf698ad709b436ad6d891ba2cea7a893be56d6fa21190f160f213114f0656f",
+  "conditional_count": 135,
+  "pass1_binding_sha256": "86683467689f9ae56119c244c39fdd1b42d6139a36bec934b3185db1f8dc05f2",
+  "pass2_protocol_id": "a712c301c2c527d8bc37b1ba7e72e6889c16a3ae0b2cd6e10f4dfbf2ee62db15",
+  "strategy_cohort_root": "04b3ad34d6eb40ee46d28a94af42da14b8c65355930ed51205c9d23634a8fa57",
+  "strategy_count": 789
+ },
+ "input_fence": {
+  "discovery_end_exclusive": "2024-01-01 00:00:00+00:00",
+  "max_end_ts": "2023-12-29 05:00:00+00:00",
+  "rows_in_forbidden_partitions": 0,
+  "rows_loaded": 155088,
+  "symbols": 88
+ },
+ "pass1_attempt_counts": {
+  "conditional_v3": {
+   "not_evaluable": 30,
+   "succeeded": 1065
+  },
+  "conditional_v3_total": 1095,
+  "strategy": {
+   "succeeded": 38192
+  },
+  "strategy_total": 38192
+ },
+ "predeclaration_sha256_lf": "5a30c803452ea0636a1a66f3ab5d5a455f00aec05a3575e70d1c785100779d7b",
+ "registered_candidates": 924,
+ "robustness_attempts_at_freeze": 0,
+ "schema_version": "alpha_edge_pass2_freeze_proof_v1",
+ "strategy_cohort": 789,
+ "strategy_cohort_root": "04b3ad34d6eb40ee46d28a94af42da14b8c65355930ed51205c9d23634a8fa57"
+}
