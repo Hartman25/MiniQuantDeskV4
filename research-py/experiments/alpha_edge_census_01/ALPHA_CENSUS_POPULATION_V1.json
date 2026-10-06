@@ -1,0 +1,39 @@
+{
+ "attempts_at_freeze": 0,
+ "freeze": {
+  "conditional_horizons": [
+   1,
+   2,
+   3,
+   5,
+   10,
+   20
+  ],
+  "conditional_population_root": "1abdad2e89196275d0f9ce1b69b8b869ab21a9a425e6bb3eb4e5855525b7b979",
+  "conditional_query_count": 2622768,
+  "manifest_order_root": "b7fe591be4d24881834aee8291a892af580905cb6c0e14d395a283e30863c25c",
+  "search_space_id": "5ca25a2a965c8056c754760e4ded2473",
+  "strategy_cell_count": 437128,
+  "strategy_population_root": "99078e64ef4b41618f420d1b8c66a1110a3789bb1e53a87aa959153055848c5c"
+ },
+ "gate": {
+  "attempts": 0,
+  "conditional_horizons": [
+   1,
+   2,
+   3,
+   5,
+   10,
+   20
+  ],
+  "conditional_population_root": "1abdad2e89196275d0f9ce1b69b8b869ab21a9a425e6bb3eb4e5855525b7b979",
+  "conditional_query_count": 2622768,
+  "manifest_order_root": "b7fe591be4d24881834aee8291a892af580905cb6c0e14d395a283e30863c25c",
+  "registered": 437128,
+  "search_space_id": "5ca25a2a965c8056c754760e4ded2473",
+  "strategy_cell_count": 437128,
+  "strategy_population_root": "99078e64ef4b41618f420d1b8c66a1110a3789bb1e53a87aa959153055848c5c"
+ },
+ "registered_equals_expected": true,
+ "schema_version": "alpha_census_population_v1"
+}

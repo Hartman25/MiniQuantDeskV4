@@ -1,0 +1,181 @@
+{
+ "alpha_definition": "net_total_pnl - benchmark_net_total_pnl over the cell evaluation window, finite and > 0",
+ "benchmark": {
+  "kind": "capital_matched_passive_buy_hold_same_window_same_cost_model",
+  "window_start": "first bar where the cell signal is defined"
+ },
+ "calendar_contract": {
+  "content_sha256": "3249ee517cbc6763b9f73b372d5c6a5f8337d872b91d20a5bca1c27b7a1a76de",
+  "contract_id": "us_equity_regular_sessions_v1"
+ },
+ "chunking": {
+  "cells_per_chunk": 500,
+  "identity_independent": true
+ },
+ "conditional_edge": {
+  "fwd_ret": "close_{t+h}/close_t - 1, label only",
+  "horizons": [
+   1,
+   2,
+   3,
+   5,
+   10,
+   20
+  ],
+  "positive_effect": "finite mean fwd_ret conditional minus unconditional same-symbol mean > 0",
+  "recording": "every finite positive effect; no minimum n/effect/DSR"
+ },
+ "data_contract": {
+  "adjustment": "all",
+  "asof": "2026-10-05",
+  "end_utc_exclusive": "2025-01-01T00:00:00+00:00",
+  "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+  "feed": "sip",
+  "no_iex_fallback": true,
+  "provider": "alpaca",
+  "start_utc": "2016-01-01T00:00:00+00:00",
+  "symbol_failure_policy": "NON_EVALUABLE_stays_in_universe",
+  "timeframe": "1Day"
+ },
+ "edge_identity": {
+  "conditional_edge": "sha256(kind,trial_id,horizon)",
+  "result_independent": true,
+  "strategy_edge": "sha256(kind,trial_id)"
+ },
+ "edge_recording_rule": {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "conditional_edge": "finite positive conditional effect",
+  "strategy_edge": "evaluable cell with finite net matched-benchmark alpha > 0"
+ },
+ "execution_contract": {
+  "calendar_signal": "member(bar t+2) so the held close-to-close return covers a member session; never past 2024-12-31",
+  "cost_model": {
+   "commission_bps_per_side": 10.0,
+   "slippage_bps_per_side": 0.0
+  },
+  "execution_pricing": {
+   "pricing_model_id": "rust_conservative_bar_range_v1",
+   "slippage_bps": 5,
+   "source": "PREDECLARED_BATCH_03 economic_protocol",
+   "volatility_mult_bps": 0
+  },
+  "fill": "first bar strictly after t at rust_conservative_bar_range_v1 (BUY high+slip, SELL low-slip), integer-micros, same-bar fill forbidden",
+  "hold_semantics": "desired while any qualifying event occurred in trailing N completed bars; no pyramiding",
+  "open_position_at_end": "marked_to_last_close_no_liquidation",
+  "pnl_marking": "qty_held_before_bar*(close_t-close_{t-1}); fill cost = qty*adverse(fill vs close)+commission",
+  "positions": "long_flat_daily_completed_bars",
+  "rebalance_anchor": "canonical session ordinal since 2016-01-01 modulo interval",
+  "signal_knowledge": "signal on bar t uses only bars <= t"
+ },
+ "feature_version": {
+  "eligible_features": [
+   "atr_14",
+   "atr_pct_14",
+   "atr_rank_14",
+   "dolvol_20",
+   "ema_fast_slow",
+   "gap_pct_1",
+   "hh_dist_20",
+   "hh_dist_60",
+   "illiquidity_amihud",
+   "ll_dist_20",
+   "ll_dist_60",
+   "momentum_score",
+   "r2_20",
+   "range_pct",
+   "ret_1",
+   "ret_10",
+   "ret_2",
+   "ret_20",
+   "ret_5",
+   "ret_rank_20",
+   "ret_rank_5",
+   "slope_20",
+   "slope_rank_20",
+   "vol_10",
+   "vol_20",
+   "vol_60",
+   "vol_rank_20",
+   "vol_ratio",
+   "zret_20"
+  ],
+  "excluded_features": {
+   "dow": "calendar encoding covered by S14",
+   "is_month_end": "calendar encoding covered by S14",
+   "month": "calendar encoding covered by S14",
+   "stale_bar_flag": "explicit data-quality flag"
+  },
+  "feature_set": "FeatureSetV1"
+ },
+ "flag_thresholds": {
+  "cost_fragile": "alpha - (strategy_costs - benchmark_costs) <= 0, i.e. doubling costs erases alpha",
+  "data_quality_caveat_zero_volume_bars": 20,
+  "data_short_history_rows": 1500,
+  "high_turnover_round_trips_per_year": 50,
+  "large_drawdown_frac_of_budget": 0.25,
+  "parameter_island_neighbor_positive_share": 0.25,
+  "regime_concentration_share": 0.8,
+  "single_year_concentration_share": 0.5,
+  "tiny_sample_trades": 30
+ },
+ "metric_definitions": {
+  "concentration": "max positive bucket / sum of positive buckets of per-bar alpha contribution by year / regime",
+  "dsr": "DEFERRED_FULL_POPULATION: effective-trial correction over the full population is infeasible; per-cell sharpe/skew/kurtosis/observations are recorded so research_multiple_testing_judge_v1 can run later",
+  "exposure": "fraction of window bars with a position held before the bar",
+  "max_drawdown": "peak-to-trough of cumulative net pnl including the zero start; flagged as a fraction of the 10000 budget",
+  "min_cross_section": 20,
+  "round_trips": "closed runs",
+  "sharpe": "mean/std(ddof=1) of daily net pnl / 100000 over window bars * sqrt(252); null when std == 0",
+  "trade_count": "entries with qty > 0 (open run counted)",
+  "turnover": "traded notional (entries+exits) / 10000",
+  "universe_cell": "sum of per-symbol simulations on the global session grid; capital 10000 per evaluable member",
+  "win_loss": "closed runs only; run pnl = net bars from entry bar through exit bar inclusive"
+ },
+ "ml_folds": {
+  "label_purge": "training rows require t+h strictly before test start",
+  "s19_model": {
+   "clip_z": 5.0,
+   "features_per_model": 1,
+   "fit": "mqk_research.ml.model_logreg.fit_logreg_deterministic",
+   "fit_intercept": true,
+   "l2": 0.01,
+   "lr": 0.1,
+   "standardize": true,
+   "steps": 300
+  },
+  "scheme": "expanding walk-forward by calendar year, first test year requires >=504 prior rows",
+  "thresholds": "quantiles from training rows only"
+ },
+ "ordering": "families S01..S20 in grid order; symbols sorted; cell identity independent of order",
+ "parameter_neighborhood": {
+  "axes": "numeric non-bool parameters only",
+  "neighbor": "same family and same symbol, equal on every other parameter, adjacent in that parameter's sorted unique grid values",
+  "parameter_island": "positive cell with >=1 neighbor and positive-neighbor share < threshold; never deleted"
+ },
+ "regime_definition": "SPY close > SPY SMA200 at the prior completed bar (RISK_ON else RISK_OFF)",
+ "replication": {
+  "BROADLY_REPLICATED": ">= 50% of evaluable symbols positive",
+  "CLUSTER_REPLICATED": "2+ positive symbols but < 50%",
+  "SYMBOL_SPECIFIC": "exactly 1 positive symbol",
+  "basis": "per config: count of evaluable symbols whose cell has net alpha > 0 (conditional: effect > 0 per horizon)",
+  "universe_cell": "NOT_APPLICABLE"
+ },
+ "retry_rules": {
+  "infrastructure_retry": "same trial, new attempt, same economics",
+  "outcome_based_retry": "forbidden"
+ },
+ "schema_version": "alpha_census_protocol_v1",
+ "sizing": {
+  "allocation_bps": 1000,
+  "compounding": false,
+  "entry_budget_usd": 10000,
+  "initial_capital_usd": 100000,
+  "model": "FixedInitialCapitalFractionV1",
+  "plus_one_fallback": false,
+  "production_default": false,
+  "quantity": "floor(budget / completed-signal-bar close)",
+  "universe_level_capital_basis": "USD 10000 per evaluable member symbol",
+  "whole_shares": true
+ }
+}
