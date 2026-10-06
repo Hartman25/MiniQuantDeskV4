@@ -1,0 +1,25 @@
+{
+ "contaminated_by_rejected_run": {
+  "end_exclusive": "2025-01-01",
+  "reason": "read by ALPHA_EDGE_CENSUS_01_REJECTED_EXECUTION_20261005",
+  "role": "NEVER_AN_UNREAD_RESERVE",
+  "start_inclusive": "2024-01-01",
+  "status": "CONTAMINATED_BY_REJECTED_RUN"
+ },
+ "discovery": {
+  "end_exclusive": "2024-01-01",
+  "role": "PASS1_CENSUS_DISCOVERY",
+  "start_inclusive": "2016-01-01"
+ },
+ "final_holdout": {
+  "start_inclusive": "2026-03-01",
+  "status": "RESERVED_UNCONSUMED"
+ },
+ "remaining_confirmation_reserve": {
+  "end_exclusive": "2026-03-01",
+  "role": "LATER_INDEPENDENT_CONFIRMATION",
+  "start_inclusive": "2025-01-01",
+  "status": "RESERVED_UNCONSUMED"
+ },
+ "schema_version": "alpha_census_partitions_v2"
+}

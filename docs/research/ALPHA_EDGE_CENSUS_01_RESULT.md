@@ -1,3 +1,5 @@
+> **NOT THE AUTHORITATIVE RESULT.** This document records ALPHA_EDGE_CENSUS_01_REJECTED_EXECUTION_20261005 (reason: INDEPENDENT_REVIEW_REJECTED_CONTRACT_DIVERGENCE). Its counts are historical exploratory values only and must not select or alter any corrected candidate, grid, threshold, symbol or factor grammar. See `ALPHA_EDGE_CENSUS_01_REJECTED_RUN_DISPOSITION.md`; the corrected result is a separate document.
+
 # Alpha Edge Census 01 — Pass 1 Result
 
 Mission: V4-ALPHA-EDGE-CENSUS-01. Label for every observation: **DISCOVERED / NOT VALIDATED**.

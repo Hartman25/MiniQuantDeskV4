@@ -1,0 +1,5055 @@
+{
+ "conditional_factor_count": 2170,
+ "conditional_horizons": [
+  1,
+  3,
+  5,
+  10,
+  20
+ ],
+ "config_count": 434,
+ "configs": [
+  {
+   "config_id": "a95cf20bd092ec2ad20eb7e6",
+   "family": "S01",
+   "params": {
+    "cadence": "daily",
+    "lookback": 21
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c110af9887652c2ca78e6f46",
+   "family": "S01",
+   "params": {
+    "cadence": "month_end",
+    "lookback": 21
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1efb247721b49a7af1fe0e12",
+   "family": "S01",
+   "params": {
+    "cadence": "daily",
+    "lookback": 63
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "25a47e79576eb50babf0136d",
+   "family": "S01",
+   "params": {
+    "cadence": "month_end",
+    "lookback": 63
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "08fd93f8ddad030cb65c0f6d",
+   "family": "S01",
+   "params": {
+    "cadence": "daily",
+    "lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d6fd1ec9fa17b4d1453509ed",
+   "family": "S01",
+   "params": {
+    "cadence": "month_end",
+    "lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "633c54ed24fb67a798065f11",
+   "family": "S01",
+   "params": {
+    "cadence": "daily",
+    "lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bece415e329143ee1efcf85c",
+   "family": "S01",
+   "params": {
+    "cadence": "month_end",
+    "lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fa10321df85fe42838c912bc",
+   "family": "S02",
+   "params": {
+    "sma": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5572a997f88a282fc2cc4344",
+   "family": "S02",
+   "params": {
+    "sma": 50
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9286d7fec414c565180fba0f",
+   "family": "S02",
+   "params": {
+    "sma": 100
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "721cf97ebab145f5984dd99f",
+   "family": "S02",
+   "params": {
+    "sma": 150
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c93dd13c072dc2a57f173cb0",
+   "family": "S02",
+   "params": {
+    "sma": 200
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4fe847fa39d9cee89166991a",
+   "family": "S02",
+   "params": {
+    "sma": 250
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c287bb6bb06567ea1104f3fa",
+   "family": "S03",
+   "params": {
+    "fast": 10,
+    "slow": 50
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b6153d4be00dfbf678c64db1",
+   "family": "S03",
+   "params": {
+    "fast": 10,
+    "slow": 100
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "260c26eabb693519335007fd",
+   "family": "S03",
+   "params": {
+    "fast": 10,
+    "slow": 150
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ee8f55e85294f3553da4dd55",
+   "family": "S03",
+   "params": {
+    "fast": 10,
+    "slow": 200
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0a3a38b98244791dfbede21e",
+   "family": "S03",
+   "params": {
+    "fast": 10,
+    "slow": 250
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ed689ffd139c62e9d94ebac4",
+   "family": "S03",
+   "params": {
+    "fast": 20,
+    "slow": 50
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3b4de5158c763d9c4f002786",
+   "family": "S03",
+   "params": {
+    "fast": 20,
+    "slow": 100
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bf22c6f718455e2f1ecb420f",
+   "family": "S03",
+   "params": {
+    "fast": 20,
+    "slow": 150
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8a8c96ff5a1aa03ea2ff45cb",
+   "family": "S03",
+   "params": {
+    "fast": 20,
+    "slow": 200
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2c63cfc64034ee7517e0c805",
+   "family": "S03",
+   "params": {
+    "fast": 20,
+    "slow": 250
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "cfaec9362f1d700531058094",
+   "family": "S03",
+   "params": {
+    "fast": 50,
+    "slow": 100
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "aa3677ccd155a86202b12d93",
+   "family": "S03",
+   "params": {
+    "fast": 50,
+    "slow": 150
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1140711db608f3f9f9d555e1",
+   "family": "S03",
+   "params": {
+    "fast": 50,
+    "slow": 200
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3f28d35608e38004a7da76b3",
+   "family": "S03",
+   "params": {
+    "fast": 50,
+    "slow": 250
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0e42dbab9ab5be827fa36d0b",
+   "family": "S04",
+   "params": {
+    "entry": 20,
+    "exit": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "92bf175ceadcb3aad5ac15f3",
+   "family": "S04",
+   "params": {
+    "entry": 50,
+    "exit": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "359887a42bee917b3d280262",
+   "family": "S04",
+   "params": {
+    "entry": 50,
+    "exit": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5d1ed937a805cde0e947836c",
+   "family": "S04",
+   "params": {
+    "entry": 100,
+    "exit": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "062e5b8e541629b0dff83800",
+   "family": "S04",
+   "params": {
+    "entry": 100,
+    "exit": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "05890e0b6c01751506451996",
+   "family": "S04",
+   "params": {
+    "entry": 100,
+    "exit": 50
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fc5c39ac9ff42a3f78bef51f",
+   "family": "S04",
+   "params": {
+    "entry": 150,
+    "exit": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "20bf9add124e6a38589e4450",
+   "family": "S04",
+   "params": {
+    "entry": 150,
+    "exit": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "044649cc0aeb463ce319a8f2",
+   "family": "S04",
+   "params": {
+    "entry": 150,
+    "exit": 50
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f5c203267375df1a892d2fdc",
+   "family": "S04",
+   "params": {
+    "entry": 200,
+    "exit": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "27bc8e296c329750d6e4d60f",
+   "family": "S04",
+   "params": {
+    "entry": 200,
+    "exit": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "cce431d785191eb831ee5ad0",
+   "family": "S04",
+   "params": {
+    "entry": 200,
+    "exit": 50
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "738df0144e6895eac6d3fb0a",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 2,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ed7aceaa52036336decb914d",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 2,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7e5de7a5f7d5de6b948ea934",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 2,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "cfa7922dfa0847ac90140b13",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 2,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "967f2dfcb4c91e4f0c9e594f",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 2,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "67182543b8def83afdfeb2b5",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 2,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "105d08c741b1e4ce22244940",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 2,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "812f33e61d2115c96ebff697",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 2,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "867475eb012fb43acfc4d6b2",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 2,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b7004c2a9adc2911e3196475",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 2,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bda70c42ba375fddec0b5157",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 2,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "10762d1a3f2a8f61146ddd67",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 2,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9d272739bc05880899126596",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e0056f74cc7c4e60be9be707",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "afbf266694e97d5e4a2224bf",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ebeb33d16e3dcde58295ce7b",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4bda8562cae36a77618376fd",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8f9623def99443fa9c51df86",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0f7b1c4d1e5c2cd4828f6489",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c071433803bc7e5a86379365",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2e7cf350120bb459b93514b1",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "26307102b42702d19a3ebdff",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a3bdb81990dd0cf6d596c2cf",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "598a6d016f5495a68ce98fd2",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6de2ba67791088fa48400150",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9cac6c3f0006cd7909175776",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2af20cff33c691d659e27a70",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bce846b60d5966baa8f13faf",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "15527593c8effa06f26b0e77",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "672a5a6e0f014c4609f4160a",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8b5523a179796c6487644eec",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e2fee922a375e0534afa197d",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7057a4a72fac56e8d2e5ac5a",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "982ea6463df20456e4278f52",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "669c483cb78e81b19c515a7a",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "44dd86442c8f0c305018cfb4",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4d15bb9805125006fd65c07f",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 7,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6dda86202ef9e7b4fd09ab47",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 7,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b3709abb75ef4359cd46bd81",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 7,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2299c60f9dca4494be6bbe09",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 7,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bb9b95d642a3f13aab6a069d",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 7,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8f6a2e4467364396c2791b36",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 7,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "90bc7a4e5a6566551eb86805",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 7,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d399e0ed25752fcadbbce421",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 7,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "42ddc30f51217804f6e3e685",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 7,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "65176714be375a888c74f5f6",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 7,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e17a195fbb0e81424249530a",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 7,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "63696859577250d6dbd5da5f",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 7,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ef81d92430ee85c6364ba710",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "73f0230d21ace42ccaa82b09",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b83a6126042fd1b4eedc24fe",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "122651c6bf19352c8a55494e",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8fbbcc6b3bc12f9337e5cf0d",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d6f3274e84bbbe80e653aabd",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8953fc083132bcf315c74efe",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e5dc0ec1ca0e6548861b6ec6",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "157d06ff6c76d025e01a0841",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f51345caa05451e412e67064",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0f8817c84622dcbcd26e6d9b",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "cf939efde4417f36cad69a96",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ede23878a9817e0fae5cb5ed",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 14,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a68301ea2e4ff9169aae2e12",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 50,
+    "period": 14,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f324f1305962ae04ffb385f6",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 14,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "aa391d5eaf0a0ea07227c0eb",
+   "family": "S05",
+   "params": {
+    "entry_below": 10,
+    "exit_above": 70,
+    "period": 14,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6a1b74d64530abf9bd66f8cd",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 14,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "de043772d23cc1412307f19e",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 50,
+    "period": 14,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ba597cbb2177c84ba8fc702f",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 14,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5c33e3df7098fea1917392bc",
+   "family": "S05",
+   "params": {
+    "entry_below": 20,
+    "exit_above": 70,
+    "period": 14,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9ef9fc07eb184714943c3bf2",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 14,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4f9517b31ae202cd5e2751d9",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 50,
+    "period": 14,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b4ded610277ba100938555af",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 14,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "70a2d55e5ff4388a82d4fce8",
+   "family": "S05",
+   "params": {
+    "entry_below": 30,
+    "exit_above": 70,
+    "period": 14,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fd1599eeab2d23d8c5af62ba",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8dc08892c08338748a813295",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "353814f8ae39cf32e0a16fc0",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "393b3c17d93ed0a7e65670da",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1c6062c8ee21e4eaa2777934",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "173642fbd945532ec3d36432",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1cbb835ab40aa316083eb0bf",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 20,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "976aebef0d1e130468047c17",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 20,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e12a2a366061a05f8989fe43",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 20,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "279ec0a101e0cc63dfa3ed58",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 20,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f5b0fa5762500e51778dc704",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 20,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "00bdb734d34ec168af356e5c",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 20,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c89e0b15c8bb0ccac5ceb03c",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 40,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "aebc849542a648d5f8c81a29",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 40,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3392a29ea9d5c3c621964962",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 40,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "606c5b051fe0d748ca60e535",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 40,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a4392c10c957caaa9455285a",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 40,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e2b001eb32e71e944e8c3b42",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 40,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "06fb2cefffd1e85ab50a6e4f",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 60,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9e23dc00ed30cf09928603fe",
+   "family": "S06",
+   "params": {
+    "entry_z": -1.5,
+    "exit_z": 0.0,
+    "lookback": 60,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0b19211b182a939f9c8843ac",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 60,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1bfa41839cf020aeb575749d",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 60,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "85586130ecd7dafe79e77922",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 60,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "996d6e211f2b22109c7764d0",
+   "family": "S06",
+   "params": {
+    "entry_z": -2.5,
+    "exit_z": 0.0,
+    "lookback": 60,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1b8b35b7fc377dcce4b132f9",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "21081ef328e5a82c7d48dd8a",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3e8ceff1c9b70ae59900399e",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8f718218b48a1c6146a48912",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1e32852966c0db7032efe105",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "da867e39b9f76547a1664689",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "87c1d3a73846a8f26bb6fa74",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "17a07720190a32e8d899b660",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2d941474a1d2cfe59bee7834",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "59948927c19652d060395136",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a5ed0f7b941e1d2446a56e77",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d65aff5ec763574f8011ea76",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "39f5507cd95ac697a1447fb3",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "74c75a8e380f48d15a2e513a",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e41aaef442ea2e330cd8b919",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9b2cdaac6c56d1f8f930f933",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "db886706d127f33a9fc1ccb9",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2b18c0f2905294b4ec93fd0b",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a4ac3dbec86f52bc4d33d623",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "137b034b9fdc2c2bcd596024",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "aa4464113a71488081fcd2c7",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "cf319bf4ed9120f6dd1ef871",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fa562fc4d6d6ea9693cfc0c4",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4ef2ff39b5d15824a6fbaaa7",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ab7aeecca5b6e65cff97bfcf",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a1511a0b768d204a9654f12f",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bd12c8b708b38fc7333c7406",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c5530a31819305c0701904ab",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5f01e04e8f58fc8af8656508",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a6104223afab945271b59955",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "040564ab7c8e74bbfb2a3478",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "43263884d11288bcf3ad8492",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e1f612280e01d7f451ac830f",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "82f7d0b6ccb41aa880198297",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9baf3aa2a9e7d182722d6b59",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "30d336bda64eb2b95546776d",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 1,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "28e858fa77fc779fd2763355",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "efa71615072b8f0661a09ba6",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "69904954ff9f5818211faa1b",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "79e6f1d76b78d452a50eadbb",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2df4068edc2af6137254cfbd",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5df85e45c19b3698c8d67f60",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e986b938b54e4ecc87af4f10",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1352f51739ac42ce537afd08",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b4f2e903548983ecc7357a9d",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9e4df7ea6d14fd30da2ce95a",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a8401e57223bb5f8ac8ccb54",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "80d2e83d71f800ac37fb5ecc",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4e8cc25691391b64e6a63219",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5a7b15bfd18b833a7cdb9508",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "35826b001b19c47fcc9a15bf",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ddef64bbea510fe30f0a83ba",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "75420b90d10fc92aea94bc77",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "518cbc641f3af620b92b409a",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "dfe2ac81ee3b1a5a58563099",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b38102bcf8ac734abdf078bf",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f89bc79fce0c36b27b635ece",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "82b67d16ab656180f798af6a",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "160f8b5198d8fc60b63744a9",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "220a876cbf1cf9b59fa45903",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1abb4e2e5c2d51c683fa01f7",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0e4b97c0a71943dfd066bca9",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "822b837f0d34961f096c1b26",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d8eb32ae0ef8501c52e9965b",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b2a7d76b1188cce34ca0c94e",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c12eabe74f79c063cb74eb11",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "569336fcd21f7dd39a6a1727",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b191b7bf4315712f744af90b",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "179887c717f7ad52ca655d9c",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c8717e9f4714389f208bd23a",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4b48135d3174c8950da3f03b",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4da6bc8b1586240f1c4f2256",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 3,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fe6c88bcf7e8860318bc0ae8",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1be16af3f23aa118dcff1aaf",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "90b62b78b70be9e91b94c950",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "df6e2029e6f0d1f3187c89ee",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "05119f88a94e88b1f91b3009",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2d759d2e2154efbfa93d9b62",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "94acb0c11ec8b7c5a5571045",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "28aabc02f7898905c94a39ba",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5332add1cec90de2690805d8",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "de4eb75332ba6e1f39d5d80e",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b445139a4dfa26cea004f350",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f2ed525c737f0f7b9f22f61c",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f5fee3761651c4457973b1f8",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1deffeba9d0c99cfd238b76e",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5c2f87247d37c27059175bd8",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8311ce2a6ab94cf608c4315e",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a368d6eaca9f43efdc7846f3",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d68a1a7aa361947ddda6afa1",
+   "family": "S07",
+   "params": {
+    "atr_window": 14,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "cd7899db5e009a2b88ac4449",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6359b4ac8c4ae4675b73237e",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "93bb1a4550d04e352338fa14",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1afe3032adbfdf337c2c27f9",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6d86d8865b9042f23aa3259c",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7cec9afa27f1caa63393d643",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6cb1a15eaeac28b592ce1fb1",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "13e35bcda3bd015d1825b2a3",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2744f52ee1cbf5db6f064416",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "06e45674be4a0c995b7f3434",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "da977b0a2125c8fe1c37f6cf",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1012583f378992af43e43f42",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bab4370d2e16810ec398cce5",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4162b88a9e87d5195ff75f6b",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c3bb74076496df596d6a5591",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "05bb31cfb09e653e30620147",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ae4024d7e7360006506332a7",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "eeaa000fdcdb00c964f4e9ee",
+   "family": "S07",
+   "params": {
+    "atr_window": 20,
+    "decline_sessions": 5,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "797c6b5c5a5e949fe9574b4b",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1863ef1707c865121f775b16",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4e47eec3eda5dd9563e6e09f",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b1a0513bd9c87ad2c1414733",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4f499f829157cb01d9cb707d",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ebb1c79f4437c20758f2ecb7",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "743fd85979ed14a760a971c0",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3fa155a58cf31d56758c2405",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0fec6e6c2ebe4066d3981c51",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "03324f22709b32f27358b00d",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "09ff60de6986e51ba4f62730",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e1b961339ff81086a0526aa5",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fa6442804a453867daa1f1e6",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "51452070e638c1b49f2b318c",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5be0256dbce5e594a7f8c768",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "dc1d71d5418d42e31039ca2e",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a05b2f5a51993742fd432567",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6841e44701095eb60006d87a",
+   "family": "S08",
+   "params": {
+    "atr_window": 14,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "049626c566e3574e1351baf9",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "70a9de25640e61565942746d",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 1,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ef1cc6cd5a7e70e3c79ff992",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b1ae5ba7e54b631f71a05b31",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 3,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6771781e9ad817b766813ffb",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2f611ca124892359235f0ac5",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 5,
+    "mult": 1.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "280716e44b43cd2ada45215a",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "218a6d6d0dd7cc373128c4be",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 1,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "422fbb7bd8a32bceea7f7b45",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3e8f539ff80a1bbf34a54627",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 3,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0d7a8123b430b8d0fb7924b3",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7eb4ede2ad9a6449f81b5e15",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 5,
+    "mult": 1.5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "16a2d7156b6118eaa3cd6d31",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7c40b626d620b882fbb03205",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 1,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f59243599bc5e4bb1258ebe8",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "983411d18242e7f52266c62b",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 3,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "32872f6e731cd73026900acc",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "337346ba149ed3830a830602",
+   "family": "S08",
+   "params": {
+    "atr_window": 20,
+    "hold": 5,
+    "mult": 2.0,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ead8d6f4e3c845abd8e29400",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9f4b2f66e0e1179390461805",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ee948952491e67888650d1cd",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "365bcbb92f64abb84f937058",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fc2b222d7da445aacffe4355",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "394f686c84c99c3c455dd3ab",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "875f08e659e424d6fbf0fb6b",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8e1740feb23716c1359ff09e",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "555fc061ecbd1edbad63d1c9",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "673186d0119ea01d945c078c",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fc2a267eb1f38c7ded1d7ca9",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "947c304c2ce1337b80fd9fd2",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b8d9fc64f48253c8408a2eb9",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8cf8623d6ac141232d1273c6",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6af8c2cb75972fd6d04668f1",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "194cbc4b0c7fd23f2e061b6a",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1f3511e3396f9613a8ffda76",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "58ef3dbe367f8953cc80f73e",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0a5119d6a3f7ea1f0b656356",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d61ce0ff4bd7bdb91c4e81ce",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "92b2e449586a6337d0d7b6ed",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3ce1ca2ff68efb087d29b5d0",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a1c213b7fb8359fe9359c681",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b1be9e4fccf320e4fb8690ea",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "55fb2daa0c3484c960647c39",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1c6786d3e92fb6424bedb8b7",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3c83cf3b1dcab18f4440e316",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "424318953698c5391825465f",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a6c9716d9c1fe07197f6d9fc",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0944ad4330a9e938b8eb0d10",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a7bb34ad1a2c0ac59dc3b1c5",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c4da70c5165efc69f5132d2f",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2d5031bd4f3181dffe7b42a6",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3fc77575cc189d8900224824",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e12f0697bf1fab2af10948fb",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "429dd75cac9dff420e77b905",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "77db91ae53747ad047dd0701",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "422fb5779e23f7896519f84d",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "08effc3fd39de4d3dd519ce3",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a92a7b6ac1cc1578317b0b26",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "907db9f267fba827227d3b52",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9f5b599c73b76246355deb3c",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5b3471da24390d42f58d6ba2",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9e588d9335620d1671454ae7",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3c6b657273a2eec4e9f35a33",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "50d7f69f15b7d5d65aff22af",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4e6d5b49d8bc426805c0e31b",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fa8ce2fc72fba52d05668a1e",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 40,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e1d37cbaf470fba2a42bc88c",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9f168e318c6685b5db5df17f",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0cc88f1f5baa487094b5e41d",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c8f040cd2f841a3652eaa005",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "efcd61be3fa454ba72fc29ce",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "45539e56a1bfeb1bad408347",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d89ab5001ab1059a18d9acb1",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "12a50cfce3c34a64ee65043b",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.25,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9aab516289698f7e3b6652cf",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "22ba2242fb414477be5ea3c7",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2901a8e6e3189b20439ba21f",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d65a459d24a2003fd45e0007",
+   "family": "S09",
+   "params": {
+    "breakout": 20,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "95f25016dd7a913e17575c41",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3fe2d3c647eaca94d78763fe",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 10,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c71c748a00ffe4b81541f81b",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9f70e8d36ce7f678e778ddb0",
+   "family": "S09",
+   "params": {
+    "breakout": 50,
+    "exit": 20,
+    "long": 60,
+    "ratio": 0.4,
+    "short": 10,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b130cd112cd95b6e15fd648f",
+   "family": "S10",
+   "params": {
+    "cadence": "daily",
+    "distance": 0.03,
+    "high_lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f9565dce1cf0bfce84578b2d",
+   "family": "S10",
+   "params": {
+    "cadence": "month_end",
+    "distance": 0.03,
+    "high_lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "47d73bff9c8aa6d48b7c5f6a",
+   "family": "S10",
+   "params": {
+    "cadence": "daily",
+    "distance": 0.05,
+    "high_lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a56299762333b619fde3878d",
+   "family": "S10",
+   "params": {
+    "cadence": "month_end",
+    "distance": 0.05,
+    "high_lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1340beda5b1f5aecbe58fe4f",
+   "family": "S10",
+   "params": {
+    "cadence": "daily",
+    "distance": 0.1,
+    "high_lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1a1b46c873aa7aa0e0ebf03e",
+   "family": "S10",
+   "params": {
+    "cadence": "month_end",
+    "distance": 0.1,
+    "high_lookback": 126
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3ca838ff8e88e9f7a5042dd9",
+   "family": "S10",
+   "params": {
+    "cadence": "daily",
+    "distance": 0.03,
+    "high_lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "47f57513fc6f972190cc5aa0",
+   "family": "S10",
+   "params": {
+    "cadence": "month_end",
+    "distance": 0.03,
+    "high_lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4fba4cd4f6a601f46e9617d9",
+   "family": "S10",
+   "params": {
+    "cadence": "daily",
+    "distance": 0.05,
+    "high_lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fec39f767ce615f3727ee5f1",
+   "family": "S10",
+   "params": {
+    "cadence": "month_end",
+    "distance": 0.05,
+    "high_lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4665690e21d69b20087c64f3",
+   "family": "S10",
+   "params": {
+    "cadence": "daily",
+    "distance": 0.1,
+    "high_lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ed07161201998f01f0277685",
+   "family": "S10",
+   "params": {
+    "cadence": "month_end",
+    "distance": 0.1,
+    "high_lookback": 252
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "267ebd217cb419dbe6502116",
+   "family": "S11",
+   "params": {
+    "down_sessions": 2,
+    "hold": 1,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fcffcc5835d51ce559ee7117",
+   "family": "S11",
+   "params": {
+    "down_sessions": 2,
+    "hold": 1,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "762abdadb7776086e75e0221",
+   "family": "S11",
+   "params": {
+    "down_sessions": 2,
+    "hold": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "44da06e479964137b5ad4165",
+   "family": "S11",
+   "params": {
+    "down_sessions": 2,
+    "hold": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9642f182cc7cdb020d4fd617",
+   "family": "S11",
+   "params": {
+    "down_sessions": 2,
+    "hold": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "84b38eaa63104c27e244306b",
+   "family": "S11",
+   "params": {
+    "down_sessions": 2,
+    "hold": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f9cd8ce2c406b9f548154b43",
+   "family": "S11",
+   "params": {
+    "down_sessions": 3,
+    "hold": 1,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1fdd1ad39925d138f1a1348c",
+   "family": "S11",
+   "params": {
+    "down_sessions": 3,
+    "hold": 1,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b284aa3bcb07553521f920de",
+   "family": "S11",
+   "params": {
+    "down_sessions": 3,
+    "hold": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7965d1e1b6e0eb7d594bf42d",
+   "family": "S11",
+   "params": {
+    "down_sessions": 3,
+    "hold": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7b2c1175d2a8f60ee3ac98c3",
+   "family": "S11",
+   "params": {
+    "down_sessions": 3,
+    "hold": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4737e9b90273aaa6cf5eb8c4",
+   "family": "S11",
+   "params": {
+    "down_sessions": 3,
+    "hold": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "03fe1e28c5fd10746a930bd3",
+   "family": "S11",
+   "params": {
+    "down_sessions": 4,
+    "hold": 1,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7df844e61172dd9bed1febec",
+   "family": "S11",
+   "params": {
+    "down_sessions": 4,
+    "hold": 1,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "658073dd72bb0f37d5844630",
+   "family": "S11",
+   "params": {
+    "down_sessions": 4,
+    "hold": 3,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4310c5e7531f4cc5e40060ef",
+   "family": "S11",
+   "params": {
+    "down_sessions": 4,
+    "hold": 3,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3b93cb819f8b18bcc790f71e",
+   "family": "S11",
+   "params": {
+    "down_sessions": 4,
+    "hold": 5,
+    "trend": "none"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "09a125c0d4117dd5b3a82b15",
+   "family": "S11",
+   "params": {
+    "down_sessions": 4,
+    "hold": 5,
+    "trend": "sma200"
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e0c749020ca054894fa48cea",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0c856eedd3c7c4d4013fa61a",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "58343a28f147b82f85d604c5",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "fcc02c6eabc8ae0967e5b8c9",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e8370c529ef5e4dab8c701d9",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "04a3525140ad733b14dc0b05",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "da86707cf0a5d4596f0773b8",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "53d75411ed383005dcd441d8",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0ba214d2274cbd6713da895b",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "68243051d6fb286829b04611",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a1613219ee6bad584848bb15",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "355881b5bad3458873922829",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9da3726ff3ee58a16efee7cd",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "f4e590822139d71bf01cc6cc",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2d7403c0add2928bd5d953d2",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "5432dcb83b14f9cfa27a7562",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 20,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "450fbb3c778f79268e537d9b",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "01b09cc87de05986748902d6",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b53dc0e7ac5cf8b96bf5cce7",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7bbf36232fcbb25b7338fdb4",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "306c2ed46d3896eef1921daf",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "9a5380276f4a765d97976618",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "685bf2934b46fa57041c1726",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "436209b9ff015d7bcf9fb6ca",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 1.5
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "19466afa236f19bc157cdc79",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "548774f1ac169019ea1d5d69",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7e575b8b466cd202729281eb",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "608021a319ee4c336d9f31c0",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 1,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "93ad241044c892c4969eee5c",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "b2a0fe648fb9906cd483a72d",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "continuation",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "97600a49109e356dd17300e3",
+   "family": "S12",
+   "params": {
+    "hold": 1,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "d76c4b10e8ebbd183118e085",
+   "family": "S12",
+   "params": {
+    "hold": 3,
+    "mode": "reversal",
+    "price_impulse": 5,
+    "volume_lookback": 60,
+    "volume_z": 2.0
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "1cc27b4eac3a2d7d977adce7",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "0691580c9e24a1c11ed744ac",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "81d2d4f57c309a8c6336cc10",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4e71a837fcaded9ab568ec23",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "15ee38beeb443a20ec50c0ff",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e5e6da5ee379f55891784da2",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2e2d12086d5d8109f7cac93f",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "ee940d29ba7348eeb88e60b7",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8c5a08db4f420b1a06867e6e",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "e78721b05c7b222c563e78be",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "3a7854cd3baa2254bf939620",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "004bced25f0b2a41198de574",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 10
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "c44a5954a42a49507fb1c168",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "245338929a784237fdeb2d44",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "bda62142ab153c232388c6c0",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "2cfd86c33f9a80ec7bdc614c",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "7a11ba1c80c7373d12f0e3e7",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "91cb341af2f69dd6d4e9c893",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 1.5,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "4157655c8e5ccfd35454ffad",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "25fa8b64d2920b5e52acf599",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "23d9dd901d9960c1f543503a",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "breakout",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "a8e6fa61c607da2e88cc548c",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 1,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "326dee12a4d8f6605cb6dfcf",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 3,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "6876747cd4e3e3a7cdf67b23",
+   "family": "S13",
+   "params": {
+    "expansion_ratio": 2.0,
+    "hold": 5,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 20
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "06d50758220ac362245e7611",
+   "family": "S14",
+   "params": {
+    "first": 3,
+    "kind": "tom",
+    "last": 1
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "71e994b5376b805f2a903d0b",
+   "family": "S14",
+   "params": {
+    "first": 3,
+    "kind": "tom",
+    "last": 2
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "8b7c96821cbf3dda16b3e24e",
+   "family": "S14",
+   "params": {
+    "first": 5,
+    "kind": "tom",
+    "last": 1
+   },
+   "scope": "symbol"
+  },
+  {
+   "config_id": "42ba80f2d48cd00682ea1a3b",
+   "family": "S14",
+   "params": {
+    "kind": "season",
+    "value": "nov_apr"
+   },
+   "scope": "symbol"
+  }
+ ],
+ "experiment_id": "alpha_edge_census_01_corrected",
+ "family_templates": {
+  "S01": {
+   "configs": 8,
+   "name": "TIME_SERIES_MOMENTUM",
+   "scope": "symbol"
+  },
+  "S02": {
+   "configs": 6,
+   "name": "PRICE_ABOVE_SMA",
+   "scope": "symbol"
+  },
+  "S03": {
+   "configs": 14,
+   "name": "SMA_CROSS",
+   "scope": "symbol"
+  },
+  "S04": {
+   "configs": 12,
+   "name": "DONCHIAN_BREAKOUT",
+   "scope": "symbol"
+  },
+  "S05": {
+   "configs": 72,
+   "name": "RSI_REVERSION",
+   "scope": "symbol"
+  },
+  "S06": {
+   "configs": 24,
+   "name": "ZSCORE_REVERSION",
+   "scope": "symbol"
+  },
+  "S07": {
+   "configs": 108,
+   "name": "ATR_NORMALIZED_REVERSAL",
+   "scope": "symbol"
+  },
+  "S08": {
+   "configs": 36,
+   "name": "OVERNIGHT_GAP_REVERSAL",
+   "scope": "symbol"
+  },
+  "S09": {
+   "configs": 64,
+   "name": "VOLATILITY_CONTRACTION_BREAKOUT",
+   "scope": "symbol"
+  },
+  "S10": {
+   "configs": 12,
+   "name": "HIGH_PROXIMITY",
+   "scope": "symbol"
+  },
+  "S11": {
+   "configs": 18,
+   "name": "CONSECUTIVE_DOWN_REVERSAL",
+   "scope": "symbol"
+  },
+  "S12": {
+   "configs": 32,
+   "name": "VOLUME_PRICE_SURPRISE",
+   "scope": "symbol"
+  },
+  "S13": {
+   "configs": 24,
+   "name": "VOLATILITY_EXPANSION",
+   "scope": "symbol"
+  },
+  "S14": {
+   "configs": 4,
+   "name": "CALENDAR",
+   "scope": "symbol"
+  }
+ },
+ "grammar_id": "2dd48b2525441ba5d4e92c6050c69c63",
+ "rejected_grammar": {
+  "config_count": 5086,
+  "families": "S01..S20",
+  "label": "REJECTED_UNAUTHORIZED_SEARCH_GRAMMAR",
+  "status": "REJECTED_NOT_AUTHORITATIVE"
+ },
+ "schema_version": "alpha_census_grammar_v2",
+ "signal_semantics": {
+  "S01": "long when log(close_t/close_{t-L})>0; cadence month_end samples the state on the last session of each month and holds",
+  "S02": "long while close_t > SMA(close, n)_t",
+  "S03": "long while SMA(fast)_t > SMA(slow)_t",
+  "S04": "enter when close_t > max(close_{t-entry..t-1}); exit when close_t < min(close_{t-exit..t-1})",
+  "S05": "Cutler simple-mean RSI(period); enter RSI<entry_below (and trend filter); exit RSI>exit_above",
+  "S06": "z=(close-mean)/std(ddof=1) over lookback; enter z<=entry_z (and trend filter); exit z>=0",
+  "S07": "event: close_{t-d}-close_t >= mult*ATR_{t-1} (simple-mean ATR, prior bar) and trend filter; held for `hold` strategy outputs",
+  "S08": "event: open_t - close_{t-1} <= -mult*ATR_{t-1}; decision only after bar t completes; held for `hold` strategy outputs",
+  "S09": "enter when range(short)/range(long) at t-1 <= ratio and close_t > prior-breakout close channel (and trend filter); exit below prior exit channel",
+  "S10": "long while close_t >= (1-distance)*max(close, high_lookback); cadence as S01",
+  "S11": "event: `down_sessions` consecutive down closes (and trend filter); held for `hold` strategy outputs",
+  "S12": "event: volume z-score vs prior L bars >= volume_z with price impulse sign (continuation up / reversal down); long only",
+  "S13": "event: std(short)/std(long) of log returns >= ratio with up-day (breakout) or down-day (reversal); long only",
+  "S14": "member(bar t+2) so the held close-to-close return covers a member session: turn-of-month last/first sessions, or Nov-Apr"
+ }
+}

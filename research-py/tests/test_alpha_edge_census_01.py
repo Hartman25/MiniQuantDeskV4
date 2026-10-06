@@ -1,4 +1,4 @@
-"""Alpha Edge Census Pass 1 invariants: authority, causality, execution, registry, resume, edge identity."""
+"""Corrected Alpha Edge Census invariants: authority, partitions, eligibility, causality, execution, store."""
 
 from __future__ import annotations
 
@@ -16,10 +16,7 @@ EXP = Path(__file__).resolve().parents[1] / "experiments" / "alpha_edge_census_0
 sys.path.insert(0, str(EXP))
 
 import calendar_authority as cal  # noqa: E402
-import census as ce  # noqa: E402
-import conditional as cd  # noqa: E402
 import data as cdata  # noqa: E402
-import edge_registry as er  # noqa: E402
 import partitions as pt  # noqa: E402
 import search_space as ss  # noqa: E402
 import signals as sg  # noqa: E402
@@ -87,31 +84,127 @@ def first_configs(per_family=2):
     return out
 
 
+def _load(name):
+    return json.loads((EXP / name).read_text(encoding="utf-8"))
+
+
 # --------------------------------------------------------------------------------------- authority / identity
 
-def test_frozen_manifests_match_regenerated_authority():
-    uni = json.loads((EXP / "ALPHA_CENSUS_UNIVERSE_V1.json").read_text())
-    part = json.loads((EXP / "ALPHA_CENSUS_PARTITIONS_V1.json").read_text())
-    prot = json.loads((EXP / "ALPHA_CENSUS_PROTOCOL_V1.json").read_text())
-    space = json.loads((EXP / "ALPHA_CENSUS_SEARCH_SPACE_V1.json").read_text())
-    assert part == ss.build_partitions() and prot == ss.build_protocol()
-    assert ss.build_search_space(uni, part, prot) == space
-    assert len(uni["symbols"]) == 88 and uni["symbols"] == sorted(set(uni["symbols"]))
-    assert "AAPL" in uni["symbols"]
-    assert uni["universe_source_kind"] == "current_enabled_equity_registry_snapshot_v1"
-    assert uni["point_in_time_membership"] is False
-    assert uni["survivorship_classification"] == "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME"
+def test_frozen_authority_manifests_match_regenerated_authority():
+    seed, grammar = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json"), _load("ALPHA_CENSUS_GRAMMAR_V2.json")
+    assert _load("ALPHA_CENSUS_PARTITIONS_V2.json") == ss.build_partitions()
+    assert _load("ALPHA_CENSUS_PROTOCOL_V2.json") == ss.build_protocol()
+    assert grammar == ss.build_grammar()
+    assert seed["symbol_count"] == len(seed["symbols"]) == 88 and seed["symbols"] == sorted(set(seed["symbols"]))
+    assert "AAPL" in seed["symbols"]
+    assert seed["universe_source_kind"] == "current_enabled_equity_registry_snapshot_v1"
+    assert seed["point_in_time_membership"] is False
+    assert seed["survivorship_classification"] == "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME"
+    rejected = json.loads((EXP / "rejected_run_20261005" / "ALPHA_CENSUS_UNIVERSE_V1.json").read_text(encoding="utf-8"))
+    assert seed["symbols"] == rejected["symbols"]
 
 
-def test_search_space_shape_and_unique_identity():
-    space = json.loads((EXP / "ALPHA_CENSUS_SEARCH_SPACE_V1.json").read_text())
-    cfgs = space["configs"]
-    assert len({c["config_id"] for c in cfgs}) == len(cfgs) == space["config_count"]
-    assert {c["family"] for c in cfgs} == {f"S{i:02d}" for i in range(1, 21)}
-    ids = {k: space[k] for k in ("universe_id", "partitions_id", "protocol_id")}
-    tids = [t for _c, _s, t in ss.iter_cells(cfgs, json.loads((EXP / "ALPHA_CENSUS_UNIVERSE_V1.json").read_text())["symbols"], ids)]
-    assert len(tids) == len(set(tids)) == space["strategy_cell_count"]
-    assert space["conditional_query_count"] == 6 * space["strategy_cell_count"]
+def test_ir2_families_are_exactly_s01_to_s14():
+    assert tuple(sorted({c["family"] for c in ss.build_configs()})) == tuple(f"S{i:02d}" for i in range(1, 15))
+    assert tuple(ss.FAMILIES) == ss.EXPECTED_FAMILY_IDS
+    assert all(c["scope"] == "symbol" for c in ss.build_configs())
+
+
+def test_ir3_exact_corrected_strategy_edge_configuration_count_is_434():
+    cfgs = ss.build_configs()
+    assert len(cfgs) == 434 == ss.EXPECTED_CONFIG_COUNT
+    assert len({c["config_id"] for c in cfgs}) == 434
+    assert sum(ss.EXPECTED_FAMILY_COUNTS.values()) == 434
+
+
+@pytest.mark.parametrize("family,count", [("S01", 8), ("S02", 6), ("S03", 14), ("S04", 12), ("S05", 72), ("S06", 24),
+                                          ("S07", 108), ("S08", 36), ("S09", 64), ("S10", 12), ("S11", 18),
+                                          ("S12", 32), ("S13", 24), ("S14", 4)])
+def test_per_family_config_counts(family, count):
+    assert sum(1 for c in ss.build_configs() if c["family"] == family) == count
+
+
+def _axis(family, key):
+    return sorted({c["params"][key] for c in ss.build_configs() if c["family"] == family})
+
+
+def test_ir4_axes_equal_the_frozen_values():
+    assert _axis("S01", "lookback") == [21, 63, 126, 252] and _axis("S01", "cadence") == ["daily", "month_end"]
+    assert _axis("S02", "sma") == [20, 50, 100, 150, 200, 250]
+    assert _axis("S03", "fast") == [10, 20, 50] and _axis("S03", "slow") == [50, 100, 150, 200, 250]
+    assert all(c["params"]["fast"] < c["params"]["slow"] for c in ss.build_configs() if c["family"] == "S03")
+    assert _axis("S04", "entry") == [20, 50, 100, 150, 200] and _axis("S04", "exit") == [10, 20, 50]
+    assert all(c["params"]["exit"] < c["params"]["entry"] for c in ss.build_configs() if c["family"] == "S04")
+    assert _axis("S05", "period") == [2, 3, 5, 7, 10, 14] and _axis("S05", "entry_below") == [10, 20, 30]
+    assert _axis("S05", "exit_above") == [50, 70] and _axis("S05", "trend") == ["none", "sma200"]
+    assert _axis("S06", "lookback") == [10, 20, 40, 60] and _axis("S06", "entry_z") == [-2.5, -2.0, -1.5]
+    assert _axis("S06", "exit_z") == [0.0] and _axis("S06", "trend") == ["none", "sma200"]
+    assert _axis("S07", "decline_sessions") == [1, 3, 5] and _axis("S07", "atr_window") == [14, 20]
+    assert _axis("S07", "mult") == [1.0, 1.5, 2.0] and _axis("S07", "hold") == [1, 3, 5]
+    assert _axis("S07", "trend") == ["none", "sma200"]
+    assert set(next(c for c in ss.build_configs() if c["family"] == "S07")["params"]) == {
+        "decline_sessions", "atr_window", "mult", "hold", "trend"}
+    assert _axis("S08", "atr_window") == [14, 20] and _axis("S08", "mult") == [1.0, 1.5, 2.0]
+    assert _axis("S08", "hold") == [1, 3, 5] and _axis("S08", "trend") == ["none", "sma200"]
+    assert set(next(c for c in ss.build_configs() if c["family"] == "S08")["params"]) == {
+        "atr_window", "mult", "hold", "trend"}
+    assert _axis("S09", "short") == [5, 10] and _axis("S09", "long") == [40, 60] and _axis("S09", "ratio") == [0.25, 0.40]
+    assert _axis("S09", "breakout") == [20, 50] and _axis("S09", "exit") == [10, 20]
+    assert _axis("S10", "high_lookback") == [126, 252] and _axis("S10", "distance") == [0.03, 0.05, 0.10]
+    assert _axis("S10", "cadence") == ["daily", "month_end"]
+    assert _axis("S11", "down_sessions") == [2, 3, 4] and _axis("S11", "hold") == [1, 3, 5]
+    assert _axis("S12", "volume_lookback") == [20, 60] and _axis("S12", "volume_z") == [1.5, 2.0]
+    assert _axis("S12", "price_impulse") == [1, 5] and _axis("S12", "mode") == ["continuation", "reversal"]
+    assert _axis("S12", "hold") == [1, 3]
+    assert _axis("S13", "short_vol") == [10, 20] and _axis("S13", "long_vol") == [60]
+    assert _axis("S13", "expansion_ratio") == [1.5, 2.0] and _axis("S13", "mode") == ["breakout", "reversal"]
+    assert _axis("S13", "hold") == [1, 3, 5]
+    s14 = [c["params"] for c in ss.build_configs() if c["family"] == "S14"]
+    assert s14 == [{"kind": "tom", "last": 1, "first": 3}, {"kind": "tom", "last": 2, "first": 3},
+                   {"kind": "tom", "last": 1, "first": 5}, {"kind": "season", "value": "nov_apr"}]
+
+
+def _grammar_mutants():
+    cfgs = ss.build_configs()
+    extra = {"config_id": "z", "family": "S15", "scope": "symbol", "params": {"x": 1}}
+    yield "added S15", cfgs + [extra]
+    yield "dropped one config", cfgs[:-1]
+    yield "extra S07 coordinate", cfgs + [{**cfgs[0], "family": "S07", "config_id": "q", "params": {"hold": 99}}]
+    yield "universe scope", [{**cfgs[0], "scope": "universe"}] + cfgs[1:]
+    yield "family missing", [c for c in cfgs if c["family"] != "S14"]
+
+
+@pytest.mark.parametrize("name,mutant", list(_grammar_mutants()), ids=lambda v: v if isinstance(v, str) else "")
+def test_ir5_grammar_authority_refuses_any_drift_before_attempt_one(name, mutant):
+    with pytest.raises(ss.GrammarRefusal):
+        ss.assert_grammar_authority(mutant)
+
+
+def test_ir5_s15_to_s20_are_not_registered_families():
+    assert not {f"S{i}" for i in range(15, 21)} & set(ss.FAMILIES)
+    assert ss.build_grammar()["rejected_grammar"]["label"] == "REJECTED_UNAUTHORIZED_SEARCH_GRAMMAR"
+
+
+def test_ir6_conditional_horizons_are_exactly_1_3_5_10_20():
+    assert ss.CONDITIONAL_HORIZONS == (1, 3, 5, 10, 20) and 2 not in ss.CONDITIONAL_HORIZONS
+    assert ss.build_grammar()["conditional_horizons"] == [1, 3, 5, 10, 20]
+    assert ss.build_protocol()["conditional_edge"]["horizons"] == [1, 3, 5, 10, 20]
+    assert ss.build_grammar()["conditional_factor_count"] == 434 * 5
+
+
+def test_trial_count_is_derived_from_the_eligible_universe_never_hard_coded():
+    g, part, prot = ss.build_grammar(), ss.build_partitions(), ss.build_protocol()
+    seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
+    for k in (88, 87, 3):
+        disp = {s: {"disposition": cdata.ELIGIBLE if i < k else cdata.EXCLUDED_INSUFFICIENT_HISTORY}
+                for i, s in enumerate(seed["symbols"])}
+        space = ss.build_search_space(g, ss.build_universe(seed, disp), part, prot)
+        assert space["eligible_symbol_count"] == k and space["strategy_trial_count"] == 434 * k
+        assert space["config_count"] == 434 and space["seed_symbol_count"] == 88
+    assert 434 * 88 == 38192
+    with pytest.raises(ss.GrammarRefusal):
+        ss.build_search_space(g, ss.build_universe(seed, {s: {"disposition": cdata.EXCLUDED_DATA_UNAVAILABLE}
+                                                         for s in seed["symbols"]}), part, prot)
 
 
 def test_identity_is_param_order_invariant_and_param_sensitive():
@@ -120,43 +213,60 @@ def test_identity_is_param_order_invariant_and_param_sensitive():
     c_perm = {**c, "params": {"b": 2, "a": 1}}
     c_other = {**c, "params": {"a": 1, "b": 3}}
     t = lambda cfg: ss.trial_id(ss.trial_identity(cfg, "SPY", ids))  # noqa: E731
-    assert t(c) == t(c_perm) and t(c) != t(c_other)
+    assert t(c) == t(c_perm) and t(c) != t(c_other) and t(c).startswith("ace2-")
     assert ss.config_id("S01", {"a": 1, "b": 2}) == ss.config_id("S01", {"b": 2, "a": 1})
     assert ss.config_id("S01", {"a": 1, "b": 2}) != ss.config_id("S01", {"a": 1, "b": 3})
-    assert ss.trial_id(ss.trial_identity(c, "SPY", ids)) != ss.trial_id(ss.trial_identity(c, "QQQ", ids))
+    assert t(c) != ss.trial_id(ss.trial_identity(c, "QQQ", ids))
+    assert ss.EXPERIMENT_ID != ss.REJECTED_EXPERIMENT_ID
 
 
-def test_edge_id_is_result_independent():
-    a = er.edge_id("STRATEGY_EDGE", "ace1-abc")
-    assert a == er.edge_id("STRATEGY_EDGE", "ace1-abc")
-    assert a != er.edge_id("CONDITIONAL_EDGE", "ace1-abc", 1)
-    assert er.edge_id("CONDITIONAL_EDGE", "ace1-abc", 1) != er.edge_id("CONDITIONAL_EDGE", "ace1-abc", 2)
-    import inspect
-    assert list(inspect.signature(er.edge_id).parameters) == ["kind", "trial_id", "horizon"]
-
-
-def test_protocol_declares_frozen_economics_and_non_executable_conditional():
+def test_protocol_declares_corrected_economics_floors_and_deferred_judge():
     prot = ss.build_protocol()
-    ec = prot["execution_contract"]
-    assert ec["execution_pricing"]["slippage_bps"] == 5 and ec["execution_pricing"]["volatility_mult_bps"] == 0
-    assert prot["flag_thresholds"]["tiny_sample_trades"] == 30
-    assert prot["metric_definitions"]["dsr"].startswith("DEFERRED_FULL_POPULATION")
-    assert prot["chunking"]["cells_per_chunk"] == 500
-    assert "label only" in prot["conditional_edge"]["fwd_ret"] and prot["sizing"]["production_default"] is False
+    assert prot["execution_contract"]["execution_pricing"]["slippage_bps"] == 5
+    q = prot["strategy_edge_qualification"]
+    assert q["min_closed_round_trips"] == 5 and q["min_evaluated_bars"] == 252 and q["judge_status"] == "DEFERRED_FULL_POPULATION"
+    c = prot["conditional_edge"]
+    assert c["min_events"] == 30 and c["fdr"]["alpha"] == 0.10 and c["null_protocol"] == {
+        "n_permutations": 200, "base_seed": 0, "source": c["null_protocol"]["source"]}
+    assert prot["eligibility_rule"]["min_valid_completed_1day_observations_strictly_before_2024_01_01"] == 252
+    assert prot["eligibility_rule"]["data_present_alone_is_not_a_disposition"] is True
+    assert prot["sizing"]["production_default"] is False and prot["chunking"]["cells_per_chunk"] == 500
+    assert prot["indicator_conventions"]["zscore"].endswith("ddof=1)")
+    assert "feature_version" not in prot and "ml_folds" not in prot
 
 
 # ----------------------------------------------------------------------------------- partitions / data / SIP
 
-def test_calendar_pin_and_session_grid_end_at_discovery_boundary():
+def test_calendar_pin_and_session_grid_end_at_the_last_discovery_session():
     assert cal.CONTENT_SHA256 == cal.EXPECTED_CONTENT_SHA256
-    assert SESSIONS[0] >= dt.date(2016, 1, 1) and SESSIONS[-1] == dt.date(2024, 12, 31)
+    assert SESSIONS[0] >= dt.date(2016, 1, 1) and SESSIONS[-1] == dt.date(2023, 12, 29)
 
 
-@pytest.mark.parametrize("ts", ["2025-01-01", "2025-06-30", "2026-02-27", "2026-03-01", "2026-09-01"])
-def test_partition_fence_refuses_reserve_and_holdout(ts):
-    pt.require_discovery_only(pd.Series(["2024-12-31T05:00:00+00:00"]), what="ok")
+def test_ir23_partition_labels_never_call_2024_an_unread_reserve():
+    blob = json.dumps(pt.PARTITIONS)
+    assert "RESERVED_UNREAD" not in blob and "UNREAD" not in blob.replace("NEVER_AN_UNREAD_RESERVE", "")
+    p = pt.PARTITIONS
+    assert p["discovery"]["end_exclusive"] == "2024-01-01"
+    assert p["contaminated_by_rejected_run"] == {
+        "start_inclusive": "2024-01-01", "end_exclusive": "2025-01-01", "status": "CONTAMINATED_BY_REJECTED_RUN",
+        "reason": "read by ALPHA_EDGE_CENSUS_01_REJECTED_EXECUTION_20261005", "role": "NEVER_AN_UNREAD_RESERVE"}
+    assert p["remaining_confirmation_reserve"]["start_inclusive"] == "2025-01-01"
+    assert p["remaining_confirmation_reserve"]["end_exclusive"] == "2026-03-01"
+    assert p["final_holdout"] == {"start_inclusive": "2026-03-01", "status": "RESERVED_UNCONSUMED"}
+
+
+@pytest.mark.parametrize("ts,label", [("2023-12-29T05:00:00+00:00", pt.DISCOVERY), ("2024-01-01T00:00:00+00:00", pt.CONTAMINATED),
+                                      ("2024-12-31T05:00:00+00:00", pt.CONTAMINATED), ("2025-01-01T00:00:00+00:00", pt.RESERVE),
+                                      ("2026-02-27T05:00:00+00:00", pt.RESERVE), ("2026-03-01T00:00:00+00:00", pt.HOLDOUT)])
+def test_classify_timestamp(ts, label):
+    assert pt.classify_timestamp(ts) == label
+
+
+@pytest.mark.parametrize("ts", ["2024-01-02", "2024-06-28", "2025-01-02", "2025-06-30", "2026-03-02", "2026-09-01"])
+def test_ir1_partition_fence_refuses_2024_2025_and_holdout_rows(ts):
+    pt.require_discovery_only(pd.Series(["2023-12-29T05:00:00+00:00"]), what="ok")
     with pytest.raises(pt.PartitionBreach):
-        pt.require_discovery_only(pd.Series(["2024-12-30T05:00:00+00:00", ts + "T05:00:00+00:00"]), what="bad")
+        pt.require_discovery_only(pd.Series(["2023-12-28T05:00:00+00:00", ts + "T05:00:00+00:00"]), what="bad")
 
 
 def test_partition_fence_refuses_empty_input():
@@ -164,24 +274,26 @@ def test_partition_fence_refuses_empty_input():
         pt.require_discovery_only(pd.Series([], dtype=object), what="empty")
 
 
-def test_symbol_data_refuses_non_session_and_post_discovery_dates(bars):
+@pytest.mark.parametrize("bad_date", ["2024-01-02", "2025-01-02", "2026-03-02", "2020-07-04"])
+def test_symbol_data_refuses_non_session_and_post_discovery_dates(bars, bad_date):
     b = bars["X00"].copy()
-    b.loc[5, "end_ts"] = pd.Timestamp("2025-01-02", tz="UTC") + pd.Timedelta(hours=5)
-    with pytest.raises(RuntimeError, match="canonical session"):
+    b.loc[5, "end_ts"] = pd.Timestamp(bad_date, tz="UTC") + pd.Timedelta(hours=5)
+    with pytest.raises(RuntimeError, match="canonical"):
         sg.SymbolData("X00", b)
-    b = bars["X00"].copy()
-    b.loc[5, "end_ts"] = pd.Timestamp("2020-07-04", tz="UTC") + pd.Timedelta(hours=5)
-    with pytest.raises(RuntimeError, match="canonical session"):
-        sg.SymbolData("X00", b)
+
+
+def test_request_contract_ends_exactly_at_the_discovery_fence():
+    assert cdata.REQUEST_CONTRACT["end_utc_exclusive"] == "2024-01-01T00:00:00+00:00"
+    assert cdata.REQUEST_CONTRACT["start_utc"] == "2016-01-01T00:00:00+00:00"
 
 
 def test_sip_all_contract_refuses_other_feed_or_adjustment():
     good = {"source_attestation": {"feed": "sip", "adjustment_mode": "all", "source_provider_id": "alpaca",
                                    "requested_start_utc": "2016-01-01T00:00:00+00:00",
-                                   "requested_end_utc": "2025-01-01T00:00:00+00:00"}}
+                                   "requested_end_utc": "2024-01-01T00:00:00+00:00"}}
     cdata.require_sip_all_contract(good)
     for k, v in (("feed", "iex"), ("adjustment_mode", "raw"), ("source_provider_id", "other"),
-                 ("requested_end_utc", "2026-03-02T00:00:00+00:00")):
+                 ("requested_end_utc", "2025-01-01T00:00:00+00:00"), ("requested_end_utc", "2026-03-02T00:00:00+00:00")):
         bad = copy.deepcopy(good)
         bad["source_attestation"][k] = v
         with pytest.raises(SystemExit):
@@ -213,6 +325,70 @@ def test_acquisition_never_falls_back_to_iex_and_keeps_symbol(tmp_path, monkeypa
     monkeypatch.setattr(ah, "extract_research_bars_with_provenance", ca)
     rec = cdata.acquire_symbol("QQQ", tmp_path / "QQQ")
     assert rec["disposition"] == "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION" and set(calls) == {"sip"}
+
+
+# ------------------------------------------------------------------------------------------- eligibility
+
+def _elig(monkeypatch, bars_df, status=None):
+    monkeypatch.setattr(cdata, "load_symbol_bars", lambda d: (bars_df, {"artifact_sha256": "h"}))
+    return cdata.classify_eligibility("X00", status or {"disposition": "DATA_PRESENT"}, Path("unused"))
+
+
+@pytest.mark.parametrize("n,expected", [(252, cdata.ELIGIBLE), (251, cdata.EXCLUDED_INSUFFICIENT_HISTORY),
+                                        (1000, cdata.ELIGIBLE), (10, cdata.EXCLUDED_INSUFFICIENT_HISTORY)])
+def test_eligibility_requires_252_valid_completed_observations(monkeypatch, bars, n, expected):
+    assert _elig(monkeypatch, bars["X00"].iloc[:n].reset_index(drop=True))["disposition"] == expected
+
+
+def test_ir21_data_present_alone_cannot_satisfy_eligibility(monkeypatch, tmp_path):
+    rec = cdata.classify_eligibility("X00", {"disposition": "DATA_PRESENT"}, tmp_path / "missing")
+    assert rec["disposition"] == cdata.EXCLUDED_PROVENANCE_REJECTED and rec["disposition"] != "DATA_PRESENT"
+    assert "DATA_PRESENT" not in {cdata.ELIGIBLE, *cdata.EXCLUDED_DISPOSITIONS}
+
+
+def test_eligibility_types_every_non_present_acquisition_status(tmp_path):
+    f = lambda st: cdata.classify_eligibility("X", {"disposition": st}, tmp_path)["disposition"]  # noqa: E731
+    assert f("NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION") == cdata.EXCLUDED_UNSUPPORTED_CORPORATE_ACTION
+    assert f("DATA_UNAVAILABLE_PROVIDER_ERROR") == cdata.EXCLUDED_DATA_UNAVAILABLE
+    assert f("DATA_UNAVAILABLE_UNEXPECTED_ERROR") == cdata.EXCLUDED_DATA_UNAVAILABLE
+
+
+def test_eligibility_excludes_non_canonical_sessions_as_invalid_bar_data(monkeypatch, bars):
+    b = bars["X00"].copy()
+    b.loc[5, "end_ts"] = pd.Timestamp("2020-07-04", tz="UTC") + pd.Timedelta(hours=5)
+    assert _elig(monkeypatch, b)["disposition"] == cdata.EXCLUDED_INVALID_BAR_DATA
+
+
+def test_ir22_every_seed_symbol_has_exactly_one_typed_disposition():
+    seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
+    disp = {s: {"disposition": cdata.ELIGIBLE} for s in seed["symbols"]}
+    disp[seed["symbols"][3]] = {"disposition": cdata.EXCLUDED_INSUFFICIENT_HISTORY}
+    uni = ss.build_universe(seed, disp)
+    assert uni["symbol_count"] == 87 and sorted(uni["excluded"]) == [seed["symbols"][3]]
+    assert sorted(uni["dispositions"]) == seed["symbols"]
+    for bad in ({**disp, seed["symbols"][0]: {"disposition": "DATA_PRESENT"}},
+                {**disp, seed["symbols"][0]: {"disposition": "EXCLUDED_BECAUSE_IT_LOST_MONEY"}},
+                {s: d for s, d in disp.items() if s != seed["symbols"][0]},
+                {**disp, "ZZZZ": {"disposition": cdata.ELIGIBLE}}):
+        with pytest.raises(RuntimeError):
+            ss.build_universe(seed, bad)
+
+
+def test_seed_builder_fails_closed_when_snapshot_claims_point_in_time(monkeypatch):
+    import mqk_research.universe.snapshot as snap_mod
+    real = snap_mod.build_current_enabled_equity_registry_snapshot
+
+    def lying(*a, **k):
+        real_snap = real(*a, **k)
+
+        class Wrap:
+            def to_json_dict(self_inner):
+                return {**real_snap.to_json_dict(), "point_in_time_membership": True}
+        return Wrap()
+
+    monkeypatch.setattr(snap_mod, "build_current_enabled_equity_registry_snapshot", lying)
+    with pytest.raises(RuntimeError, match="fail closed"):
+        ss.build_seed_universe()
 
 
 # ----------------------------------------------------------------------------------------- simulator
@@ -378,7 +554,7 @@ def test_metrics_values_against_hand_computation():
     assert m["cost_fragile"] is False  # alpha 1.0 minus cost gap 0.25 stays positive
 
 
-# ----------------------------------------------------------------- causal signals / fold isolation (synthetic)
+# ------------------------------------------------------------------------- causal signals (synthetic)
 
 def prefix_invariant(U1, U2, symbol, family, params, boundary_ord):
     a, b = U1.build(symbol, family, params), U2.build(symbol, family, params)
@@ -399,17 +575,14 @@ def U_perturbed(bars):
 def test_every_family_signal_is_prefix_invariant_to_future_bars(bars, U, U_perturbed):
     pb, boundary = U_perturbed
     U2 = sg.Universe(pb)
-    checked = 0
+    fams = set()
     for c in first_configs(3):
         for sym in ("SPY", "X03", "X04"):
-            if c["scope"] == "universe":
-                assert prefix_invariant(U, U2, sym, c["family"], c["params"], boundary), (c["family"], sym)
-                checked += 1
-                break
             assert prefix_invariant(U, U2, sym, c["family"], c["params"], boundary), (c["family"], c["params"], sym)
-            checked += 1
-    assert checked >= 40
-    assert any(U.build("X03", c["family"], c["params"]) is not None for c in first_configs(3) if c["family"] == "S02")
+            fams.add(c["family"])
+    assert fams == set(ss.EXPECTED_FAMILY_IDS)
+    for fam in ss.EXPECTED_FAMILY_IDS:
+        assert any(U.build("X03", c["family"], c["params"]) is not None for c in ss.build_configs() if c["family"] == fam)
 
 
 def test_prefix_invariance_check_detects_a_leaky_signal(bars, U, U_perturbed):
@@ -429,77 +602,69 @@ def test_prefix_invariance_check_detects_a_leaky_signal(bars, U, U_perturbed):
     assert prefix_invariant(Leaky(U), Leaky(U2), "X03", "S01", {}, boundary) is False
 
 
-def test_s18_thresholds_and_s19_fits_use_only_rows_before_the_fold(bars, monkeypatch):
-    start_2023 = sg.SESSION_INDEX[next(d for d in SESSIONS if d.year == 2023)]
-    pb = perturbed(bars, start_2023 - 1)  # every bar from the 2023 fold start onward is changed
-    base, pert = sg.Universe(bars), sg.Universe(pb)
-    feat = "ret_20" if "ret_20" in base.features["X03"] else sorted(base.features["X03"])[0]
-    p18 = {"feature": feat, "q": 0.7, "side": "ge", "hold": 5}
-    p19 = {"feature": feat, "label_horizon": 5, "p_entry": 0.5}
-    calls = {}
-
-    import mqk_research.ml.model_logreg as ml
-    real = ml.fit_logreg_deterministic
-
-    def record(X, y, **kw):
-        calls.setdefault(id(record.cur), []).append((np.array(X, copy=True), np.array(y, copy=True)))
-        return real(X, y, **kw)
-
-    monkeypatch.setattr(ml, "fit_logreg_deterministic", record)
-    out = {}
-    for name, uni in (("base", base), ("pert", pert)):
-        record.cur = uni
-        uni.build("X03", "S18", p18)
-        uni.build("X03", "S19", p19)
-        out[name] = calls[id(uni)]
-    # thresholds of every fold up to 2023 are bit-identical although the fold-year bars differ
-    for y in range(2017, 2024):
-        k = ("s18thr", feat, y)
-        a, b = base.sd["X03"]._memo.get(k), pert.sd["X03"]._memo.get(k)
-        assert (a is None) == (b is None) and (a is None or np.array_equal(a, b)), y
-    thr24 = [np.array_equal(base.sd["X03"]._memo[("s18thr", feat, 2024)], pert.sd["X03"]._memo[("s18thr", feat, 2024)])]
-    assert thr24 == [False]  # fixture sensitivity: the 2024 fold (which sees the perturbed rows) does differ
-    # S19: every fit whose training window ends before the 2023 purge boundary is identical (labels purged)
-    lim = start_2023 - 5
-    same = [(len(a[0]) <= lim) for a in out["base"]]
-    assert sum(same) >= 3
-    for (xa, ya), (xb, yb) in zip(out["base"], out["pert"]):
-        if len(xa) <= lim:
-            assert np.array_equal(xa, xb) and np.array_equal(ya, yb)
-    # the purge matters: the label of the last un-purged row would read a perturbed bar
-    sdb, sdp = base.sd["X03"], pert.sd["X03"]
-    assert (sdb.c[start_2023 + 2] / sdb.c[start_2023 - 3]) != (sdp.c[start_2023 + 2] / sdp.c[start_2023 - 3])
+def test_month_end_cadence_only_changes_decision_after_a_month_end_anchor(U):
+    for fam, p in (("S01", {"lookback": 63, "cadence": "month_end"}),
+                   ("S10", {"high_lookback": 126, "distance": 0.10, "cadence": "month_end"})):
+        sd = U.sd["X03"]
+        sig = U.build("X03", fam, p)
+        change = np.flatnonzero(sig.d[1:] != sig.d[:-1]) + 1
+        assert len(change) > 0 and sd.month_end[change].all(), fam
+        assert np.all(~sig.cond | sd.month_end)
 
 
-def test_s19_is_exactly_one_feature_per_model():
-    assert all(set(c["params"]) == {"feature", "label_horizon", "p_entry"} for c in ss.build_configs() if c["family"] == "S19")
-    assert all(isinstance(c["params"]["feature"], str) for c in ss.build_configs() if c["family"] == "S19")
+def _flat_symbol(n=60):
+    ts = [pd.Timestamp(d, tz="UTC") + pd.Timedelta(hours=5) for d in SESSIONS[:n]]
+    return pd.DataFrame({"symbol": "T", "end_ts": ts, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1e6})
 
 
-@pytest.mark.parametrize("bad", [
-    {"feature": ["ret_20", "ret_5"], "label_horizon": 5, "p_entry": 0.5},
-    {"feature": "ret_20", "feature2": "ret_5", "label_horizon": 5, "p_entry": 0.5},
-])
-def test_s19_refuses_a_model_given_two_features(U, bad):
-    with pytest.raises(ValueError, match="exactly one feature"):
-        U.s19("X03", bad)
+def _events(df, family, params):
+    sig = sg.PER_SYMBOL[family](sg.SymbolData("T", df), params)
+    return sig, np.flatnonzero(sig.cond), np.flatnonzero(sig.d)
 
 
-def test_universe_builder_fails_closed_when_snapshot_claims_point_in_time(monkeypatch):
-    import mqk_research.universe.snapshot as snap_mod
-    real = snap_mod.build_current_enabled_equity_registry_snapshot
+def test_s08_gap_down_uses_prior_bar_atr_and_holds_exactly_n_bars():
+    df = _flat_symbol()
+    df.loc[30, ["open", "high", "low", "close"]] = [96.0, 101.0, 95.0, 100.0]
+    _sig, ev, held = _events(df, "S08", {"atr_window": 14, "mult": 1.0, "hold": 3, "trend": "none"})
+    assert list(ev) == [30] and list(held) == [30, 31, 32]
+    df.loc[30, "open"] = 98.5  # gap of 1.5 is inside the 2.0 prior-bar ATR threshold
+    _sig, ev, _ = _events(df, "S08", {"atr_window": 14, "mult": 1.0, "hold": 3, "trend": "none"})
+    assert len(ev) == 0
 
-    def lying(*a, **k):
-        real_snap = real(*a, **k)
 
-        class Wrap:
-            def to_json_dict(self_inner):
-                return {**real_snap.to_json_dict(), "point_in_time_membership": True}
-        return Wrap()
+def test_s07_decline_uses_prior_bar_atr_so_the_event_bar_range_cannot_mask_itself():
+    df = _flat_symbol()
+    df.loc[30, ["open", "high", "low", "close"]] = [100.0, 100.0, 60.0, 95.0]  # huge same-bar range, 5pt decline
+    _sig, ev, held = _events(df, "S07", {"decline_sessions": 3, "atr_window": 14, "mult": 1.0, "hold": 1, "trend": "none"})
+    assert list(ev) == [30] and list(held) == [30]  # prior-bar ATR is 2.0; a same-bar ATR (~4.8) would reject it
 
-    monkeypatch.setattr(snap_mod, "build_current_enabled_equity_registry_snapshot", lying)
-    with pytest.raises(RuntimeError, match="fail closed"):
-        ss.build_universe()
+
+def test_s05_matches_hand_computed_cutler_rsi(bars, U):
+    c = bars["X01"]["close"].to_numpy()
+    n, entry = 3, 30
+    d = np.diff(c, prepend=np.nan)
+    up, down = np.where(d > 0, d, 0.0), np.where(d < 0, -d, 0.0)
+    rsi = np.full(len(c), np.nan)
+    for t in range(n, len(c)):
+        u, w = up[t - n + 1:t + 1].mean(), down[t - n + 1:t + 1].mean()
+        rsi[t] = 100.0 if (w == 0 and u > 0) else (np.nan if w == 0 else 100.0 - 100.0 / (1.0 + u / w))
+    sig = U.build("X01", "S05", {"period": n, "entry_below": entry, "exit_above": 50, "trend": "none"})
+    s = int(np.flatnonzero(np.isfinite(rsi))[0])
+    expect = (np.nan_to_num(rsi, nan=1e9) < entry)
+    expect[:s] = False
+    assert sig.s == s and np.array_equal(sig.cond, expect) and expect.any()
+
+
+def test_s06_zscore_uses_sample_std_ddof1(bars, U):
+    c, n = bars["X02"]["close"].to_numpy(), 20
+    z = np.full(len(c), np.nan)
+    for t in range(n - 1, len(c)):
+        w = c[t - n + 1:t + 1]
+        z[t] = (c[t] - w.mean()) / w.std(ddof=1)
+    sig = U.build("X02", "S06", {"lookback": n, "entry_z": -1.5, "exit_z": 0.0, "trend": "none"})
+    expect = np.nan_to_num(z, nan=1e9) <= -1.5
+    expect[: int(np.flatnonzero(np.isfinite(z))[0])] = False
+    assert np.array_equal(sig.cond, expect) and expect.any()
 
 
 def test_s14_calendar_membership_comes_from_authority_not_prices(bars, U, U_perturbed):
@@ -507,47 +672,18 @@ def test_s14_calendar_membership_comes_from_authority_not_prices(bars, U, U_pert
     c = next(c for c in ss.build_configs() if c["family"] == "S14")
     a = U.build("X03", c["family"], c["params"])
     b = sg.Universe(pb).build("X03", c["family"], c["params"])
-    assert np.array_equal(a.d, b.d) and a.d.any()  # whole-array equality: calendar d ignores prices entirely
+    assert np.array_equal(a.d, b.d) and a.d.any()
+    m = sg.calendar_member(U.sd["X03"], c["params"])
+    assert np.array_equal(a.d[:-2], m[2:]) and not a.d[-2:].any() and np.array_equal(a.cond[:-1], m[1:])
 
 
-# ------------------------------------------------------------------------------------- conditional edges
-
-def _fake_sd(closes, years=None):
-    n = len(closes)
-    bars = pd.DataFrame({"symbol": "F", "end_ts": [pd.Timestamp(d, tz="UTC") + pd.Timedelta(hours=5) for d in SESSIONS[:n]],
-                         "open": closes, "high": closes, "low": closes, "close": closes, "volume": np.ones(n)})
-    sd = sg.SymbolData("F", bars)
-    sd.regime = np.array([i % 2 for i in range(n)], np.int8)
-    return sd
-
-
-def test_conditional_stats_hand_computed_and_never_pnl():
-    c = np.array([100.0, 101, 103, 102, 106, 105, 110, 108, 107, 111, 115, 113])
-    sd = _fake_sd(c)
-    cond = np.zeros(len(c), bool)
-    cond[[1, 3, 5]] = True
-    q = cd.conditional_stats([(sd, sg.Sig(cond, cond, 0))], (1, 2))
-    r1 = q[1]
-    fwd1 = c[1:] / c[:-1] - 1
-    sel = fwd1[[1, 3, 5]]
-    assert r1["n"] == 3 and r1["mean"] == pytest.approx(sel.mean()) and r1["median"] == pytest.approx(np.median(sel))
-    assert r1["std"] == pytest.approx(sel.std(ddof=1)) and r1["positive_freq"] == pytest.approx((sel > 0).mean())
-    assert r1["uncond_mean"] == pytest.approx(fwd1.mean()) and r1["effect"] == pytest.approx(sel.mean() - fwd1.mean())
-    assert r1["tiny_sample"] is True and sum(v[0] for v in r1["year"].values()) == 3
-    assert sum(v[0] for v in r1["regime"].values()) == 3
-    assert "pnl" not in json.dumps(r1).lower()
-    assert q[2]["n"] == 3  # horizon 2: t=1,3,5 all have t+2 available
-    last = np.zeros(len(c), bool)
-    last[-1] = True
-    assert cd.conditional_stats([(sd, sg.Sig(last, last, 0))], (1,))[1] is None  # no forward window => no record
-
-
-def test_non_positive_effect_is_not_positive():
-    base = {"effect": 0.0}
-    assert not cd.is_positive(base) and not cd.is_positive({"effect": -1e-9}) and not cd.is_positive({"effect": float("nan")})
-    assert cd.is_positive({"effect": 1e-12}) and not cd.is_positive(None)
-
-
+def test_trend_and_cadence_refuse_unknown_values(U):
+    with pytest.raises(ValueError):
+        sg.trend_ok(U.sd["X03"], "sma100")
+    with pytest.raises(ValueError):
+        sg.cadence_anchor(U.sd["X03"], "weekly")
+    with pytest.raises(ValueError):
+        sg.calendar_member(U.sd["X03"], {"kind": "weekday"})
 
 
 # ------------------------------------------------------------------------------------------- store (bulk)
@@ -584,355 +720,3 @@ def test_bulk_store_semantics(tmp_path):
     assert st.trial_attempt_digest("e")["t1"]["attempts"] == 2  # aborted call left no partial attempts
     with pytest.raises(ValueError):
         st.finalize_attempts_bulk([{"attempt_id": again[0][0], "status": "started"}])
-
-
-# ------------------------------------------------------------- census gate / execution / resume / registry
-
-@pytest.fixture(scope="module")
-def mini(U):
-    prot = ss.build_protocol()
-    full_uni = json.loads((EXP / "ALPHA_CENSUS_UNIVERSE_V1.json").read_text())
-    syms = list(U.symbols)
-    uni = {**full_uni, "symbols": syms}
-    cfgs = first_configs(2)
-    space = {"search_space_id": "mini", "universe_id": "u" * 32, "partitions_id": "p" * 32, "protocol_id": "q" * 32,
-             "configs": cfgs}
-    ids = {k: space[k] for k in ("universe_id", "partitions_id", "protocol_id")}
-    index = {c["config_id"]: i for i, c in enumerate(cfgs)}
-    cells = [(index[c["config_id"]], c, s, t) for c, s, t in ss.iter_cells(cfgs, syms, ids)]
-    space["population_root_sha256"] = ss.population_root(cfgs, syms, ids)
-    meta = {s: {"disposition": ce.DATA_PRESENT, "rows": len(U.sd[s].c), "data_short_history": s == syms[-1],
-                "data_quality_caveat": False} for s in syms}
-    return {"space": space, "cells": cells, "meta": meta, "uni": uni, "prot": prot}
-
-
-def _fresh_store(tmp_path, mini, *, register=True):
-    st = ResearchResultStore(tmp_path / "registry.sqlite")
-    if register:
-        ce.register_population(st, mini["space"], mini["cells"])
-    return st
-
-
-def test_gate_accepts_exact_frozen_population_with_zero_attempts(tmp_path, mini):
-    st = _fresh_store(tmp_path, mini)
-    r = ce.require_frozen_population(st, mini["space"], mini["cells"], allow_attempts=False)
-    assert r["registered"] == len(mini["cells"]) > 100 and r["attempts"] == 0
-
-
-def test_gate_refuses_missing_extra_duplicate_and_unfrozen(tmp_path, mini):
-    cells = mini["cells"]
-    # M03: one registered cell missing
-    st = ResearchResultStore(tmp_path / "a.sqlite")
-    ce.register_population(st, mini["space"], cells[:-1])
-    with pytest.raises(ce.GateRefusal, match="missing=1"):
-        ce.require_frozen_population(st, mini["space"], cells, allow_attempts=False)
-    # M04: an undeclared extra cell is registered
-    st = _fresh_store(tmp_path, mini)
-    st.register_trials_bulk([{"trial_id": "ace1-extra", "experiment_id": ss.EXPERIMENT_ID, "hypothesis_id": "alpha_edge_census_01:S01",
-                              "strategy_id": "x", "protocol_id": "q", "identity": {"x": 1}}])
-    with pytest.raises(ce.GateRefusal, match="extra=1"):
-        ce.require_frozen_population(st, mini["space"], cells, allow_attempts=True)
-    # duplicate expected cell
-    with pytest.raises(ce.GateRefusal, match="duplicate"):
-        ce.freeze_record(mini["space"], cells + [cells[0]])
-    # attempt before population freeze: trials registered, freeze marker absent
-    st = ResearchResultStore(tmp_path / "c.sqlite")
-    tmp = ResearchResultStore(tmp_path / "scratch.sqlite")
-    ce.register_population(tmp, mini["space"], cells)
-    st.register_hypothesis(hypothesis_id="alpha_edge_census_01:S01", experiment_id=ss.EXPERIMENT_ID, hypothesis_text="x")
-    for fam in {c[1]["family"] for c in cells}:
-        st.register_hypothesis(hypothesis_id=ss.hypothesis_id(fam), experiment_id=ss.EXPERIMENT_ID, hypothesis_text="x")
-    ids = {k: mini["space"][k] for k in ("universe_id", "partitions_id", "protocol_id")}
-    st.register_trials_bulk([{"trial_id": t, "experiment_id": ss.EXPERIMENT_ID, "hypothesis_id": ss.hypothesis_id(c["family"]),
-                              "strategy_id": f"{c['family']}:{c['config_id']}", "protocol_id": ids["protocol_id"],
-                              "identity": ss.trial_identity(c, s, ids)} for _i, c, s, t in cells])
-    with pytest.raises(ce.GateRefusal, match="freeze marker"):
-        ce.require_frozen_population(st, mini["space"], cells, allow_attempts=True)
-    # attempts != 0 at freeze time
-    (tmp_path / "d").mkdir()
-    st = _fresh_store(tmp_path / "d", mini)
-    st.begin_attempts_bulk([cells[0][3]], origin="x")
-    with pytest.raises(ce.GateRefusal, match="attempts already exist"):
-        ce.require_frozen_population(st, mini["space"], cells, allow_attempts=False)
-    ce.require_frozen_population(st, mini["space"], cells, allow_attempts=True)
-
-
-def test_run_chunks_refuses_unregistered_population(tmp_path, mini, U):
-    st = ResearchResultStore(tmp_path / "e.sqlite")
-    with pytest.raises(ce.GateRefusal):
-        ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], tmp_path / "out", chunk_size=10)
-    assert not (tmp_path / "out" / "chunks").exists() or not list((tmp_path / "out" / "chunks").iterdir())
-
-
-def _read(out):
-    lines = []
-    for p in sorted((Path(out) / "chunks").glob("chunk_*.jsonl")):
-        lines += p.read_text(encoding="utf-8").splitlines()
-    return lines
-
-
-@pytest.fixture(scope="module")
-def reference_run(tmp_path_factory, mini, U):
-    root = tmp_path_factory.mktemp("ref")
-    st = _fresh_store(root, mini)
-    ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], root, chunk_size=13)
-    return root, st
-
-
-def test_chunk_size_does_not_change_cell_economics_or_denominator(tmp_path, mini, U, reference_run):
-    root, st = reference_run
-    ref = _read(root)
-    assert len(ref) == len(mini["cells"])
-    st2 = _fresh_store(tmp_path, mini)
-    ce.run_chunks(st2, U, mini["space"], mini["cells"], mini["meta"], tmp_path, chunk_size=50)
-    assert _read(tmp_path) == ref
-    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
-    assert all(v["attempts"] == 1 and v["succeeded"] == 1 for v in d.values()) and len(d) == len(mini["cells"])
-
-
-def test_cell_lines_follow_manifest_order_and_contain_real_evaluations(mini, reference_run):
-    root, _ = reference_run
-    rows = [json.loads(x) for x in _read(root)]
-    assert [r["t"] for r in rows] == [c[3] for c in mini["cells"]]
-    ev = [r for r in rows if r["d"] == "EVALUABLE"]
-    assert len(ev) > 100 and any(r["m"]["trade_count"] > 0 for r in ev)
-    assert any(r["m"]["net_alpha_usd"] > 0 for r in ev), "fixture must contain positive-alpha cells (false-positive guard)"
-    assert any(isinstance(q, dict) for r in ev for q in r["q"].values())
-
-
-def test_interrupted_chunk_is_retried_as_new_attempt_with_identical_economics(tmp_path, mini, U, reference_run, monkeypatch):
-    ref = _read(reference_run[0])
-    st = _fresh_store(tmp_path, mini)
-    real = ce.evaluate_cell
-    n = {"i": 0}
-
-    def flaky(*a, **k):
-        n["i"] += 1
-        if n["i"] == 20:
-            raise RuntimeError("simulated infrastructure fault")
-        return real(*a, **k)
-
-    monkeypatch.setattr(ce, "evaluate_cell", flaky)
-    with pytest.raises(RuntimeError, match="simulated"):
-        ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], tmp_path, chunk_size=13)
-    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
-    failed = [t for t, v in d.items() if v["failed"]]
-    assert len(failed) == 13 and all(d[t]["started"] == 0 for t in d)  # the whole interrupted chunk is closed as failed
-    assert len(list((tmp_path / "chunks").glob("chunk_*.jsonl"))) == 1
-    monkeypatch.setattr(ce, "evaluate_cell", real)
-    ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], tmp_path, chunk_size=13)
-    assert _read(tmp_path) == ref
-    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
-    assert len(d) == len(mini["cells"])  # same trials: retry created no new trial identity (M15)
-    assert all(d[t]["attempts"] == 2 and d[t]["failed"] == 1 and d[t]["succeeded"] == 1 for t in failed)
-    assert all(v["succeeded"] == 1 for v in d.values())
-
-
-def test_crash_leftover_started_attempts_are_finalized_then_retried(tmp_path, mini, U, reference_run):
-    st = _fresh_store(tmp_path, mini)
-    part = mini["cells"][:13]
-    st.begin_attempts_bulk([c[3] for c in part], origin="crashed")  # process died with attempts left 'started'
-    res = ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], tmp_path, chunk_size=13)
-    assert res["chunks_run"] == -(-len(mini["cells"]) // 13)
-    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
-    assert all(d[c[3]]["failed"] == 1 and d[c[3]]["succeeded"] == 1 and d[c[3]]["started"] == 0 for c in part)
-    assert _read(tmp_path) == _read(reference_run[0])
-
-
-def test_resume_skips_terminal_chunks_and_is_idempotent(tmp_path, mini, U, reference_run):
-    st = _fresh_store(tmp_path, mini)
-    r1 = ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], tmp_path, chunk_size=13, max_chunks=3)
-    assert r1["chunks_run"] == 3
-    before = st.trial_attempt_digest(ss.EXPERIMENT_ID)
-    r2 = ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], tmp_path, chunk_size=13)
-    assert r2["chunks_skipped_terminal"] == 3
-    r3 = ce.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], tmp_path, chunk_size=13)
-    assert r3["chunks_run"] == 0
-    after = st.trial_attempt_digest(ss.EXPERIMENT_ID)
-    assert all(v["attempts"] == 1 for v in after.values()) and after == before | {t: after[t] for t in after}
-    assert _read(tmp_path) == _read(reference_run[0])
-
-
-def test_non_evaluable_symbol_stays_in_population(mini, U):
-    meta = copy.deepcopy(mini["meta"])
-    meta["X02"] = {"disposition": "DATA_UNAVAILABLE_PROVIDER_ERROR"}
-    cfg = next(c for c in mini["space"]["configs"] if c["scope"] == "symbol")
-    r = ce.evaluate_cell(U, cfg, "X02", meta)
-    assert r["d"] == "NON_EVALUABLE_DATA_UNAVAILABLE_PROVIDER_ERROR" and r["m"] is None and r["q"] is None
-
-
-def test_universe_cell_pools_members_and_s02_defined_only_with_cross_section(mini, U):
-    cfg = next(c for c in mini["space"]["configs"] if c["family"] == "S02")
-    r = ce.evaluate_cell(U, cfg, None, mini["meta"])
-    assert r["d"] == "EVALUABLE" and r["m"]["members"] >= 2 and len(r["m"]["member_symbols"]) == r["m"]["members"]
-    assert r["m"]["window_bars"] > 0
-
-
-@pytest.fixture(scope="module")
-def registry_out(mini, reference_run):
-    root, _ = reference_run
-    import shutil
-    out = root.parent / "reg_out"
-    shutil.copytree(root, out, ignore=shutil.ignore_patterns("*.sqlite"))
-    prot = {**mini["prot"], "chunking": {"cells_per_chunk": 13}}
-    summary = er.build_registry({**mini["space"]}, mini["uni"], mini["cells"], mini["meta"], prot, out)
-    return out, summary, prot
-
-
-def _edges(out):
-    return [json.loads(x) for x in (Path(out) / "edge_registry_v1.jsonl").read_text(encoding="utf-8").splitlines()]
-
-
-def test_registry_records_every_positive_observation_and_nothing_else(registry_out, mini, reference_run):
-    out, summary, _ = registry_out
-    rows = [json.loads(x) for x in _read(reference_run[0])]
-    exp_s = {r["t"] for r in rows if r["m"] and r["m"]["net_alpha_usd"] > 0}
-    exp_c = {(r["t"], int(h)) for r in rows if r["m"] for h, q in r["q"].items() if isinstance(q, dict)}
-    edges = _edges(out)
-    got_s = {e["trial_id"] for e in edges if e["kind"] == "STRATEGY_EDGE"}
-    got_c = {(e["trial_id"], e["horizon"]) for e in edges if e["kind"] == "CONDITIONAL_EDGE"}
-    assert got_s == exp_s and got_c == exp_c and len(exp_s) > 0 and len(exp_c) > 0
-    assert len(edges) == len(got_s) + len(got_c) and len({e["edge_id"] for e in edges}) == len(edges)
-    for e in edges:
-        key = e["metrics"]["net_alpha_usd"] if e["kind"] == "STRATEGY_EDGE" else e["stats"]["effect"]
-        assert key > 0 and np.isfinite(key)
-    assert summary["strategy_edges"] == len(got_s) and summary["conditional_edges"] == len(got_c)
-
-
-def test_conditional_edges_are_non_executable_labels_never_pnl(registry_out):
-    out, _summary, _ = registry_out
-    cond = [e for e in _edges(out) if e["kind"] == "CONDITIONAL_EDGE"]
-    assert cond
-    for e in cond:
-        assert e["executable_pnl"] is False and "metrics" not in e
-        assert not any(("pnl" in k or "alpha" in k or "net_" in k) for k in e["stats"])
-    assert all("executable_pnl" not in e or e["executable_pnl"] is False for e in _edges(out))
-
-
-def test_every_registry_record_is_not_validated_with_no_promotion_authority_and_labels(registry_out):
-    out, summary, _ = registry_out
-    for e in _edges(out):
-        assert e["VALIDATION_STATUS"] == "NOT_VALIDATED" and e["PROMOTION_AUTHORITY"] == "NONE"
-        assert e["label"] == "DISCOVERED / NOT VALIDATED" and e["partition"] == "DISCOVERY_PRE_2025"
-        assert e["point_in_time_membership"] is False
-        assert e["universe_source_kind"] == "current_enabled_equity_registry_snapshot_v1"
-        assert e["survivorship_classification"] == "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME"
-        assert "survivorship_caveat" in e["flags"]
-        assert e["kind"] != "CONDITIONAL_EDGE" or e["executable_pnl"] is False
-    assert summary["JUDGE_STATUS"] == "DEFERRED_FULL_POPULATION" and summary["PROMOTION_AUTHORITY"] == "NONE"
-    assert "label" in summary and summary["label"] == "DISCOVERED / NOT VALIDATED"
-
-
-def test_search_ledger_holds_the_full_denominator_not_only_winners(registry_out, mini):
-    out, summary, _ = registry_out
-    led = [json.loads(x) for x in (out / "search_ledger_v1.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert [r["t"] for r in led] == [c[3] for c in mini["cells"]]
-    assert len(led) == summary["cells_total"] == len(mini["cells"]) > summary["strategy_edges"] > 0
-    assert any(r["net_alpha_usd"] <= 0 for r in led if "net_alpha_usd" in r)  # non-winners present (M10)
-    assert sum(summary["dispositions"].values()) == len(mini["cells"])
-
-
-def test_registry_is_deterministic_and_hashes_bind_files(registry_out, mini):
-    out, summary, prot = registry_out
-    import hashlib
-    assert hashlib.sha256((out / "edge_registry_v1.jsonl").read_bytes()).hexdigest() == summary["edge_registry_sha256"]
-    assert hashlib.sha256((out / "search_ledger_v1.jsonl").read_bytes()).hexdigest() == summary["search_ledger_sha256"]
-    again = er.build_registry({**mini["space"]}, mini["uni"], mini["cells"], mini["meta"], prot, out)
-    assert again == summary
-
-
-def test_neighborhood_flags_never_delete_island_edges(registry_out):
-    out, summary, _ = registry_out
-    edges = _edges(out)
-    islands = [e for e in edges if "parameter_island" in e["flags"]]
-    assert summary["parameter_island_edges"] == len(islands)
-    for e in islands:
-        assert e["neighborhood"]["n_neighbors"] >= 1 and e["neighborhood"]["positive_share"] < 0.25
-    assert all(e["neighborhood"]["n_neighbors"] == 0 or e["neighborhood"]["positive_share"] is not None for e in edges)
-    assert len(edges) == summary["strategy_edges"] + summary["conditional_edges"]  # flags annotate, never filter
-
-
-def test_neighbor_map_adjacent_numeric_only():
-    cfgs = [{"family": "F", "params": {"a": a, "b": b, "m": "x"}} for a in (1, 2, 4) for b in (10, 20)]
-    nb = er.neighbor_map(cfgs)
-    idx = {(c["params"]["a"], c["params"]["b"]): i for i, c in enumerate(cfgs)}
-    assert set(nb[idx[(2, 10)]]) == {idx[(1, 10)], idx[(4, 10)], idx[(2, 20)]}
-    assert set(nb[idx[(1, 10)]]) == {idx[(2, 10)], idx[(1, 20)]}  # diagonal moves are not neighbours
-    other = [{"family": "G", "params": {"a": 2}}, {"family": "F", "params": {"a": 3}}]
-    assert er.neighbor_map(other) == [[], []]  # different families never neighbour
-
-
-def test_replication_classes_present_and_symbol_specific_flagged(registry_out):
-    out, summary, _ = registry_out
-    for e in _edges(out):
-        if e["scope"] == "UNIVERSE":
-            assert e["replication"]["class"] == "NOT_APPLICABLE_UNIVERSE_SCOPE"
-        else:
-            r = e["replication"]
-            assert r["class"] in ("SYMBOL_SPECIFIC", "CLUSTER_REPLICATED", "BROADLY_REPLICATED")
-            assert (r["class"] == "SYMBOL_SPECIFIC") == ("single_symbol" in e["flags"]) == (r["n_positive_symbols"] == 1)
-
-
-def test_registry_refuses_tampered_or_missing_chunk(tmp_path, mini, U, reference_run):
-    import shutil
-    root = tmp_path / "t"
-    shutil.copytree(reference_run[0], root, ignore=shutil.ignore_patterns("*.sqlite"))
-    prot = {**mini["prot"], "chunking": {"cells_per_chunk": 13}}
-    p0 = er.chunk_path(root, 0)
-    lines = p0.read_text(encoding="utf-8").splitlines()
-    p0.write_text("\n".join(lines[1:] + lines[:1]) + "\n", encoding="utf-8")
-    with pytest.raises(er.RegistryRefusal, match="not the manifest cell"):
-        er.build_registry(mini["space"], mini["uni"], mini["cells"], mini["meta"], prot, root)
-    p0.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
-    with pytest.raises(er.RegistryRefusal, match="line count"):
-        er.build_registry(mini["space"], mini["uni"], mini["cells"], mini["meta"], prot, root)
-    p0.unlink()
-    with pytest.raises(er.RegistryRefusal, match="missing chunk"):
-        er.build_registry(mini["space"], mini["uni"], mini["cells"], mini["meta"], prot, root)
-
-
-def _fake_bars_dir(tmp_path, symbols, absent=()):
-    for sym in symbols:
-        d = tmp_path / sym
-        d.mkdir()
-        status = {"disposition": "DATA_UNAVAILABLE_PROVIDER_ERROR" if sym in absent else ce.DATA_PRESENT}
-        (d / "status.json").write_text(json.dumps(status), encoding="utf-8")
-        if sym not in absent:
-            (d / "research_bars_provenance.json").write_text(json.dumps({"sym": sym}), encoding="utf-8")
-            (d / "corporate_actions_provenance.json").write_text(json.dumps({"ca": sym}), encoding="utf-8")
-
-
-def test_bars_manifest_binds_hashes_keeps_unavailable_symbols_and_load_refuses_drift(tmp_path, monkeypatch, bars):
-    syms = ["SPY", "X00", "X01"]
-    uni = {"symbols": syms}
-    _fake_bars_dir(tmp_path, syms, absent=("X01",))
-    state = {"hash": "h1"}
-
-    def fake_load(sym_dir):
-        b = bars[sym_dir.name].copy()
-        return b, {"artifact_sha256": "a-" + sym_dir.name, "canonical_semantic_bars_hash": state["hash"] + sym_dir.name,
-                   "canonical_pricing_bars_hash": "p"}
-
-    monkeypatch.setattr(ce, "load_symbol_bars", fake_load)
-    m = ce.build_bars_manifest(uni, tmp_path)
-    assert set(m["symbols"]) == set(syms)  # the unavailable symbol is not dropped (M11)
-    assert m["symbols"]["X01"] == {"disposition": "DATA_UNAVAILABLE_PROVIDER_ERROR"}
-    assert m["symbols"]["SPY"]["rows"] == len(bars["SPY"]) and m["symbols"]["SPY"]["provenance_file_sha256"]
-    assert m["request_contract"]["feed"] == "sip"
-    assert ce.load_bars(uni, tmp_path, m).keys() == {"SPY", "X00"}
-    state["hash"] = "h2"  # same bytes path, different semantic identity
-    with pytest.raises(ce.GateRefusal, match="differ"):
-        ce.load_bars(uni, tmp_path, m)
-    m2 = ce.build_bars_manifest(uni, tmp_path)
-    assert m2["manifest_sha256"] != m["manifest_sha256"]
-
-
-def test_symbol_meta_flags_short_history_and_zero_volume_caveat():
-    prot = ss.build_protocol()
-    man = {"symbols": {"A": {"disposition": ce.DATA_PRESENT, "rows": 1499, "zero_volume_bars": 20},
-                       "B": {"disposition": ce.DATA_PRESENT, "rows": 1500, "zero_volume_bars": 19},
-                       "C": {"disposition": "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION"}}}
-    meta = ce.symbol_meta(man, prot)
-    assert meta["A"]["data_short_history"] and meta["A"]["data_quality_caveat"]
-    assert not meta["B"]["data_short_history"] and not meta["B"]["data_quality_caveat"]
-    assert meta["C"] == {"disposition": "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION"}

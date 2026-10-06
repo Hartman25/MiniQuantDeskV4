@@ -26,6 +26,15 @@ REQUEST_CONTRACT = {
     "start_utc": DATA_REQUEST_START_UTC.isoformat(), "end_utc_exclusive": DISCOVERY_END_EXCLUSIVE.isoformat(),
     "asof": "2026-10-05", "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
 }
+MIN_ELIGIBLE_OBSERVATIONS = 252
+ELIGIBLE = "ELIGIBLE"
+EXCLUDED_DATA_UNAVAILABLE = "EXCLUDED_DATA_UNAVAILABLE"
+EXCLUDED_UNSUPPORTED_CORPORATE_ACTION = "EXCLUDED_UNSUPPORTED_CORPORATE_ACTION"
+EXCLUDED_PROVENANCE_REJECTED = "EXCLUDED_PROVENANCE_REJECTED"
+EXCLUDED_INVALID_BAR_DATA = "EXCLUDED_INVALID_BAR_DATA"
+EXCLUDED_INSUFFICIENT_HISTORY = "EXCLUDED_INSUFFICIENT_HISTORY"
+EXCLUDED_DISPOSITIONS = (EXCLUDED_DATA_UNAVAILABLE, EXCLUDED_UNSUPPORTED_CORPORATE_ACTION,
+                         EXCLUDED_PROVENANCE_REJECTED, EXCLUDED_INVALID_BAR_DATA, EXCLUDED_INSUFFICIENT_HISTORY)
 RETRIES = 5
 _TRANSIENT_MARKERS = ("status=429", "status=500", "status=502", "status=503", "status=504")
 
@@ -97,6 +106,32 @@ def acquire_symbol(symbol: str, sym_dir: Path) -> dict:
 def acquire_universe(symbols, data_dir: Path) -> dict:
     data_dir = Path(data_dir)
     return {s: acquire_symbol(s, data_dir / s) for s in symbols}
+
+
+def classify_eligibility(symbol: str, status: dict, sym_dir: Path) -> dict:
+    """Exactly one ELIGIBLE or typed EXCLUDED_* disposition per seed symbol. Acquisition status (DATA_PRESENT) is
+    never a disposition: eligibility needs verified provenance, valid canonical-session bars and >= 252 completed
+    1Day observations strictly before the discovery end. Performance is never an input."""
+    acq = status.get("disposition")
+    rec = {"symbol": symbol, "acquisition_status": acq}
+    if acq == "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION":
+        return {**rec, "disposition": EXCLUDED_UNSUPPORTED_CORPORATE_ACTION, "detail": status.get("detail", "")}
+    if acq != "DATA_PRESENT":
+        return {**rec, "disposition": EXCLUDED_DATA_UNAVAILABLE, "detail": status.get("detail", "")}
+    try:
+        bars, manifest = load_symbol_bars(sym_dir)
+    except (SystemExit, Exception) as exc:  # noqa: BLE001 - every verification failure is a typed exclusion
+        return {**rec, "disposition": EXCLUDED_PROVENANCE_REJECTED, "detail": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    from signals import SymbolData
+    try:
+        SymbolData(symbol, bars)
+    except RuntimeError as exc:
+        return {**rec, "disposition": EXCLUDED_INVALID_BAR_DATA, "detail": str(exc)[:300]}
+    n = int(len(bars))
+    rec.update({"observations": n, "artifact_sha256": manifest["artifact_sha256"]})
+    if n < MIN_ELIGIBLE_OBSERVATIONS:
+        return {**rec, "disposition": EXCLUDED_INSUFFICIENT_HISTORY}
+    return {**rec, "disposition": ELIGIBLE}
 
 
 def require_sip_all_contract(manifest: dict) -> None:

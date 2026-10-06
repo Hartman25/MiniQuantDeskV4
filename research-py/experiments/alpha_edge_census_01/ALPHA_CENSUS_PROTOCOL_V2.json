@@ -1,0 +1,161 @@
+{
+ "alpha_definition": "net_total_pnl - benchmark_net_total_pnl over the cell evaluation window, finite",
+ "benchmark": {
+  "kind": "capital_matched_passive_buy_hold_same_window_same_cost_model",
+  "window_start": "first bar where the cell signal is defined"
+ },
+ "calendar_contract": {
+  "content_sha256": "3249ee517cbc6763b9f73b372d5c6a5f8337d872b91d20a5bca1c27b7a1a76de",
+  "contract_id": "us_equity_regular_sessions_v1"
+ },
+ "chunking": {
+  "cells_per_chunk": 500,
+  "identity_independent": true
+ },
+ "conditional_edge": {
+  "DISCOVERED_MODERATE": "WEAK + deterministic empirical-null two-sided p <= 0.1",
+  "DISCOVERED_STRONG": "MODERATE + COMPLETE full registered factor-family BH/FDR + q <= 0.1",
+  "DISCOVERED_WEAK": ">=30 valid events + finite direction-adjusted conditional effect > 0 + succeeded authoritative evaluation",
+  "authority": "mqk_research.factors registered FactorSpec + durable evaluation attempt opened before computation",
+  "baseline": "same-symbol same-horizon unconditional mean",
+  "effect": "conditional mean minus baseline, direction applied prospectively (higher_is_better, fixed ex-ante)",
+  "factor_identity": "family/condition type, params, horizon, direction, lookback, normalization, universe identity, data provenance, timing convention, information lag; results never alter identity",
+  "fdr": {
+   "alpha": 0.1,
+   "population": "all registered factors of the corrected family; failed/non-evaluable stay accounted",
+   "protocol": "factor_fdr_bh_v1"
+  },
+  "horizons": [
+   1,
+   3,
+   5,
+   10,
+   20
+  ],
+  "label": "close_{t+h}/close_t - 1, diagnostic only, never P&L; labels reaching past the discovery fence are dropped",
+  "min_events": 30,
+  "null_protocol": {
+   "base_seed": 0,
+   "n_permutations": 200,
+   "source": "mqk_research.factors.fdr.compute_empirical_pvalue (accepted repo defaults)"
+  }
+ },
+ "data_contract": {
+  "adjustment": "all",
+  "asof": "2026-10-05",
+  "end_utc_exclusive": "2024-01-01T00:00:00+00:00",
+  "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+  "feed": "sip",
+  "no_iex_fallback": true,
+  "provider": "alpaca",
+  "start_utc": "2016-01-01T00:00:00+00:00",
+  "symbol_failure_policy": "typed_EXCLUDED_disposition",
+  "timeframe": "1Day"
+ },
+ "edge_identity": {
+  "conditional_edge": "sha256(kind,factor_id)",
+  "result_independent": true,
+  "strategy_edge": "sha256(kind,trial_id)"
+ },
+ "edge_recording_rule": {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "conditional_edge": "DISCOVERED_WEAK|MODERATE|STRONG (highest class only)",
+  "non_qualifying": "stay in the complete search/factor ledger, not registry records",
+  "strategy_edge": "DISCOVERED_WEAK|MODERATE|STRONG (highest class only)"
+ },
+ "eligibility_rule": {
+  "data_present_alone_is_not_a_disposition": true,
+  "exclusion_for_performance": false,
+  "min_valid_completed_1day_observations_strictly_before_2024_01_01": 252,
+  "requires": "accepted registered SIP/adjustment=all provenance and supported asset/data semantics",
+  "substitution": false
+ },
+ "execution_contract": {
+  "cost_model": {
+   "commission_bps_per_side": 10.0,
+   "slippage_bps_per_side": 0.0
+  },
+  "execution_pricing": {
+   "pricing_model_id": "rust_conservative_bar_range_v1",
+   "slippage_bps": 5,
+   "source": "PREDECLARED_BATCH_03 economic_protocol",
+   "volatility_mult_bps": 0
+  },
+  "fill": "first bar strictly after t at rust_conservative_bar_range_v1 (BUY high+slip, SELL low-slip), integer-micros, same-bar fill forbidden",
+  "hold_semantics": "desired while any qualifying event occurred in trailing N completed strategy outputs; no pyramiding",
+  "month_end_anchor": "last canonical session of each calendar month",
+  "open_position_at_end": "marked_to_last_close_no_liquidation",
+  "pnl_marking": "qty_held_before_bar*(close_t-close_{t-1}); fill cost = qty*adverse(fill vs close)+commission",
+  "positions": "long_flat_daily_completed_bars",
+  "signal_knowledge": "signal on bar t uses only bars <= t"
+ },
+ "flag_thresholds": {
+  "cost_fragile": "alpha - (strategy_costs - benchmark_costs) <= 0, i.e. doubling costs erases alpha",
+  "data_quality_caveat_zero_volume_bars": 20,
+  "data_short_history_rows": 1500,
+  "high_turnover_round_trips_per_year": 50,
+  "large_drawdown_frac_of_budget": 0.25,
+  "parameter_island_neighbor_positive_share": 0.25,
+  "regime_concentration_share": 0.8,
+  "single_year_concentration_share": 0.5,
+  "tiny_sample_trades": 30
+ },
+ "indicator_conventions": {
+  "atr": "simple rolling mean of true range",
+  "rsi": "mqk_research.indicators.core.rsi (Cutler simple-mean)",
+  "zscore": "mqk_research.indicators.core.zscore (sample std, ddof=1)"
+ },
+ "metric_definitions": {
+  "concentration": "max positive bucket / sum of positive buckets of per-bar alpha contribution by year / regime",
+  "dsr": "DEFERRED_FULL_POPULATION: effective-trial correction over the full population is infeasible; per-cell sharpe/skew/kurtosis/observations are recorded so research_multiple_testing_judge_v1 can run later",
+  "exposure": "fraction of window bars with a position held before the bar",
+  "max_drawdown": "peak-to-trough of cumulative net pnl including the zero start; flagged as a fraction of the 10000 budget",
+  "min_cross_section": 20,
+  "round_trips": "closed runs",
+  "sharpe": "mean/std(ddof=1) of daily net pnl / 100000 over window bars * sqrt(252); null when std == 0",
+  "trade_count": "entries with qty > 0 (open run counted)",
+  "turnover": "traded notional (entries+exits) / 10000",
+  "win_loss": "closed runs only; run pnl = net bars from entry bar through exit bar inclusive"
+ },
+ "ordering": "families S01..S14 in grid order; symbols sorted; cell identity independent of order",
+ "parameter_neighborhood": {
+  "axes": "numeric non-bool parameters only",
+  "neighbor": "same family and same symbol, equal on every other parameter, adjacent in that parameter's sorted unique grid values",
+  "parameter_island": "qualifying cell with >=1 neighbor and qualifying-neighbor share < threshold; never deleted"
+ },
+ "regime_definition": "SPY close > SPY SMA200 at the prior completed bar (RISK_ON else RISK_OFF)",
+ "replication": {
+  "BROADLY_REPLICATED": ">= 50% of evaluable symbols qualifying",
+  "CLUSTER_REPLICATED": "2+ qualifying symbols but < 50%",
+  "SYMBOL_SPECIFIC": "exactly 1 qualifying symbol",
+  "basis": "per config: count of evaluable symbols whose cell is a registry record (>= WEAK)"
+ },
+ "retry_rules": {
+  "infrastructure_retry": "same trial, new attempt, same economics",
+  "outcome_based_retry": "forbidden"
+ },
+ "schema_version": "alpha_census_protocol_v2",
+ "sizing": {
+  "allocation_bps": 1000,
+  "compounding": false,
+  "entry_budget_usd": 10000,
+  "initial_capital_usd": 100000,
+  "model": "FixedInitialCapitalFractionV1",
+  "plus_one_fallback": false,
+  "production_default": false,
+  "quantity": "floor(budget / completed-signal-bar close)",
+  "whole_shares": true
+ },
+ "strategy_edge_qualification": {
+  "DISCOVERED_MODERATE": "WEAK + finite cost-aware matched-benchmark alpha > 0",
+  "DISCOVERED_STRONG": "MODERATE + DSR >= 0.5 + complete authoritative full-population multiple-testing + PBO <= 0.5",
+  "DISCOVERED_WEAK": "common + >=252 completed evaluated bars + >=5 CLOSED round trips + net strategy P&L > 0",
+  "common": "frozen registered trial, succeeded authoritative attempt, finite metrics, discovery partition only, frozen costs present, valid benchmark present",
+  "judge_status": "DEFERRED_FULL_POPULATION",
+  "min_closed_round_trips": 5,
+  "min_evaluated_bars": 252,
+  "population_narrowing": "forbidden",
+  "strong_while_judge_deferred": 0
+ }
+}
