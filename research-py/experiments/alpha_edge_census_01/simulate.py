@@ -18,10 +18,10 @@ VOL_MULT_BPS = 0
 ANNUALIZATION = 252
 
 
-def conservative_fills(hm: np.ndarray, lm: np.ndarray, cm: np.ndarray):
+def conservative_fills(hm: np.ndarray, lm: np.ndarray, cm: np.ndarray, slippage_bps: int | None = None):
     """Vectorised int64 mirror of execution_pricing.conservative_fill_price_micros (BUY at high, SELL at low)."""
     spread = (hm - lm) * 10_000 // cm
-    eff = SLIPPAGE_BPS + spread * VOL_MULT_BPS // 10_000
+    eff = (SLIPPAGE_BPS if slippage_bps is None else slippage_bps) + spread * VOL_MULT_BPS // 10_000
     buy = hm + hm * eff // 10_000
     sell = np.maximum(lm - lm * eff // 10_000, 0)
     return buy, sell
@@ -40,8 +40,11 @@ class SimOut:
     start: int             # first possible fill bar (s+1)
 
 
-def simulate(hm, lm, cm, d: np.ndarray, s: int) -> SimOut:
-    """Run the position series. h[b] = d[b-1] is the position after the fill on bar b."""
+def simulate(hm, lm, cm, d: np.ndarray, s: int, *, commission_bps: float | None = None,
+             slippage_bps: int | None = None) -> SimOut:
+    """Run the position series. h[b] = d[b-1] is the position after the fill on bar b. The cost overrides default to
+    the accepted census constants (None); a robustness stress passes explicit multiples."""
+    commission = COMMISSION_BPS if commission_bps is None else commission_bps
     n = len(cm)
     h = np.zeros(n, bool)
     h[1:] = d[:-1]
@@ -56,7 +59,7 @@ def simulate(hm, lm, cm, d: np.ndarray, s: int) -> SimOut:
     q_after = np.where(held_after, qty_run[np.maximum(run_id, 0)], 0).astype(np.int64) if len(e_idx) else np.zeros(n, np.int64)
     q_before = np.zeros(n, np.int64)
     q_before[1:] = q_after[:-1]
-    buy, sell = conservative_fills(hm, lm, cm)
+    buy, sell = conservative_fills(hm, lm, cm, slippage_bps)
     dc = np.zeros(n, np.int64)
     dc[1:] = cm[1:] - cm[:-1]
     gross_m = q_before * dc
@@ -64,7 +67,7 @@ def simulate(hm, lm, cm, d: np.ndarray, s: int) -> SimOut:
     ext = exit_ & (q_before > 0)
     adverse_m = np.where(ent, q_after * (buy - cm), 0) + np.where(ext, q_before * (cm - sell), 0)
     traded_m = np.where(ent, q_after * buy, 0) + np.where(ext, q_before * sell, 0)
-    comm = traded_m.astype(np.float64) * (COMMISSION_BPS / 10_000.0)
+    comm = traded_m.astype(np.float64) * (commission / 10_000.0)
     gross = gross_m / 1e6
     cost = (adverse_m.astype(np.float64) + comm) / 1e6
     net = gross - cost
