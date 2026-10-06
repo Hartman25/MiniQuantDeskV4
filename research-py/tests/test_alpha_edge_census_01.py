@@ -1048,3 +1048,391 @@ def test_non_evaluable_symbol_stays_in_population(mini, U):
     meta["X02"] = {"disposition": "DATA_UNAVAILABLE_PROVIDER_ERROR"}
     r = cs.evaluate_cell(U, mini["cells"][0][1], "X02", meta)
     assert r == {"d": "NON_EVALUABLE_DATA_UNAVAILABLE_PROVIDER_ERROR", "m": None}
+
+
+# ------------------------------------------------------------- C3: qualification taxonomy + Edge Registry (IR10-IR20, IR24, IR25, IR27)
+
+import edge_registry as er  # noqa: E402
+
+REAL_M = {"window_bars": 500, "round_trips": 9, "trade_count": 10, "net_pnl_usd": 120.0, "net_alpha_usd": 40.0,
+          "cost_usd": 30.0, "benchmark_net_pnl_usd": 80.0, "benchmark_cost_usd": 4.0, "sharpe": None,
+          "year_alpha_usd": {"2020": 1.0}}
+JUDGE_OK = {"status": "COMPLETE", "population_complete": True, "dsr": 0.7, "pbo": 0.3}
+
+
+def _m(**kw):
+    return {**REAL_M, **kw}
+
+
+def test_ir10_positive_alpha_with_non_positive_net_pnl_is_not_a_record():
+    for pnl in (-0.01, 0.0, -500.0):
+        assert er.strategy_class("EVALUABLE", _m(net_pnl_usd=pnl, net_alpha_usd=900.0)) is None
+    assert er.strategy_positive_below_floor("EVALUABLE", _m(net_pnl_usd=-5.0, net_alpha_usd=900.0), None)
+
+
+@pytest.mark.parametrize("trips,cls", [(0, None), (4, None), (5, er.MODERATE)])
+def test_ir11_fewer_than_five_closed_round_trips_is_not_a_record(trips, cls):
+    assert er.strategy_class("EVALUABLE", _m(round_trips=trips)) == cls
+    assert er.strategy_class("EVALUABLE", _m(round_trips=trips, trade_count=99)) == cls  # open runs never count
+
+
+@pytest.mark.parametrize("bars_,cls", [(251, None), (252, er.MODERATE)])
+def test_ir12_fewer_than_252_evaluated_bars_is_not_a_record(bars_, cls):
+    assert er.strategy_class("EVALUABLE", _m(window_bars=bars_)) == cls
+
+
+def test_ir13_positive_net_pnl_with_floors_is_weak_even_when_alpha_is_not_positive():
+    for alpha in (0.0, -10.0):
+        assert er.strategy_class("EVALUABLE", _m(net_alpha_usd=alpha)) == er.WEAK
+
+
+def test_ir14_weak_plus_positive_finite_matched_benchmark_alpha_is_moderate():
+    assert er.strategy_class("EVALUABLE", _m(net_alpha_usd=0.01)) == er.MODERATE
+    assert er.strategy_class("EVALUABLE", _m(net_alpha_usd=float("nan"))) is None
+
+
+@pytest.mark.parametrize("judge,cls", [
+    (None, er.MODERATE),
+    ({"status": "DEFERRED_FULL_POPULATION"}, er.MODERATE),
+    ({**JUDGE_OK, "population_complete": False}, er.MODERATE),
+    ({**JUDGE_OK, "dsr": 0.49}, er.MODERATE),
+    ({**JUDGE_OK, "pbo": 0.51}, er.MODERATE),
+    ({**JUDGE_OK, "dsr": None}, er.MODERATE),
+    (JUDGE_OK, er.STRONG),
+])
+def test_ir15_no_strong_while_the_full_population_judge_is_deferred_or_unmet(judge, cls):
+    assert er.strategy_class("EVALUABLE", _m(), judge) == cls
+    assert ss.JUDGE_STATUS == "DEFERRED_FULL_POPULATION"
+
+
+@pytest.mark.parametrize("drop", ["cost_usd", "benchmark_net_pnl_usd", "benchmark_cost_usd", "net_pnl_usd", "net_alpha_usd",
+                                  "window_bars", "round_trips"])
+def test_strategy_edge_needs_cost_benchmark_and_finite_metrics(drop):
+    assert er.strategy_class("EVALUABLE", {k: v for k, v in _m().items() if k != drop}) is None
+    assert er.strategy_class("EVALUABLE", _m(**{drop: None})) is None
+    assert er.strategy_class("EVALUABLE", _m(**{drop: float("inf")})) is None
+    assert er.strategy_class("EVALUABLE", _m(year_alpha_usd={"2020": float("nan")})) is None
+
+
+def test_non_evaluable_cells_are_never_records():
+    assert er.strategy_class("NON_EVALUABLE_SIGNAL_NOT_DEFINED", None) is None
+    assert er.strategy_class("NON_EVALUABLE_X", _m()) is None
+
+
+def _rec(n=30, eff=0.002, p=0.05, status="succeeded", fid="f1", **kw):
+    return {"factor_id": fid, "evaluation_id": "e1", "attempt_index": 1, "status": status, "mean_ic": 0.01,
+            "events": {"event_count": n, "direction_adjusted_effect": eff, "symbols_represented": 5,
+                       "top_symbol_event_share": 0.3, "per_year": {}, "per_regime": {}},
+            "pvalue": {"p_value": p}, **kw}
+
+
+FDR_OK = {"status": "complete", "q_values": {"f1": 0.05}}
+
+
+def test_ir16_conditional_with_29_events_never_enters_and_ir17_30_events_positive_effect_is_weak():
+    assert er.conditional_class(_rec(n=29, p=0.001), FDR_OK) is None
+    assert er.conditional_class(_rec(n=30, p=0.5), FDR_OK) == er.WEAK
+    for eff in (0.0, -0.001, float("nan"), None):
+        assert er.conditional_class(_rec(eff=eff, p=0.001), FDR_OK) is None
+    assert er.conditional_class(_rec(status="not_evaluable"), FDR_OK) is None
+    assert er.conditional_class(_rec(status="failed"), FDR_OK) is None
+    assert er.conditional_positive_below_floor(_rec(n=29), None)
+
+
+@pytest.mark.parametrize("p,cls", [(0.10, er.STRONG), (0.1000001, er.WEAK), (0.5, er.WEAK), (None, er.WEAK)])
+def test_ir18_moderate_needs_the_empirical_null_p_at_most_point_ten(p, cls):
+    rec = _rec(p=p)
+    rec["pvalue"] = None if p is None else {"p_value": p}
+    got = er.conditional_class(rec, {"status": "complete", "q_values": {"f1": 0.10}})
+    assert got == cls
+    assert er.conditional_class(rec, None) == (er.MODERATE if cls == er.STRONG else er.WEAK)
+
+
+@pytest.mark.parametrize("fdr,cls", [
+    (None, er.MODERATE),
+    ({"status": "incomplete", "q_values": {"f1": 0.01}}, er.MODERATE),
+    ({"status": "not_evaluable", "q_values": None}, er.MODERATE),
+    ({"status": "complete", "q_values": {"f1": 0.1001}}, er.MODERATE),
+    ({"status": "complete", "q_values": {}}, er.MODERATE),
+    ({"status": "complete", "q_values": {"f1": 0.10}}, er.STRONG),
+])
+def test_ir19_strong_needs_a_complete_full_family_fdr_and_q_at_most_point_ten(fdr, cls):
+    assert er.conditional_class(_rec(p=0.01), fdr) == cls
+    assert ss.DISCOVERY_FDR_ALPHA == 0.10
+
+
+def test_authoritative_factor_record_is_highest_attempt_not_the_best_result():
+    good, bad = _rec(p=0.001, attempt_index=1), _rec(attempt_index=2, status="failed")
+    assert er.authoritative_factor_records([good, bad])["f1"]["status"] == "failed"
+    assert er.authoritative_factor_records([bad, good])["f1"]["status"] == "failed"
+
+
+def test_edge_id_is_result_independent_and_kind_separated():
+    assert er.edge_id("STRATEGY_EDGE", "t1") == er.edge_id("STRATEGY_EDGE", "t1")
+    assert er.edge_id("STRATEGY_EDGE", "t1") != er.edge_id("CONDITIONAL_EDGE", "t1") != er.edge_id("STRATEGY_EDGE", "t2")
+
+
+def test_neighbor_map_adjacent_numeric_only():
+    cfgs = [{"family": "F", "params": {"a": a, "b": b, "m": "x"}} for a in (1, 2, 4) for b in (10, 20)]
+    nb = er.neighbor_map(cfgs)
+    idx = {(c["params"]["a"], c["params"]["b"]): i for i, c in enumerate(cfgs)}
+    assert set(nb[idx[(2, 10)]]) == {idx[(1, 10)], idx[(4, 10)], idx[(2, 20)]}
+    assert set(nb[idx[(1, 10)]]) == {idx[(2, 10)], idx[(1, 20)]}
+    assert er.neighbor_map([{"family": "G", "params": {"a": 2}}, {"family": "F", "params": {"a": 3}}]) == [[], []]
+
+
+def test_ir25_label_return_cannot_reach_strategy_pnl(U, mini, monkeypatch):
+    import inspect
+    assert "label" not in inspect.getsource(cs.evaluate_cell) and "fwd_ret" not in inspect.getsource(cs.evaluate_cell)
+    assert not any("label" in p or "fwd" in p for p in inspect.signature(sm.simulate).parameters)
+    cfg, sym = mini["cells"][0][1], mini["cells"][0][2]
+    ref = cs.evaluate_cell(U, cfg, sym, mini["meta"])
+
+    def boom(*a, **k):
+        raise AssertionError("StrategyEdge economics must not touch the conditional label frame")
+
+    monkeypatch.setattr(cd, "build_frame", boom)
+    assert cs.evaluate_cell(U, cfg, sym, mini["meta"]) == ref
+
+
+def test_ir24_rejected_run_population_and_attempts_cannot_satisfy_the_corrected_freeze_gate(tmp_path, mini):
+    cells = mini["cells"]
+    assert ss.REJECTED_EXPERIMENT_ID != ss.EXPERIMENT_ID
+    st = ResearchResultStore(tmp_path / "rej.sqlite")
+    ids = {k: mini["space"][k] for k in ("universe_id", "partitions_id", "protocol_id")}
+    st.register_hypothesis(hypothesis_id="rej-h", experiment_id=ss.REJECTED_EXPERIMENT_ID, hypothesis_text="x")
+    st.register_trials_bulk([{"trial_id": t, "experiment_id": ss.REJECTED_EXPERIMENT_ID, "hypothesis_id": "rej-h",
+                              "strategy_id": f"{c['family']}:{c['config_id']}", "protocol_id": ids["protocol_id"],
+                              "identity": ss.trial_identity(c, s, ids)} for _i, c, s, t in cells])
+    st.begin_attempts_bulk([cells[0][3]], origin="rejected")
+    with pytest.raises(cs.GateRefusal, match="missing="):
+        _gate(st, mini, allow_attempts=True)
+    with pytest.raises(cs.GateRefusal, match="missing="):
+        _gate(st, mini, allow_attempts=False)
+
+
+# ---- end-to-end registry over a small real population (registered factors, real runner, real FDR)
+
+@pytest.fixture(scope="module")
+def reg_run(tmp_path_factory, U, cctx):
+    root = tmp_path_factory.mktemp("reg")
+    cfgs = [_cfg("S02", sma=50), _cfg("S05", **S05_CFG), _cfg("S05", **{**S05_CFG, "entry_below": 30}),
+            [c for c in ss.build_configs() if c["family"] == "S14"][0]]
+    seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
+    base = ss.build_universe(seed, {s: {"disposition": cdata.ELIGIBLE} for s in seed["symbols"]})
+    uni = {**base, "symbols": list(U.symbols)}
+    ids = {"universe_id": "u" * 32, "partitions_id": "p" * 32, "protocol_id": "q" * 32}
+    space = {"search_space_id": "reg", **ids}
+    index = {c["config_id"]: i for i, c in enumerate(cfgs)}
+    cells = [(index[c["config_id"]], c, s, t) for c, s, t in ss.iter_cells(cfgs, list(U.symbols), ids)]
+    space["population_root_sha256"] = ss.population_root(cfgs, list(U.symbols), ids)
+    meta = {s: {"disposition": cs.DATA_PRESENT, "rows": len(U.sd[s].c), "data_short_history": False,
+                "data_quality_caveat": False} for s in U.symbols}
+    st = ResearchResultStore(root / "registry.sqlite")
+    cs.register_population(st, space, cells, cctx)
+    cs.run_chunks(st, U, space, cells, meta, cctx, root, chunk_size=20)
+    cache = cd.PermutationCache()
+    recs = [cd.evaluate_factor(st.db_path, root / "fac", U, c, h, cctx, origin="t", cache=cache)
+            for c in cfgs for h in ss.CONDITIONAL_HORIZONS]
+    fdr = cd.family_fdr_report(st.db_path, recs)
+    prot = {**ss.build_protocol(), "chunking": {"cells_per_chunk": 20}}
+    out = root / "out"
+    out.mkdir()
+    import shutil
+    shutil.copytree(root / "chunks", out / "chunks")
+    summary = er.build_registry(space, uni, cells, meta, prot, out, ctx=cctx, factor_records=recs, fdr=fdr)
+    return {"root": root, "out": out, "space": space, "uni": uni, "cells": cells, "meta": meta, "prot": prot,
+            "recs": recs, "fdr": fdr, "summary": summary, "ctx": cctx, "cfgs": cfgs, "st": st}
+
+
+def _lines(p):
+    return [json.loads(x) for x in Path(p).read_text(encoding="utf-8").splitlines()]
+
+
+def _edges(r):
+    return _lines(r["out"] / "edge_registry_v2.jsonl")
+
+
+def test_registry_records_exactly_the_qualifying_candidates_at_their_highest_class(reg_run):
+    r = reg_run
+    rows = [json.loads(x) for x in _read(r["root"])]
+    exp_s = {x["t"]: er.strategy_class(x["d"], x["m"]) for x in rows}
+    exp_s = {t: c for t, c in exp_s.items() if c}
+    auth = er.authoritative_factor_records(r["recs"])
+    exp_c = {f: er.conditional_class(a, r["fdr"]) for f, a in auth.items()}
+    exp_c = {f: c for f, c in exp_c.items() if c}
+    edges = _edges(r)
+    got_s = {e["trial_id"]: e["edge_class"] for e in edges if e["kind"] == "STRATEGY_EDGE"}
+    got_c = {e["factor_id"]: e["edge_class"] for e in edges if e["kind"] == "CONDITIONAL_EDGE"}
+    assert got_s == exp_s and got_c == exp_c
+    assert exp_s and exp_c, "fixture must contain both qualifying StrategyEdges and ConditionalEdges"
+    assert len(got_s) < len(rows) and len(got_c) < len(auth), "fixture must contain non-qualifying candidates"
+    assert len({e["edge_id"] for e in edges}) == len(edges)
+    for e in edges:
+        assert e["edge_class"] in (er.WEAK, er.MODERATE, er.STRONG)
+        assert sum(k in e for k in ("edge_class",)) == 1
+    s = r["summary"]
+    assert sum(s["strategy_edges"].values()) == len(got_s) and sum(s["conditional_edges"].values()) == len(got_c)
+    assert s["strategy_edges"][er.STRONG] == 0 and s["JUDGE_STATUS"] == "DEFERRED_FULL_POPULATION"
+
+
+def test_every_record_is_not_validated_no_promotion_non_executable_and_survivorship_labeled(reg_run):
+    for e in _edges(reg_run):
+        assert e["VALIDATION_STATUS"] == "NOT_VALIDATED" and e["PROMOTION_AUTHORITY"] == "NONE"
+        assert e["label"] == "DISCOVERED / NOT VALIDATED" and e["partition"] == "DISCOVERY_2016_2023"
+        assert e["survivorship_classification"] == "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME"
+        assert e["point_in_time_membership"] is False and "survivorship_caveat" in e["flags"]
+        if e["kind"] == "CONDITIONAL_EDGE":
+            assert e["executable_pnl"] is False and "metrics" not in e
+            assert e["horizon"] in (1, 3, 5, 10, 20) and e["events"]["event_count"] >= 30
+        else:
+            assert e["metrics"]["net_pnl_usd"] > 0 and e["metrics"]["round_trips"] >= 5 and e["metrics"]["window_bars"] >= 252
+    s = reg_run["summary"]
+    assert s["PROMOTION_AUTHORITY"] == "NONE" and s["VALIDATION_STATUS"] == "NOT_VALIDATED"
+
+
+def test_ir27_search_ledger_keeps_every_strategy_candidate_including_losers_and_below_floor(reg_run):
+    r = reg_run
+    led = _lines(r["out"] / "search_ledger_v2.jsonl")
+    assert [x["t"] for x in led] == [c[3] for c in r["cells"]]
+    s = r["summary"]
+    assert len(led) == s["cells_total"] == len(r["cells"]) > sum(s["strategy_edges"].values())
+    assert any(x.get("net_pnl_usd", 1) <= 0 for x in led), "losing candidates must stay in the denominator"
+    assert s["strategy_positive_below_floor"] == sum(1 for x in led if x.get("below_floor"))
+    assert all(x["class"] is None for x in led if x.get("below_floor")), "below-floor is never a registry class"
+    assert sum(s["dispositions"].values()) == len(r["cells"])
+
+
+def test_ir28_factor_ledger_keeps_every_registered_factor_including_non_evaluable(reg_run):
+    r = reg_run
+    fl = _lines(r["out"] / "factor_ledger_v2.jsonl")
+    s = r["summary"]
+    assert len(fl) == s["factors_total"] == len(r["cfgs"]) * 5 == len(r["fdr"]["declared_factor_ids"])
+    assert {x["status"] for x in fl} >= {"succeeded", "not_evaluable"}
+    assert any(x["class"] is None for x in fl)
+    assert sum(s["conditional_edges"].values()) < len(fl)
+    assert s["conditional_positive_below_floor"] == sum(1 for x in fl if x["below_floor"])
+
+
+def test_ir20_fdr_population_is_the_registry_and_keeps_non_evaluable_and_negative_factors(reg_run):
+    r = reg_run
+    fdr = r["fdr"]
+    assert fdr["status"] == "complete" and len(fdr["declared_factor_ids"]) == len(r["cfgs"]) * 5
+    assert fdr["excluded_factor_ids_with_reasons"], "non-evaluable (date-level) factors stay accounted as typed exclusions"
+    neg = [a for a in r["recs"] if a["status"] == "succeeded" and a["events"]["direction_adjusted_effect"] is not None
+           and a["events"]["direction_adjusted_effect"] <= 0]
+    assert neg and all(a["factor_id"] in fdr["raw_p_values"] and a["factor_id"] in fdr["q_values"] for a in neg)
+    assert set(fdr["included_factor_ids"]) | set(fdr["excluded_factor_ids_with_reasons"]) == set(fdr["declared_factor_ids"])
+
+
+def test_registry_refuses_fdr_built_from_winners_or_a_partial_factor_record_set(reg_run, tmp_path):
+    r = reg_run
+    auth = er.authoritative_factor_records(r["recs"])
+    winners = [x for x in r["recs"] if er.conditional_class(auth[x["factor_id"]], r["fdr"])]
+    assert winners and len(winners) < len(r["recs"])
+    kw = dict(ctx=r["ctx"])
+    out = tmp_path / "o"
+    out.mkdir()
+    import shutil
+    shutil.copytree(r["out"] / "chunks", out / "chunks")
+    args = (r["space"], r["uni"], r["cells"], r["meta"], r["prot"], out)
+    with pytest.raises(er.RegistryRefusal, match="factor records != registered population"):
+        er.build_registry(*args, factor_records=winners, fdr=r["fdr"], **kw)
+    narrowed = {**r["fdr"], "declared_factor_ids": [x["factor_id"] for x in winners]}
+    with pytest.raises(er.RegistryRefusal, match="FDR population differs"):
+        er.build_registry(*args, factor_records=r["recs"], fdr=narrowed, **kw)
+    assert cd.family_fdr_report(r["st"].db_path, winners)["declared_factor_ids"].__len__() == len(r["recs"])
+
+
+def test_registry_is_deterministic_and_hashes_bind_files(reg_run):
+    import hashlib
+    r = reg_run
+    s = r["summary"]
+    for key, name in (("edge_registry_sha256", "edge_registry_v2.jsonl"), ("search_ledger_sha256", "search_ledger_v2.jsonl"),
+                      ("factor_ledger_sha256", "factor_ledger_v2.jsonl")):
+        assert hashlib.sha256((r["out"] / name).read_bytes()).hexdigest() == s[key]
+    again = er.build_registry(r["space"], r["uni"], r["cells"], r["meta"], r["prot"], r["out"], ctx=r["ctx"],
+                              factor_records=list(reversed(r["recs"])), fdr=r["fdr"])
+    assert again == s
+
+
+def test_ids_do_not_depend_on_results_or_layout(reg_run):
+    r = reg_run
+    for e in _edges(r):
+        ident = e["trial_id"] if e["kind"] == "STRATEGY_EDGE" else e["factor_id"]
+        assert e["edge_id"] == er.edge_id(e["kind"], ident)
+
+
+def test_neighborhood_flags_never_delete_island_edges(reg_run):
+    edges = _edges(reg_run)
+    s = reg_run["summary"]
+    assert s["parameter_island_edges"] == sum("parameter_island" in e["flags"] for e in edges)
+    assert len(edges) == sum(s["strategy_edges"].values()) + sum(s["conditional_edges"].values())
+
+
+def test_registry_refuses_tampered_or_missing_chunk(tmp_path, reg_run):
+    import shutil
+    r = reg_run
+    root = tmp_path / "t"
+    shutil.copytree(r["out"], root)
+    args = (r["space"], r["uni"], r["cells"], r["meta"], r["prot"], root)
+    kw = dict(ctx=r["ctx"], factor_records=r["recs"], fdr=r["fdr"])
+    p0 = er.chunk_path(root, 0)
+    lines = p0.read_text(encoding="utf-8").splitlines()
+    p0.write_text("\n".join(lines[1:] + lines[:1]) + "\n", encoding="utf-8")
+    with pytest.raises(er.RegistryRefusal, match="not the manifest cell"):
+        er.build_registry(*args, **kw)
+    p0.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    with pytest.raises(er.RegistryRefusal, match="line count"):
+        er.build_registry(*args, **kw)
+    p0.unlink()
+    with pytest.raises(er.RegistryRefusal, match="missing chunk"):
+        er.build_registry(*args, **kw)
+
+
+# ---- bars manifest / symbol meta
+
+def _fake_bars_dir(tmp_path, symbols, absent=()):
+    for sym in symbols:
+        d = tmp_path / sym
+        d.mkdir()
+        status = {"disposition": "DATA_UNAVAILABLE_PROVIDER_ERROR" if sym in absent else cs.DATA_PRESENT}
+        (d / "status.json").write_text(json.dumps(status), encoding="utf-8")
+        if sym not in absent:
+            (d / "research_bars_provenance.json").write_text(json.dumps({"sym": sym}), encoding="utf-8")
+            (d / "corporate_actions_provenance.json").write_text(json.dumps({"ca": sym}), encoding="utf-8")
+
+
+def test_bars_manifest_binds_hashes_keeps_unavailable_symbols_and_load_refuses_drift(tmp_path, monkeypatch, bars):
+    syms = ["SPY", "X00", "X01"]
+    uni = {"symbols": syms}
+    _fake_bars_dir(tmp_path, syms, absent=("X01",))
+    state = {"hash": "h1"}
+
+    def fake_load(sym_dir):
+        return bars[sym_dir.name].copy(), {"artifact_sha256": "a-" + sym_dir.name,
+                                           "canonical_semantic_bars_hash": state["hash"] + sym_dir.name,
+                                           "canonical_pricing_bars_hash": "p"}
+
+    monkeypatch.setattr(cs, "load_symbol_bars", fake_load)
+    m = cs.build_bars_manifest(uni, tmp_path)
+    assert set(m["symbols"]) == set(syms)
+    assert m["symbols"]["X01"] == {"disposition": "DATA_UNAVAILABLE_PROVIDER_ERROR"}
+    assert m["symbols"]["SPY"]["rows"] == len(bars["SPY"]) and m["symbols"]["SPY"]["provenance_file_sha256"]
+    assert m["request_contract"] == cdata.REQUEST_CONTRACT
+    assert cs.load_bars(uni, tmp_path, m).keys() == {"SPY", "X00"}
+    state["hash"] = "h2"
+    with pytest.raises(cs.GateRefusal, match="differ"):
+        cs.load_bars(uni, tmp_path, m)
+    assert cs.build_bars_manifest(uni, tmp_path)["manifest_sha256"] != m["manifest_sha256"]
+
+
+def test_symbol_meta_flags_short_history_and_zero_volume_caveat():
+    prot = ss.build_protocol()
+    man = {"symbols": {"A": {"disposition": cs.DATA_PRESENT, "rows": 1499, "zero_volume_bars": 20},
+                       "B": {"disposition": cs.DATA_PRESENT, "rows": 1500, "zero_volume_bars": 19},
+                       "C": {"disposition": "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION"}}}
+    meta = cs.symbol_meta(man, prot)
+    assert meta["A"]["data_short_history"] and meta["A"]["data_quality_caveat"]
+    assert not meta["B"]["data_short_history"] and not meta["B"]["data_quality_caveat"]
+    assert meta["C"] == {"disposition": "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION"}
