@@ -24,14 +24,14 @@ import search_space as ss  # noqa: E402
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 from mqk_research.factors.contracts import (  # noqa: E402
     DIRECTION_HIGHER_IS_BETTER, EVAL_STATUS_NOT_EVALUABLE, EVAL_STATUS_SUCCEEDED, NORMALIZATION_RAW,
-    TIMING_SAME_BAR_CLOSE, FactorSpec)
-from mqk_research.factors.diagnostics import observations_content_hash  # noqa: E402
+    TIMING_SAME_BAR_CLOSE, FactorEvaluationSpec, FactorSpec)
+from mqk_research.factors.diagnostics import FactorDiagnosticsProtocolSpec, observations_content_hash  # noqa: E402
 from mqk_research.factors.fdr import (  # noqa: E402
     EMPIRICAL_PVALUE_PROTOCOL_VERSION, FactorPValueEvidence, build_fdr_population_report)
 from mqk_research.factors.null_controls import _derive_period_seed  # noqa: E402
 from mqk_research.factors.registry import (  # noqa: E402
     list_factor_evaluation_attempts, list_factors, register_factor)
-from mqk_research.factors.runner import run_registered_factor_diagnostics  # noqa: E402
+from mqk_research.factors.runner import UNIVERSE_MODE_FIXED_EX_ANTE, run_registered_factor_diagnostics  # noqa: E402
 
 FACTOR_FAMILY = "alpha_census_conditional_v3"
 FACTOR_PROTOCOL_VERSION = "alpha_census_conditional_factor_v3"
@@ -447,10 +447,23 @@ class FactorResumeRefusal(RuntimeError):
 
 
 def retry_eligible(attempt: dict) -> bool:
-    """Only an infrastructure failure may be retried (same factor/evaluation, new attempt). The registered runner maps
-    every statistical or economic outcome to succeeded / not_evaluable, so a `failed` attempt is by construction an
-    infrastructure fault or interruption; a succeeded or not_evaluable attempt is never retry-eligible."""
-    return attempt["status"] == "failed" and bool((attempt.get("failure_reason") or "").strip())
+    """Only the exact typed `infrastructure_interrupted` failure is automatically retryable (same factor/evaluation,
+    new attempt). Any other failed reason (an arbitrary exception text) is not classified and is never retried."""
+    return attempt["status"] == "failed" and attempt.get("failure_reason") == INTERRUPTED_REASON
+
+
+def expected_evaluation_id(condition: dict, horizon: int, ctx: dict) -> str:
+    """The evaluation_id the registered runner derives for this exact factor, from the same frozen inputs and never from
+    a result: factor id, mode-tagged fixed ex-ante universe, evaluation window, label protocol, diagnostics protocol."""
+    spec = factor_spec(condition, horizon, ctx)
+    protocol = FactorDiagnosticsProtocolSpec(direction=spec.direction, n_quantiles=N_QUANTILES,
+                                             min_cross_section=MIN_CROSS_SECTION, min_periods=MIN_PERIODS)
+    return FactorEvaluationSpec(
+        factor_id=spec.compute_factor_id(),
+        universe_identity={**declared_universe_identity(ctx), "universe_mode": UNIVERSE_MODE_FIXED_EX_ANTE},
+        evaluation_window_start_utc=WINDOW_START_UTC, evaluation_window_end_utc=WINDOW_END_UTC,
+        label_protocol_version=LABEL_PROTOCOL_VERSION,
+        evaluation_protocol_version=protocol.evaluation_protocol_version()).compute_evaluation_id()
 
 
 def factor_record_path(rec_dir: Path, factor_id: str) -> Path:
@@ -519,12 +532,15 @@ def resolve_factor(registry_db: Path, out_dir: Path, rec_dir: Path, U, condition
     except KeyError:
         raise FactorResumeRefusal(f"factor {fid} is not registered in the frozen population; refusing to attempt") from None
     attempts = store.list_factor_evaluation_attempts(fid)
+    expected_eid = expected_evaluation_id(condition, horizon, ctx)
+    for att in attempts:  # fence first: nothing is finalized or opened for an attempt of a foreign evaluation
+        if (att["status"] == "started" or retry_eligible(att)) and att.get("evaluation_id") != expected_eid:
+            raise FactorResumeRefusal(f"{att['attempt_id']}: {att['status']} attempt belongs to evaluation "
+                                      f"{att.get('evaluation_id')!r}, not the current {expected_eid!r}; refusing to resume")
     for att in attempts:
         if att["status"] == "started":
-            if not att.get("evaluation_id"):
-                raise FactorResumeRefusal(f"{att['attempt_id']}: started attempt has no evaluation_id; cannot be finalized")
             store.finalize_factor_evaluation_attempt(att["attempt_id"], status="failed", expected_factor_id=fid,
-                                                     expected_evaluation_id=att["evaluation_id"],
+                                                     expected_evaluation_id=expected_eid,
                                                      failure_reason=INTERRUPTED_REASON)
     attempts = store.list_factor_evaluation_attempts(fid)
     latest = attempts[-1] if attempts else None
@@ -539,7 +555,7 @@ def resolve_factor(registry_db: Path, out_dir: Path, rec_dir: Path, U, condition
         raise FactorResumeRefusal(f"{fid}: a terminal attempt exists but the latest attempt is {latest['status']}; "
                                   "authority conflict, refusing to continue")
     if latest is not None and not retry_eligible(latest):
-        raise FactorResumeRefusal(f"{latest['attempt_id']}: failed without a recorded infrastructure reason; not retried")
+        raise FactorResumeRefusal(f"{latest['attempt_id']}: failed with a reason other than {INTERRUPTED_REASON!r}; not retried")
     rec = evaluate(registry_db, out_dir, U, condition, horizon, ctx, origin=origin, cache=cache, metadata=metadata)
     write_factor_record(rec_dir, rec)
     return rec, ACTION_RETRIED if latest is not None else ACTION_EVALUATED

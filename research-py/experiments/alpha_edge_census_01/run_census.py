@@ -17,6 +17,7 @@ Stages (each idempotent; frozen manifests are immutable once written):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import multiprocessing as mp
@@ -315,7 +316,36 @@ def _eval_condition(item: tuple[int, dict]) -> tuple[int, str, dict]:
     return ci, "ok", actions
 
 
+@contextlib.contextmanager
+def _exclusive_run_factors_owner():
+    """Process-lifetime OS lock: only one run-factors controller may operate on the V3 registry. The OS releases the lock
+    when the descriptor closes or the process dies; the lock file's mere existence is not authority."""
+    FACTOR_DIR.mkdir(parents=True, exist_ok=True)
+    with open(FACTOR_DIR / "run_factors.lock", "a+b") as fh:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ce.GateRefusal("another run-factors controller owns the V3 factor registry; refusing to run") from None
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def cmd_run_factors(a) -> None:
+    with _exclusive_run_factors_owner():
+        _run_factors_owned(a)
+
+
+def _run_factors_owned(a) -> None:
     uni, _prot, _space, bm, ctx, _cells, conditions = _factor_context()
     FACTOR_REC_DIR.mkdir(parents=True, exist_ok=True)
     pending = cd.pending_conditions(FACTOR_REGISTRY_DB, FACTOR_REC_DIR, conditions, ctx)

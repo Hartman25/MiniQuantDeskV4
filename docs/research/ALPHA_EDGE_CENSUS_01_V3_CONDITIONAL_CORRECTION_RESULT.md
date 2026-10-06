@@ -26,6 +26,13 @@ as a new attempt of the same evaluation; `failed` (infrastructure) is retried; n
 an unregistered factor is refused (no auto-registration); a terminal attempt followed by a later failed one is an authority
 conflict and refuses. Each horizon is persisted as soon as it is terminal. Cases A-E are tests.
 
+**Resume-authority closeout (RESUME-AUTHORITY-CLOSEOUT-03) supersedes the retry clause above.** Only the exact typed reason
+`infrastructure_interrupted` is automatically retryable; a `failed` attempt with any other reason (e.g. a runner exception
+text) is refused and needs operator action. A `started` or retryable `failed` attempt is resumed only if its `evaluation_id`
+equals the expected evaluation identity recomputed from the frozen inputs, otherwise `FactorResumeRefusal` before any state
+change. `run-factors` runs under one non-blocking OS file lock (`factor_eval/run_factors.lock`) held for the whole invocation;
+a second controller is refused. No factor, Strategy, FDR or Edge Registry state was re-executed or changed.
+
 **IR-10 — tooling.** `ALPHA_EDGE_CENSUS_01_V3_TOOLING_DISPOSITION.md`: `mqk_readonly` USED; Srclight stale-index reverified and
 skipped; Graft `CONNECT_TIMEOUT`; `mqd-test-proof` used.
 

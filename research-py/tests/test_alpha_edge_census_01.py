@@ -1699,8 +1699,6 @@ def test_d1_registry_conditional_records_are_keyed_by_semantic_condition(reg_run
 
 # ------------------------------------------------------------ factor-level resume / idempotency (CR-02)
 
-import mqk_research.factors.runner as frunner  # noqa: E402
-
 HORIZONS = list(ss.CONDITIONAL_HORIZONS)
 
 
@@ -1714,6 +1712,9 @@ class _Env:
         return cd.resolve_factor(self.db, self.out, self.rec, self.U, self.cond, h, self.ctx, origin="t",
                                  cache=cd.PermutationCache(), evaluate=evaluate)
 
+    def eid(self, h):
+        return cd.expected_evaluation_id(self.cond, h, self.ctx)
+
     def attempts(self, h):
         return self.store.list_factor_evaluation_attempts(self.fids[h])
 
@@ -1721,16 +1722,12 @@ class _Env:
         return {h: [a["status"] for a in self.attempts(h)] for h in HORIZONS}
 
 
-def _flaky(monkeypatch, fail_on: set):
-    """Evaluate wrapper whose infrastructure fault hits INSIDE the registered runner (after the durable attempt opened)."""
-    def boom(*a, **k):
-        raise RuntimeError("injected infrastructure fault")
-
+def _flaky(env, fail_on: set):
+    """Evaluate wrapper whose process dies right after the durable attempt opened: the attempt stays `started`."""
     def evaluate(db, out, U, cond, h, ctx, **kw):
         if h in fail_on:
-            with monkeypatch.context() as m:
-                m.setattr(frunner, "evaluate_factor_ic_ir", boom)
-                return cd.evaluate_factor(db, out, U, cond, h, ctx, **kw)
+            env.store.begin_factor_evaluation_attempt(factor_id=env.fids[h], evaluation_id=env.eid(h), origin="crashed")
+            raise RuntimeError("injected infrastructure fault")
         return cd.evaluate_factor(db, out, U, cond, h, ctx, **kw)
     return evaluate
 
@@ -1746,10 +1743,10 @@ def _stop_after_fault(env, evaluate):
     return done
 
 
-def test_d2_case_a_succeeded_horizon_is_not_rerun_when_a_later_horizon_fails(tmp_path, monkeypatch, U, cctx):
+def test_d2_case_a_succeeded_horizon_is_not_rerun_when_a_later_horizon_fails(tmp_path, U, cctx):
     env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
-    assert _stop_after_fault(env, _flaky(monkeypatch, {3})) == [(1, "evaluated")]
-    assert env.statuses() == {1: ["succeeded"], 3: ["failed"], 5: [], 10: [], 20: []}
+    assert _stop_after_fault(env, _flaky(env, {3})) == [(1, "evaluated")]
+    assert env.statuses() == {1: ["succeeded"], 3: ["started"], 5: [], 10: [], 20: []}
     h1_attempt = env.attempts(1)[0]["attempt_id"]
     resumed = [(h, env.resolve(h)[1]) for h in HORIZONS]
     assert resumed == [(1, "reused"), (3, "retried"), (5, "evaluated"), (10, "evaluated"), (20, "evaluated")]
@@ -1759,10 +1756,10 @@ def test_d2_case_a_succeeded_horizon_is_not_rerun_when_a_later_horizon_fails(tmp
     assert env.attempts(3)[1]["evaluation_id"] == env.attempts(3)[0]["evaluation_id"], "retry is the SAME evaluation"
 
 
-def test_d2_case_b_not_evaluable_horizon_stays_one_terminal_attempt_when_a_later_horizon_fails(tmp_path, monkeypatch, U, cctx):
+def test_d2_case_b_not_evaluable_horizon_stays_one_terminal_attempt_when_a_later_horizon_fails(tmp_path, U, cctx):
     env = _Env(tmp_path, cctx, [c for c in CONDS if c["family"] == "S14"][0], U)
-    assert _stop_after_fault(env, _flaky(monkeypatch, {3})) == [(1, "evaluated")]
-    assert env.statuses()[1] == ["not_evaluable"] and env.statuses()[3] == ["failed"]
+    assert _stop_after_fault(env, _flaky(env, {3})) == [(1, "evaluated")]
+    assert env.statuses()[1] == ["not_evaluable"] and env.statuses()[3] == ["started"]
     resumed = [(h, env.resolve(h)[1]) for h in HORIZONS]
     assert resumed[0] == (1, "reused") and resumed[1] == (3, "retried")
     assert env.statuses()[1] == ["not_evaluable"], "a terminal NOT_EVALUABLE is never re-attempted"
@@ -1771,8 +1768,8 @@ def test_d2_case_b_not_evaluable_horizon_stays_one_terminal_attempt_when_a_later
 
 def test_d2_case_c_a_stale_started_attempt_is_never_treated_as_success(tmp_path, U, cctx):
     env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
-    aid, _ = env.store.begin_factor_evaluation_attempt(factor_id=env.fids[1], evaluation_id="e" * 32, origin="crashed")
-    cd.write_factor_record(env.rec, {"factor_id": env.fids[1], "attempt_id": aid, "evaluation_id": "e" * 32,
+    aid, _ = env.store.begin_factor_evaluation_attempt(factor_id=env.fids[1], evaluation_id=env.eid(1), origin="crashed")
+    cd.write_factor_record(env.rec, {"factor_id": env.fids[1], "attempt_id": aid, "evaluation_id": env.eid(1),
                                      "status": "succeeded", "horizon": 1})  # a fabricated success claim
     assert cd.settled_record(env.store, env.rec, env.fids[1]) is None
     rec, action = env.resolve(1)
@@ -1824,8 +1821,8 @@ def test_d2_unreconstructable_terminal_evidence_fails_closed_instead_of_rerunnin
 
 
 def test_d2_retry_eligibility_is_infrastructure_failure_only_and_conflicts_fail_closed(tmp_path, U, cctx):
-    ok = {"status": "failed", "failure_reason": "RuntimeError: boom"}
-    assert cd.retry_eligible(ok) and not cd.retry_eligible({"status": "failed", "failure_reason": ""})
+    assert cd.retry_eligible({"status": "failed", "failure_reason": cd.INTERRUPTED_REASON})
+    assert not cd.retry_eligible({"status": "failed", "failure_reason": ""})
     for status in ("succeeded", "not_evaluable"):
         assert not cd.retry_eligible({"status": status, "failure_reason": "zero_variance_factor"})
     env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
@@ -1852,7 +1849,7 @@ def test_d2_driver_resumes_per_factor_and_registry_outranks_result_files(tmp_pat
     monkeypatch.setattr(rc, "FACTOR_DIR", tmp_path)
     monkeypatch.setattr(rc, "FACTOR_REC_DIR", env.rec)
     monkeypatch.setattr(rc, "_W", {"U": U, "ctx": cctx, "cache": cd.PermutationCache()})
-    env.store.begin_factor_evaluation_attempt(factor_id=env.fids[3], evaluation_id="e" * 32, origin="orphan")
+    env.store.begin_factor_evaluation_attempt(factor_id=env.fids[3], evaluation_id=env.eid(3), origin="orphan")
     assert cd.pending_conditions(env.db, env.rec, [c], cctx) == [(0, c)]
     assert rc._eval_condition((ci, c)) == (ci, "ok", {"evaluated": 4, "retried": 1})
     assert env.statuses() == {1: ["succeeded"], 3: ["failed", "succeeded"], 5: ["succeeded"], 10: ["succeeded"], 20: ["succeeded"]}
@@ -1868,6 +1865,153 @@ def test_d2_driver_resumes_per_factor_and_registry_outranks_result_files(tmp_pat
     assert rc._eval_condition((ci, c)) == (ci, "ok", {"reused": 4, "reconstructed": 1})
     assert cd.read_factor_record(env.rec, env.fids[5]) == json.loads(good)
     assert all(len(env.attempts(h)) == (2 if h == 3 else 1) for h in HORIZONS)
+
+
+# ------------------------------------------------ fail-closed resume authority (RESUME-AUTHORITY-CLOSEOUT-03)
+
+import types  # noqa: E402
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("ValueError: x", False), ("AssertionError: x", False), ("RuntimeError: x", False), ("", False), (None, False),
+    ("infrastructure_interrupted", True)])
+def test_r_retry_authority_is_the_exact_typed_interruption_only(reason, expected):  # T1-T4
+    assert cd.retry_eligible({"status": "failed", "failure_reason": reason}) is expected
+    for status in ("started", "succeeded", "not_evaluable"):
+        assert not cd.retry_eligible({"status": status, "failure_reason": cd.INTERRUPTED_REASON})
+
+
+def test_r_resolve_refuses_a_generic_failed_attempt_of_the_current_evaluation(tmp_path, U, cctx):  # T1-T3 wiring
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    aid, _ = env.store.begin_factor_evaluation_attempt(factor_id=env.fids[3], evaluation_id=env.eid(3), origin="t")
+    env.store.finalize_factor_evaluation_attempt(aid, status="failed", expected_factor_id=env.fids[3],
+                                                 expected_evaluation_id=env.eid(3), failure_reason="ValueError: x")
+    before = env.attempts(3)
+    with pytest.raises(cd.FactorResumeRefusal, match="not retried"):
+        env.resolve(3)
+    assert env.attempts(3) == before and len(before) == 1
+
+
+def test_r_expected_evaluation_id_equals_the_registered_runner_evaluation_id(tmp_path, U, cctx):  # T5
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    for h in HORIZONS:
+        rec, _action = env.resolve(h)
+        assert rec["evaluation_id"] == env.eid(h) == env.attempts(h)[0]["evaluation_id"]
+    assert len({env.eid(h) for h in HORIZONS}) == 5
+
+
+def _foreign_attempt(env, h, *, finalize):
+    aid, _ = env.store.begin_factor_evaluation_attempt(factor_id=env.fids[h], evaluation_id="e" * 32, origin="foreign")
+    if finalize:
+        env.store.finalize_factor_evaluation_attempt(aid, status="failed", expected_factor_id=env.fids[h],
+                                                     expected_evaluation_id="e" * 32, failure_reason=cd.INTERRUPTED_REASON)
+    return aid
+
+
+def test_r_foreign_evaluation_failed_attempt_is_refused_without_state_change(tmp_path, U, cctx):  # T6
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    _foreign_attempt(env, 3, finalize=True)
+    before = env.attempts(3)
+    with pytest.raises(cd.FactorResumeRefusal, match="refusing to resume"):
+        env.resolve(3)
+    assert env.attempts(3) == before and len(before) == 1
+
+
+def test_r_foreign_evaluation_started_attempt_is_refused_and_left_untouched(tmp_path, U, cctx):  # T7
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    _foreign_attempt(env, 3, finalize=False)
+    before = env.attempts(3)
+    with pytest.raises(cd.FactorResumeRefusal, match="refusing to resume"):
+        env.resolve(3)
+    after = env.attempts(3)
+    assert after == before and len(after) == 1 and after[0]["status"] == "started"
+
+
+def test_r_matching_started_attempt_under_run_ownership_is_interrupted_then_retried_once(tmp_path, monkeypatch, U, cctx):  # T8
+    import run_census as rc
+    monkeypatch.setattr(rc, "FACTOR_DIR", tmp_path / "factor_eval")
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    env.store.begin_factor_evaluation_attempt(factor_id=env.fids[3], evaluation_id=env.eid(3), origin="previous_controller")
+    with rc._exclusive_run_factors_owner():
+        rec, action = env.resolve(3)
+    first, second = env.attempts(3)
+    assert action == "retried" and rec["attempt_id"] == second["attempt_id"]
+    assert (first["status"], first["failure_reason"]) == ("failed", cd.INTERRUPTED_REASON) and second["status"] == "succeeded"
+    assert first["evaluation_id"] == second["evaluation_id"] == env.eid(3)
+
+
+def test_r_second_run_factors_owner_is_refused_before_any_state_change(tmp_path, monkeypatch, U, cctx):  # T9
+    import run_census as rc
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    env.store.begin_factor_evaluation_attempt(factor_id=env.fids[3], evaluation_id=env.eid(3), origin="previous_controller")
+    monkeypatch.setattr(rc, "FACTOR_DIR", tmp_path / "factor_eval")
+    monkeypatch.setattr(rc, "FACTOR_REGISTRY_DB", env.db)
+
+    def reached_state_path(*_a, **_k):
+        raise AssertionError("a second owner reached registry-touching code")
+    monkeypatch.setattr(rc, "_factor_context", reached_state_path)
+    monkeypatch.setattr(cd, "pending_conditions", reached_state_path)
+    before = env.statuses()
+    args = types.SimpleNamespace(max_configs=None, workers=1)
+    with rc._exclusive_run_factors_owner():
+        with pytest.raises(rc.ce.GateRefusal, match="another run-factors controller"):
+            rc.cmd_run_factors(args)
+        with pytest.raises(rc.ce.GateRefusal, match="another run-factors controller"):
+            with rc._exclusive_run_factors_owner():
+                pass
+    assert env.statuses() == before == {1: [], 3: ["started"], 5: [], 10: [], 20: []}
+    with rc._exclusive_run_factors_owner():  # the OS lock is released with the owner; the lock file alone is not authority
+        pass
+
+
+def test_r_run_factors_owner_lock_is_released_by_process_death(tmp_path):  # T9 cross-process / process-death clause
+    import subprocess
+    import sys
+    code = ("import sys, time, pathlib; sys.path.insert(0, sys.argv[1]); import run_census as rc; "
+            "rc.FACTOR_DIR = pathlib.Path(sys.argv[2]); cm = rc._exclusive_run_factors_owner(); cm.__enter__(); "
+            "print('owned', flush=True); time.sleep(120)")
+    import run_census as rc
+    rc_dir = str(Path(rc.__file__).resolve().parent)
+    holder = subprocess.Popen([sys.executable, "-c", code, rc_dir, str(tmp_path)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "owned"
+        old = rc.FACTOR_DIR
+        rc.FACTOR_DIR = tmp_path
+        try:
+            with pytest.raises(rc.ce.GateRefusal, match="another run-factors controller"):
+                with rc._exclusive_run_factors_owner():
+                    pass
+            holder.kill()
+            holder.wait(timeout=30)
+            assert (tmp_path / "run_factors.lock").exists(), "the stale lock file remains, and is not authority"
+            with rc._exclusive_run_factors_owner():
+                pass
+        finally:
+            rc.FACTOR_DIR = old
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=30)
+
+
+def test_r_completed_v3_registry_rerun_is_idempotent_read_only_proof(tmp_path, U, cctx):  # T10
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    for h in HORIZONS:
+        env.resolve(h)
+    before = env.statuses()
+    assert [a for h in HORIZONS for _r, a in [env.resolve(h)]] == ["reused"] * 5
+    assert env.statuses() == before and all(len(v) == 1 for v in before.values())
+    import sqlite3
+    real = Path(__file__).resolve().parents[1] / "runs" / "alpha_edge_census_01_corrected" / "registry_conditional_v3.sqlite"
+    if not real.exists():
+        pytest.skip("accepted V3 factor registry is not present in this checkout")
+    con = sqlite3.connect(f"file:{real.as_posix()}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT factor_id, COUNT(*), SUM(status IN ('succeeded','not_evaluable')) "
+                           "FROM research_factor_evaluation_attempts GROUP BY factor_id").fetchall()
+    finally:
+        con.close()
+    assert len(rows) == 1095 and all(n == 1 and t == 1 for _f, n, t in rows),         "every accepted factor is one terminal attempt, so a rerun can only take the reuse path"
 
 
 # ----------------------------------------------------------------- V3 factor-only freeze gate (D4)
