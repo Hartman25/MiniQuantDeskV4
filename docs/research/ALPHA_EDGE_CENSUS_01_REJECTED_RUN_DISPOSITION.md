@@ -77,7 +77,11 @@ Status key: FIXED+PROVEN, ALREADY CORRECT+PROVEN, PENDING(commit) — resolved b
 | Bulk store / resume | chunk/resume determinism | ALREADY CORRECT+PROVEN (bulk-store and resume tests retained) |
 | Mutation proof | M01/M02/M13/M14 tied to old fences | FIXED+PROVEN: 27 mutations (C01-C18 + retained M03,M04,M06-M09,M12,M15,M16), each RED under mutation and restored byte-for-byte; one initially survived (C10, self-referential label test) and was closed by a literal-label test |
 | Population freeze | corrected eligible universe, population, factor registration before attempt #1 | FIXED+PROVEN: 88/88 seed symbols ELIGIBLE (typed disposition each), 434 configs x 88 = 38,192 trials, 2,170 registered FactorSpecs, 0 attempts, max input ts 2023-12-29; POPULATION_FREEZE_PROOF_V2.json committed before corrected attempt #1 |
+| Execution / resume | interrupted run, orphan 'started' attempts, failed-status records | FIXED+PROVEN (C6: orphan attempts finalized failed and retried as new attempts; failed/foreign-id record files are not terminal; mutations M20/M21 RED) |
+| Execution | corrected Pass-1 results | ALREADY CORRECT+PROVEN (C6: 38,192/38,192 StrategyEdge and 2,170/2,170 factor attempts succeeded or typed not_evaluable, 0 failed; WEAK/MODERATE and conditional classes independently recomputed from raw chunks/ledger, 0 mismatches) |
+| Multiple testing | full registered factor-family BH/FDR | ALREADY CORRECT+PROVEN (C6: status complete, population 2,170, 50 not_evaluable retained in denominator; StrategyEdge judge DEFERRED_FULL_POPULATION so STRONG=0) |
+| Provenance | no timestamp >= 2024-01-01 in economic inputs; rejected experiment isolated | ALREADY CORRECT+PROVEN (C7: raw CSV max 2023-12-29T05:00Z over 155,088 rows; registry.sqlite holds only alpha_edge_census_01_corrected; no consume_holdout call in the experiment code) |
+| Docs | old RESULT.md describes rejected run | ALREADY CORRECT (banner marks it NOT AUTHORITATIVE; ALPHA_EDGE_CENSUS_01_CORRECTED_RESULT.md is the corrected result) |
+| Review packaging | new correction ZIP with SHA-256 manifest | FIXED+PROVEN (C7) |
 
-Between C1 and C5 the not-yet-rewritten modules (`census.py`, `conditional.py`, `edge_registry.py`, `run_census.py`,
-`mutation_proof.py`) still target the rejected contract and are not imported by anything else; no corrected attempt
-exists until they are rewritten and the population freeze is committed.
+Historical note: between C1 and C5 the not-yet-rewritten modules targeted the rejected contract; all were rewritten by C5/C6 and no corrected attempt preceded the committed population freeze.
