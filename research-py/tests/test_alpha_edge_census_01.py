@@ -1452,3 +1452,31 @@ def test_c18_candidate_ids_do_not_depend_on_list_position_shard_or_layout():
     assert sub and all(full[k] == v for k, v in sub.items())
     assert len(set(full.values())) == len(full) == len(cfgs) * 3
     assert er.edge_id("STRATEGY_EDGE", "t1") == ss.sha256_canonical({"kind": "STRATEGY_EDGE", "id": "t1"})[:32]
+
+
+# ---- committed population freeze proof (C5): bound to the committed manifests, zero attempts, 434 x eligible
+
+def _norm_sha(p):
+    import hashlib
+    return hashlib.sha256(Path(p).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
+def test_population_freeze_proof_binds_committed_manifests_and_counts():
+    proof = _load("POPULATION_FREEZE_PROOF_V2.json")
+    uni, space, grammar = _load("ALPHA_CENSUS_UNIVERSE_V2.json"), _load("ALPHA_CENSUS_SEARCH_SPACE_V2.json"), _load("ALPHA_CENSUS_GRAMMAR_V2.json")
+    seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
+    assert proof["strategy_edge_config_count"] == len(grammar["configs"]) == 434
+    assert proof["per_family_config_counts"] == ss.EXPECTED_FAMILY_COUNTS and proof["family_set"] == list(ss.EXPECTED_FAMILY_IDS)
+    assert sorted(uni["dispositions"]) == seed["symbols"] and proof["seed_symbol_count"] == len(seed["symbols"])
+    assert proof["eligible_symbol_count"] == len(uni["symbols"]) == uni["symbol_count"]
+    assert all(r["disposition"] == "ELIGIBLE" or r["disposition"] in cdata.EXCLUDED_DISPOSITIONS
+               for r in uni["dispositions"].values())
+    assert proof["derived_strategy_edge_trial_count"] == 434 * proof["eligible_symbol_count"] == space["strategy_trial_count"]
+    assert proof["registered_strategy_trials"] == space["strategy_trial_count"]
+    assert proof["registered_factors"] == proof["conditional_factor_count"] == 434 * 5 == space["conditional_factor_count"]
+    assert proof["strategy_attempts"] == proof["factor_evaluation_attempts"] == proof["attempts_at_freeze"] == 0
+    assert pd.Timestamp(proof["max_economic_input_end_ts"]) <= pd.Timestamp("2023-12-29T23:59:59", tz="UTC")
+    assert proof["partition_ids"]["partitions_sha256"] == ss.sha256_canonical(ss.build_partitions())
+    assert proof["population_hashes"]["strategy_population_root"] and proof["population_hashes"]["conditional_factor_population_root"]
+    for name, digest in proof["manifest_file_sha256"].items():
+        assert _norm_sha(EXP / name) == digest, name

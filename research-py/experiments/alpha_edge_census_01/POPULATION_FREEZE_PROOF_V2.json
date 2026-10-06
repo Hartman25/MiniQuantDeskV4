@@ -1,0 +1,93 @@
+{
+ "attempts_at_freeze": 0,
+ "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+ "conditional_factor_count": 2170,
+ "conditional_horizons": [
+  1,
+  3,
+  5,
+  10,
+  20
+ ],
+ "config_count_required": 434,
+ "derived_strategy_edge_trial_count": 38192,
+ "discovery_end_exclusive": "2024-01-01 00:00:00+00:00",
+ "disposition_counts": {
+  "ELIGIBLE": 88
+ },
+ "eligible_symbol_count": 88,
+ "excluded_symbol_count": 0,
+ "experiment_id": "alpha_edge_census_01_corrected",
+ "factor_evaluation_attempts": 0,
+ "family_set": [
+  "S01",
+  "S02",
+  "S03",
+  "S04",
+  "S05",
+  "S06",
+  "S07",
+  "S08",
+  "S09",
+  "S10",
+  "S11",
+  "S12",
+  "S13",
+  "S14"
+ ],
+ "grammar_id": "2dd48b2525441ba5d4e92c6050c69c63",
+ "manifest_file_sha256": {
+  "ALPHA_CENSUS_BARS_MANIFEST_V2.json": "6e4a4befe3797d45b97ba474374f3326e4b3cbec6efa3666307c339459e596d6",
+  "ALPHA_CENSUS_GRAMMAR_V2.json": "d7ccafea17b1944d5a67bb35fd562fce55c2ce739bed86b225ff4963c46ca50c",
+  "ALPHA_CENSUS_PARTITIONS_V2.json": "9549618bd8fae8a57716e50bcd3f22be1c8b67791645389933772c3d379b9c4d",
+  "ALPHA_CENSUS_PROTOCOL_V2.json": "89cb014cde1453383b4aadb69a3a3794b4549c892b80b3642ac62b1dac651f9f",
+  "ALPHA_CENSUS_SEARCH_SPACE_V2.json": "9b6670732bcb6082713e9fcc6c3598376d47de4d9b0e54ad180d927515b8cdc0",
+  "ALPHA_CENSUS_SEED_UNIVERSE_V2.json": "ff9a3eff44d688ca092fc4e297fd87d216efcc0433dd34f4c33e545bab0698a7",
+  "ALPHA_CENSUS_UNIVERSE_V2.json": "e0be5e6ce1491947314b133eb93f40b8ce579db78397b0d23cdcbf7d02a47dea"
+ },
+ "max_economic_input_end_ts": "2023-12-29 05:00:00+00:00",
+ "partition_ids": {
+  "partitions_id": "5e2a018cc5fd82486859f1f1c4a4d8b5",
+  "partitions_sha256": "5e2a018cc5fd82486859f1f1c4a4d8b557f120254f78b2b73ab5a1d890b9757f"
+ },
+ "per_family_config_counts": {
+  "S01": 8,
+  "S02": 6,
+  "S03": 14,
+  "S04": 12,
+  "S05": 72,
+  "S06": 24,
+  "S07": 108,
+  "S08": 36,
+  "S09": 64,
+  "S10": 12,
+  "S11": 18,
+  "S12": 32,
+  "S13": 24,
+  "S14": 4
+ },
+ "population_hashes": {
+  "conditional_factor_count": 2170,
+  "conditional_factor_population_root": "b069832b0934e1566f027b412d90e30127837bb612a9f1853c60f0e52d6793e9",
+  "conditional_horizons": [
+   1,
+   3,
+   5,
+   10,
+   20
+  ],
+  "manifest_order_root": "1f8b6c8f251effdaef1055d6513a60a44efb81086b8767e260c8103417b9c00d",
+  "search_space_id": "220e7a096df79bdcc6674017631b7f80",
+  "strategy_cell_count": 38192,
+  "strategy_population_root": "6e8cf8133f408d1054e346238ec644c12bf3ae4865aff6b18f583a04cf103208"
+ },
+ "protocol_id": "1916cbc84d6cbefccbd33a0ffe8ac300",
+ "registered_factors": 2170,
+ "registered_strategy_trials": 38192,
+ "schema_version": "alpha_census_population_freeze_proof_v2",
+ "search_space_id": "220e7a096df79bdcc6674017631b7f80",
+ "seed_symbol_count": 88,
+ "strategy_attempts": 0,
+ "strategy_edge_config_count": 434,
+ "universe_id": "a32b4de2b515d93c4042e6b8368bf4a5"
+}

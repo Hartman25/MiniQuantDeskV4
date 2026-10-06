@@ -53,7 +53,7 @@ def build_bars_manifest(universe: dict, data_dir: Path) -> dict:
             "zero_volume_bars": int((bars["volume"] <= 0).sum()),
         }
     from data import REQUEST_CONTRACT
-    doc = {"schema_version": "alpha_census_bars_manifest_v1", "request_contract": REQUEST_CONTRACT,
+    doc = {"schema_version": "alpha_census_bars_manifest_v2", "request_contract": REQUEST_CONTRACT,
            "universe_id": ss.sha256_canonical(universe)[:32], "symbols": rows}
     doc["manifest_sha256"] = ss.sha256_canonical({k: doc[k] for k in ("request_contract", "universe_id", "symbols")})
     return doc

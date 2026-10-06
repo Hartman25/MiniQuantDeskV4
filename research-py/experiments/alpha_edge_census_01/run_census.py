@@ -1,16 +1,20 @@
-"""Alpha Edge Census Pass 1 driver. Stages: bars-manifest -> freeze -> run. Artifacts go under runs/alpha_edge_census_01/.
+"""Corrected Alpha Edge Census driver. Artifacts go under runs/alpha_edge_census_01_corrected/ (the rejected
+execution's runs/alpha_edge_census_01/ is never read or written).
 
-  python experiments/alpha_edge_census_01/run_census.py bars-manifest   # writes the immutable bars manifest
-  python experiments/alpha_edge_census_01/run_census.py freeze          # registers the population (attempts must be 0)
-  python experiments/alpha_edge_census_01/run_census.py run [--max-chunks N]   # resumable execution + registry
+Stages (each idempotent; frozen manifests are immutable once written):
+  acquire        per-symbol SIP/adjustment=all bars for [2016-01-01, 2024-01-01) -> typed ELIGIBLE/EXCLUDED_* dispositions
+                 -> eligible-universe + search-space manifests
+  bars-manifest  immutable census bars/provenance manifest over the eligible universe
+  freeze         registers the whole StrategyEdge trial population and ConditionalEdge FactorSpec population
+                 (attempts must be 0) and writes the POPULATION_FREEZE_PROOF
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -18,118 +22,146 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 import census as ce  # noqa: E402
-import edge_registry as er  # noqa: E402
+import conditional as cd  # noqa: E402
+import data as dt  # noqa: E402
+import partitions as pt  # noqa: E402
 import search_space as ss  # noqa: E402
-import signals as sg  # noqa: E402
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 
-RUN_DIR = HERE.parents[1] / "runs" / "alpha_edge_census_01"
+RUN_DIR = HERE.parents[1] / "runs" / "alpha_edge_census_01_corrected"
 DATA_DIR = RUN_DIR / "data"
-BARS_MANIFEST = HERE / "ALPHA_CENSUS_BARS_MANIFEST_V1.json"
-POPULATION = HERE / "ALPHA_CENSUS_POPULATION_V1.json"
-FROZEN = ("UNIVERSE", "PARTITIONS", "PROTOCOL", "SEARCH_SPACE")
+REGISTRY_DB = RUN_DIR / "registry.sqlite"
+BARS_MANIFEST = HERE / "ALPHA_CENSUS_BARS_MANIFEST_V2.json"
+FREEZE_PROOF = HERE / "POPULATION_FREEZE_PROOF_V2.json"
+_MANIFESTS = (ss.SEED_UNIVERSE_FILE, ss.GRAMMAR_FILE, ss.PARTITIONS_FILE, ss.PROTOCOL_FILE, ss.UNIVERSE_FILE,
+              ss.SEARCH_SPACE_FILE, BARS_MANIFEST)
 
 
-def _load(name: str) -> dict:
-    return json.loads((HERE / f"ALPHA_CENSUS_{name}_V1.json").read_text(encoding="utf-8"))
-
-
-def _frozen() -> tuple[dict, dict, dict, dict]:
-    uni, part, prot, space = (_load(n) for n in FROZEN)
-    if part != ss.build_partitions() or prot != ss.build_protocol() or ss.build_search_space(uni, part, prot) != space:
-        raise ce.GateRefusal("frozen manifests differ from regenerated authority")
-    return uni, part, prot, space
+def _load(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _dump(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, sort_keys=True, indent=1) + "\n", encoding="utf-8", newline="\n")
 
 
-def cmd_bars_manifest(_a) -> None:
-    uni, _p, _q, _s = _frozen()
-    doc = ce.build_bars_manifest(uni, DATA_DIR)
-    if BARS_MANIFEST.exists():
-        if json.loads(BARS_MANIFEST.read_text(encoding="utf-8")) != doc:
-            raise ce.GateRefusal("bars manifest is immutable and differs from the data on disk")
-        print("bars manifest already frozen and identical")
-        return
-    _dump(BARS_MANIFEST, doc)
-    disp: dict = {}
-    for r in doc["symbols"].values():
-        disp[r["disposition"]] = disp.get(r["disposition"], 0) + 1
-    print("bars manifest written", doc["manifest_sha256"], disp)
-
-
-def _setup():
-    uni, _part, prot, space = _frozen()
-    bm = json.loads(BARS_MANIFEST.read_text(encoding="utf-8"))
-    configs, symbols, _ids, cells = ce.population(uni, space)
-    if ss.population_root(configs, symbols, {k: space[k] for k in ("universe_id", "partitions_id", "protocol_id")}) != \
-            space["population_root_sha256"]:
-        raise ce.GateRefusal("population root differs from the frozen search space")
-    if len(cells) != space["strategy_cell_count"]:
-        raise ce.GateRefusal("expanded population size differs from the frozen search space")
-    return uni, prot, space, bm, cells
-
-
-def cmd_freeze(_a) -> None:
-    _uni, _prot, space, _bm, cells = _setup()
-    store = ResearchResultStore(RUN_DIR / "registry.sqlite")
-    freeze = ce.register_population(store, space, cells)
-    gate = ce.require_frozen_population(store, space, cells, allow_attempts=False)
-    doc = {"schema_version": "alpha_census_population_v1", "freeze": freeze, "gate": gate,
-           "registered_equals_expected": True, "attempts_at_freeze": gate["attempts"]}
-    if POPULATION.exists():
-        if json.loads(POPULATION.read_text(encoding="utf-8")) != doc:
-            raise ce.GateRefusal("population record is immutable and differs")
-    else:
-        _dump(POPULATION, doc)
-    print("population frozen:", json.dumps(gate, sort_keys=True))
-
-
-def cmd_run(a) -> None:
-    uni, prot, space, bm, cells = _setup()
-    store = ResearchResultStore(RUN_DIR / "registry.sqlite")
-    ce.require_frozen_population(store, space, cells, allow_attempts=True)
-    t0 = time.time()
-    bars = ce.load_bars(uni, DATA_DIR, bm)
-    meta = ce.symbol_meta(bm, prot)
-    U = sg.Universe(bars)
-    print(f"loaded {len(bars)} symbols / universe built in {time.time() - t0:.0f}s", flush=True)
-    res = ce.run_chunks(store, U, space, cells, meta, RUN_DIR, chunk_size=prot["chunking"]["cells_per_chunk"],
-                        max_chunks=a.max_chunks, log=lambda m: print(f"{time.time() - t0:7.0f}s {m}", flush=True))
-    print(json.dumps(res))
-    if res["chunks_run"] + res["chunks_skipped_terminal"] == res["chunks_total"]:
-        summary = er.build_registry(space, uni, cells, meta, prot, RUN_DIR)
-        print("registry:", json.dumps({k: summary[k] for k in ("cells_total", "strategy_edges", "conditional_edges")}))
-        _write_evidence(summary)
-
-
 def _sha(p: Path) -> str:
-    import hashlib
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def _write_evidence(summary: dict) -> None:
-    files = {f"ALPHA_CENSUS_{n}_V1.json": HERE / f"ALPHA_CENSUS_{n}_V1.json" for n in FROZEN}
-    files[BARS_MANIFEST.name] = BARS_MANIFEST
-    files[POPULATION.name] = POPULATION
-    for n in ("search_ledger_v1.jsonl", "edge_registry_v1.jsonl", "edge_registry_summary_v1.json"):
-        files[n] = RUN_DIR / n
-    ev = {"schema_version": "alpha_census_campaign_evidence_v1", "sha256": {k: _sha(v) for k, v in sorted(files.items())},
-          "summary_counts": {k: summary[k] for k in ("cells_total", "strategy_edges", "conditional_edges")}}
-    _dump(RUN_DIR / "campaign_evidence_v1.json", ev)
-    print("campaign evidence written")
+def _write_immutable(path: Path, doc: dict, what: str) -> None:
+    if path.exists():
+        if _load(path) != doc:
+            raise ce.GateRefusal(f"{what} is immutable and differs from the regenerated authority")
+        return
+    _dump(path, doc)
+
+
+def cmd_acquire(_a) -> None:
+    seed = _load(ss.SEED_UNIVERSE_FILE)
+    if seed != ss.build_seed_universe():
+        raise ce.GateRefusal("seed universe differs from the live registry snapshot; fail closed")
+    statuses = dt.acquire_universe(seed["symbols"], DATA_DIR)
+    dispositions = {s: dt.classify_eligibility(s, statuses[s], DATA_DIR / s) for s in seed["symbols"]}
+    ss.validate_dispositions(seed, dispositions)
+    expected = ss.build_universe(seed, dispositions)
+    if ss.UNIVERSE_FILE.exists() and _load(ss.UNIVERSE_FILE) != expected:
+        raise ce.GateRefusal("eligible universe is immutable and differs from the data on disk")
+    space = ss.write_population_manifests(dispositions)
+    counts: dict = {}
+    for r in dispositions.values():
+        counts[r["disposition"]] = counts.get(r["disposition"], 0) + 1
+    print("dispositions:", json.dumps(counts, sort_keys=True))
+    print("eligible:", expected["symbol_count"], "strategy_trial_count:", space["strategy_trial_count"])
+
+
+def _frozen() -> tuple[dict, dict, dict, dict, dict]:
+    seed, grammar, part, prot = (_load(p) for p in (ss.SEED_UNIVERSE_FILE, ss.GRAMMAR_FILE, ss.PARTITIONS_FILE,
+                                                    ss.PROTOCOL_FILE))
+    uni, space = _load(ss.UNIVERSE_FILE), _load(ss.SEARCH_SPACE_FILE)
+    if grammar != ss.build_grammar() or part != ss.build_partitions() or prot != ss.build_protocol():
+        raise ce.GateRefusal("frozen manifests differ from regenerated authority")
+    if ss.build_universe(seed, uni["dispositions"]) != uni or ss.build_search_space(grammar, uni, part, prot) != space:
+        raise ce.GateRefusal("universe/search space differ from the frozen dispositions")
+    return uni, part, prot, space, grammar
+
+
+def cmd_bars_manifest(_a) -> None:
+    uni, _p, _q, _s, _g = _frozen()
+    doc = ce.build_bars_manifest(uni, DATA_DIR)
+    _write_immutable(BARS_MANIFEST, doc, "bars manifest")
+    print("bars manifest", doc["manifest_sha256"])
+
+
+def _setup():
+    uni, part, prot, space, grammar = _frozen()
+    ss.assert_grammar_authority(grammar["configs"])
+    bm = _load(BARS_MANIFEST)
+    if bm["universe_id"] != ss.sha256_canonical(uni)[:32]:
+        raise ce.GateRefusal("bars manifest is bound to a different universe")
+    ctx = cd.population_context(uni, prot, part, bm)
+    configs, symbols, ids, cells = ce.population(uni, space)
+    if ss.population_root(configs, symbols, ids) != space["population_root_sha256"]:
+        raise ce.GateRefusal("population root differs from the frozen search space")
+    if len(cells) != space["strategy_trial_count"] or len(cells) != ss.EXPECTED_CONFIG_COUNT * len(symbols):
+        raise ce.GateRefusal("expanded population size differs from 434 x eligible symbols")
+    return uni, part, prot, space, grammar, bm, ctx, cells
+
+
+def _max_input_ts(bm: dict) -> str:
+    return max(r["last_end_ts"] for r in bm["symbols"].values() if r["disposition"] == ce.DATA_PRESENT)
+
+
+def cmd_freeze(_a) -> None:
+    uni, part, prot, space, grammar, bm, ctx, cells = _setup()
+    max_ts = _max_input_ts(bm)
+    pt.require_discovery_only([max_ts], what="census bars manifest max timestamp")
+    store = ResearchResultStore(REGISTRY_DB)
+    freeze = ce.register_population(store, space, cells, ctx)
+    gate = ce.require_frozen_population(store, space, cells, ctx, allow_attempts=False)
+    per_family = {f: d["configs"] for f, d in grammar["family_templates"].items()}
+    proof = {
+        "schema_version": "alpha_census_population_freeze_proof_v2", "experiment_id": ss.EXPERIMENT_ID,
+        "strategy_edge_config_count": len(grammar["configs"]), "config_count_required": ss.EXPECTED_CONFIG_COUNT,
+        "family_set": sorted(per_family), "per_family_config_counts": per_family,
+        "seed_symbol_count": uni["seed_symbol_count"], "eligible_symbol_count": uni["symbol_count"],
+        "excluded_symbol_count": len(uni["excluded"]),
+        "disposition_counts": _counts(uni["dispositions"]),
+        "derived_strategy_edge_trial_count": len(cells),
+        "conditional_horizons": list(ss.CONDITIONAL_HORIZONS), "conditional_factor_count": gate["registered_factors"],
+        "registered_strategy_trials": gate["registered_trials"], "registered_factors": gate["registered_factors"],
+        "strategy_attempts": gate["strategy_attempts"], "factor_evaluation_attempts": gate["factor_attempts"],
+        "attempts_at_freeze": gate["strategy_attempts"] + gate["factor_attempts"],
+        "population_hashes": freeze,
+        "partition_ids": {"partitions_id": space["partitions_id"], "partitions_sha256": ss.sha256_canonical(part)},
+        "universe_id": space["universe_id"], "protocol_id": space["protocol_id"], "search_space_id": space["search_space_id"],
+        "grammar_id": grammar["grammar_id"], "bars_manifest_sha256": bm["manifest_sha256"],
+        "max_economic_input_end_ts": max_ts, "discovery_end_exclusive": str(pt.DISCOVERY_END_EXCLUSIVE),
+        "manifest_file_sha256": {p.name: _sha(p) for p in _MANIFESTS},
+    }
+    if proof["attempts_at_freeze"] != 0:
+        raise ce.GateRefusal("attempts exist at freeze time")
+    if proof["derived_strategy_edge_trial_count"] != ss.EXPECTED_CONFIG_COUNT * proof["eligible_symbol_count"]:
+        raise ce.GateRefusal("trial count is not 434 x eligible symbols")
+    _write_immutable(FREEZE_PROOF, proof, "population freeze proof")
+    print(json.dumps({k: proof[k] for k in ("strategy_edge_config_count", "eligible_symbol_count",
+                                            "derived_strategy_edge_trial_count", "conditional_factor_count",
+                                            "attempts_at_freeze", "max_economic_input_end_ts")}, sort_keys=True))
+
+
+def _counts(dispositions: dict) -> dict:
+    out: dict = {}
+    for r in dispositions.values():
+        out[r["disposition"]] = out.get(r["disposition"], 0) + 1
+    return dict(sorted(out.items()))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("acquire").set_defaults(fn=cmd_acquire)
     sub.add_parser("bars-manifest").set_defaults(fn=cmd_bars_manifest)
     sub.add_parser("freeze").set_defaults(fn=cmd_freeze)
-    r = sub.add_parser("run")
-    r.add_argument("--max-chunks", type=int, default=None)
-    r.set_defaults(fn=cmd_run)
     a = ap.parse_args()
     a.fn(a)
 

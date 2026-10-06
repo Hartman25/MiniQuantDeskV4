@@ -1,0 +1,724 @@
+{
+ "dispositions": {
+  "AAL": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "f73015ddc78f1318ea7bf22678f71275cfdb9a203938d5adcf0c2fcfad7b8c2a",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "AAL"
+  },
+  "AAPL": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b847b23e14124f1ae407a20739de24a231d1525d6324d3380163fb115a33dcc4",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "AAPL"
+  },
+  "ACHR": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "14fdecb109eba8fa8c3c7b09c5d7c115c820c270b1c2786991cedfbcf1d81649",
+   "disposition": "ELIGIBLE",
+   "observations": 762,
+   "symbol": "ACHR"
+  },
+  "AFRM": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "0cb1b6f6bb3abc9d13ab6893c120e7bc3aded28a519b4fb4c775e735a56b86b4",
+   "disposition": "ELIGIBLE",
+   "observations": 746,
+   "symbol": "AFRM"
+  },
+  "AMD": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1c2420d7c98727f553a12fc164f3ce9f3c18485f7caabd3388400dec6e3bb258",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "AMD"
+  },
+  "AMZN": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e7e06bfa240fb18bad0bcf2bb0af2831b4755ae0612f82658cb0cd4166497a9b",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "AMZN"
+  },
+  "ARKK": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "5099183982a27ab2fa158c4ffd7736773cb455d722693a7c3aba7740b8a8e441",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "ARKK"
+  },
+  "BAC": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "56111791ea3e0538e8f2d8fbcd649ec5b64b489f91a66321e41d1d87d65d4b97",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "BAC"
+  },
+  "BITO": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c6d49a0abeff6eaf7e2918dd9d58f84e12b4dc1668f8c94bd6c8f71b86ee09fb",
+   "disposition": "ELIGIBLE",
+   "observations": 553,
+   "symbol": "BITO"
+  },
+  "CCL": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "31bfd050d21b63baf49f8b0f4faa174228b5cade8255a022160e375c49a10f52",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "CCL"
+  },
+  "CHPT": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e4d962129cd23d0712b9cb68189da2648439f2cc906e285f2e109b3c616c3430",
+   "disposition": "ELIGIBLE",
+   "observations": 1081,
+   "symbol": "CHPT"
+  },
+  "CSCO": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c1fcdc6f8116097f702d37ea4abd3c93d20ebaeea85a3bf5a11519fbdf763b08",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "CSCO"
+  },
+  "CVX": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "7dee477c65b33e4dce9ca72b91941ac79e33d1792d8033f4491715711bf86b04",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "CVX"
+  },
+  "DIA": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c0244eef90cf221837d9f4f82fbbfadd5d2ef10d093e4271cce690e327477575",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "DIA"
+  },
+  "DKNG": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c9b3b8cd528571e36a03c824931ae9ad7bf340293f84d1be5680963bca8cce19",
+   "disposition": "ELIGIBLE",
+   "observations": 1117,
+   "symbol": "DKNG"
+  },
+  "EEM": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "8a4a10903985359797d472b188bbef7d8cc04b2d3e16d8210f836efec310c054",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "EEM"
+  },
+  "EFA": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "700e250522c992d2cfdaf192c428da5670345b2145a852e19073978e7a01d870",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "EFA"
+  },
+  "F": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a55704bb678f0d2ad7f94caaf2b641474b5d6d06265d5accf8036733a1bbd368",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "F"
+  },
+  "FXI": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "6eed548a91ad71d4f98c45d42f39ab4586df043dd5ab9dc9b8981a2dfff36812",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "FXI"
+  },
+  "GDX": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "9d72c6b38d328f6f79aa2e952b1a0223801fcba2fedd09935e37072c91435aad",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "GDX"
+  },
+  "GDXJ": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b16d320cb79b81994623540149fe8b3e31cd1e8ba7ec8897967f042c35b79706",
+   "disposition": "ELIGIBLE",
+   "observations": 1930,
+   "symbol": "GDXJ"
+  },
+  "GE": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "265aecaccde7549b921ec55ee909f47b837488fad057357255d4735e590e4e47",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "GE"
+  },
+  "GLD": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1ab60030cba535e7d5caab67d64686618c9f6d24ea127b1823beaaa44320a6e4",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "GLD"
+  },
+  "GOOGL": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "00a795a78ebbbed651b0e1ec994722b0c53928ae8940dacccf44f79e62738ddf",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "GOOGL"
+  },
+  "GS": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "35554976ed3e61386e37fefc14b7dcb67a3156ddebedfcb03bc82c99c09999f7",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "GS"
+  },
+  "HD": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "7ec4593a085a2329f5b78706d60b70dac44bb31d9e87980b3b3d197ed21be8c1",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "HD"
+  },
+  "HIMS": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "73595dafd3ebf1eef7451d215320699845112cea4ddb7b1afa2a3c94e16f889b",
+   "disposition": "ELIGIBLE",
+   "observations": 1082,
+   "symbol": "HIMS"
+  },
+  "HOOD": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b331cb152906755c6311e32586f77c77e4a27ea8b7d2a5bacd1db1bd64058bf5",
+   "disposition": "ELIGIBLE",
+   "observations": 610,
+   "symbol": "HOOD"
+  },
+  "IBM": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "ff22353f91f50d3455deed5538dae19bb0a7f8d25a12013199de7621fb8d769b",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "IBM"
+  },
+  "ICLN": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e49ff2525a827a35ef7abc7a8b3c4713465a98ba26058e360df76a5ff29d1a0a",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "ICLN"
+  },
+  "IEF": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "03f02b1dd7fa7c363ac0278abc32d8c4348ac3b4412924827582417bdef2f2a8",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "IEF"
+  },
+  "INTC": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a50d76c58e5e09747d24eed38d22572eed12bc6a9c0720cb5522475834733113",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "INTC"
+  },
+  "IONQ": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "33ae50ccfe358542c28893575fe9e85515a7e6df00dd39823912922782d9b156",
+   "disposition": "ELIGIBLE",
+   "observations": 753,
+   "symbol": "IONQ"
+  },
+  "IWM": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "9944b108a0baa04f24a4e34ad726bc0f1ae95f8a63755a3c4c7861707929b491",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "IWM"
+  },
+  "JBLU": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "664ca5109525e9d2b44c93093703cfe533e8ad407d402ace21d206d9e1473c49",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "JBLU"
+  },
+  "JNJ": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e555ec44f36126f67ae87e2ef62b2b914c3453c6ed680cd15180fffeb4893a4e",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "JNJ"
+  },
+  "JOBY": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "2655da2b1ad23c65f241397d9d177699170f79aec1c185925b0cfd276c881619",
+   "disposition": "ELIGIBLE",
+   "observations": 790,
+   "symbol": "JOBY"
+  },
+  "JPM": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "7af2d18862011fdb29e29bf6aaae9b3679bcdcb2b670631425a0e262bfe56fc5",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "JPM"
+  },
+  "KGC": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "fad90310821c6ad46a142b9bfc203dbbc91ddad6a36bfd85b53d99903364a7e9",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "KGC"
+  },
+  "KO": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "6858e6624028b2dcc2e3f2bfef62db32fa40e3e1c6006679527905c9363f27c7",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "KO"
+  },
+  "KWEB": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "8eae9467a8ee6c509856c0e4ff690cb80b6691394c0168b76445011401029dbd",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "KWEB"
+  },
+  "LCID": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "4a2a327f40a152504513498b45d89cb5efdfe2353c27f235637a5d7123591dd2",
+   "disposition": "ELIGIBLE",
+   "observations": 826,
+   "symbol": "LCID"
+  },
+  "LYFT": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "0daf80f4351f4f616eff1e8df3838373c38932019c5381ebba6f6b8fee25f7d4",
+   "disposition": "ELIGIBLE",
+   "observations": 1198,
+   "symbol": "LYFT"
+  },
+  "MARA": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e156c447e02e2ad351c4a4f57acee4988c46e7e909b4e89fe998e9c96e8855a1",
+   "disposition": "ELIGIBLE",
+   "observations": 1552,
+   "symbol": "MARA"
+  },
+  "META": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "5403a85cc4f7cf46fb788d9bdcec9aa00da1286dc49fadc8a70d99f4e38333dc",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "META"
+  },
+  "MSFT": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "d96c6714825bbabf79505b56a68770d224459e37c2b5de61314d27260f014bd2",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "MSFT"
+  },
+  "NCLH": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "51c6b53f5beae81fafa30aa401b5cf8e00694d2637e813edf7aca637d65b634c",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "NCLH"
+  },
+  "NEM": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "ce61a77b9e91b9829324af004ba3a4dc8307231e73b3cc68742418aee1987808",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "NEM"
+  },
+  "NFLX": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "2ec1069f1de7d9114aa3c2e0120fc8cc797ef4a9511176e16fc22ef2beaef764",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "NFLX"
+  },
+  "NIO": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "d423a797a317515338297cbba77158289ab71a0fa7c26d58658b234dbb40bc98",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "NIO"
+  },
+  "NVDA": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "ae82c8ae6236d032c2824c60b1bb5e03acb8b7f91309064edb10bbe3f5180dba",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "NVDA"
+  },
+  "OPEN": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c7bcc0a7b0c6573db589c637c6c95c15d5bb0cd74e4cf2ce4252a21efedf392b",
+   "disposition": "ELIGIBLE",
+   "observations": 890,
+   "symbol": "OPEN"
+  },
+  "ORCL": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "564800c4f9affbd9dabe5e29eb9da0ba0fa795d8bb8f00213be7832152e284fc",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "ORCL"
+  },
+  "PEP": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "af3360538a59ba5044ad9d942bb6e463f2bc6b1a5354b45fc2fe5968f2881010",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "PEP"
+  },
+  "PFE": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b1f3b121975bdf01a76bd2946b317267be85d8049a8c2d1f4e933b0d222442c1",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "PFE"
+  },
+  "PLTR": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a6069a0de5709044246485ec8b921495a2ab1c296d019297b659f929ed3e8ce0",
+   "disposition": "ELIGIBLE",
+   "observations": 818,
+   "symbol": "PLTR"
+  },
+  "PLUG": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "86e05f92b6d2a41d0bb85dd242378c53b111db65b965ec841ef44460383a5788",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "PLUG"
+  },
+  "QQQ": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "cafe4e1b22fcf0c258a55f4935cfd3160cf539a4b72e599d76191395dc631924",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "QQQ"
+  },
+  "RBLX": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "8110eda8548a07d72506aba6d22e77e29db94901cd1ade80b4e81700943ab57b",
+   "disposition": "ELIGIBLE",
+   "observations": 708,
+   "symbol": "RBLX"
+  },
+  "RIOT": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "19af7a0457fe2751ea077ed843255a2239ed7f3b71176cee4ad3f78968bd0547",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "RIOT"
+  },
+  "RIVN": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "487b148e672d300aeae500c6a1556445a47b9d474d68a3af1e7d830559cdaa3d",
+   "disposition": "ELIGIBLE",
+   "observations": 537,
+   "symbol": "RIVN"
+  },
+  "RKLB": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "74d21b58186285b77949f8121f396bbae650782327cfdcc7c0fecc4e53c045ba",
+   "disposition": "ELIGIBLE",
+   "observations": 779,
+   "symbol": "RKLB"
+  },
+  "SHY": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1850342fbe56e8ceaa4c3cb7f05bd3f1edb786dd17384bf26348ae41b5d2ce62",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "SHY"
+  },
+  "SLV": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "85a8945609a7c1343c1a36bc0ba2a8b518c44edfe0557ce8ea5e192a27d42abf",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "SLV"
+  },
+  "SMH": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "8da8df4ed16859d1e3a7432f6af55fb41efae68443ffa5b7d8843d50ac884e62",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "SMH"
+  },
+  "SOFI": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "0de9be41f2d6b963c2b50699255252da7a84d57edd1797b2cf9f8cb48a003227",
+   "disposition": "ELIGIBLE",
+   "observations": 776,
+   "symbol": "SOFI"
+  },
+  "SPY": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "bcac957e68241a0b408cce91e9aad307ec6011f3307217ac3b57e1dbbc204424",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "SPY"
+  },
+  "T": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "4df8e9de13c33b5d03f45ac89c971fbd4fed03d47bf16847d3b28d772b462c7d",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "T"
+  },
+  "TAN": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a68e46d60ddb278fa4bdc92fdf14f165827d1a2702e52852a72afd8dcf3a06c4",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "TAN"
+  },
+  "TLT": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "204b474168db91c39b91182c95e74f4595aee8a76867cf376f91dcf80be980fa",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "TLT"
+  },
+  "TSLA": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "005f648aa47798253c6f598d0bb59cc83be0ddc7271c60ae04e3f985f4bd5c2a",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "TSLA"
+  },
+  "UAL": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1353eeae430c3f9190a8a61fd4874ad0343e7903212b0584ec85948c8e138a05",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "UAL"
+  },
+  "UPST": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "27daaf395d4ab7d66ada6fdec38f5defd2952b50448fad4875b886b39e915ccd",
+   "disposition": "ELIGIBLE",
+   "observations": 764,
+   "symbol": "UPST"
+  },
+  "VNQ": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "20e6050e30b38da3b9b6b5809ce244b6fc3f05a122c18328a1bf3f25de6c12ad",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "VNQ"
+  },
+  "VTI": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "000df91013c401fb45bbcd12f9e8a87f77f13c8eca0b8688ebbfa8b487024ef6",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "VTI"
+  },
+  "VZ": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "2cf3600b9bc9aedcd28ed64d706a6e086fa1c3a9779c33db192d2ceea5164b17",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "VZ"
+  },
+  "WFC": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "51343c59f7e4448246189ac5241ee84bc0e35555115ddb9d2c7a7a696a389f08",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "WFC"
+  },
+  "WMT": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "4c15154dee2896d98159ff4e13aa93ade1902352dfe7cbf9fa6d48a7c7538f4c",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "WMT"
+  },
+  "XLB": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "20018e3d027cefda19c8d73098a83516eb9ff727c7cea1bfd39b681646c36d79",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLB"
+  },
+  "XLE": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c95fd3c4512a4c927551cafd8bfd93db31cbdba1175bb53b007d1ea5284ca35b",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLE"
+  },
+  "XLF": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b9a0bfc66fadbf2c10da267621bbb352c30c02b08edd4d13ab45266205795f0f",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLF"
+  },
+  "XLI": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "9edbbaf09c6ad8ca610d9abfec54d39fbb3c5663782e7cea421ea67615608cc5",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLI"
+  },
+  "XLK": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "81fc417a8ca4cb302ea197b3b2832841fcdfe62c65f300288c76aabc6cd0348b",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLK"
+  },
+  "XLP": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "7b56561acd5cf0c96227d99d641983bd16a7a0271ec4ee0e54271ef4c095ddd0",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLP"
+  },
+  "XLU": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "58ad78f420c2b6220ea419dde4659c5aa3a824caead34b3d01b7a34fae6f7041",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLU"
+  },
+  "XLV": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "ed9a0e1ea1634a92cacbc4aa6f7df59cf080f0ea1e24408be63002ec9f988dbf",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLV"
+  },
+  "XLY": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "843333c46befb1c89791539a8fd8f9d9098e23acf827a057227e699553dc9aed",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XLY"
+  },
+  "XOM": {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "58047344d935e0476760ce2bbe48c8ca809e03f094482ba81b1dd2fbe282d2f7",
+   "disposition": "ELIGIBLE",
+   "observations": 2012,
+   "symbol": "XOM"
+  }
+ },
+ "eligibility_rule": {
+  "data_present_alone_is_not_a_disposition": true,
+  "exclusion_for_performance": false,
+  "min_valid_completed_1day_observations_strictly_before_2024_01_01": 252,
+  "requires": "accepted registered SIP/adjustment=all provenance and supported asset/data semantics",
+  "substitution": false
+ },
+ "excluded": {},
+ "point_in_time_membership": false,
+ "schema_version": "alpha_census_universe_v2",
+ "seed_symbol_count": 88,
+ "seed_universe_sha256": "1c0f363f31beb059b7da40af5e8f527027c353b4d66c5835bbbb26f7b43fe5d0",
+ "survivorship_classification": "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME",
+ "symbol_count": 88,
+ "symbols": [
+  "AAL",
+  "AAPL",
+  "ACHR",
+  "AFRM",
+  "AMD",
+  "AMZN",
+  "ARKK",
+  "BAC",
+  "BITO",
+  "CCL",
+  "CHPT",
+  "CSCO",
+  "CVX",
+  "DIA",
+  "DKNG",
+  "EEM",
+  "EFA",
+  "F",
+  "FXI",
+  "GDX",
+  "GDXJ",
+  "GE",
+  "GLD",
+  "GOOGL",
+  "GS",
+  "HD",
+  "HIMS",
+  "HOOD",
+  "IBM",
+  "ICLN",
+  "IEF",
+  "INTC",
+  "IONQ",
+  "IWM",
+  "JBLU",
+  "JNJ",
+  "JOBY",
+  "JPM",
+  "KGC",
+  "KO",
+  "KWEB",
+  "LCID",
+  "LYFT",
+  "MARA",
+  "META",
+  "MSFT",
+  "NCLH",
+  "NEM",
+  "NFLX",
+  "NIO",
+  "NVDA",
+  "OPEN",
+  "ORCL",
+  "PEP",
+  "PFE",
+  "PLTR",
+  "PLUG",
+  "QQQ",
+  "RBLX",
+  "RIOT",
+  "RIVN",
+  "RKLB",
+  "SHY",
+  "SLV",
+  "SMH",
+  "SOFI",
+  "SPY",
+  "T",
+  "TAN",
+  "TLT",
+  "TSLA",
+  "UAL",
+  "UPST",
+  "VNQ",
+  "VTI",
+  "VZ",
+  "WFC",
+  "WMT",
+  "XLB",
+  "XLE",
+  "XLF",
+  "XLI",
+  "XLK",
+  "XLP",
+  "XLU",
+  "XLV",
+  "XLY",
+  "XOM"
+ ]
+}
