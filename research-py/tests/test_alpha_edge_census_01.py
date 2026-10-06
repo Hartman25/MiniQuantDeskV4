@@ -264,6 +264,12 @@ def test_classify_timestamp(ts, label):
     assert pt.classify_timestamp(ts) == label
 
 
+def test_partition_label_literals_are_frozen_not_self_referential():
+    assert (pt.DISCOVERY, pt.CONTAMINATED, pt.RESERVE, pt.HOLDOUT) == (
+        "DISCOVERY", "CONTAMINATED_BY_REJECTED_RUN", "REMAINING_CONFIRMATION_RESERVE", "FINAL_HOLDOUT")
+    assert pt.classify_timestamp("2024-06-03T05:00:00+00:00") == "CONTAMINATED_BY_REJECTED_RUN"
+
+
 @pytest.mark.parametrize("ts", ["2024-01-02", "2024-06-28", "2025-01-02", "2025-06-30", "2026-03-02", "2026-09-01"])
 def test_ir1_partition_fence_refuses_2024_2025_and_holdout_rows(ts):
     pt.require_discovery_only(pd.Series(["2023-12-29T05:00:00+00:00"]), what="ok")
@@ -1436,3 +1442,13 @@ def test_symbol_meta_flags_short_history_and_zero_volume_caveat():
     assert meta["A"]["data_short_history"] and meta["A"]["data_quality_caveat"]
     assert not meta["B"]["data_short_history"] and not meta["B"]["data_quality_caveat"]
     assert meta["C"] == {"disposition": "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION"}
+
+
+def test_c18_candidate_ids_do_not_depend_on_list_position_shard_or_layout():
+    cfgs = first_configs(2)
+    ids = {"universe_id": "u" * 32, "partitions_id": "p" * 32, "protocol_id": "q" * 32}
+    full = {(c["config_id"], s): t for c, s, t in ss.iter_cells(cfgs, ["B", "A", "C"], ids)}
+    sub = {(c["config_id"], s): t for c, s, t in ss.iter_cells(list(reversed(cfgs)), ["C", "A"], ids)}
+    assert sub and all(full[k] == v for k, v in sub.items())
+    assert len(set(full.values())) == len(full) == len(cfgs) * 3
+    assert er.edge_id("STRATEGY_EDGE", "t1") == ss.sha256_canonical({"kind": "STRATEGY_EDGE", "id": "t1"})[:32]

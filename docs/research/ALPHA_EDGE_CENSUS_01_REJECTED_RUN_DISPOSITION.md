@@ -75,7 +75,7 @@ Status key: FIXED+PROVEN, ALREADY CORRECT+PROVEN, PENDING(commit) — resolved b
 | ConditionalEdge | n >= 30 floor, FDR taxonomy | FIXED+PROVEN (IR16-IR20; floor, p<=0.10, complete-family BH q<=0.10) |
 | Edge Registry | wrong recording rules, partition label | FIXED+PROVEN (V2: one class per record, NOT_VALIDATED/NONE, full ledgers, IR27/IR28) |
 | Bulk store / resume | chunk/resume determinism | ALREADY CORRECT+PROVEN (bulk-store and resume tests retained) |
-| Mutation proof | M01/M02/M13/M14 tied to old fences | PENDING (C4) |
+| Mutation proof | M01/M02/M13/M14 tied to old fences | FIXED+PROVEN: 27 mutations (C01-C18 + retained M03,M04,M06-M09,M12,M15,M16), each RED under mutation and restored byte-for-byte; one initially survived (C10, self-referential label test) and was closed by a literal-label test |
 | Population freeze | corrected eligible universe, population, factor registration before attempt #1 | PENDING (C5) |
 
 Between C1 and C5 the not-yet-rewritten modules (`census.py`, `conditional.py`, `edge_registry.py`, `run_census.py`,
