@@ -707,6 +707,111 @@ class ResearchResultStore:
                 connection.rollback()
                 raise
 
+    # Bulk variants: identical semantics to the single-row methods above, one transaction per call.
+
+    def register_trials_bulk(self, rows: Iterable[Dict[str, Any]]) -> int:
+        """Atomically register many trials; any identity collision aborts the whole call. Returns rows inserted."""
+        prepared = []
+        for r in rows:
+            prepared.append((
+                r["trial_id"], r["experiment_id"], r["hypothesis_id"], r["strategy_id"], r["protocol_id"],
+                json.dumps(r["identity"], sort_keys=True, separators=(",", ":")),
+            ))
+        inserted = 0
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for row in prepared:
+                    existing = connection.execute(
+                        "select experiment_id, hypothesis_id, strategy_id, protocol_id, identity_json "
+                        "from research_trials where trial_id=?", (row[0],)).fetchone()
+                    if existing is not None:
+                        if tuple(existing) != row[1:]:
+                            raise RuntimeError(f"trial_id collision with conflicting canonical identity: {row[0]!r}")
+                        continue
+                    connection.execute(
+                        "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id, "
+                        "protocol_id, identity_json, schema_version) values (?, ?, ?, ?, ?, ?, ?)",
+                        (*row, REGISTRY_SCHEMA_VERSION))
+                    inserted += 1
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return inserted
+
+    def begin_attempts_bulk(
+        self, trial_ids: Iterable[str], *, origin: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None
+    ) -> List[tuple[str, int]]:
+        """Allocate the next attempt_index for each trial and insert 'started' rows in one transaction."""
+        meta_json = json.dumps(metadata or {}, sort_keys=True)
+        out: List[tuple[str, int]] = []
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for trial_id in trial_ids:
+                    if connection.execute("select 1 from research_trials where trial_id=?", (trial_id,)).fetchone() is None:
+                        raise KeyError(f"unknown trial_id: {trial_id}")
+                    idx = int(connection.execute(
+                        "select coalesce(max(attempt_index), 0) + 1 from research_attempts where trial_id=?",
+                        (trial_id,)).fetchone()[0])
+                    attempt_id = f"{trial_id}:att{idx:04d}"
+                    connection.execute(
+                        "insert into research_attempts (attempt_id, trial_id, attempt_index, status, origin, result_id, "
+                        "artifact_paths_json, result_summary_json, failure_reason, metadata_json) "
+                        "values (?, ?, ?, 'started', ?, null, null, null, null, ?)",
+                        (attempt_id, trial_id, idx, origin, meta_json))
+                    out.append((attempt_id, idx))
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return out
+
+    def finalize_attempts_bulk(self, items: Iterable[Dict[str, Any]]) -> None:
+        """Move many 'started' attempts to terminal status atomically; any non-started attempt aborts the call.
+        Each item: attempt_id, status, optional result_id/result_summary/failure_reason."""
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for it in items:
+                    if it["status"] not in _TERMINAL_ATTEMPT_STATUSES:
+                        raise ValueError(f"invalid terminal attempt status: {it['status']!r}")
+                    row = connection.execute(
+                        "select status from research_attempts where attempt_id=?", (it["attempt_id"],)).fetchone()
+                    if row is None:
+                        raise KeyError(f"unknown attempt_id: {it['attempt_id']}")
+                    if row[0] != "started":
+                        raise RuntimeError(f"attempt {it['attempt_id']!r} is already terminal (status={row[0]!r})")
+                    summary = it.get("result_summary")
+                    connection.execute(
+                        "update research_attempts set status=?, result_id=?, result_summary_json=?, failure_reason=? "
+                        "where attempt_id=?",
+                        (it["status"], it.get("result_id"),
+                         json.dumps(summary, sort_keys=True) if summary is not None else None,
+                         it.get("failure_reason"), it["attempt_id"]))
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def trial_attempt_digest(self, experiment_id: str) -> Dict[str, Dict[str, Any]]:
+        """trial_id -> {attempts, started, succeeded, failed, blocked} for every trial of the experiment
+        (trials without attempts included with zero counts)."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "select t.trial_id, count(a.attempt_id), coalesce(sum(a.status='started'),0), "
+                "coalesce(sum(a.status='succeeded'),0), coalesce(sum(a.status='failed'),0), "
+                "coalesce(sum(a.status='blocked'),0) from research_trials t "
+                "left join research_attempts a on a.trial_id=t.trial_id where t.experiment_id=? group by t.trial_id "
+                "order by t.trial_id", (experiment_id,)).fetchall()
+        return {r[0]: {"attempts": int(r[1]), "started": int(r[2]), "succeeded": int(r[3]),
+                       "failed": int(r[4]), "blocked": int(r[5])} for r in rows}
+
     def link_attempt_jobs(self, attempt_id: str, job_ids: Iterable[str]) -> None:
         """Durably record that `attempt_id` covers each of `job_ids` (evaluation
         slices). One candidate attempt may own multiple window jobs
