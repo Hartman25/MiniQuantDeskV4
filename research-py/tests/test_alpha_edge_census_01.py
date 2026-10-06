@@ -1484,37 +1484,6 @@ def test_population_freeze_proof_binds_committed_manifests_and_counts():
         assert _norm_sha(EXP / name) == digest, name
 
 
-def test_factor_run_resume_finalizes_orphan_and_records_only_terminal_configs(tmp_path, monkeypatch, U, cctx):
-    import run_census as rc
-
-    cfgs = ss.build_conditions(ss.build_configs())
-    c = _cond("S05", **S05_COND)
-    ci = cfgs.index(c)
-    db = tmp_path / "r.sqlite"
-    cd.register_all_factors(db, cfgs, cctx)
-    monkeypatch.setattr(rc, "FACTOR_REGISTRY_DB", db)
-    monkeypatch.setattr(rc, "FACTOR_DIR", tmp_path / "fe")
-    monkeypatch.setattr(rc, "FACTOR_REC_DIR", tmp_path / "fe" / "records")
-    rc.FACTOR_REC_DIR.mkdir(parents=True)
-    monkeypatch.setattr(rc, "_W", {"U": U, "ctx": cctx, "cache": cd.PermutationCache()})
-    st = ResearchResultStore(db)
-    fid3 = cd.factor_spec(c, 3, cctx).compute_factor_id()
-    st.begin_factor_evaluation_attempt(factor_id=fid3, evaluation_id="e" * 32, origin="orphan")
-    assert rc._config_records(ci, cfgs, cctx) is None
-    assert rc._eval_config((ci, c)) == (ci, "ok")
-    recs = rc._config_records(ci, cfgs, cctx)
-    assert [r["horizon"] for r in recs] == [1, 3, 5, 10, 20]
-    atts = st.list_factor_evaluation_attempts(fid3)
-    assert [a["status"] for a in sorted(atts, key=lambda a: a["attempt_index"])] == ["failed", "succeeded"]
-    # a record file with a failed status or foreign factor ids is not terminal
-    p = rc._rec_path(ci)
-    good = p.read_text(encoding="utf-8")
-    p.write_text(good.replace('"status":"succeeded"', '"status":"failed"', 1), encoding="utf-8")
-    assert rc._config_records(ci, cfgs, cctx) is None
-    p.write_text(good.replace(recs[0]["factor_id"], "f" * 32), encoding="utf-8")
-    assert rc._config_records(ci, cfgs, cctx) is None
-
-
 # ------------------------------------------------------------------ V3 semantic ConditionalEdge authority (CR-01)
 
 CONDS = ss.build_conditions(ss.build_configs())
@@ -1726,3 +1695,176 @@ def test_d1_registry_conditional_records_are_keyed_by_semantic_condition(reg_run
         if e["kind"] == "CONDITIONAL_EDGE":
             assert e["condition_id"] in cond_ids and "config_id" not in e and e["source_config_count"] >= 1
     assert all("config_id" not in x and x["condition_id"] in cond_ids for x in _lines(reg_run["out"] / er.OUT_FACTOR_LEDGER))
+
+
+# ------------------------------------------------------------ factor-level resume / idempotency (CR-02)
+
+import mqk_research.factors.runner as frunner  # noqa: E402
+
+HORIZONS = list(ss.CONDITIONAL_HORIZONS)
+
+
+class _Env:
+    def __init__(self, tmp_path, cctx, cond, U):
+        self.db, self.out, self.rec, self.ctx, self.cond, self.U = tmp_path / "f.sqlite", tmp_path / "art", tmp_path / "rec", cctx, cond, U
+        self.store = ResearchResultStore(self.db)
+        self.fids = {h: cd.register_factor(self.db, cd.factor_spec(cond, h, cctx)) for h in HORIZONS}
+
+    def resolve(self, h, evaluate=None):
+        return cd.resolve_factor(self.db, self.out, self.rec, self.U, self.cond, h, self.ctx, origin="t",
+                                 cache=cd.PermutationCache(), evaluate=evaluate)
+
+    def attempts(self, h):
+        return self.store.list_factor_evaluation_attempts(self.fids[h])
+
+    def statuses(self):
+        return {h: [a["status"] for a in self.attempts(h)] for h in HORIZONS}
+
+
+def _flaky(monkeypatch, fail_on: set):
+    """Evaluate wrapper whose infrastructure fault hits INSIDE the registered runner (after the durable attempt opened)."""
+    def boom(*a, **k):
+        raise RuntimeError("injected infrastructure fault")
+
+    def evaluate(db, out, U, cond, h, ctx, **kw):
+        if h in fail_on:
+            with monkeypatch.context() as m:
+                m.setattr(frunner, "evaluate_factor_ic_ir", boom)
+                return cd.evaluate_factor(db, out, U, cond, h, ctx, **kw)
+        return cd.evaluate_factor(db, out, U, cond, h, ctx, **kw)
+    return evaluate
+
+
+def _stop_after_fault(env, evaluate):
+    """One run that stops at the first infrastructure fault (the process dies there)."""
+    done = []
+    try:
+        for h in HORIZONS:
+            done.append((h, env.resolve(h, evaluate)[1]))
+    except RuntimeError as exc:
+        assert "injected" in str(exc)
+    return done
+
+
+def test_d2_case_a_succeeded_horizon_is_not_rerun_when_a_later_horizon_fails(tmp_path, monkeypatch, U, cctx):
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    assert _stop_after_fault(env, _flaky(monkeypatch, {3})) == [(1, "evaluated")]
+    assert env.statuses() == {1: ["succeeded"], 3: ["failed"], 5: [], 10: [], 20: []}
+    h1_attempt = env.attempts(1)[0]["attempt_id"]
+    resumed = [(h, env.resolve(h)[1]) for h in HORIZONS]
+    assert resumed == [(1, "reused"), (3, "retried"), (5, "evaluated"), (10, "evaluated"), (20, "evaluated")]
+    assert env.statuses() == {1: ["succeeded"], 3: ["failed", "succeeded"], 5: ["succeeded"], 10: ["succeeded"],
+                              20: ["succeeded"]}
+    assert env.attempts(1)[0]["attempt_id"] == h1_attempt and len(env.attempts(1)) == 1
+    assert env.attempts(3)[1]["evaluation_id"] == env.attempts(3)[0]["evaluation_id"], "retry is the SAME evaluation"
+
+
+def test_d2_case_b_not_evaluable_horizon_stays_one_terminal_attempt_when_a_later_horizon_fails(tmp_path, monkeypatch, U, cctx):
+    env = _Env(tmp_path, cctx, [c for c in CONDS if c["family"] == "S14"][0], U)
+    assert _stop_after_fault(env, _flaky(monkeypatch, {3})) == [(1, "evaluated")]
+    assert env.statuses()[1] == ["not_evaluable"] and env.statuses()[3] == ["failed"]
+    resumed = [(h, env.resolve(h)[1]) for h in HORIZONS]
+    assert resumed[0] == (1, "reused") and resumed[1] == (3, "retried")
+    assert env.statuses()[1] == ["not_evaluable"], "a terminal NOT_EVALUABLE is never re-attempted"
+    assert all(len(env.attempts(h)) == (2 if h == 3 else 1) for h in HORIZONS)
+
+
+def test_d2_case_c_a_stale_started_attempt_is_never_treated_as_success(tmp_path, U, cctx):
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    aid, _ = env.store.begin_factor_evaluation_attempt(factor_id=env.fids[1], evaluation_id="e" * 32, origin="crashed")
+    cd.write_factor_record(env.rec, {"factor_id": env.fids[1], "attempt_id": aid, "evaluation_id": "e" * 32,
+                                     "status": "succeeded", "horizon": 1})  # a fabricated success claim
+    assert cd.settled_record(env.store, env.rec, env.fids[1]) is None
+    rec, action = env.resolve(1)
+    assert action == "retried" and rec["attempt_id"] != aid and rec["status"] == "succeeded"
+    first, second = env.attempts(1)
+    assert (first["status"], first["failure_reason"]) == ("failed", cd.INTERRUPTED_REASON) and second["status"] == "succeeded"
+
+
+def test_d2_case_d_a_completed_five_horizon_set_resumes_with_zero_new_attempts(tmp_path, U, cctx):
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    first = [env.resolve(h) for h in HORIZONS]
+    before = env.statuses()
+    again = [env.resolve(h) for h in HORIZONS]
+    assert [a for _r, a in again] == ["reused"] * 5 and [r for r, _a in again] == [r for r, _a in first]
+    assert env.statuses() == before and all(len(v) == 1 for v in before.values())
+    assert cd.pending_conditions(env.db, env.rec, [env.cond], cctx) == []
+
+
+@pytest.mark.parametrize("family", ["S05", "S14"])
+def test_d2_case_e_deleted_result_files_are_rebuilt_without_new_attempts(family, tmp_path, U, cctx):
+    cond = _cond("S05", **S05_COND) if family == "S05" else [c for c in CONDS if c["family"] == "S14"][0]
+    env = _Env(tmp_path, cctx, cond, U)
+    first = [env.resolve(h)[0] for h in HORIZONS]
+    import shutil
+    shutil.rmtree(env.rec)
+    assert cd.pending_conditions(env.db, env.rec, [cond], cctx) == [(0, cond)]
+    rebuilt = [env.resolve(h) for h in HORIZONS]
+    assert [a for _r, a in rebuilt] == ["reconstructed"] * 5 and [r for r, _a in rebuilt] == first
+    assert all(len(env.attempts(h)) == 1 for h in HORIZONS)
+
+
+def test_d2_unreconstructable_terminal_evidence_fails_closed_instead_of_rerunning(tmp_path, U, cctx):
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    env.resolve(3)
+    art = Path(env.attempts(3)[0]["artifact_paths"]["factor_diagnostics"])
+    (env.rec / f"{env.fids[3]}.json").unlink()
+    saved = art.read_text(encoding="utf-8")
+    art.unlink()
+    with pytest.raises(cd.FactorResumeRefusal, match="artifact is unavailable"):
+        env.resolve(3)
+    forged = json.loads(saved)
+    forged["input_provenance"]["content_sha256"] = "0" * 64
+    art.write_text(json.dumps(forged), encoding="utf-8")
+    with pytest.raises(cd.FactorResumeRefusal, match="do not match the registered artifact"):
+        env.resolve(3)
+    assert len(env.attempts(3)) == 1, "a terminal factor is never re-attempted, even when its evidence is unusable"
+    art.write_text(saved, encoding="utf-8")
+    assert env.resolve(3)[1] == "reconstructed"
+
+
+def test_d2_retry_eligibility_is_infrastructure_failure_only_and_conflicts_fail_closed(tmp_path, U, cctx):
+    ok = {"status": "failed", "failure_reason": "RuntimeError: boom"}
+    assert cd.retry_eligible(ok) and not cd.retry_eligible({"status": "failed", "failure_reason": ""})
+    for status in ("succeeded", "not_evaluable"):
+        assert not cd.retry_eligible({"status": status, "failure_reason": "zero_variance_factor"})
+    env = _Env(tmp_path, cctx, _cond("S05", **S05_COND), U)
+    env.resolve(1)
+    aid, _ = env.store.begin_factor_evaluation_attempt(factor_id=env.fids[1], evaluation_id=env.attempts(1)[0]["evaluation_id"])
+    env.store.finalize_factor_evaluation_attempt(aid, status="failed", expected_factor_id=env.fids[1],
+                                                 expected_evaluation_id=env.attempts(1)[0]["evaluation_id"],
+                                                 failure_reason="late")
+    with pytest.raises(cd.FactorResumeRefusal, match="authority conflict"):
+        env.resolve(1)
+    other = _cond("S02", sma=50)
+    with pytest.raises(cd.FactorResumeRefusal, match="not registered"):
+        cd.resolve_factor(env.db, env.out, env.rec, U, other, 5, cctx, origin="t")
+    assert len(env.store.list_factors(family=cd.FACTOR_FAMILY)) == 5, "an unfrozen factor must not be auto-registered"
+
+
+def test_d2_driver_resumes_per_factor_and_registry_outranks_result_files(tmp_path, monkeypatch, U, cctx):
+    import run_census as rc
+    conds = ss.build_conditions(ss.build_configs())
+    c = _cond("S05", **S05_COND)
+    ci = conds.index(c)
+    env = _Env(tmp_path, cctx, c, U)
+    monkeypatch.setattr(rc, "FACTOR_REGISTRY_DB", env.db)
+    monkeypatch.setattr(rc, "FACTOR_DIR", tmp_path)
+    monkeypatch.setattr(rc, "FACTOR_REC_DIR", env.rec)
+    monkeypatch.setattr(rc, "_W", {"U": U, "ctx": cctx, "cache": cd.PermutationCache()})
+    env.store.begin_factor_evaluation_attempt(factor_id=env.fids[3], evaluation_id="e" * 32, origin="orphan")
+    assert cd.pending_conditions(env.db, env.rec, [c], cctx) == [(0, c)]
+    assert rc._eval_condition((ci, c)) == (ci, "ok", {"evaluated": 4, "retried": 1})
+    assert env.statuses() == {1: ["succeeded"], 3: ["failed", "succeeded"], 5: ["succeeded"], 10: ["succeeded"], 20: ["succeeded"]}
+    recs = cd.load_factor_records(env.db, env.rec, [c], cctx)
+    assert [r["horizon"] for r in recs] == HORIZONS
+    # a result file with a foreign status / foreign attempt is not authority: the condition is pending again, no rerun
+    p = cd.factor_record_path(env.rec, env.fids[5])
+    good = p.read_text(encoding="utf-8")
+    p.write_text(good.replace('"status":"succeeded"', '"status":"failed"', 1), encoding="utf-8")
+    assert cd.pending_conditions(env.db, env.rec, [c], cctx) == [(0, c)]
+    with pytest.raises(cd.FactorResumeRefusal, match="not settled"):
+        cd.load_factor_records(env.db, env.rec, [c], cctx)
+    assert rc._eval_condition((ci, c)) == (ci, "ok", {"reused": 4, "reconstructed": 1})
+    assert cd.read_factor_record(env.rec, env.fids[5]) == json.loads(good)
+    assert all(len(env.attempts(h)) == (2 if h == 3 else 1) for h in HORIZONS)

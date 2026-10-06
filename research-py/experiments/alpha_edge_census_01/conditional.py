@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,8 +21,11 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 import search_space as ss  # noqa: E402
+from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 from mqk_research.factors.contracts import (  # noqa: E402
-    DIRECTION_HIGHER_IS_BETTER, EVAL_STATUS_SUCCEEDED, NORMALIZATION_RAW, TIMING_SAME_BAR_CLOSE, FactorSpec)
+    DIRECTION_HIGHER_IS_BETTER, EVAL_STATUS_NOT_EVALUABLE, EVAL_STATUS_SUCCEEDED, NORMALIZATION_RAW,
+    TIMING_SAME_BAR_CLOSE, FactorSpec)
+from mqk_research.factors.diagnostics import observations_content_hash  # noqa: E402
 from mqk_research.factors.fdr import (  # noqa: E402
     EMPIRICAL_PVALUE_PROTOCOL_VERSION, FactorPValueEvidence, build_fdr_population_report)
 from mqk_research.factors.null_controls import _derive_period_seed  # noqa: E402
@@ -361,14 +365,162 @@ def evaluate_factor(registry_db: Path, out_dir: Path, U, condition: dict, horizo
            "horizon": horizon, "status": res.status, "reason": res.reason}
     if res.status != EVAL_STATUS_SUCCEEDED:
         return rec
-    artifact = json.loads(Path(res.artifact_path).read_text(encoding="utf-8"))
+    return _with_evidence(rec, json.loads(Path(res.artifact_path).read_text(encoding="utf-8")), frame, aux, spec, cache)
+
+
+def _with_evidence(rec: dict, artifact: dict, frame: pd.DataFrame, aux: pd.DataFrame, spec: FactorSpec,
+                   cache: PermutationCache | None) -> dict:
+    """The diagnostic evidence fields of a succeeded evaluation, derived only from the registered artifact and the
+    observations frame (shared by a fresh evaluation and a faithful reconstruction)."""
     metrics = artifact["metrics"]
-    rec.update(observations_content_sha256=artifact["input_provenance"]["content_sha256"],
-               mean_ic=metrics["mean_ic"], period_count=metrics["period_count"],
-               top_minus_bottom_spread=metrics["quantile"]["top_minus_bottom_spread"],
-               events=event_diagnostics(frame, aux, spec.direction),
-               pvalue=fast_empirical_pvalue(frame, metrics, cache=cache))
-    return rec
+    return {**rec, "observations_content_sha256": artifact["input_provenance"]["content_sha256"],
+            "mean_ic": metrics["mean_ic"], "period_count": metrics["period_count"],
+            "top_minus_bottom_spread": metrics["quantile"]["top_minus_bottom_spread"],
+            "events": event_diagnostics(frame, aux, spec.direction),
+            "pvalue": fast_empirical_pvalue(frame, metrics, cache=cache)}
+
+
+# ------------------------------------------------------------------------------- factor-level resume (CR-02)
+# Registry truth decides what a resume does for each exact (factor_id, evaluation_id); result files are only a
+# convenience cache that must match the registry's authoritative attempt. A terminal factor is never re-attempted.
+
+REUSE_STATUSES = (EVAL_STATUS_SUCCEEDED, EVAL_STATUS_NOT_EVALUABLE)
+INTERRUPTED_REASON = "infrastructure_interrupted"
+ACTION_REUSED, ACTION_RECONSTRUCTED, ACTION_EVALUATED, ACTION_RETRIED = "reused", "reconstructed", "evaluated", "retried"
+
+
+class FactorResumeRefusal(RuntimeError):
+    """A resume that cannot proceed without fabricating evidence or re-attempting a terminal factor."""
+
+
+def retry_eligible(attempt: dict) -> bool:
+    """Only an infrastructure failure may be retried (same factor/evaluation, new attempt). The registered runner maps
+    every statistical or economic outcome to succeeded / not_evaluable, so a `failed` attempt is by construction an
+    infrastructure fault or interruption; a succeeded or not_evaluable attempt is never retry-eligible."""
+    return attempt["status"] == "failed" and bool((attempt.get("failure_reason") or "").strip())
+
+
+def factor_record_path(rec_dir: Path, factor_id: str) -> Path:
+    return Path(rec_dir) / f"{factor_id}.json"
+
+
+def write_factor_record(rec_dir: Path, rec: dict) -> None:
+    path = factor_record_path(rec_dir, rec["factor_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(json.dumps(rec, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    os.replace(tmp, path)
+
+
+def read_factor_record(rec_dir: Path, factor_id: str) -> dict | None:
+    path = factor_record_path(rec_dir, factor_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+
+
+def _record_binds(rec: dict | None, factor_id: str, att: dict) -> bool:
+    return bool(rec) and rec.get("factor_id") == factor_id and rec.get("attempt_id") == att["attempt_id"] \
+        and rec.get("evaluation_id") == att["evaluation_id"] and rec.get("status") == att["status"]
+
+
+def reconstruct_record(U, condition: dict, horizon: int, spec: FactorSpec, att: dict, cache) -> dict:
+    """Rebuild the evidence record of an already-terminal attempt from durable registry/artifact evidence. Fails closed
+    if the evidence cannot be proven to be the registered attempt's own."""
+    base = {"factor_id": att["factor_id"], "evaluation_id": att["evaluation_id"], "attempt_id": att["attempt_id"],
+            "attempt_index": att["attempt_index"], "condition_id": condition["condition_id"],
+            "family": condition["family"], "horizon": horizon, "status": att["status"],
+            "reason": att.get("failure_reason")}
+    if att["status"] != EVAL_STATUS_SUCCEEDED:
+        return base
+    path = (att.get("artifact_paths") or {}).get("factor_diagnostics")
+    if not path or not Path(path).exists():
+        raise FactorResumeRefusal(f"{att['attempt_id']}: succeeded but its diagnostics artifact is unavailable; "
+                                  "refusing to fabricate evidence or re-attempt a terminal factor")
+    artifact = json.loads(Path(path).read_text(encoding="utf-8"))
+    frame, aux = build_frame(U, condition, horizon)
+    if artifact.get("factor_id") != att["factor_id"] or artifact.get("evaluation_id") != att["evaluation_id"] or \
+            observations_content_hash(frame) != artifact["input_provenance"]["content_sha256"]:
+        raise FactorResumeRefusal(f"{att['attempt_id']}: rebuilt observations do not match the registered artifact")
+    return _with_evidence(base, artifact, frame, aux, spec, cache)
+
+
+def resolve_factor(registry_db: Path, out_dir: Path, rec_dir: Path, U, condition: dict, horizon: int, ctx: dict, *,
+                   origin: str, cache: PermutationCache | None = None, metadata: dict | None = None,
+                   evaluate=None) -> tuple[dict, str]:
+    """Return (terminal record, action) for ONE exact registered factor, never re-attempting a terminal one:
+      succeeded / not_evaluable -> reuse the authoritative attempt (record file, else faithful reconstruction)
+      started (interrupted run)  -> finalized failed `infrastructure_interrupted`, then retried as a new attempt
+      failed                     -> retried as a new attempt (infrastructure failure only)
+      never attempted            -> first durable attempt.
+    The record is persisted as soon as the factor is terminal."""
+    evaluate = evaluate or evaluate_factor
+    spec = factor_spec(condition, horizon, ctx)
+    fid = spec.compute_factor_id()
+    store = ResearchResultStore(Path(registry_db))
+    try:
+        store.get_factor(fid)
+    except KeyError:
+        raise FactorResumeRefusal(f"factor {fid} is not registered in the frozen population; refusing to attempt") from None
+    attempts = store.list_factor_evaluation_attempts(fid)
+    for att in attempts:
+        if att["status"] == "started":
+            if not att.get("evaluation_id"):
+                raise FactorResumeRefusal(f"{att['attempt_id']}: started attempt has no evaluation_id; cannot be finalized")
+            store.finalize_factor_evaluation_attempt(att["attempt_id"], status="failed", expected_factor_id=fid,
+                                                     expected_evaluation_id=att["evaluation_id"],
+                                                     failure_reason=INTERRUPTED_REASON)
+    attempts = store.list_factor_evaluation_attempts(fid)
+    latest = attempts[-1] if attempts else None
+    if latest is not None and latest["status"] in REUSE_STATUSES:
+        rec = read_factor_record(rec_dir, fid)
+        action = ACTION_REUSED
+        if not _record_binds(rec, fid, latest):
+            rec, action = reconstruct_record(U, condition, horizon, spec, latest, cache), ACTION_RECONSTRUCTED
+            write_factor_record(rec_dir, rec)
+        return rec, action
+    if any(a["status"] in REUSE_STATUSES for a in attempts):
+        raise FactorResumeRefusal(f"{fid}: a terminal attempt exists but the latest attempt is {latest['status']}; "
+                                  "authority conflict, refusing to continue")
+    if latest is not None and not retry_eligible(latest):
+        raise FactorResumeRefusal(f"{latest['attempt_id']}: failed without a recorded infrastructure reason; not retried")
+    rec = evaluate(registry_db, out_dir, U, condition, horizon, ctx, origin=origin, cache=cache, metadata=metadata)
+    write_factor_record(rec_dir, rec)
+    return rec, ACTION_RETRIED if latest is not None else ACTION_EVALUATED
+
+
+def settled_record(store: ResearchResultStore, rec_dir: Path, factor_id: str) -> dict | None:
+    """The persisted record iff the registry's latest attempt is terminal and the record is bound to that exact attempt."""
+    attempts = store.list_factor_evaluation_attempts(factor_id)
+    if attempts and attempts[-1]["status"] in REUSE_STATUSES:
+        rec = read_factor_record(rec_dir, factor_id)
+        if _record_binds(rec, factor_id, attempts[-1]):
+            return rec
+    return None
+
+
+def pending_conditions(registry_db: Path, rec_dir: Path, conditions: list[dict], ctx: dict) -> list[tuple[int, dict]]:
+    """(index, condition) for every condition with a factor that is not yet settled in the registry."""
+    store = ResearchResultStore(Path(registry_db))
+    return [(i, c) for i, c in enumerate(conditions)
+            if any(settled_record(store, rec_dir, factor_spec(c, h, ctx).compute_factor_id()) is None
+                   for h in ss.CONDITIONAL_HORIZONS)]
+
+
+def load_factor_records(registry_db: Path, rec_dir: Path, conditions: list[dict], ctx: dict) -> list[dict]:
+    """Every expected factor's registry-bound record in population order; refuses while any factor is unsettled."""
+    store = ResearchResultStore(Path(registry_db))
+    out = []
+    for c in conditions:
+        for h in ss.CONDITIONAL_HORIZONS:
+            rec = settled_record(store, rec_dir, factor_spec(c, h, ctx).compute_factor_id())
+            if rec is None:
+                raise FactorResumeRefusal(f"{c['family']} {c['condition_id']} h{h} is not settled in the registry; run run-factors")
+            out.append(rec)
+    return out
 
 
 def declared_universe_identity(ctx: dict) -> dict:

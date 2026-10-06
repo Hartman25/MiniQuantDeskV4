@@ -8,7 +8,7 @@ Stages (each idempotent; frozen manifests are immutable once written):
   freeze         registers the whole StrategyEdge trial population and ConditionalEdge FactorSpec population
                  (attempts must be 0) and writes the POPULATION_FREEZE_PROOF
   run-strategy   resumable StrategyEdge Pass-1 execution (frozen-population gate first)
-  run-factors    resumable registered ConditionalEdge factor evaluations (one durable attempt per evaluation)
+  run-factors    resumable registered ConditionalEdge factor evaluations (factor-level resume; a terminal factor is never re-attempted)
   registry       complete-family FDR + qualification ledgers + Edge Registry V2 + campaign evidence
 """
 
@@ -18,7 +18,6 @@ import argparse
 import hashlib
 import json
 import multiprocessing as mp
-import os
 import sys
 import time
 from pathlib import Path
@@ -184,78 +183,53 @@ def cmd_run_strategy(a) -> None:
     print(json.dumps(res, sort_keys=True))
 
 
-def _rec_path(ci: int) -> Path:
-    return FACTOR_REC_DIR / f"config_{ci:04d}.jsonl"
-
-
-def _config_records(ci: int, conditions: list[dict], ctx: dict) -> list[dict] | None:
-    """The condition's five evaluation records iff the file is complete and bound to the registered factor ids."""
-    p = _rec_path(ci)
-    if not p.exists():
-        return None
-    rows = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
-    want = [cd.factor_spec(conditions[ci], h, ctx).compute_factor_id() for h in ss.CONDITIONAL_HORIZONS]
-    terminal = {cd.EVAL_STATUS_SUCCEEDED, "not_evaluable"}
-    ok = [r["factor_id"] for r in rows] == want and all(r["status"] in terminal for r in rows)
-    return rows if ok else None
-
-
 def _init_worker(uni: dict, bm: dict, ctx: dict) -> None:
     _W["U"], _W["ctx"], _W["cache"] = _load_universe(uni, bm), ctx, cd.PermutationCache()
 
 
-def _eval_config(item: tuple[int, dict]) -> tuple[int, str]:
-    ci, config = item
-    ctx, store = _W["ctx"], ResearchResultStore(FACTOR_REGISTRY_DB)
-    recs = []
+def _eval_condition(item: tuple[int, dict]) -> tuple[int, str, dict]:
+    """Resolve the five factors of one condition at factor granularity: a terminal factor is reused, never re-attempted;
+    each horizon is persisted as soon as it is terminal, so a later horizon failing cannot cause a rerun."""
+    ci, cond = item
+    actions: dict = {}
     try:
         for h in ss.CONDITIONAL_HORIZONS:
-            fid = cd.factor_spec(config, h, ctx).compute_factor_id()
-            for att in store.list_factor_evaluation_attempts(fid):
-                if att["status"] == "started":
-                    store.finalize_factor_evaluation_attempt(
-                        att["attempt_id"], status="failed", expected_factor_id=fid,
-                        expected_evaluation_id=att["evaluation_id"], failure_reason="infrastructure_interrupted")
-            recs.append(cd.evaluate_factor(FACTOR_REGISTRY_DB, FACTOR_DIR / "artifacts", _W["U"], config, h, ctx,
-                                           origin=FACTOR_ORIGIN, cache=_W["cache"], metadata={"config_index": ci}))
-    except Exception as exc:  # noqa: BLE001 - infrastructure fault: attempt is durably failed, config retried on resume
-        return ci, f"{type(exc).__name__}: {str(exc)[:200]}"
-    tmp = _rec_path(ci).with_suffix(".tmp")
-    body = "\n".join(json.dumps(r, sort_keys=True, separators=(",", ":")) for r in recs) + "\n"
-    tmp.write_bytes(body.encode("utf-8"))
-    os.replace(tmp, _rec_path(ci))
-    return ci, "ok"
+            _rec, action = cd.resolve_factor(FACTOR_REGISTRY_DB, FACTOR_DIR / "artifacts", FACTOR_REC_DIR, _W["U"], cond, h,
+                                             _W["ctx"], origin=FACTOR_ORIGIN, cache=_W["cache"],
+                                             metadata={"condition_index": ci})
+            actions[action] = actions.get(action, 0) + 1
+    except Exception as exc:  # noqa: BLE001 - the attempt is durably failed (or refused); remaining horizons resume later
+        return ci, f"{type(exc).__name__}: {str(exc)[:200]}", actions
+    return ci, "ok", actions
 
 
 def cmd_run_factors(a) -> None:
     uni, _part, _prot, _space, bm, ctx, cells = _run_context()
-    configs = ce.cell_conditions(cells)
+    conditions = ce.cell_conditions(cells)
     FACTOR_REC_DIR.mkdir(parents=True, exist_ok=True)
-    pending = [(ci, c) for ci, c in enumerate(configs) if _config_records(ci, configs, ctx) is None]
+    pending = cd.pending_conditions(FACTOR_REGISTRY_DB, FACTOR_REC_DIR, conditions, ctx)
     if a.max_configs is not None:
         pending = pending[:a.max_configs]
-    print(f"configs total={len(configs)} pending={len(pending)}", flush=True)
-    t0, failed = time.time(), []
+    print(f"conditions total={len(conditions)} pending={len(pending)}", flush=True)
+    t0, failed, totals = time.time(), [], {}
     with mp.get_context("spawn").Pool(a.workers, initializer=_init_worker, initargs=(uni, bm, ctx)) as pool:
-        for n, (ci, status) in enumerate(pool.imap_unordered(_eval_config, pending), 1):
+        for n, (ci, status, actions) in enumerate(pool.imap_unordered(_eval_condition, pending), 1):
+            for k, v in actions.items():
+                totals[k] = totals.get(k, 0) + v
             if status != "ok":
                 failed.append((ci, status))
             if n % 10 == 0 or status != "ok":
-                print(f"{time.time() - t0:7.0f}s {n}/{len(pending)} config {ci} {status}", flush=True)
-    print(json.dumps({"evaluated": len(pending) - len(failed), "failed": len(failed)}))
+                print(f"{time.time() - t0:7.0f}s {n}/{len(pending)} condition {ci} {status}", flush=True)
+    print(json.dumps({"conditions_ok": len(pending) - len(failed), "failed": len(failed), "factor_actions": totals},
+                     sort_keys=True))
     if failed:
-        raise SystemExit(f"fail-closed: {len(failed)} configs hit infrastructure faults; re-run run-factors to retry: {failed[:3]}")
+        raise SystemExit(f"fail-closed: {len(failed)} conditions hit faults; re-run run-factors to resume: {failed[:3]}")
 
 
 def cmd_registry(_a) -> None:
     uni, _part, prot, space, bm, ctx, cells = _run_context()
     configs = ce.cell_conditions(cells)
-    records = []
-    for ci in range(len(configs)):
-        rows = _config_records(ci, configs, ctx)
-        if rows is None:
-            raise ce.GateRefusal(f"config {ci} has no complete registered factor evaluation records; run run-factors")
-        records += rows
+    records = cd.load_factor_records(FACTOR_REGISTRY_DB, FACTOR_REC_DIR, configs, ctx)
     store = ResearchResultStore(REGISTRY_DB)
     digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)
     if any(d["succeeded"] < 1 or d["started"] for d in digest.values()):
