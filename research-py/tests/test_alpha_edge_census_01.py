@@ -747,7 +747,15 @@ def _cfg(family, **kw):
     raise KeyError((family, kw))
 
 
+def _cond(family, **kw):
+    for c in ss.build_conditions(ss.build_configs()):
+        if c["family"] == family and all(c["params"].get(k) == v for k, v in kw.items()):
+            return c
+    raise KeyError((family, kw))
+
+
 S05_CFG = dict(period=3, entry_below=20, exit_above=70, trend="none")
+S05_COND = dict(period=3, entry_below=20, trend="none")
 
 
 def test_declared_lookback_equals_first_defined_bar_for_every_config(U):
@@ -759,12 +767,12 @@ def test_declared_lookback_equals_first_defined_bar_for_every_config(U):
 
 
 def test_ir7_every_conditional_candidate_is_a_registered_factorspec_with_zero_attempts(tmp_path, cctx):
-    cfgs = ss.build_configs()
+    conds = ss.build_conditions(ss.build_configs())
     db = tmp_path / "r.sqlite"
-    ids = cd.register_all_factors(db, cfgs, cctx)
-    assert len(ids) == len(set(ids)) == 434 * 5 == len(cd.expected_factor_ids(cfgs, cctx))
+    ids = cd.register_all_factors(db, conds, cctx)
+    assert len(ids) == len(set(ids)) == 219 * 5 == len(cd.expected_factor_ids(conds, cctx))
     dig = cd.registered_population_digest(db, ids)
-    assert dig["registered"] == 2170 and dig["attempts"] == 0
+    assert dig["registered"] == 1095 and dig["attempts"] == 0
     horizons = {f["identity"]["horizon_periods"] for f in cd.list_factors(db, family=cd.FACTOR_FAMILY)}
     assert horizons == {1, 3, 5, 10, 20}
     with pytest.raises(RuntimeError, match="missing=1"):
@@ -772,11 +780,11 @@ def test_ir7_every_conditional_candidate_is_a_registered_factorspec_with_zero_at
 
 
 def test_factor_identity_binds_semantics_but_not_layout_or_results(cctx):
-    c = _cfg("S05", **S05_CFG)
+    c = _cond("S05", **S05_COND)
     a = cd.factor_spec(c, 3, cctx)
     assert a.compute_factor_id() == cd.factor_spec(c, 3, cctx).compute_factor_id()
     assert a.compute_factor_id() != cd.factor_spec(c, 5, cctx).compute_factor_id()
-    assert a.compute_factor_id() != cd.factor_spec(_cfg("S05", **{**S05_CFG, "entry_below": 30}), 3, cctx).compute_factor_id()
+    assert a.compute_factor_id() != cd.factor_spec(_cond("S05", **{**S05_COND, "entry_below": 30}), 3, cctx).compute_factor_id()
     other = {**cctx, "universe_identity": {**cctx["universe_identity"], "symbols_sha256": "x"}}
     assert a.compute_factor_id() != cd.factor_spec(c, 3, other).compute_factor_id()
     other = {**cctx, "data_provenance_identity": {**cctx["data_provenance_identity"], "bars_manifest_sha256": "1" * 64}}
@@ -787,34 +795,34 @@ def test_factor_identity_binds_semantics_but_not_layout_or_results(cctx):
 
 
 def test_ir8_ir9_results_and_retries_cannot_change_or_manufacture_a_factor(tmp_path, bars, U, cctx):
-    c = _cfg("S05", **S05_CFG)
+    c = _cond("S05", **S05_COND)
     db = tmp_path / "r.sqlite"
-    ids = cd.register_all_factors(db, ss.build_configs(), cctx)
+    ids = cd.register_all_factors(db, ss.build_conditions(ss.build_configs()), cctx)
     fid = cd.factor_spec(c, 3, cctx).compute_factor_id()
     r1 = cd.evaluate_factor(db, tmp_path / "o1", U, c, 3, cctx, origin="t")
     r2 = cd.evaluate_factor(db, tmp_path / "o2", sg.Universe(perturbed(bars, 900)), c, 3, cctx, origin="t")
     assert r1["factor_id"] == r2["factor_id"] == fid and r1["evaluation_id"] == r2["evaluation_id"]
     assert (r1["attempt_index"], r2["attempt_index"]) == (1, 2)
     assert r1["mean_ic"] != r2["mean_ic"] and r1["observations_content_sha256"] != r2["observations_content_sha256"]
-    assert len(cd.list_factors(db, family=cd.FACTOR_FAMILY)) == 2170
-    assert cd.expected_factor_ids(ss.build_configs(), cctx) == ids
+    assert len(cd.list_factors(db, family=cd.FACTOR_FAMILY)) == 1095
+    assert cd.expected_factor_ids(ss.build_conditions(ss.build_configs()), cctx) == ids
     assert len(cd.list_factor_evaluation_attempts(db, fid)) == 2
 
 
 def test_ir28_registry_keeps_every_conditional_candidate_including_non_evaluable_ones(tmp_path, U, cctx):
-    cfgs = ss.build_configs()
+    cfgs = ss.build_conditions(ss.build_configs())
     db = tmp_path / "r.sqlite"
     cd.register_all_factors(db, cfgs, cctx)
     s14 = [c for c in cfgs if c["family"] == "S14"][0]
     rec = cd.evaluate_factor(db, tmp_path / "o", U, s14, 1, cctx, origin="t")
     assert rec["status"] == "not_evaluable"  # a date-level condition is cross-sectionally constant
-    assert cd.registered_population_digest(db, cd.expected_factor_ids(cfgs, cctx))["registered"] == 2170
+    assert cd.registered_population_digest(db, cd.expected_factor_ids(cfgs, cctx))["registered"] == 1095
     rep = cd.family_fdr_report(db, [])
-    assert rep["status"] == "incomplete"  # 2169 factors never attempted: no decision on a partial population
+    assert rep["status"] == "incomplete"  # 1094 factors never attempted: no decision on a partial population
 
 
 def test_frame_label_is_diagnostic_future_return_minus_symbol_baseline_and_causal(U):
-    fr, aux = cd.build_frame(U, _cfg("S02", sma=50), 5)
+    fr, aux = cd.build_frame(U, _cond("S02", sma=50), 5)
     assert list(fr.columns) == cd.FRAME_COLUMNS and len(aux) == len(fr)
     assert (fr["information_cutoff_ts_utc"] <= fr["period_ts_utc"]).all()
     assert (fr["period_ts_utc"] < fr["label_end_ts_utc"]).all()
@@ -824,7 +832,7 @@ def test_frame_label_is_diagnostic_future_return_minus_symbol_baseline_and_causa
 
 
 def test_event_diagnostics_effect_is_conditional_minus_baseline_with_symbol_attribution(U):
-    fr, aux = cd.build_frame(U, _cfg("S02", sma=50), 1)
+    fr, aux = cd.build_frame(U, _cond("S02", sma=50), 1)
     ev = cd.event_diagnostics(fr, aux)
     m = fr["factor_value"].to_numpy() == 1.0
     assert ev["event_count"] == int(m.sum()) and ev["row_count"] == len(fr)
@@ -838,7 +846,7 @@ def test_fast_empirical_pvalue_matches_native_repo_protocol_exactly(U):
     from mqk_research.factors.contracts import FactorEvaluationSpec
     from mqk_research.factors.diagnostics import evaluate_factor_ic_ir
     from mqk_research.factors.fdr import compute_empirical_pvalue
-    fr, _aux = cd.build_frame(U, _cfg("S05", **S05_CFG), 3)
+    fr, _aux = cd.build_frame(U, _cond("S05", **S05_COND), 3)
     kw = dict(n_quantiles=cd.N_QUANTILES, min_cross_section=cd.MIN_CROSS_SECTION, min_periods=cd.MIN_PERIODS)
     real = evaluate_factor_ic_ir(fr, **kw)
     spec = FactorEvaluationSpec(factor_id="f", universe_identity={}, evaluation_window_start_utc=cd.WINDOW_START_UTC,
@@ -857,28 +865,25 @@ def test_fast_empirical_pvalue_matches_native_repo_protocol_exactly(U):
         cd.fast_empirical_pvalue(nb, real.metrics, n_permutations=2)
 
 
-def test_population_freeze_covers_strategy_trials_and_factors_with_zero_attempts(tmp_path):
+def test_population_freeze_covers_strategy_trials_with_zero_attempts(tmp_path):
     seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
     syms = seed["symbols"][:2]
     uni = ss.build_universe(seed, {s: {"disposition": cdata.ELIGIBLE if s in syms else cdata.EXCLUDED_INSUFFICIENT_HISTORY}
                                    for s in seed["symbols"]})
     space = ss.build_search_space(ss.build_grammar(), uni, ss.build_partitions(), ss.build_protocol())
-    ctx = cd.population_context(uni, ss.build_protocol(), ss.build_partitions(),
-                                {"manifest_sha256": "0" * 64, "request_contract": cdata.REQUEST_CONTRACT})
     _cfgs, _syms, _ids, cells = cs.population(uni, space)
     assert len(cells) == 434 * 2
     st = ResearchResultStore(tmp_path / "r.sqlite")
     with pytest.raises(cs.GateRefusal):
-        cs.require_frozen_population(st, space, cells, ctx, allow_attempts=False)
-    fz = cs.register_population(st, space, cells, ctx)
-    assert fz["strategy_cell_count"] == 868 and fz["conditional_factor_count"] == 2170
-    proof = cs.require_frozen_population(st, space, cells, ctx, allow_attempts=False)
-    assert proof["strategy_attempts"] == 0 and proof["factor_attempts"] == 0 and proof["registered_factors"] == 2170
-    with __import__("contextlib").closing(st._connect()) as con:  # noqa: SLF001
-        con.execute("delete from research_factors where factor_id=(select min(factor_id) from research_factors)")
-        con.commit()
-    with pytest.raises(cs.GateRefusal, match="missing=1"):
-        cs.require_frozen_population(st, space, cells, ctx, allow_attempts=False)
+        cs.require_frozen_population(st, space, cells, allow_attempts=False)
+    fz = cs.register_population(st, space, cells)
+    assert fz["strategy_cell_count"] == 868 and set(fz) == {"search_space_id", "strategy_cell_count", "manifest_order_root",
+                                                          "strategy_population_root"}
+    proof = cs.require_frozen_population(st, space, cells, allow_attempts=False)
+    assert proof["strategy_attempts"] == 0 and proof["registered_trials"] == 868
+    st.begin_attempts_bulk([cells[0][3]], origin="x")
+    with pytest.raises(cs.GateRefusal, match="attempts already exist"):
+        cs.require_frozen_population(st, space, cells, allow_attempts=False)
 
 
 # ------------------------------------------------------------- census gate / execution / resume (StrategyEdge)
@@ -901,29 +906,27 @@ def mini(U, cctx):
 def _fresh_store(tmp_path, mini, *, register=True):
     st = ResearchResultStore(tmp_path / "registry.sqlite")
     if register:
-        cs.register_population(st, mini["space"], mini["cells"], mini["ctx"])
+        cs.register_population(st, mini["space"], mini["cells"])
     return st
 
 
 def _gate(st, mini, cells=None, **kw):
-    return cs.require_frozen_population(st, mini["space"], cells or mini["cells"], mini["ctx"], **kw)
+    return cs.require_frozen_population(st, mini["space"], cells or mini["cells"], **kw)
 
 
 def _run(st, mini, U, out, **kw):
-    return cs.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], mini["ctx"], out, **kw)
+    return cs.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], out, **kw)
 
 
 def test_gate_accepts_exact_frozen_population_with_zero_attempts(tmp_path, mini):
     r = _gate(_fresh_store(tmp_path, mini), mini, allow_attempts=False)
-    n_cfg = len(cs.cell_configs(mini["cells"]))
     assert r["registered_trials"] == len(mini["cells"]) > 100 and r["strategy_attempts"] == 0
-    assert r["registered_factors"] == n_cfg * 5 and r["factor_attempts"] == 0
 
 
 def test_gate_refuses_missing_extra_duplicate_unfrozen_and_attempted(tmp_path, mini):
-    cells, ctx = mini["cells"], mini["ctx"]
+    cells = mini["cells"]
     st = ResearchResultStore(tmp_path / "a.sqlite")
-    cs.register_population(st, mini["space"], cells[:-1], ctx)
+    cs.register_population(st, mini["space"], cells[:-1])
     with pytest.raises(cs.GateRefusal, match="missing=1"):
         _gate(st, mini, allow_attempts=False)
     st = _fresh_store(tmp_path, mini)
@@ -933,10 +936,8 @@ def test_gate_refuses_missing_extra_duplicate_unfrozen_and_attempted(tmp_path, m
     with pytest.raises(cs.GateRefusal, match="extra=1"):
         _gate(st, mini, allow_attempts=True)
     with pytest.raises(cs.GateRefusal, match="duplicate"):
-        cs.freeze_record(mini["space"], cells + [cells[0]], [])
-    with pytest.raises(cs.GateRefusal, match="duplicate"):
-        cs.freeze_record(mini["space"], cells, ["f", "f"])
-    # trials registered but no freeze marker / no factors: an attempt before the population freeze is refused
+        cs.freeze_record(mini["space"], cells + [cells[0]])
+    # trials registered but no freeze marker: an attempt before the population freeze is refused
     st = ResearchResultStore(tmp_path / "c.sqlite")
     for fam in {c[1]["family"] for c in cells}:
         st.register_hypothesis(hypothesis_id=ss.hypothesis_id(fam), experiment_id=ss.EXPERIMENT_ID, hypothesis_text="x")
@@ -944,12 +945,9 @@ def test_gate_refuses_missing_extra_duplicate_unfrozen_and_attempted(tmp_path, m
     st.register_trials_bulk([{"trial_id": t, "experiment_id": ss.EXPERIMENT_ID, "hypothesis_id": ss.hypothesis_id(c["family"]),
                               "strategy_id": f"{c['family']}:{c['config_id']}", "protocol_id": ids["protocol_id"],
                               "identity": ss.trial_identity(c, s, ids)} for _i, c, s, t in cells])
-    with pytest.raises(cs.GateRefusal, match="registered factors != expected"):
-        _gate(st, mini, allow_attempts=True)
-    cd.register_all_factors(st.db_path, cs.cell_configs(cells), ctx)
     with pytest.raises(cs.GateRefusal, match="freeze marker"):
         _gate(st, mini, allow_attempts=True)
-    # attempts != 0 at freeze time (strategy trial, and separately a factor evaluation attempt)
+    # attempts != 0 at freeze time
     (tmp_path / "d").mkdir()
     st = _fresh_store(tmp_path / "d", mini)
     st.begin_attempts_bulk([cells[0][3]], origin="x")
@@ -1224,6 +1222,7 @@ def reg_run(tmp_path_factory, U, cctx):
     root = tmp_path_factory.mktemp("reg")
     cfgs = [_cfg("S02", sma=50), _cfg("S05", **S05_CFG), _cfg("S05", **{**S05_CFG, "entry_below": 30}),
             [c for c in ss.build_configs() if c["family"] == "S14"][0]]
+    conds = ss.build_conditions(cfgs)
     seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
     base = ss.build_universe(seed, {s: {"disposition": cdata.ELIGIBLE} for s in seed["symbols"]})
     uni = {**base, "symbols": list(U.symbols)}
@@ -1235,12 +1234,14 @@ def reg_run(tmp_path_factory, U, cctx):
     meta = {s: {"disposition": cs.DATA_PRESENT, "rows": len(U.sd[s].c), "data_short_history": False,
                 "data_quality_caveat": False} for s in U.symbols}
     st = ResearchResultStore(root / "registry.sqlite")
-    cs.register_population(st, space, cells, cctx)
-    cs.run_chunks(st, U, space, cells, meta, cctx, root, chunk_size=20)
+    cs.register_population(st, space, cells)
+    cs.run_chunks(st, U, space, cells, meta, root, chunk_size=20)
+    fst = ResearchResultStore(root / "registry_conditional_v3.sqlite")
+    cd.register_all_factors(fst.db_path, conds, cctx)
     cache = cd.PermutationCache()
-    recs = [cd.evaluate_factor(st.db_path, root / "fac", U, c, h, cctx, origin="t", cache=cache)
-            for c in cfgs for h in ss.CONDITIONAL_HORIZONS]
-    fdr = cd.family_fdr_report(st.db_path, recs)
+    recs = [cd.evaluate_factor(fst.db_path, root / "fac", U, c, h, cctx, origin="t", cache=cache)
+            for c in conds for h in ss.CONDITIONAL_HORIZONS]
+    fdr = cd.family_fdr_report(fst.db_path, recs)
     prot = {**ss.build_protocol(), "chunking": {"cells_per_chunk": 20}}
     out = root / "out"
     out.mkdir()
@@ -1248,7 +1249,8 @@ def reg_run(tmp_path_factory, U, cctx):
     shutil.copytree(root / "chunks", out / "chunks")
     summary = er.build_registry(space, uni, cells, meta, prot, out, ctx=cctx, factor_records=recs, fdr=fdr)
     return {"root": root, "out": out, "space": space, "uni": uni, "cells": cells, "meta": meta, "prot": prot,
-            "recs": recs, "fdr": fdr, "summary": summary, "ctx": cctx, "cfgs": cfgs, "st": st}
+            "recs": recs, "fdr": fdr, "summary": summary, "ctx": cctx, "cfgs": cfgs, "conds": conds, "st": st,
+            "fst": fst}
 
 
 def _lines(p):
@@ -1256,7 +1258,7 @@ def _lines(p):
 
 
 def _edges(r):
-    return _lines(r["out"] / "edge_registry_v2.jsonl")
+    return _lines(r["out"] / er.OUT_EDGES)
 
 
 def test_registry_records_exactly_the_qualifying_candidates_at_their_highest_class(reg_run):
@@ -1299,7 +1301,7 @@ def test_every_record_is_not_validated_no_promotion_non_executable_and_survivors
 
 def test_ir27_search_ledger_keeps_every_strategy_candidate_including_losers_and_below_floor(reg_run):
     r = reg_run
-    led = _lines(r["out"] / "search_ledger_v2.jsonl")
+    led = _lines(r["out"] / er.OUT_SEARCH_LEDGER)
     assert [x["t"] for x in led] == [c[3] for c in r["cells"]]
     s = r["summary"]
     assert len(led) == s["cells_total"] == len(r["cells"]) > sum(s["strategy_edges"].values())
@@ -1311,9 +1313,9 @@ def test_ir27_search_ledger_keeps_every_strategy_candidate_including_losers_and_
 
 def test_ir28_factor_ledger_keeps_every_registered_factor_including_non_evaluable(reg_run):
     r = reg_run
-    fl = _lines(r["out"] / "factor_ledger_v2.jsonl")
+    fl = _lines(r["out"] / er.OUT_FACTOR_LEDGER)
     s = r["summary"]
-    assert len(fl) == s["factors_total"] == len(r["cfgs"]) * 5 == len(r["fdr"]["declared_factor_ids"])
+    assert len(fl) == s["factors_total"] == len(r["conds"]) * 5 == len(r["fdr"]["declared_factor_ids"])
     assert {x["status"] for x in fl} >= {"succeeded", "not_evaluable"}
     assert any(x["class"] is None for x in fl)
     assert sum(s["conditional_edges"].values()) < len(fl)
@@ -1323,7 +1325,7 @@ def test_ir28_factor_ledger_keeps_every_registered_factor_including_non_evaluabl
 def test_ir20_fdr_population_is_the_registry_and_keeps_non_evaluable_and_negative_factors(reg_run):
     r = reg_run
     fdr = r["fdr"]
-    assert fdr["status"] == "complete" and len(fdr["declared_factor_ids"]) == len(r["cfgs"]) * 5
+    assert fdr["status"] == "complete" and len(fdr["declared_factor_ids"]) == len(r["conds"]) * 5
     assert fdr["excluded_factor_ids_with_reasons"], "non-evaluable (date-level) factors stay accounted as typed exclusions"
     neg = [a for a in r["recs"] if a["status"] == "succeeded" and a["events"]["direction_adjusted_effect"] is not None
            and a["events"]["direction_adjusted_effect"] <= 0]
@@ -1347,15 +1349,15 @@ def test_registry_refuses_fdr_built_from_winners_or_a_partial_factor_record_set(
     narrowed = {**r["fdr"], "declared_factor_ids": [x["factor_id"] for x in winners]}
     with pytest.raises(er.RegistryRefusal, match="FDR population differs"):
         er.build_registry(*args, factor_records=r["recs"], fdr=narrowed, **kw)
-    assert cd.family_fdr_report(r["st"].db_path, winners)["declared_factor_ids"].__len__() == len(r["recs"])
+    assert cd.family_fdr_report(r["fst"].db_path, winners)["declared_factor_ids"].__len__() == len(r["recs"])
 
 
 def test_registry_is_deterministic_and_hashes_bind_files(reg_run):
     import hashlib
     r = reg_run
     s = r["summary"]
-    for key, name in (("edge_registry_sha256", "edge_registry_v2.jsonl"), ("search_ledger_sha256", "search_ledger_v2.jsonl"),
-                      ("factor_ledger_sha256", "factor_ledger_v2.jsonl")):
+    for key, name in (("edge_registry_sha256", er.OUT_EDGES), ("search_ledger_sha256", er.OUT_SEARCH_LEDGER),
+                      ("factor_ledger_sha256", er.OUT_FACTOR_LEDGER)):
         assert hashlib.sha256((r["out"] / name).read_bytes()).hexdigest() == s[key]
     again = er.build_registry(r["space"], r["uni"], r["cells"], r["meta"], r["prot"], r["out"], ctx=r["ctx"],
                               factor_records=list(reversed(r["recs"])), fdr=r["fdr"])
@@ -1485,12 +1487,12 @@ def test_population_freeze_proof_binds_committed_manifests_and_counts():
 def test_factor_run_resume_finalizes_orphan_and_records_only_terminal_configs(tmp_path, monkeypatch, U, cctx):
     import run_census as rc
 
-    cfgs = ss.build_configs()
-    c = _cfg("S05", **S05_CFG)
+    cfgs = ss.build_conditions(ss.build_configs())
+    c = _cond("S05", **S05_COND)
     ci = cfgs.index(c)
     db = tmp_path / "r.sqlite"
     cd.register_all_factors(db, cfgs, cctx)
-    monkeypatch.setattr(rc, "REGISTRY_DB", db)
+    monkeypatch.setattr(rc, "FACTOR_REGISTRY_DB", db)
     monkeypatch.setattr(rc, "FACTOR_DIR", tmp_path / "fe")
     monkeypatch.setattr(rc, "FACTOR_REC_DIR", tmp_path / "fe" / "records")
     rc.FACTOR_REC_DIR.mkdir(parents=True)
@@ -1511,3 +1513,216 @@ def test_factor_run_resume_finalizes_orphan_and_records_only_terminal_configs(tm
     assert rc._config_records(ci, cfgs, cctx) is None
     p.write_text(good.replace(recs[0]["factor_id"], "f" * 32), encoding="utf-8")
     assert rc._config_records(ci, cfgs, cctx) is None
+
+
+# ------------------------------------------------------------------ V3 semantic ConditionalEdge authority (CR-01)
+
+CONDS = ss.build_conditions(ss.build_configs())
+EXEC_SEAMS = [("S04", "exit"), ("S05", "exit_above"), ("S07", "hold"), ("S08", "hold"), ("S09", "exit"), ("S11", "hold"),
+              ("S12", "hold"), ("S13", "hold")]
+
+
+def _pairs_differing_only_in(configs, family, key):
+    out = []
+    fam = [c for c in configs if c["family"] == family]
+    for i, a in enumerate(fam):
+        for b in fam[i + 1:]:
+            diff = {k for k in set(a["params"]) | set(b["params"]) if a["params"].get(k) != b["params"].get(k)}
+            if diff == {key}:
+                out.append((a, b))
+    return out
+
+
+@pytest.mark.parametrize("family,count", sorted(ss.EXPECTED_CONDITION_FAMILY_COUNTS.items()))
+def test_d1_semantic_condition_count_per_family(family, count):
+    assert sum(1 for c in CONDS if c["family"] == family) == count
+
+
+def test_d1_semantic_population_is_219_conditions_and_1095_factors(cctx):
+    assert len(CONDS) == ss.EXPECTED_CONDITION_COUNT == 219 and sum(ss.EXPECTED_CONDITION_FAMILY_COUNTS.values()) == 219
+    assert len(ss.build_configs()) == 434
+    ss.assert_condition_authority(CONDS, ss.build_configs())
+    ids = cd.expected_factor_ids(CONDS, cctx)
+    assert len(ids) == len(set(ids)) == ss.EXPECTED_CONDITIONAL_FACTOR_COUNT == 1095
+    g = ss.build_condition_grammar(ss.build_configs())
+    assert g["condition_count"] == 219 and g["conditional_factor_count"] == 1095
+    rev = ss.build_condition_grammar(list(reversed(ss.build_configs())))
+    assert rev["condition_grammar_id"] == g["condition_grammar_id"], "grammar id is independent of config order"
+
+
+def test_d1_projection_partitions_params_and_maps_every_strategy_config_exactly_once():
+    cfgs = ss.build_configs()
+    for f in ss.EXPECTED_FAMILY_IDS:
+        keys = {k for c in cfgs if c["family"] == f for k in c["params"]}
+        cond_keys, exec_keys = set(ss.CONDITION_PARAM_KEYS[f]), set(ss.EXECUTION_ONLY_KEYS.get(f, ()))
+        assert not cond_keys & exec_keys and keys <= cond_keys | exec_keys and exec_keys <= keys, f
+    mapped = [cid for c in CONDS for cid in c["source_config_ids"]]
+    assert sorted(mapped) == sorted(c["config_id"] for c in cfgs) and len(mapped) == 434
+    assert all(c["source_config_ids"] == sorted(c["source_config_ids"]) for c in CONDS)
+    assert max(len(c["source_config_ids"]) for c in CONDS) > 1, "fixture must contain duplicate-collapsing groups"
+    for c in CONDS:
+        assert c["condition_id"] == ss.condition_id(c["family"], c["params"])
+    with pytest.raises(ss.GrammarRefusal, match="neither condition-defining nor execution-only"):
+        ss.condition_params("S04", {"entry": 20, "exit": 10, "surprise": 1})
+    with pytest.raises(ss.GrammarRefusal, match="execution-only parameters"):
+        ss.condition_params("S07", {"decline_sessions": 1, "atr_window": 14, "mult": 1.0, "trend": "none"})
+
+
+@pytest.mark.parametrize("family,key", EXEC_SEAMS)
+def test_d1_execution_only_param_changes_cannot_mint_a_distinct_condition_or_factor(family, key, cctx):
+    pairs = _pairs_differing_only_in(ss.build_configs(), family, key)
+    assert pairs, (family, key)
+    for a, b in pairs:
+        ca, cb = ss.condition_params(family, a["params"]), ss.condition_params(family, b["params"])
+        assert ca == cb and ss.condition_id(family, ca) == ss.condition_id(family, cb)
+    cond = next(c for c in CONDS if c["family"] == family and len(c["source_config_ids"]) > 1)
+    assert len({spec.compute_factor_id() for _c, _h, spec in cd.iter_factor_specs([cond], cctx)}) == len(ss.CONDITIONAL_HORIZONS)
+
+
+def gappy_bars(symbol: str, seed: int) -> pd.DataFrame:
+    """Event-rich fixture: recurring gap-down opens so that the S08 gap event genuinely occurs (the plain synthetic
+    bars almost never gap, which would make an S08 equivalence check vacuous)."""
+    df = synth_bars(symbol, seed, phi=-0.2, sig=0.015)
+    rng = np.random.default_rng(seed)
+    o, c = df["open"].to_numpy().copy(), df["close"].to_numpy()
+    lo, hi = df["low"].to_numpy().copy(), df["high"].to_numpy().copy()
+    for i in range(30, len(df), 9):
+        o[i] = round(c[i - 1] * (1 - rng.uniform(0.02, 0.08)), 2)
+        lo[i] = min(lo[i], o[i], c[i])
+        hi[i] = max(hi[i], o[i], c[i])
+    return df.assign(open=o, low=lo, high=hi)
+
+
+@pytest.fixture(scope="module")
+def UG(bars):
+    return sg.Universe({"SPY": bars["SPY"], "G0": gappy_bars("G0", 501), "G1": gappy_bars("G1", 502)})
+
+
+@pytest.mark.parametrize("family,key", EXEC_SEAMS)
+def test_d1_execution_only_change_leaves_condition_series_identical_but_changes_the_strategy_signal(family, key, U, UG):
+    changed_d = False
+    for UU in (U, UG):
+        for a, b in _pairs_differing_only_in(ss.build_configs(), family, key):
+            for sym in UU.symbols:
+                sa, sb = UU.build(sym, family, a["params"]), UU.build(sym, family, b["params"])
+                assert (sa is None) == (sb is None)
+                if sa is None:
+                    continue
+                assert sa.s == sb.s and np.array_equal(sa.cond, sb.cond), (family, key, sym)
+                changed_d |= not np.array_equal(sa.d, sb.d)
+    assert changed_d, f"{family}.{key}: the execution-only parameter must really change d (else the equivalence is vacuous)"
+
+
+def test_d1_condition_series_equals_every_source_strategy_config_series(U, UG):
+    proof = cd.condition_equivalence_proof(U, ss.build_configs(), CONDS)
+    assert proof["conditions"] == 219 and proof["mismatches"] == 0 and proof["multi_source_conditions"] > 20
+    assert proof["source_config_series_compared"] == 434 * len(U.symbols)
+    gproof = cd.condition_equivalence_proof(UG, ss.build_configs(), CONDS)
+    assert gproof["mismatches"] == 0 and gproof["source_config_series_compared"] == 434 * len(UG.symbols)
+    assert gproof == cd.condition_equivalence_proof(UG, ss.build_configs(), CONDS)
+    bad = [{**c, "params": {**c["params"], "entry": 50}} if c["family"] == "S04" and c["params"]["entry"] == 20 else c
+           for c in CONDS]
+    with pytest.raises(cd.ConditionEquivalenceError):
+        cd.condition_equivalence_proof(U, ss.build_configs(), bad)
+
+
+def test_d1_condition_lookback_equals_first_defined_bar_for_every_condition(U):
+    for c in CONDS:
+        for s in U.symbols:
+            sig = cd.condition_sig(U, s, c)
+            if sig is not None:
+                assert sig.s == cd.condition_lookback(c["family"], c["params"]), (c["family"], c["params"])
+
+
+def test_d1_genuine_condition_params_do_mint_distinct_identities_and_observations(U, UG, cctx):
+    no_pair = set()
+    for f in ss.EXPECTED_FAMILY_IDS:
+        for key in ss.CONDITION_PARAM_KEYS[f]:
+            pairs = _pairs_differing_only_in(CONDS, f, key)
+            if not pairs:
+                no_pair.add((f, key))
+                continue
+            a, b = pairs[0]
+            assert a["condition_id"] != b["condition_id"]
+            assert cd.factor_spec(a, 5, cctx).compute_factor_id() != cd.factor_spec(b, 5, cctx).compute_factor_id()
+            differs = False
+            for UU in (U, UG):
+                for sym in UU.symbols:
+                    sa, sb = cd.condition_sig(UU, sym, a), cd.condition_sig(UU, sym, b)
+                    differs |= (sa is None) != (sb is None) or (sa is not None and (sa.s != sb.s or not np.array_equal(sa.cond, sb.cond)))
+            assert differs, (f, key)
+    assert no_pair <= {("S13", "long_vol"), ("S14", "kind"), ("S14", "value"), ("S14", "last"), ("S14", "first")}, no_pair
+
+
+def test_d1_factor_spec_refuses_execution_only_param_or_forged_condition_id(cctx):
+    c = _cond("S07", decline_sessions=1)
+    leaky = {**c, "params": {**c["params"], "hold": 3}}
+    with pytest.raises(ValueError, match="execution-only"):
+        cd.factor_spec(leaky, 1, cctx)
+    with pytest.raises(ValueError, match="condition_id does not match"):
+        cd.factor_spec({**c, "condition_id": "0" * 24}, 1, cctx)
+
+
+@pytest.mark.parametrize("family,key", [("S04", "exit"), ("S07", "hold")])
+def test_d1_adding_an_execution_only_param_to_condition_identity_breaks_the_authority(family, key, monkeypatch):
+    keys = {**ss.CONDITION_PARAM_KEYS, family: (*ss.CONDITION_PARAM_KEYS[family], key)}
+    exec_keys = {f: tuple(k for k in v if not (f == family and k == key)) for f, v in ss.EXECUTION_ONLY_KEYS.items()}
+    monkeypatch.setattr(ss, "CONDITION_PARAM_KEYS", keys)
+    monkeypatch.setattr(ss, "EXECUTION_ONLY_KEYS", exec_keys)
+    cfgs = ss.build_configs()
+    with pytest.raises(ss.GrammarRefusal, match="semantic condition counts"):
+        ss.assert_condition_authority(ss.build_conditions(cfgs), cfgs)
+
+
+def test_d1_no_semantic_coordinate_has_two_factor_ids_and_removal_breaks_the_population_proof(tmp_path, cctx):
+    db = tmp_path / "r.sqlite"
+    ids = cd.register_all_factors(db, CONDS, cctx)
+    seen: dict = {}
+    for f in cd.list_factors(db, family=cd.FACTOR_FAMILY):
+        seen.setdefault((f["identity"]["params"]["condition_id"], f["identity"]["horizon_periods"]), []).append(f["factor_id"])
+    assert len(seen) == 1095 and all(len(v) == 1 for v in seen.values())
+    with __import__("contextlib").closing(ResearchResultStore(db)._connect()) as con:  # noqa: SLF001
+        con.execute("delete from research_factors where factor_id=?", (ids[-1],))
+        con.commit()
+    with pytest.raises(RuntimeError, match="missing=1"):
+        cd.registered_population_digest(db, ids)
+
+
+def test_d1_v2_factor_ids_attempts_and_results_cannot_satisfy_the_v3_population(tmp_path, cctx):
+    db = tmp_path / "r.sqlite"
+    cfgs = ss.build_configs()
+    v2 = [cd.v2_factor_spec(c, h, cctx) for c in cfgs for h in ss.CONDITIONAL_HORIZONS]
+    v2_ids = [cd.register_factor(db, s) for s in v2]
+    assert len(set(v2_ids)) == 2170 and {s.family for s in v2} == {cd.FACTOR_FAMILY_V2}
+    st = ResearchResultStore(db)
+    for fid in v2_ids[:5]:
+        st.begin_factor_evaluation_attempt(factor_id=fid, evaluation_id="e" * 32, origin="v2")
+    v3_ids = cd.register_all_factors(db, CONDS, cctx)
+    assert not set(v2_ids) & set(v3_ids)
+    dig = cd.registered_population_digest(db, v3_ids)
+    assert dig["registered"] == 1095 and dig["attempts"] == 0, "V2 attempts must not leak into the V3 population"
+    rep = cd.family_fdr_report(db, [])
+    assert rep["family"] == cd.FACTOR_FAMILY and sorted(rep["declared_factor_ids"]) == sorted(v3_ids)
+    with pytest.raises(RuntimeError, match="missing=1"):
+        cd.registered_population_digest(db, v3_ids + ["f" * 32])
+
+
+def test_d1_conditional_adjacency_uses_only_the_semantic_grid():
+    nb = er.conditional_neighbor_map(CONDS)
+    for i, c in enumerate(CONDS):
+        for j in nb[i]:
+            o = CONDS[j]
+            assert o["family"] == c["family"]
+            diff = {k for k in set(c["params"]) | set(o["params"]) if c["params"].get(k) != o["params"].get(k)}
+            assert len(diff) == 1 and diff <= set(ss.CONDITION_PARAM_KEYS[c["family"]])
+    leaky = [{**c, "params": {**c["params"], "hold": h}} for c in CONDS if c["family"] == "S07" for h in (1, 3)]
+    with pytest.raises(er.RegistryRefusal, match="execution-only"):
+        er.conditional_neighbor_map(leaky)
+
+
+def test_d1_registry_conditional_records_are_keyed_by_semantic_condition(reg_run):
+    cond_ids = {c["condition_id"] for c in reg_run["conds"]}
+    for e in _edges(reg_run):
+        if e["kind"] == "CONDITIONAL_EDGE":
+            assert e["condition_id"] in cond_ids and "config_id" not in e and e["source_config_count"] >= 1
+    assert all("config_id" not in x and x["condition_id"] in cond_ids for x in _lines(reg_run["out"] / er.OUT_FACTOR_LEDGER))

@@ -12,7 +12,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "src"))
 
-import conditional as cd  # noqa: E402
 import search_space as ss  # noqa: E402
 import signals as sg  # noqa: E402
 import simulate as sm  # noqa: E402
@@ -119,14 +118,18 @@ def grammar_configs(space: dict) -> list[dict]:
 
 
 def cell_configs(cells) -> list[dict]:
-    """Distinct configs of the cell population in manifest order: the ConditionalEdge factor population is these
-    configs x horizons, so StrategyEdge and ConditionalEdge always share one grammar authority."""
+    """Distinct Strategy configs of the cell population in manifest order."""
     seen, out = set(), []
     for _i, c, _s, _t in cells:
         if c["config_id"] not in seen:
             seen.add(c["config_id"])
             out.append(c)
     return out
+
+
+def cell_conditions(cells) -> list[dict]:
+    """Semantic ConditionalEdge conditions projected from the Strategy grammar (execution-only params dropped)."""
+    return ss.build_conditions(cell_configs(cells))
 
 
 def population(universe: dict, space: dict):
@@ -147,21 +150,17 @@ def sorted_root(trial_ids) -> str:
     return h.hexdigest()
 
 
-def freeze_record(space: dict, cells, factor_ids: list[str]) -> dict:
+def freeze_record(space: dict, cells) -> dict:
     tids = [c[3] for c in cells]
     if len(set(tids)) != len(tids):
         raise GateRefusal("duplicate cell in expected population")
-    if len(set(factor_ids)) != len(factor_ids):
-        raise GateRefusal("duplicate factor in expected population")
     return {"search_space_id": space["search_space_id"], "strategy_cell_count": len(tids),
-            "manifest_order_root": space["population_root_sha256"], "strategy_population_root": sorted_root(tids),
-            "conditional_horizons": list(ss.CONDITIONAL_HORIZONS), "conditional_factor_count": len(factor_ids),
-            "conditional_factor_population_root": ss.sha256_canonical(sorted(factor_ids))}
+            "manifest_order_root": space["population_root_sha256"], "strategy_population_root": sorted_root(tids)}
 
 
-def register_population(store: ResearchResultStore, space: dict, cells, ctx: dict, *, batch=5000) -> dict:
-    """Register every expected StrategyEdge trial AND every ConditionalEdge FactorSpec before any attempt, then write
-    the population freeze marker."""
+def register_population(store: ResearchResultStore, space: dict, cells, *, batch=5000) -> dict:
+    """Register every expected StrategyEdge trial before any attempt, then write the Strategy population freeze
+    marker. The ConditionalEdge factor population has its own freeze (conditional.py / run_census freeze-factors)."""
     fam_seen = set()
     for _i, c, _s, _t in cells:
         if c["family"] not in fam_seen:
@@ -174,38 +173,35 @@ def register_population(store: ResearchResultStore, space: dict, cells, ctx: dic
                  "strategy_id": f"{c['family']}:{c['config_id']}", "protocol_id": ids["protocol_id"],
                  "identity": ss.trial_identity(c, s, ids)} for _i, c, s, t in cells[k:k + batch]]
         store.register_trials_bulk(rows)
-    factor_ids = cd.register_all_factors(store.db_path, cell_configs(cells), ctx)
-    freeze = freeze_record(space, cells, factor_ids)
+    freeze = freeze_record(space, cells)
     store.register_hypothesis(hypothesis_id=FREEZE_PREFIX + freeze["strategy_population_root"],
                               experiment_id=ss.EXPERIMENT_ID,
                               hypothesis_text=json.dumps(freeze, sort_keys=True, separators=(",", ":")))
     return freeze
 
 
-def require_frozen_population(store: ResearchResultStore, space: dict, cells, ctx: dict, *, allow_attempts: bool) -> dict:
-    """Refuse unless registered trials == expected StrategyEdge population AND registered factors == expected
-    ConditionalEdge population exactly, the freeze marker matches, and (before the first attempt) all attempts == 0."""
-    factor_ids = cd.expected_factor_ids(cell_configs(cells), ctx)
-    freeze = freeze_record(space, cells, factor_ids)
+def require_frozen_population(store: ResearchResultStore, space: dict, cells, *, allow_attempts: bool) -> dict:
+    """Refuse unless registered trials == expected StrategyEdge population exactly, the Strategy freeze marker matches
+    (its strategy fields; any historical conditional fields of an older marker are not authority), and (before the
+    first attempt) all attempts == 0."""
+    freeze = freeze_record(space, cells)
     digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)
     expected = {c[3] for c in cells}
     got = set(digest)
     if got != expected:
         raise GateRefusal(f"registered != expected: missing={len(expected - got)} extra={len(got - expected)}")
-    try:
-        fpop = cd.registered_population_digest(store.db_path, factor_ids)
-    except RuntimeError as exc:
-        raise GateRefusal(str(exc)) from None
     marker = FREEZE_PREFIX + freeze["strategy_population_root"]
     with __import__("contextlib").closing(store._connect()) as con:  # noqa: SLF001 - read-only probe
         row = con.execute("select hypothesis_text from research_hypotheses where hypothesis_id=?", (marker,)).fetchone()
-    if row is None or json.loads(row[0]) != freeze:
+    if row is None or {k: json.loads(row[0]).get(k) for k in freeze} != freeze:
         raise GateRefusal("population freeze marker absent or different; attempt before population freeze refused")
     strategy_attempts = sum(d["attempts"] for d in digest.values())
-    if not allow_attempts and (strategy_attempts or fpop["attempts"]):
+    if not allow_attempts and strategy_attempts:
         raise GateRefusal("attempts already exist; freeze check demands attempts == 0")
     return {"registered_trials": len(got), "strategy_attempts": strategy_attempts,
-            "registered_factors": fpop["registered"], "factor_attempts": fpop["attempts"], **freeze}
+            "strategy_succeeded": sum(d["succeeded"] for d in digest.values()),
+            "strategy_failed": sum(d["failed"] for d in digest.values()),
+            "strategy_started": sum(d["started"] for d in digest.values()), **freeze}
 
 
 def _line_count(p: Path) -> int:
@@ -217,10 +213,9 @@ def chunk_path(out_dir: Path, k: int) -> Path:
     return Path(out_dir) / "chunks" / f"chunk_{k:05d}.jsonl"
 
 
-def run_chunks(store, U, space, cells, meta, ctx: dict, out_dir: Path, *, chunk_size=500, max_chunks=None,
-               log=print) -> dict:
+def run_chunks(store, U, space, cells, meta, out_dir: Path, *, chunk_size=500, max_chunks=None, log=print) -> dict:
     """Resumable, deterministic-order execution. Chunking never changes identity or economics."""
-    require_frozen_population(store, space, cells, ctx, allow_attempts=True)
+    require_frozen_population(store, space, cells, allow_attempts=True)
     out_dir = Path(out_dir)
     (out_dir / "chunks").mkdir(parents=True, exist_ok=True)
     digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)

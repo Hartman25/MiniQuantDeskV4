@@ -41,13 +41,13 @@ MUTATIONS = {
             [("CONDITIONAL_HORIZONS = (1, 3, 5, 10, 20)", "CONDITIONAL_HORIZONS = (1, 2, 3, 5, 10, 20)")],
             "test_ir6 or test_ir7"),
     "C04": ("bypass FactorSpec registration", "conditional.py",
-            [("    return [register_factor(Path(registry_db), spec) for _c, _h, spec in iter_factor_specs(configs, ctx)]",
-              "    return [spec.compute_factor_id() for _c, _h, spec in iter_factor_specs(configs, ctx)]")],
-            "test_ir7 or test_population_freeze_covers"),
+            [("    return [register_factor(Path(registry_db), spec) for _c, _h, spec in iter_factor_specs(conditions, ctx)]",
+              "    return [spec.compute_factor_id() for _c, _h, spec in iter_factor_specs(conditions, ctx)]")],
+            "test_ir7 or test_d1_no_semantic_coordinate"),
     "C05": ("a factor result enters factor_id", "conditional.py",
-            [("    spec = factor_spec(config, horizon, ctx)\n    frame, aux = build_frame(U, config, horizon)\n",
-              "    frame, aux = build_frame(U, config, horizon)\n"
-              "    spec = factor_spec(config, horizon, {**ctx, \"data_provenance_identity\": "
+            [("    spec = factor_spec(condition, horizon, ctx)\n    frame, aux = build_frame(U, condition, horizon)\n",
+              "    frame, aux = build_frame(U, condition, horizon)\n"
+              "    spec = factor_spec(condition, horizon, {**ctx, \"data_provenance_identity\": "
               "{**ctx[\"data_provenance_identity\"], \"r\": float(frame[\"label_fwd_ret\"].sum())}})\n")],
             "test_ir8_ir9"),
     "C06": ("record a negative-net, positive-alpha StrategyEdge", "edge_registry.py",
@@ -82,7 +82,7 @@ MUTATIONS = {
             "test_ir28 or test_ir20"),
     "C14": ("conditional label frame routed into StrategyEdge economics", "census.py",
             [("    so = sm.simulate(sd.hm, sd.lm, sd.cm, sig.d, sig.s)\n    met = sm.metrics(so, bench(sd, sig.s)",
-              "    _label_frame = cd.build_frame(U, config, 1)\n"
+              "    import conditional as _cd\n    _label_frame = _cd.build_frame(U, {**config, 'condition_id': 'x'}, 1)\n"
               "    so = sm.simulate(sd.hm, sd.lm, sd.cm, sig.d, sig.s)\n    met = sm.metrics(so, bench(sd, sig.s)")],
             "test_ir25"),
     "C15": ("remove the cost model", "simulate.py",
@@ -128,6 +128,41 @@ MUTATIONS = {
     "M21": ("factor-run treats a failed-status record as terminal", "run_census.py",
             [('and all(r["status"] in terminal for r in rows)', "")],
             "test_factor_run_resume_finalizes_orphan_and_records_only_terminal_configs"),
+    "D01": ("S04 exit enters the condition identity", "search_space.py",
+            [('"S03": ("fast", "slow"), "S04": ("entry",),', '"S03": ("fast", "slow"), "S04": ("entry", "exit"),')],
+            "test_d1_semantic or test_d1_projection or test_d1_execution_only_param_changes"),
+    "D02": ("S07 hold enters the condition identity", "search_space.py",
+            [('"S07": ("decline_sessions", "atr_window", "mult", "trend"),',
+              '"S07": ("decline_sessions", "atr_window", "mult", "trend", "hold"),')],
+            "test_d1_semantic or test_d1_projection or test_d1_execution_only_param_changes"),
+    "D03": ("two V3 factor ids manufactured for one condition+horizon", "conditional.py",
+            [("            yield c, h, factor_spec(c, h, ctx)\n\n\ndef register_all_factors",
+              "            for sid in c[\"source_config_ids\"]:\n                yield c, h, __import__(\"dataclasses\").replace(\n"
+              "                    factor_spec(c, h, ctx), name=f\"{c['family']}:{sid}:h{h}\")\n\n\ndef register_all_factors")],
+            "test_d1_semantic_population or test_d1_no_semantic_coordinate or test_ir7"),
+    "D04": ("the 2,170-factor V2 population is used as the V3 FDR population", "conditional.py",
+            [("build_fdr_population_report(Path(registry_db), family=FACTOR_FAMILY, p_value_evidence=items, alpha=alpha)",
+              "build_fdr_population_report(Path(registry_db), family=FACTOR_FAMILY_V2, p_value_evidence=items, alpha=alpha)")],
+            "test_d1_v2_factor_ids"),
+    "D07": ("drop negative-effect V3 factors from the FDR denominator", "conditional.py",
+            [('for e in evidence if e.get("pvalue")]',
+              'for e in evidence if e.get("pvalue") and (e["events"]["direction_adjusted_effect"] or 0) > 0]')],
+            "test_ir20 or test_registry_refuses_fdr_built"),
+    "D08": ("an execution-only parameter may enter conditional adjacency", "edge_registry.py",
+            [('    for c in conditions:\n        if set(c["params"]) - set(ss.CONDITION_PARAM_KEYS[c["family"]]):\n'
+              '            raise RegistryRefusal(f"{c[\'family\']}: execution-only parameter in conditional adjacency")\n'
+              '    return neighbor_map(conditions)', '    return neighbor_map(conditions)')],
+            "test_d1_conditional_adjacency"),
+    "D09": ("a result value alters the V3 factor identity", "conditional.py",
+            [("    spec = factor_spec(condition, horizon, ctx)\n    frame, aux = build_frame(U, condition, horizon)\n",
+              "    frame, aux = build_frame(U, condition, horizon)\n"
+              "    spec = factor_spec(condition, horizon, {**ctx, \"data_provenance_identity\": "
+              "{**ctx[\"data_provenance_identity\"], \"r\": float(frame[\"label_fwd_ret\"].sum())}})\n")],
+            "test_ir8_ir9"),
+    "D10": ("a V2 factor attempt can satisfy the V3 population", "conditional.py",
+            [("    reg = [f[\"factor_id\"] for f in list_factors(Path(registry_db), family=FACTOR_FAMILY)]",
+              "    reg = [f[\"factor_id\"] for f in list_factors(Path(registry_db))]")],
+            "test_d1_v2_factor_ids"),
     "M16": ("silent SIP->IEX fallback", "data.py",
             [('asof=REQUEST_CONTRACT["asof"], timeframe="1Day", feed="sip")',
               'asof=REQUEST_CONTRACT["asof"], timeframe="1Day", feed="iex")')],

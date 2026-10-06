@@ -193,6 +193,95 @@ def build_configs() -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------------------ semantic condition authority (V3)
+# A ConditionalEdge is a semantic conditional relationship. Only parameters that define the event/condition `sig.cond`
+# enter its identity; exit/hold parameters are Strategy execution state and never mint a conditional hypothesis.
+CONDITION_PARAM_KEYS = {
+    "S01": ("lookback", "cadence"), "S02": ("sma",), "S03": ("fast", "slow"), "S04": ("entry",),
+    "S05": ("period", "entry_below", "trend"), "S06": ("lookback", "entry_z", "trend"),
+    "S07": ("decline_sessions", "atr_window", "mult", "trend"), "S08": ("atr_window", "mult", "trend"),
+    "S09": ("short", "long", "ratio", "breakout", "trend"), "S10": ("high_lookback", "distance", "cadence"),
+    "S11": ("down_sessions", "trend"), "S12": ("volume_lookback", "volume_z", "price_impulse", "mode"),
+    "S13": ("short_vol", "long_vol", "expansion_ratio", "mode"), "S14": ("kind", "last", "first", "value"),
+}
+EXECUTION_ONLY_KEYS = {"S04": ("exit",), "S05": ("exit_above",), "S06": ("exit_z",), "S07": ("hold",), "S08": ("hold",),
+                       "S09": ("exit",), "S11": ("hold",), "S12": ("hold",), "S13": ("hold",)}
+# Neutral in-grid values used only to instantiate the Strategy signal builders when evaluating a condition; the
+# condition series is proven independent of them (see conditional.condition_equivalence_proof).
+EXECUTION_ONLY_FILL = {"S04": {"exit": 10}, "S05": {"exit_above": 70}, "S06": {"exit_z": 0.0}, "S07": {"hold": 1},
+                       "S08": {"hold": 1}, "S09": {"exit": 10}, "S11": {"hold": 1}, "S12": {"hold": 1}, "S13": {"hold": 1}}
+EXPECTED_CONDITION_FAMILY_COUNTS = {"S01": 8, "S02": 6, "S03": 14, "S04": 5, "S05": 36, "S06": 24, "S07": 36, "S08": 12,
+                                    "S09": 32, "S10": 12, "S11": 6, "S12": 16, "S13": 8, "S14": 4}
+EXPECTED_CONDITION_COUNT = 219
+EXPECTED_CONDITIONAL_FACTOR_COUNT = EXPECTED_CONDITION_COUNT * len(CONDITIONAL_HORIZONS)
+CONDITION_GRAMMAR_FILE = HERE / "ALPHA_CENSUS_CONDITION_GRAMMAR_V3.json"
+V2_CONDITIONAL_DISPOSITION = "REJECTED_SEMANTIC_DUPLICATE_FACTOR_POPULATION"
+
+
+def condition_params(family: str, params: dict) -> dict:
+    """Result-independent projection of a Strategy config's params onto the condition-defining parameters. Refuses
+    (fail closed) any parameter that is neither condition-defining nor declared execution-only."""
+    keys, exec_keys = CONDITION_PARAM_KEYS[family], EXECUTION_ONLY_KEYS.get(family, ())
+    unknown = sorted(set(params) - set(keys) - set(exec_keys))
+    if unknown:
+        raise GrammarRefusal(f"{family}: parameters {unknown} are neither condition-defining nor execution-only")
+    if sorted(set(params) & set(exec_keys)) != sorted(exec_keys):
+        raise GrammarRefusal(f"{family}: execution-only parameters {sorted(exec_keys)} are not all present")
+    return {k: params[k] for k in keys if k in params}
+
+
+def condition_id(family: str, cparams: dict) -> str:
+    return hashlib.sha256(canonical({"kind": "conditional_condition", "family": family,
+                                     "params": cparams}).encode("utf-8")).hexdigest()[:24]
+
+
+def build_conditions(configs: list[dict]) -> list[dict]:
+    """Distinct semantic conditions in first-appearance (grammar) order. source_config_ids is a sorted,
+    NON-identity traceability mapping: it never enters condition_id or any FactorSpec."""
+    by_id: dict[str, dict] = {}
+    for c in configs:
+        cp = condition_params(c["family"], c["params"])
+        cid = condition_id(c["family"], cp)
+        rec = by_id.setdefault(cid, {"condition_id": cid, "family": c["family"], "params": cp, "source_config_ids": []})
+        rec["source_config_ids"].append(c["config_id"])
+    for rec in by_id.values():
+        rec["source_config_ids"].sort()
+    return list(by_id.values())
+
+
+def assert_condition_authority(conditions: list[dict], configs: list[dict]) -> None:
+    """Refuse (before any V3 factor attempt) unless the semantic population is exactly 219 conditions with the
+    frozen per-family counts, unique ids, and a mapping that partitions the 434 Strategy configs."""
+    counts = {f: sum(1 for c in conditions if c["family"] == f) for f in EXPECTED_FAMILY_IDS}
+    if counts != EXPECTED_CONDITION_FAMILY_COUNTS or len(conditions) != EXPECTED_CONDITION_COUNT:
+        raise GrammarRefusal(f"semantic condition counts {counts} (total {len(conditions)}) differ from the frozen "
+                             f"{EXPECTED_CONDITION_FAMILY_COUNTS} (total {EXPECTED_CONDITION_COUNT})")
+    if len({c["condition_id"] for c in conditions}) != len(conditions):
+        raise GrammarRefusal("duplicate condition_id")
+    mapped = sorted(cid for c in conditions for cid in c["source_config_ids"])
+    if mapped != sorted(c["config_id"] for c in configs):
+        raise GrammarRefusal("condition -> source config mapping does not partition the Strategy configs")
+
+
+def build_condition_grammar(configs: list[dict]) -> dict:
+    conditions = build_conditions(configs)
+    assert_condition_authority(conditions, configs)
+    identity = sorted(({"condition_id": c["condition_id"], "family": c["family"], "params": c["params"]}
+                       for c in conditions), key=lambda c: c["condition_id"])
+    doc = {"schema_version": "alpha_census_condition_grammar_v3", "experiment_id": EXPERIMENT_ID,
+           "condition_param_keys": {f: list(v) for f, v in CONDITION_PARAM_KEYS.items()},
+           "execution_only_keys": {f: list(v) for f, v in EXECUTION_ONLY_KEYS.items()},
+           "per_family_condition_counts": dict(EXPECTED_CONDITION_FAMILY_COUNTS),
+           "condition_count": len(conditions), "conditional_horizons": list(CONDITIONAL_HORIZONS),
+           "conditional_factor_count": len(conditions) * len(CONDITIONAL_HORIZONS),
+           "v2_conditional_disposition": V2_CONDITIONAL_DISPOSITION,
+           "conditions": conditions,
+           "source_mapping_sha256": sha256_canonical({c["condition_id"]: c["source_config_ids"] for c in conditions})}
+    doc["condition_grammar_id"] = sha256_canonical({"conditions": identity,
+                                                    "conditional_horizons": list(CONDITIONAL_HORIZONS)})[:32]
+    return doc
+
+
 def trial_identity(config: dict, symbol: str, ids: dict) -> dict:
     """Result-independent identity of one StrategyEdge cell (one config on one symbol)."""
     return {"schema_version": SCHEMA, "kind": "strategy_edge", "family": config["family"],

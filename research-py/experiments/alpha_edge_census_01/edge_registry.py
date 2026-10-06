@@ -14,10 +14,12 @@ import numpy as np
 
 import conditional as cd
 import search_space as ss
-from census import cell_configs, chunk_path
+from census import cell_configs, cell_conditions, chunk_path
 
 LABEL = "DISCOVERED / NOT VALIDATED"
-SCHEMA = "alpha_edge_registry_v2"
+SCHEMA = "alpha_edge_registry_v3"
+OUT_SEARCH_LEDGER, OUT_EDGES, OUT_FACTOR_LEDGER = "search_ledger_v3.jsonl", "edge_registry_v3.jsonl", "factor_ledger_v3.jsonl"
+OUT_SUMMARY = "edge_registry_summary_v3.json"
 WEAK, MODERATE, STRONG = "DISCOVERED_WEAK", "DISCOVERED_MODERATE", "DISCOVERED_STRONG"
 BELOW_FLOOR = "POSITIVE_BUT_BELOW_CENSUS_FLOOR"
 TOP_N = 50
@@ -146,6 +148,15 @@ def neighbor_map(configs: list[dict]) -> list[list[int]]:
     return [sorted(x) for x in nb]
 
 
+def conditional_neighbor_map(conditions: list[dict]) -> list[list[int]]:
+    """Adjacency over the semantic condition grid. Fails closed on any execution-only parameter: exit/hold values are
+    Strategy execution state and can never make two conditional hypotheses neighbours."""
+    for c in conditions:
+        if set(c["params"]) - set(ss.CONDITION_PARAM_KEYS[c["family"]]):
+            raise RegistryRefusal(f"{c['family']}: execution-only parameter in conditional adjacency")
+    return neighbor_map(conditions)
+
+
 def _share(buckets: dict[str, float]) -> float | None:
     pos = [v for v in buckets.values() if v > 0]
     return (max(pos) / sum(pos)) if pos else None
@@ -170,10 +181,10 @@ def _iter_lines(out_dir: Path, cells, chunk_size: int):
                 raise RegistryRefusal(f"{path.name}: line count differs from manifest chunk")
 
 
-def require_factor_accounting(configs: list[dict], ctx: dict, auth: dict, fdr: dict) -> list[str]:
+def require_factor_accounting(conditions: list[dict], ctx: dict, auth: dict, fdr: dict) -> list[str]:
     """Every registered factor has exactly one authoritative record, and the FDR population IS the registered
     population (never a winners subset)."""
-    expected = cd.expected_factor_ids(configs, ctx)
+    expected = cd.expected_factor_ids(conditions, ctx)
     if set(auth) != set(expected):
         raise RegistryRefusal(f"factor records != registered population: missing={len(set(expected) - set(auth))} "
                               f"extra={len(set(auth) - set(expected))}")
@@ -190,15 +201,17 @@ def build_registry(space: dict, universe: dict, cells, meta: dict, protocol: dic
     out_dir = Path(out_dir)
     chunk_size = chunk_size or protocol["chunking"]["cells_per_chunk"]
     configs = cell_configs(cells)
+    conditions = cell_conditions(cells)
     symbols = list(universe["symbols"])
     col = {s: i for i, s in enumerate(symbols)}
     ncfg, nsym = len(configs), len(symbols)
     horizons = list(ss.CONDITIONAL_HORIZONS)
     th = protocol["flag_thresholds"]
     cfg_index = {c["config_id"]: i for i, c in enumerate(configs)}
+    cond_index = {c["condition_id"]: i for i, c in enumerate(conditions)}
 
     auth = authoritative_factor_records(factor_records)
-    require_factor_accounting(configs, ctx, auth, fdr)
+    require_factor_accounting(conditions, ctx, auth, fdr)
     fclass = {fid: conditional_class(r, fdr) for fid, r in auth.items()}
 
     qual_s = np.zeros((ncfg, nsym), bool)
@@ -209,14 +222,14 @@ def build_registry(space: dict, universe: dict, cells, meta: dict, protocol: dic
         i, j = cfg_index[cfg["config_id"]], col[rec["s"]]
         evaluable[i, j] = True
         qual_s[i, j] = strategy_class(rec["d"], rec["m"], judge) is not None
-    qual_c = {h: np.zeros(ncfg, bool) for h in horizons}
+    qual_c = {h: np.zeros(len(conditions), bool) for h in horizons}
     for fid, r in auth.items():
-        qual_c[r["horizon"]][cfg_index[r["config_id"]]] = fclass[fid] is not None
+        qual_c[r["horizon"]][cond_index[r["condition_id"]]] = fclass[fid] is not None
 
-    nb = neighbor_map(configs)
+    nb, nb_c = neighbor_map(configs), conditional_neighbor_map(conditions)
 
-    def neighborhood(vec, ci):
-        ns = nb[ci]
+    def neighborhood(vec, ci, nbmap=None):
+        ns = (nb if nbmap is None else nbmap)[ci]
         npos = int(sum(vec[n] for n in ns))
         share = (npos / len(ns)) if ns else None
         island = bool(vec[ci] and ns and share < th["parameter_island_neighbor_positive_share"])
@@ -233,8 +246,7 @@ def build_registry(space: dict, universe: dict, cells, meta: dict, protocol: dic
     common = {"schema_version": SCHEMA, **ident, **labels, "partition": "DISCOVERY_2016_2023",
               "VALIDATION_STATUS": "NOT_VALIDATED", "PROMOTION_AUTHORITY": "NONE", "label": LABEL}
 
-    ledger_p, edge_p, fledger_p = (out_dir / "search_ledger_v2.jsonl", out_dir / "edge_registry_v2.jsonl",
-                                   out_dir / "factor_ledger_v2.jsonl")
+    ledger_p, edge_p, fledger_p = out_dir / OUT_SEARCH_LEDGER, out_dir / OUT_EDGES, out_dir / OUT_FACTOR_LEDGER
     classes = (WEAK, MODERATE, STRONG)
     summ = {"cells_total": 0, "dispositions": {}, "by_family": {}, "flag_counts": {},
             "strategy_edges": {c: 0 for c in classes}, "conditional_edges": {c: 0 for c in classes},
@@ -316,14 +328,14 @@ def build_registry(space: dict, universe: dict, cells, meta: dict, protocol: dic
 
         for fid in sorted(auth):
             r = auth[fid]
-            cfg = configs[cfg_index[r["config_id"]]]
+            cond = conditions[cond_index[r["condition_id"]]]
             cls = fclass[fid]
             below = conditional_positive_below_floor(r, cls)
             summ["factors_total"] += 1
             bump(summ["factor_statuses"], r["status"])
             summ["conditional_positive_below_floor"] += int(below)
             ev = r.get("events") or {}
-            emit(ff, "f", {"factor_id": fid, "evaluation_id": r["evaluation_id"], "config_id": r["config_id"],
+            emit(ff, "f", {"factor_id": fid, "evaluation_id": r["evaluation_id"], "condition_id": r["condition_id"],
                            "family": r["family"], "horizon": r["horizon"], "status": r["status"],
                            "attempt_index": r["attempt_index"], "class": cls, "below_floor": below,
                            "events": ev.get("event_count"), "effect": ev.get("direction_adjusted_effect"),
@@ -331,7 +343,7 @@ def build_registry(space: dict, universe: dict, cells, meta: dict, protocol: dic
                            "q_value": ((fdr.get("q_values") or {}).get(fid))})
             if cls is None:
                 continue
-            nbh, island = neighborhood(qual_c[r["horizon"]], cfg_index[r["config_id"]])
+            nbh, island = neighborhood(qual_c[r["horizon"]], cond_index[r["condition_id"]], nb_c)
             fl = ["survivorship_caveat"]
             if ev["symbols_represented"] == 1:
                 fl.append("single_symbol")
@@ -348,7 +360,8 @@ def build_registry(space: dict, universe: dict, cells, meta: dict, protocol: dic
             fl.sort()
             emit(ef, "e", {**common, "edge_id": edge_id("CONDITIONAL_EDGE", fid), "kind": "CONDITIONAL_EDGE",
                            "edge_class": cls, "factor_id": fid, "evaluation_id": r["evaluation_id"],
-                           "config_id": cfg["config_id"], "family": r["family"], "params": cfg["params"],
+                           "condition_id": cond["condition_id"], "family": r["family"], "params": cond["params"],
+                           "source_config_count": len(cond["source_config_ids"]),
                            "horizon": r["horizon"], "events": ev, "pvalue": r["pvalue"],
                            "q_value": (fdr.get("q_values") or {}).get(fid), "fdr_status": fdr["status"],
                            "flags": fl, "neighborhood": nbh, "executable_pnl": False})
@@ -370,6 +383,6 @@ def build_registry(space: dict, universe: dict, cells, meta: dict, protocol: dic
                "factor_ledger_sha256": hs["f"].hexdigest(),
                "ranking_readonly_NOT_SELECTION": [
                    {"net_alpha_usd": a, "trial_id": t, "scope": s, "family": f} for a, t, s, f in top]}
-    (out_dir / "edge_registry_summary_v2.json").write_text(
+    (out_dir / OUT_SUMMARY).write_text(
         json.dumps(summary, sort_keys=True, indent=1) + "\n", encoding="utf-8", newline="\n")
     return summary

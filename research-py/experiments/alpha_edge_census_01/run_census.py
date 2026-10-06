@@ -38,10 +38,11 @@ from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E4
 
 RUN_DIR = HERE.parents[1] / "runs" / "alpha_edge_census_01_corrected"
 DATA_DIR = RUN_DIR / "data"
-REGISTRY_DB = RUN_DIR / "registry.sqlite"
+REGISTRY_DB = RUN_DIR / "registry.sqlite"  # StrategyEdge registry (accepted; never written by the V3 factor run)
+FACTOR_REGISTRY_DB = RUN_DIR / "registry_conditional_v3.sqlite"
 BARS_MANIFEST = HERE / "ALPHA_CENSUS_BARS_MANIFEST_V2.json"
 FREEZE_PROOF = HERE / "POPULATION_FREEZE_PROOF_V2.json"
-CAMPAIGN_EVIDENCE = HERE / "CAMPAIGN_EVIDENCE_V2.json"
+CAMPAIGN_EVIDENCE = HERE / "CAMPAIGN_EVIDENCE_V3.json"
 _MANIFESTS = (ss.SEED_UNIVERSE_FILE, ss.GRAMMAR_FILE, ss.PARTITIONS_FILE, ss.PROTOCOL_FILE, ss.UNIVERSE_FILE,
               ss.SEARCH_SPACE_FILE, BARS_MANIFEST)
 
@@ -126,8 +127,8 @@ def cmd_freeze(_a) -> None:
     max_ts = _max_input_ts(bm)
     pt.require_discovery_only([max_ts], what="census bars manifest max timestamp")
     store = ResearchResultStore(REGISTRY_DB)
-    freeze = ce.register_population(store, space, cells, ctx)
-    gate = ce.require_frozen_population(store, space, cells, ctx, allow_attempts=False)
+    freeze = ce.register_population(store, space, cells)
+    gate = ce.require_frozen_population(store, space, cells, allow_attempts=False)
     per_family = {f: d["configs"] for f, d in grammar["family_templates"].items()}
     proof = {
         "schema_version": "alpha_census_population_freeze_proof_v2", "experiment_id": ss.EXPERIMENT_ID,
@@ -137,10 +138,8 @@ def cmd_freeze(_a) -> None:
         "excluded_symbol_count": len(uni["excluded"]),
         "disposition_counts": _counts(uni["dispositions"]),
         "derived_strategy_edge_trial_count": len(cells),
-        "conditional_horizons": list(ss.CONDITIONAL_HORIZONS), "conditional_factor_count": gate["registered_factors"],
-        "registered_strategy_trials": gate["registered_trials"], "registered_factors": gate["registered_factors"],
-        "strategy_attempts": gate["strategy_attempts"], "factor_evaluation_attempts": gate["factor_attempts"],
-        "attempts_at_freeze": gate["strategy_attempts"] + gate["factor_attempts"],
+        "registered_strategy_trials": gate["registered_trials"], "strategy_attempts": gate["strategy_attempts"],
+        "attempts_at_freeze": gate["strategy_attempts"],
         "population_hashes": freeze,
         "partition_ids": {"partitions_id": space["partitions_id"], "partitions_sha256": ss.sha256_canonical(part)},
         "universe_id": space["universe_id"], "protocol_id": space["protocol_id"], "search_space_id": space["search_space_id"],
@@ -154,8 +153,8 @@ def cmd_freeze(_a) -> None:
         raise ce.GateRefusal("trial count is not 434 x eligible symbols")
     _write_immutable(FREEZE_PROOF, proof, "population freeze proof")
     print(json.dumps({k: proof[k] for k in ("strategy_edge_config_count", "eligible_symbol_count",
-                                            "derived_strategy_edge_trial_count", "conditional_factor_count",
-                                            "attempts_at_freeze", "max_economic_input_end_ts")}, sort_keys=True))
+                                            "derived_strategy_edge_trial_count", "attempts_at_freeze",
+                                            "max_economic_input_end_ts")}, sort_keys=True))
 
 FACTOR_DIR = RUN_DIR / "factor_eval"
 FACTOR_REC_DIR = FACTOR_DIR / "records"
@@ -166,7 +165,7 @@ _W: dict = {}
 
 def _run_context():
     uni, part, prot, space, grammar, bm, ctx, cells = _setup()
-    ce.require_frozen_population(ResearchResultStore(REGISTRY_DB), space, cells, ctx, allow_attempts=True)
+    ce.require_frozen_population(ResearchResultStore(REGISTRY_DB), space, cells, allow_attempts=True)
     return uni, part, prot, space, bm, ctx, cells
 
 
@@ -180,7 +179,7 @@ def cmd_run_strategy(a) -> None:
     U = _load_universe(uni, bm)
     meta = ce.symbol_meta(bm, prot)
     store = ResearchResultStore(REGISTRY_DB)
-    res = ce.run_chunks(store, U, space, cells, meta, ctx, RUN_DIR, chunk_size=prot["chunking"]["cells_per_chunk"],
+    res = ce.run_chunks(store, U, space, cells, meta, RUN_DIR, chunk_size=prot["chunking"]["cells_per_chunk"],
                         max_chunks=a.max_chunks, log=lambda m: print(f"{time.time() - t0:7.0f}s {m}", flush=True))
     print(json.dumps(res, sort_keys=True))
 
@@ -189,13 +188,13 @@ def _rec_path(ci: int) -> Path:
     return FACTOR_REC_DIR / f"config_{ci:04d}.jsonl"
 
 
-def _config_records(ci: int, configs: list[dict], ctx: dict) -> list[dict] | None:
-    """The config's five evaluation records iff the file is complete and bound to the registered factor ids."""
+def _config_records(ci: int, conditions: list[dict], ctx: dict) -> list[dict] | None:
+    """The condition's five evaluation records iff the file is complete and bound to the registered factor ids."""
     p = _rec_path(ci)
     if not p.exists():
         return None
     rows = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
-    want = [cd.factor_spec(configs[ci], h, ctx).compute_factor_id() for h in ss.CONDITIONAL_HORIZONS]
+    want = [cd.factor_spec(conditions[ci], h, ctx).compute_factor_id() for h in ss.CONDITIONAL_HORIZONS]
     terminal = {cd.EVAL_STATUS_SUCCEEDED, "not_evaluable"}
     ok = [r["factor_id"] for r in rows] == want and all(r["status"] in terminal for r in rows)
     return rows if ok else None
@@ -207,7 +206,7 @@ def _init_worker(uni: dict, bm: dict, ctx: dict) -> None:
 
 def _eval_config(item: tuple[int, dict]) -> tuple[int, str]:
     ci, config = item
-    ctx, store = _W["ctx"], ResearchResultStore(REGISTRY_DB)
+    ctx, store = _W["ctx"], ResearchResultStore(FACTOR_REGISTRY_DB)
     recs = []
     try:
         for h in ss.CONDITIONAL_HORIZONS:
@@ -217,7 +216,7 @@ def _eval_config(item: tuple[int, dict]) -> tuple[int, str]:
                     store.finalize_factor_evaluation_attempt(
                         att["attempt_id"], status="failed", expected_factor_id=fid,
                         expected_evaluation_id=att["evaluation_id"], failure_reason="infrastructure_interrupted")
-            recs.append(cd.evaluate_factor(REGISTRY_DB, FACTOR_DIR / "artifacts", _W["U"], config, h, ctx,
+            recs.append(cd.evaluate_factor(FACTOR_REGISTRY_DB, FACTOR_DIR / "artifacts", _W["U"], config, h, ctx,
                                            origin=FACTOR_ORIGIN, cache=_W["cache"], metadata={"config_index": ci}))
     except Exception as exc:  # noqa: BLE001 - infrastructure fault: attempt is durably failed, config retried on resume
         return ci, f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -230,7 +229,7 @@ def _eval_config(item: tuple[int, dict]) -> tuple[int, str]:
 
 def cmd_run_factors(a) -> None:
     uni, _part, _prot, _space, bm, ctx, cells = _run_context()
-    configs = ce.cell_configs(cells)
+    configs = ce.cell_conditions(cells)
     FACTOR_REC_DIR.mkdir(parents=True, exist_ok=True)
     pending = [(ci, c) for ci, c in enumerate(configs) if _config_records(ci, configs, ctx) is None]
     if a.max_configs is not None:
@@ -250,7 +249,7 @@ def cmd_run_factors(a) -> None:
 
 def cmd_registry(_a) -> None:
     uni, _part, prot, space, bm, ctx, cells = _run_context()
-    configs = ce.cell_configs(cells)
+    configs = ce.cell_conditions(cells)
     records = []
     for ci in range(len(configs)):
         rows = _config_records(ci, configs, ctx)
@@ -261,16 +260,17 @@ def cmd_registry(_a) -> None:
     digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)
     if any(d["succeeded"] < 1 or d["started"] for d in digest.values()):
         raise ce.GateRefusal("StrategyEdge population is not fully terminal; run run-strategy")
-    fdr = cd.family_fdr_report(REGISTRY_DB, records)
-    _dump(RUN_DIR / "factor_fdr_report_v2.json", fdr)
+    fdr = cd.family_fdr_report(FACTOR_REGISTRY_DB, records)
+    _dump(RUN_DIR / "factor_fdr_report_v3.json", fdr)
     meta = ce.symbol_meta(bm, prot)
     summary = er.build_registry(space, uni, cells, meta, prot, RUN_DIR, ctx=ctx, factor_records=records, fdr=fdr)
-    fattempts = [a for fid in cd.expected_factor_ids(configs, ctx) for a in store.list_factor_evaluation_attempts(fid)]
-    outs = ("search_ledger_v2.jsonl", "factor_ledger_v2.jsonl", "edge_registry_v2.jsonl", "edge_registry_summary_v2.json",
-            "factor_fdr_report_v2.json")
+    fstore = ResearchResultStore(FACTOR_REGISTRY_DB)
+    fattempts = [a for fid in cd.expected_factor_ids(configs, ctx) for a in fstore.list_factor_evaluation_attempts(fid)]
+    outs = (er.OUT_SEARCH_LEDGER, er.OUT_FACTOR_LEDGER, er.OUT_EDGES, er.OUT_SUMMARY, "factor_fdr_report_v3.json")
     _dump(CAMPAIGN_EVIDENCE, {
-        "schema_version": "alpha_census_campaign_evidence_v2", "experiment_id": ss.EXPERIMENT_ID,
-        "eligible_symbol_count": uni["symbol_count"], "strategy_edge_config_count": len(configs),
+        "schema_version": "alpha_census_campaign_evidence_v3", "experiment_id": ss.EXPERIMENT_ID,
+        "eligible_symbol_count": uni["symbol_count"], "strategy_edge_config_count": len(ce.cell_configs(cells)),
+        "semantic_condition_count": len(configs),
         "strategy_edge_trial_count": len(cells), "registered_factor_count": len(records),
         "strategy_attempts": sum(d["attempts"] for d in digest.values()),
         "strategy_attempts_failed": sum(d["attempts"] - d["succeeded"] for d in digest.values()),
