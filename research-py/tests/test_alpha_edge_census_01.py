@@ -1480,3 +1480,34 @@ def test_population_freeze_proof_binds_committed_manifests_and_counts():
     assert proof["population_hashes"]["strategy_population_root"] and proof["population_hashes"]["conditional_factor_population_root"]
     for name, digest in proof["manifest_file_sha256"].items():
         assert _norm_sha(EXP / name) == digest, name
+
+
+def test_factor_run_resume_finalizes_orphan_and_records_only_terminal_configs(tmp_path, monkeypatch, U, cctx):
+    import run_census as rc
+
+    cfgs = ss.build_configs()
+    c = _cfg("S05", **S05_CFG)
+    ci = cfgs.index(c)
+    db = tmp_path / "r.sqlite"
+    cd.register_all_factors(db, cfgs, cctx)
+    monkeypatch.setattr(rc, "REGISTRY_DB", db)
+    monkeypatch.setattr(rc, "FACTOR_DIR", tmp_path / "fe")
+    monkeypatch.setattr(rc, "FACTOR_REC_DIR", tmp_path / "fe" / "records")
+    rc.FACTOR_REC_DIR.mkdir(parents=True)
+    monkeypatch.setattr(rc, "_W", {"U": U, "ctx": cctx, "cache": cd.PermutationCache()})
+    st = ResearchResultStore(db)
+    fid3 = cd.factor_spec(c, 3, cctx).compute_factor_id()
+    st.begin_factor_evaluation_attempt(factor_id=fid3, evaluation_id="e" * 32, origin="orphan")
+    assert rc._config_records(ci, cfgs, cctx) is None
+    assert rc._eval_config((ci, c)) == (ci, "ok")
+    recs = rc._config_records(ci, cfgs, cctx)
+    assert [r["horizon"] for r in recs] == [1, 3, 5, 10, 20]
+    atts = st.list_factor_evaluation_attempts(fid3)
+    assert [a["status"] for a in sorted(atts, key=lambda a: a["attempt_index"])] == ["failed", "succeeded"]
+    # a record file with a failed status or foreign factor ids is not terminal
+    p = rc._rec_path(ci)
+    good = p.read_text(encoding="utf-8")
+    p.write_text(good.replace('"status":"succeeded"', '"status":"failed"', 1), encoding="utf-8")
+    assert rc._config_records(ci, cfgs, cctx) is None
+    p.write_text(good.replace(recs[0]["factor_id"], "f" * 32), encoding="utf-8")
+    assert rc._config_records(ci, cfgs, cctx) is None

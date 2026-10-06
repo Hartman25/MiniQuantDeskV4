@@ -7,6 +7,9 @@ Stages (each idempotent; frozen manifests are immutable once written):
   bars-manifest  immutable census bars/provenance manifest over the eligible universe
   freeze         registers the whole StrategyEdge trial population and ConditionalEdge FactorSpec population
                  (attempts must be 0) and writes the POPULATION_FREEZE_PROOF
+  run-strategy   resumable StrategyEdge Pass-1 execution (frozen-population gate first)
+  run-factors    resumable registered ConditionalEdge factor evaluations (one durable attempt per evaluation)
+  registry       complete-family FDR + qualification ledgers + Edge Registry V2 + campaign evidence
 """
 
 from __future__ import annotations
@@ -14,7 +17,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import multiprocessing as mp
+import os
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -24,8 +30,10 @@ sys.path.insert(0, str(HERE.parents[1] / "src"))
 import census as ce  # noqa: E402
 import conditional as cd  # noqa: E402
 import data as dt  # noqa: E402
+import edge_registry as er  # noqa: E402
 import partitions as pt  # noqa: E402
 import search_space as ss  # noqa: E402
+import signals as sg  # noqa: E402
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 
 RUN_DIR = HERE.parents[1] / "runs" / "alpha_edge_census_01_corrected"
@@ -33,6 +41,7 @@ DATA_DIR = RUN_DIR / "data"
 REGISTRY_DB = RUN_DIR / "registry.sqlite"
 BARS_MANIFEST = HERE / "ALPHA_CENSUS_BARS_MANIFEST_V2.json"
 FREEZE_PROOF = HERE / "POPULATION_FREEZE_PROOF_V2.json"
+CAMPAIGN_EVIDENCE = HERE / "CAMPAIGN_EVIDENCE_V2.json"
 _MANIFESTS = (ss.SEED_UNIVERSE_FILE, ss.GRAMMAR_FILE, ss.PARTITIONS_FILE, ss.PROTOCOL_FILE, ss.UNIVERSE_FILE,
               ss.SEARCH_SPACE_FILE, BARS_MANIFEST)
 
@@ -148,6 +157,134 @@ def cmd_freeze(_a) -> None:
                                             "derived_strategy_edge_trial_count", "conditional_factor_count",
                                             "attempts_at_freeze", "max_economic_input_end_ts")}, sort_keys=True))
 
+FACTOR_DIR = RUN_DIR / "factor_eval"
+FACTOR_REC_DIR = FACTOR_DIR / "records"
+FACTOR_ORIGIN = "alpha_census_factor_pass1"
+FACTOR_WORKERS = 6
+_W: dict = {}
+
+
+def _run_context():
+    uni, part, prot, space, grammar, bm, ctx, cells = _setup()
+    ce.require_frozen_population(ResearchResultStore(REGISTRY_DB), space, cells, ctx, allow_attempts=True)
+    return uni, part, prot, space, bm, ctx, cells
+
+
+def _load_universe(uni: dict, bm: dict):
+    return sg.Universe(ce.load_bars(uni, DATA_DIR, bm))
+
+
+def cmd_run_strategy(a) -> None:
+    uni, _part, prot, space, bm, ctx, cells = _run_context()
+    t0 = time.time()
+    U = _load_universe(uni, bm)
+    meta = ce.symbol_meta(bm, prot)
+    store = ResearchResultStore(REGISTRY_DB)
+    res = ce.run_chunks(store, U, space, cells, meta, ctx, RUN_DIR, chunk_size=prot["chunking"]["cells_per_chunk"],
+                        max_chunks=a.max_chunks, log=lambda m: print(f"{time.time() - t0:7.0f}s {m}", flush=True))
+    print(json.dumps(res, sort_keys=True))
+
+
+def _rec_path(ci: int) -> Path:
+    return FACTOR_REC_DIR / f"config_{ci:04d}.jsonl"
+
+
+def _config_records(ci: int, configs: list[dict], ctx: dict) -> list[dict] | None:
+    """The config's five evaluation records iff the file is complete and bound to the registered factor ids."""
+    p = _rec_path(ci)
+    if not p.exists():
+        return None
+    rows = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+    want = [cd.factor_spec(configs[ci], h, ctx).compute_factor_id() for h in ss.CONDITIONAL_HORIZONS]
+    terminal = {cd.EVAL_STATUS_SUCCEEDED, "not_evaluable"}
+    ok = [r["factor_id"] for r in rows] == want and all(r["status"] in terminal for r in rows)
+    return rows if ok else None
+
+
+def _init_worker(uni: dict, bm: dict, ctx: dict) -> None:
+    _W["U"], _W["ctx"], _W["cache"] = _load_universe(uni, bm), ctx, cd.PermutationCache()
+
+
+def _eval_config(item: tuple[int, dict]) -> tuple[int, str]:
+    ci, config = item
+    ctx, store = _W["ctx"], ResearchResultStore(REGISTRY_DB)
+    recs = []
+    try:
+        for h in ss.CONDITIONAL_HORIZONS:
+            fid = cd.factor_spec(config, h, ctx).compute_factor_id()
+            for att in store.list_factor_evaluation_attempts(fid):
+                if att["status"] == "started":
+                    store.finalize_factor_evaluation_attempt(
+                        att["attempt_id"], status="failed", expected_factor_id=fid,
+                        expected_evaluation_id=att["evaluation_id"], failure_reason="infrastructure_interrupted")
+            recs.append(cd.evaluate_factor(REGISTRY_DB, FACTOR_DIR / "artifacts", _W["U"], config, h, ctx,
+                                           origin=FACTOR_ORIGIN, cache=_W["cache"], metadata={"config_index": ci}))
+    except Exception as exc:  # noqa: BLE001 - infrastructure fault: attempt is durably failed, config retried on resume
+        return ci, f"{type(exc).__name__}: {str(exc)[:200]}"
+    tmp = _rec_path(ci).with_suffix(".tmp")
+    body = "\n".join(json.dumps(r, sort_keys=True, separators=(",", ":")) for r in recs) + "\n"
+    tmp.write_bytes(body.encode("utf-8"))
+    os.replace(tmp, _rec_path(ci))
+    return ci, "ok"
+
+
+def cmd_run_factors(a) -> None:
+    uni, _part, _prot, _space, bm, ctx, cells = _run_context()
+    configs = ce.cell_configs(cells)
+    FACTOR_REC_DIR.mkdir(parents=True, exist_ok=True)
+    pending = [(ci, c) for ci, c in enumerate(configs) if _config_records(ci, configs, ctx) is None]
+    if a.max_configs is not None:
+        pending = pending[:a.max_configs]
+    print(f"configs total={len(configs)} pending={len(pending)}", flush=True)
+    t0, failed = time.time(), []
+    with mp.get_context("spawn").Pool(a.workers, initializer=_init_worker, initargs=(uni, bm, ctx)) as pool:
+        for n, (ci, status) in enumerate(pool.imap_unordered(_eval_config, pending), 1):
+            if status != "ok":
+                failed.append((ci, status))
+            if n % 10 == 0 or status != "ok":
+                print(f"{time.time() - t0:7.0f}s {n}/{len(pending)} config {ci} {status}", flush=True)
+    print(json.dumps({"evaluated": len(pending) - len(failed), "failed": len(failed)}))
+    if failed:
+        raise SystemExit(f"fail-closed: {len(failed)} configs hit infrastructure faults; re-run run-factors to retry: {failed[:3]}")
+
+
+def cmd_registry(_a) -> None:
+    uni, _part, prot, space, bm, ctx, cells = _run_context()
+    configs = ce.cell_configs(cells)
+    records = []
+    for ci in range(len(configs)):
+        rows = _config_records(ci, configs, ctx)
+        if rows is None:
+            raise ce.GateRefusal(f"config {ci} has no complete registered factor evaluation records; run run-factors")
+        records += rows
+    store = ResearchResultStore(REGISTRY_DB)
+    digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)
+    if any(d["succeeded"] < 1 or d["started"] for d in digest.values()):
+        raise ce.GateRefusal("StrategyEdge population is not fully terminal; run run-strategy")
+    fdr = cd.family_fdr_report(REGISTRY_DB, records)
+    _dump(RUN_DIR / "factor_fdr_report_v2.json", fdr)
+    meta = ce.symbol_meta(bm, prot)
+    summary = er.build_registry(space, uni, cells, meta, prot, RUN_DIR, ctx=ctx, factor_records=records, fdr=fdr)
+    fattempts = [a for fid in cd.expected_factor_ids(configs, ctx) for a in store.list_factor_evaluation_attempts(fid)]
+    outs = ("search_ledger_v2.jsonl", "factor_ledger_v2.jsonl", "edge_registry_v2.jsonl", "edge_registry_summary_v2.json",
+            "factor_fdr_report_v2.json")
+    _dump(CAMPAIGN_EVIDENCE, {
+        "schema_version": "alpha_census_campaign_evidence_v2", "experiment_id": ss.EXPERIMENT_ID,
+        "eligible_symbol_count": uni["symbol_count"], "strategy_edge_config_count": len(configs),
+        "strategy_edge_trial_count": len(cells), "registered_factor_count": len(records),
+        "strategy_attempts": sum(d["attempts"] for d in digest.values()),
+        "strategy_attempts_failed": sum(d["attempts"] - d["succeeded"] for d in digest.values()),
+        "factor_attempts": len(fattempts), "factor_attempts_failed": sum(a["status"] == "failed" for a in fattempts),
+        "factor_statuses": summary["factor_statuses"], "strategy_edges": summary["strategy_edges"],
+        "conditional_edges": summary["conditional_edges"], "fdr_status": fdr["status"], "fdr_alpha": fdr["alpha"],
+        "fdr_declared_population": fdr["declared_population_count"], "judge_status": summary["JUDGE_STATUS"],
+        "strategy_positive_below_floor": summary["strategy_positive_below_floor"],
+        "conditional_positive_below_floor": summary["conditional_positive_below_floor"],
+        "bars_manifest_sha256": bm["manifest_sha256"], "output_sha256": {n: _sha(RUN_DIR / n) for n in outs},
+        "validation_status": "NOT_VALIDATED", "promotion_authority": "NONE", "confirmation": "NOT_RUN"})
+    print("fdr:", fdr["status"], "registry:", json.dumps({k: summary[k] for k in summary if not isinstance(summary[k], (dict, list))},
+                                                          sort_keys=True))
+
 
 def _counts(dispositions: dict) -> dict:
     out: dict = {}
@@ -162,6 +299,14 @@ def main() -> None:
     sub.add_parser("acquire").set_defaults(fn=cmd_acquire)
     sub.add_parser("bars-manifest").set_defaults(fn=cmd_bars_manifest)
     sub.add_parser("freeze").set_defaults(fn=cmd_freeze)
+    r = sub.add_parser("run-strategy")
+    r.add_argument("--max-chunks", type=int, default=None)
+    r.set_defaults(fn=cmd_run_strategy)
+    r = sub.add_parser("run-factors")
+    r.add_argument("--max-configs", type=int, default=None)
+    r.add_argument("--workers", type=int, default=FACTOR_WORKERS)
+    r.set_defaults(fn=cmd_run_factors)
+    sub.add_parser("registry").set_defaults(fn=cmd_registry)
     a = ap.parse_args()
     a.fn(a)
 
