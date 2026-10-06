@@ -16,6 +16,8 @@ EXP = Path(__file__).resolve().parents[1] / "experiments" / "alpha_edge_census_0
 sys.path.insert(0, str(EXP))
 
 import calendar_authority as cal  # noqa: E402
+import census as cs  # noqa: E402
+import conditional as cd  # noqa: E402
 import data as cdata  # noqa: E402
 import partitions as pt  # noqa: E402
 import search_space as ss  # noqa: E402
@@ -720,3 +722,329 @@ def test_bulk_store_semantics(tmp_path):
     assert st.trial_attempt_digest("e")["t1"]["attempts"] == 2  # aborted call left no partial attempts
     with pytest.raises(ValueError):
         st.finalize_attempts_bulk([{"attempt_id": again[0][0], "status": "started"}])
+
+
+# ------------------------------------------------------------------------- ConditionalEdge factor authority (C2)
+
+@pytest.fixture(scope="module")
+def cctx():
+    seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
+    universe = ss.build_universe(seed, {s: {"disposition": cdata.ELIGIBLE} for s in seed["symbols"]})
+    bm = {"manifest_sha256": "0" * 64, "request_contract": cdata.REQUEST_CONTRACT}
+    return cd.population_context(universe, ss.build_protocol(), ss.build_partitions(), bm)
+
+
+def _cfg(family, **kw):
+    for c in ss.build_configs():
+        if c["family"] == family and all(c["params"].get(k) == v for k, v in kw.items()):
+            return c
+    raise KeyError((family, kw))
+
+
+S05_CFG = dict(period=3, entry_below=20, exit_above=70, trend="none")
+
+
+def test_declared_lookback_equals_first_defined_bar_for_every_config(U):
+    for c in ss.build_configs():
+        for s in U.symbols:
+            sig = U.build(s, c["family"], c["params"])
+            if sig is not None:
+                assert sig.s == cd.declared_lookback(c), (c["family"], c["params"])
+
+
+def test_ir7_every_conditional_candidate_is_a_registered_factorspec_with_zero_attempts(tmp_path, cctx):
+    cfgs = ss.build_configs()
+    db = tmp_path / "r.sqlite"
+    ids = cd.register_all_factors(db, cfgs, cctx)
+    assert len(ids) == len(set(ids)) == 434 * 5 == len(cd.expected_factor_ids(cfgs, cctx))
+    dig = cd.registered_population_digest(db, ids)
+    assert dig["registered"] == 2170 and dig["attempts"] == 0
+    horizons = {f["identity"]["horizon_periods"] for f in cd.list_factors(db, family=cd.FACTOR_FAMILY)}
+    assert horizons == {1, 3, 5, 10, 20}
+    with pytest.raises(RuntimeError, match="missing=1"):
+        cd.registered_population_digest(db, ids + ["f" * 32])
+
+
+def test_factor_identity_binds_semantics_but_not_layout_or_results(cctx):
+    c = _cfg("S05", **S05_CFG)
+    a = cd.factor_spec(c, 3, cctx)
+    assert a.compute_factor_id() == cd.factor_spec(c, 3, cctx).compute_factor_id()
+    assert a.compute_factor_id() != cd.factor_spec(c, 5, cctx).compute_factor_id()
+    assert a.compute_factor_id() != cd.factor_spec(_cfg("S05", **{**S05_CFG, "entry_below": 30}), 3, cctx).compute_factor_id()
+    other = {**cctx, "universe_identity": {**cctx["universe_identity"], "symbols_sha256": "x"}}
+    assert a.compute_factor_id() != cd.factor_spec(c, 3, other).compute_factor_id()
+    other = {**cctx, "data_provenance_identity": {**cctx["data_provenance_identity"], "bars_manifest_sha256": "1" * 64}}
+    assert a.compute_factor_id() != cd.factor_spec(c, 3, other).compute_factor_id()
+    with pytest.raises(ValueError):
+        cd.factor_spec(c, 2, cctx)
+    assert a.timing_convention == "same_bar_close_known_after_close" and a.information_lag_periods == 0
+
+
+def test_ir8_ir9_results_and_retries_cannot_change_or_manufacture_a_factor(tmp_path, bars, U, cctx):
+    c = _cfg("S05", **S05_CFG)
+    db = tmp_path / "r.sqlite"
+    ids = cd.register_all_factors(db, ss.build_configs(), cctx)
+    fid = cd.factor_spec(c, 3, cctx).compute_factor_id()
+    r1 = cd.evaluate_factor(db, tmp_path / "o1", U, c, 3, cctx, origin="t")
+    r2 = cd.evaluate_factor(db, tmp_path / "o2", sg.Universe(perturbed(bars, 900)), c, 3, cctx, origin="t")
+    assert r1["factor_id"] == r2["factor_id"] == fid and r1["evaluation_id"] == r2["evaluation_id"]
+    assert (r1["attempt_index"], r2["attempt_index"]) == (1, 2)
+    assert r1["mean_ic"] != r2["mean_ic"] and r1["observations_content_sha256"] != r2["observations_content_sha256"]
+    assert len(cd.list_factors(db, family=cd.FACTOR_FAMILY)) == 2170
+    assert cd.expected_factor_ids(ss.build_configs(), cctx) == ids
+    assert len(cd.list_factor_evaluation_attempts(db, fid)) == 2
+
+
+def test_ir28_registry_keeps_every_conditional_candidate_including_non_evaluable_ones(tmp_path, U, cctx):
+    cfgs = ss.build_configs()
+    db = tmp_path / "r.sqlite"
+    cd.register_all_factors(db, cfgs, cctx)
+    s14 = [c for c in cfgs if c["family"] == "S14"][0]
+    rec = cd.evaluate_factor(db, tmp_path / "o", U, s14, 1, cctx, origin="t")
+    assert rec["status"] == "not_evaluable"  # a date-level condition is cross-sectionally constant
+    assert cd.registered_population_digest(db, cd.expected_factor_ids(cfgs, cctx))["registered"] == 2170
+    rep = cd.family_fdr_report(db, [])
+    assert rep["status"] == "incomplete"  # 2169 factors never attempted: no decision on a partial population
+
+
+def test_frame_label_is_diagnostic_future_return_minus_symbol_baseline_and_causal(U):
+    fr, aux = cd.build_frame(U, _cfg("S02", sma=50), 5)
+    assert list(fr.columns) == cd.FRAME_COLUMNS and len(aux) == len(fr)
+    assert (fr["information_cutoff_ts_utc"] <= fr["period_ts_utc"]).all()
+    assert (fr["period_ts_utc"] < fr["label_end_ts_utc"]).all()
+    for _sym, g in fr.groupby("symbol"):
+        assert abs(g["label_fwd_ret"].mean()) < 1e-12
+    assert set(fr["factor_value"].unique()) <= {0.0, 1.0}
+
+
+def test_event_diagnostics_effect_is_conditional_minus_baseline_with_symbol_attribution(U):
+    fr, aux = cd.build_frame(U, _cfg("S02", sma=50), 1)
+    ev = cd.event_diagnostics(fr, aux)
+    m = fr["factor_value"].to_numpy() == 1.0
+    assert ev["event_count"] == int(m.sum()) and ev["row_count"] == len(fr)
+    assert ev["effect"] == pytest.approx(fr["label_fwd_ret"].to_numpy()[m].mean())
+    assert sum(v["n"] for v in ev["per_symbol"].values()) == ev["event_count"] == sum(v["n"] for v in ev["per_year"].values())
+    assert ev["symbols_represented"] == len(ev["per_symbol"]) and 0 < ev["top_symbol_event_share"] <= 1
+    assert cd.event_diagnostics(fr.iloc[0:0], aux.iloc[0:0])["event_count"] == 0
+
+
+def test_fast_empirical_pvalue_matches_native_repo_protocol_exactly(U):
+    from mqk_research.factors.contracts import FactorEvaluationSpec
+    from mqk_research.factors.diagnostics import evaluate_factor_ic_ir
+    from mqk_research.factors.fdr import compute_empirical_pvalue
+    fr, _aux = cd.build_frame(U, _cfg("S05", **S05_CFG), 3)
+    kw = dict(n_quantiles=cd.N_QUANTILES, min_cross_section=cd.MIN_CROSS_SECTION, min_periods=cd.MIN_PERIODS)
+    real = evaluate_factor_ic_ir(fr, **kw)
+    spec = FactorEvaluationSpec(factor_id="f", universe_identity={}, evaluation_window_start_utc=cd.WINDOW_START_UTC,
+                                evaluation_window_end_utc=cd.WINDOW_END_UTC, label_protocol_version="l",
+                                evaluation_protocol_version="e")
+    native = compute_empirical_pvalue(fr, spec, real, n_permutations=6, base_seed=0, **kw)
+    fast = cd.fast_empirical_pvalue(fr, real.metrics, n_permutations=6, base_seed=0)
+    assert {k: fast[k] for k in native} == native
+    bad = json.loads(json.dumps(real.metrics))
+    bad["per_period_ic"][next(iter(bad["per_period_ic"]))] += 0.01
+    with pytest.raises(RuntimeError, match="fail closed"):
+        cd.fast_empirical_pvalue(fr, bad, n_permutations=2)
+    nb = fr.copy()
+    nb.loc[nb.index[0], "factor_value"] = 0.5
+    with pytest.raises(ValueError, match="binary"):
+        cd.fast_empirical_pvalue(nb, real.metrics, n_permutations=2)
+
+
+def test_population_freeze_covers_strategy_trials_and_factors_with_zero_attempts(tmp_path):
+    seed = _load("ALPHA_CENSUS_SEED_UNIVERSE_V2.json")
+    syms = seed["symbols"][:2]
+    uni = ss.build_universe(seed, {s: {"disposition": cdata.ELIGIBLE if s in syms else cdata.EXCLUDED_INSUFFICIENT_HISTORY}
+                                   for s in seed["symbols"]})
+    space = ss.build_search_space(ss.build_grammar(), uni, ss.build_partitions(), ss.build_protocol())
+    ctx = cd.population_context(uni, ss.build_protocol(), ss.build_partitions(),
+                                {"manifest_sha256": "0" * 64, "request_contract": cdata.REQUEST_CONTRACT})
+    _cfgs, _syms, _ids, cells = cs.population(uni, space)
+    assert len(cells) == 434 * 2
+    st = ResearchResultStore(tmp_path / "r.sqlite")
+    with pytest.raises(cs.GateRefusal):
+        cs.require_frozen_population(st, space, cells, ctx, allow_attempts=False)
+    fz = cs.register_population(st, space, cells, ctx)
+    assert fz["strategy_cell_count"] == 868 and fz["conditional_factor_count"] == 2170
+    proof = cs.require_frozen_population(st, space, cells, ctx, allow_attempts=False)
+    assert proof["strategy_attempts"] == 0 and proof["factor_attempts"] == 0 and proof["registered_factors"] == 2170
+    with __import__("contextlib").closing(st._connect()) as con:  # noqa: SLF001
+        con.execute("delete from research_factors where factor_id=(select min(factor_id) from research_factors)")
+        con.commit()
+    with pytest.raises(cs.GateRefusal, match="missing=1"):
+        cs.require_frozen_population(st, space, cells, ctx, allow_attempts=False)
+
+
+# ------------------------------------------------------------- census gate / execution / resume (StrategyEdge)
+
+@pytest.fixture(scope="module")
+def mini(U, cctx):
+    prot = ss.build_protocol()
+    syms = list(U.symbols)
+    cfgs = first_configs(2)
+    space = {"search_space_id": "mini", "universe_id": "u" * 32, "partitions_id": "p" * 32, "protocol_id": "q" * 32}
+    ids = {k: space[k] for k in ("universe_id", "partitions_id", "protocol_id")}
+    index = {c["config_id"]: i for i, c in enumerate(cfgs)}
+    cells = [(index[c["config_id"]], c, s, t) for c, s, t in ss.iter_cells(cfgs, syms, ids)]
+    space["population_root_sha256"] = ss.population_root(cfgs, syms, ids)
+    meta = {s: {"disposition": cs.DATA_PRESENT, "rows": len(U.sd[s].c), "data_short_history": s == syms[-1],
+                "data_quality_caveat": False} for s in syms}
+    return {"space": space, "cells": cells, "meta": meta, "prot": prot, "ctx": cctx}
+
+
+def _fresh_store(tmp_path, mini, *, register=True):
+    st = ResearchResultStore(tmp_path / "registry.sqlite")
+    if register:
+        cs.register_population(st, mini["space"], mini["cells"], mini["ctx"])
+    return st
+
+
+def _gate(st, mini, cells=None, **kw):
+    return cs.require_frozen_population(st, mini["space"], cells or mini["cells"], mini["ctx"], **kw)
+
+
+def _run(st, mini, U, out, **kw):
+    return cs.run_chunks(st, U, mini["space"], mini["cells"], mini["meta"], mini["ctx"], out, **kw)
+
+
+def test_gate_accepts_exact_frozen_population_with_zero_attempts(tmp_path, mini):
+    r = _gate(_fresh_store(tmp_path, mini), mini, allow_attempts=False)
+    n_cfg = len(cs.cell_configs(mini["cells"]))
+    assert r["registered_trials"] == len(mini["cells"]) > 100 and r["strategy_attempts"] == 0
+    assert r["registered_factors"] == n_cfg * 5 and r["factor_attempts"] == 0
+
+
+def test_gate_refuses_missing_extra_duplicate_unfrozen_and_attempted(tmp_path, mini):
+    cells, ctx = mini["cells"], mini["ctx"]
+    st = ResearchResultStore(tmp_path / "a.sqlite")
+    cs.register_population(st, mini["space"], cells[:-1], ctx)
+    with pytest.raises(cs.GateRefusal, match="missing=1"):
+        _gate(st, mini, allow_attempts=False)
+    st = _fresh_store(tmp_path, mini)
+    st.register_trials_bulk([{"trial_id": "ace2-extra", "experiment_id": ss.EXPERIMENT_ID,
+                              "hypothesis_id": ss.hypothesis_id("S01"), "strategy_id": "x", "protocol_id": "q",
+                              "identity": {"x": 1}}])
+    with pytest.raises(cs.GateRefusal, match="extra=1"):
+        _gate(st, mini, allow_attempts=True)
+    with pytest.raises(cs.GateRefusal, match="duplicate"):
+        cs.freeze_record(mini["space"], cells + [cells[0]], [])
+    with pytest.raises(cs.GateRefusal, match="duplicate"):
+        cs.freeze_record(mini["space"], cells, ["f", "f"])
+    # trials registered but no freeze marker / no factors: an attempt before the population freeze is refused
+    st = ResearchResultStore(tmp_path / "c.sqlite")
+    for fam in {c[1]["family"] for c in cells}:
+        st.register_hypothesis(hypothesis_id=ss.hypothesis_id(fam), experiment_id=ss.EXPERIMENT_ID, hypothesis_text="x")
+    ids = {k: mini["space"][k] for k in ("universe_id", "partitions_id", "protocol_id")}
+    st.register_trials_bulk([{"trial_id": t, "experiment_id": ss.EXPERIMENT_ID, "hypothesis_id": ss.hypothesis_id(c["family"]),
+                              "strategy_id": f"{c['family']}:{c['config_id']}", "protocol_id": ids["protocol_id"],
+                              "identity": ss.trial_identity(c, s, ids)} for _i, c, s, t in cells])
+    with pytest.raises(cs.GateRefusal, match="registered factors != expected"):
+        _gate(st, mini, allow_attempts=True)
+    cd.register_all_factors(st.db_path, cs.cell_configs(cells), ctx)
+    with pytest.raises(cs.GateRefusal, match="freeze marker"):
+        _gate(st, mini, allow_attempts=True)
+    # attempts != 0 at freeze time (strategy trial, and separately a factor evaluation attempt)
+    (tmp_path / "d").mkdir()
+    st = _fresh_store(tmp_path / "d", mini)
+    st.begin_attempts_bulk([cells[0][3]], origin="x")
+    with pytest.raises(cs.GateRefusal, match="attempts already exist"):
+        _gate(st, mini, allow_attempts=False)
+    _gate(st, mini, allow_attempts=True)
+
+
+def test_run_chunks_refuses_unregistered_population(tmp_path, mini, U):
+    st = ResearchResultStore(tmp_path / "e.sqlite")
+    with pytest.raises(cs.GateRefusal):
+        _run(st, mini, U, tmp_path / "out", chunk_size=10)
+    assert not (tmp_path / "out" / "chunks").exists() or not list((tmp_path / "out" / "chunks").iterdir())
+
+
+def _read(out):
+    lines = []
+    for p in sorted((Path(out) / "chunks").glob("chunk_*.jsonl")):
+        lines += p.read_text(encoding="utf-8").splitlines()
+    return lines
+
+
+@pytest.fixture(scope="module")
+def reference_run(tmp_path_factory, mini, U):
+    root = tmp_path_factory.mktemp("ref")
+    st = _fresh_store(root, mini)
+    _run(st, mini, U, root, chunk_size=13)
+    return root, st
+
+
+def test_chunk_size_does_not_change_cell_economics_or_denominator(tmp_path, mini, U, reference_run):
+    root, st = reference_run
+    ref = _read(root)
+    assert len(ref) == len(mini["cells"])
+    st2 = _fresh_store(tmp_path, mini)
+    _run(st2, mini, U, tmp_path, chunk_size=50)
+    assert _read(tmp_path) == ref
+    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
+    assert all(v["attempts"] == 1 and v["succeeded"] == 1 for v in d.values()) and len(d) == len(mini["cells"])
+
+
+def test_cell_lines_follow_manifest_order_and_contain_real_evaluations(mini, reference_run):
+    rows = [json.loads(x) for x in _read(reference_run[0])]
+    assert [r["t"] for r in rows] == [c[3] for c in mini["cells"]]
+    ev = [r for r in rows if r["d"] == "EVALUABLE"]
+    assert len(ev) > 100 and any(r["m"]["trade_count"] > 0 for r in ev)
+    assert any(r["m"]["net_alpha_usd"] > 0 for r in ev), "fixture must contain positive-alpha cells (false-positive guard)"
+    assert all("q" not in r for r in rows), "ConditionalEdge evidence never lives in the StrategyEdge ledger"
+
+
+def test_interrupted_chunk_is_retried_as_new_attempt_with_identical_economics(tmp_path, mini, U, reference_run, monkeypatch):
+    ref = _read(reference_run[0])
+    st = _fresh_store(tmp_path, mini)
+    real = cs.evaluate_cell
+    n = {"i": 0}
+
+    def flaky(*a, **k):
+        n["i"] += 1
+        if n["i"] == 20:
+            raise RuntimeError("simulated infrastructure fault")
+        return real(*a, **k)
+
+    monkeypatch.setattr(cs, "evaluate_cell", flaky)
+    with pytest.raises(RuntimeError, match="simulated"):
+        _run(st, mini, U, tmp_path, chunk_size=13)
+    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
+    failed = [t for t, v in d.items() if v["failed"]]
+    assert len(failed) == 13 and all(d[t]["started"] == 0 for t in d)
+    assert len(list((tmp_path / "chunks").glob("chunk_*.jsonl"))) == 1
+    monkeypatch.setattr(cs, "evaluate_cell", real)
+    _run(st, mini, U, tmp_path, chunk_size=13)
+    assert _read(tmp_path) == ref
+    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
+    assert len(d) == len(mini["cells"])  # a retry creates no new trial identity
+    assert all(d[t]["attempts"] == 2 and d[t]["failed"] == 1 and d[t]["succeeded"] == 1 for t in failed)
+    assert all(v["succeeded"] == 1 for v in d.values())
+
+
+def test_crash_leftover_started_attempts_are_finalized_then_retried(tmp_path, mini, U, reference_run):
+    st = _fresh_store(tmp_path, mini)
+    part = mini["cells"][:13]
+    st.begin_attempts_bulk([c[3] for c in part], origin="crashed")
+    res = _run(st, mini, U, tmp_path, chunk_size=13)
+    assert res["chunks_run"] == -(-len(mini["cells"]) // 13)
+    d = st.trial_attempt_digest(ss.EXPERIMENT_ID)
+    assert all(d[c[3]]["failed"] == 1 and d[c[3]]["succeeded"] == 1 and d[c[3]]["started"] == 0 for c in part)
+    assert _read(tmp_path) == _read(reference_run[0])
+
+
+def test_resume_skips_terminal_chunks_and_is_idempotent(tmp_path, mini, U, reference_run):
+    st = _fresh_store(tmp_path, mini)
+    assert _run(st, mini, U, tmp_path, chunk_size=13, max_chunks=3)["chunks_run"] == 3
+    assert _run(st, mini, U, tmp_path, chunk_size=13)["chunks_skipped_terminal"] == 3
+    assert _run(st, mini, U, tmp_path, chunk_size=13)["chunks_run"] == 0
+    after = st.trial_attempt_digest(ss.EXPERIMENT_ID)
+    assert all(v["attempts"] == 1 for v in after.values())
+    assert _read(tmp_path) == _read(reference_run[0])
+
+
+def test_non_evaluable_symbol_stays_in_population(mini, U):
+    meta = copy.deepcopy(mini["meta"])
+    meta["X02"] = {"disposition": "DATA_UNAVAILABLE_PROVIDER_ERROR"}
+    r = cs.evaluate_cell(U, mini["cells"][0][1], "X02", meta)
+    assert r == {"d": "NON_EVALUABLE_DATA_UNAVAILABLE_PROVIDER_ERROR", "m": None}

@@ -71,7 +71,8 @@ Status key: FIXED+PROVEN, ALREADY CORRECT+PROVEN, PENDING(commit) — resolved b
 | Indicators | RSI/z-score conventions undocumented | FIXED+PROVEN (C1: Cutler RSI, ddof=1 z-score, hand-checked) |
 | Indicators | S05 exit comparison is False (no exit) in a flat NaN-RSI window | ALREADY CORRECT (documented fail-closed: no fabricated exit) |
 | StrategyEdge qualification | positive predicate and missing floors | PENDING (C3) |
-| ConditionalEdge | factor-registry bypass, n >= 30 floor, FDR taxonomy | PENDING (C2/C3) |
+| ConditionalEdge | factor-registry bypass (query tuples were not registered candidates) | FIXED+PROVEN (C2: every config x horizon {1,3,5,10,20} is a registered FactorSpec with zero attempts before any evaluation; evaluation via the repo factor runner; exact-parity cached null for the repo 200-permutation protocol; population gate covers trials + factors) |
+| ConditionalEdge | n >= 30 floor, FDR taxonomy | PENDING (C3) |
 | Edge Registry | wrong recording rules, partition label | PENDING (C3) |
 | Bulk store / resume | chunk/resume determinism | ALREADY CORRECT+PROVEN (bulk-store and resume tests retained) |
 | Mutation proof | M01/M02/M13/M14 tied to old fences | PENDING (C4) |

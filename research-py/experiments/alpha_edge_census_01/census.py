@@ -8,8 +8,6 @@ import os
 import sys
 from pathlib import Path
 
-import numpy as np
-
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "src"))
@@ -89,84 +87,52 @@ def symbol_meta(bars_manifest: dict, protocol: dict) -> dict:
     return out
 
 
-def _pool(members, U):
-    """Pool member simulations onto the global session grid (universe-scope cells)."""
-    G = U.G
-    net, gross, cost, bnet, bgross, bcost = (np.zeros(G) for _ in range(6))
-    held = np.zeros(G)
-    entries, exits, runs, bruns = [], [], [], []
-    notional = bnotional = 0.0
-    start = G
-    bentries = []
-    for sd, sig in members:
-        so = sm.simulate(sd.hm, sd.lm, sd.cm, sig.d, sig.s)
-        bo = bench(sd, sig.s)
-        o = sd.ord
-        net[o] += so.net; gross[o] += so.gross; cost[o] += so.cost
-        bnet[o] += bo.net; bgross[o] += bo.gross; bcost[o] += bo.cost
-        held[o] += so.held_before
-        entries.append(o[so.entries]); exits.append(o[so.exits]); runs.append(so.run_pnl)
-        bentries.append(o[bo.entries])
-        notional += so.notional_usd
-        start = min(start, int(o[sig.s + 1]) if sig.s + 1 < sd.n else G)
-    m = len(members)
-    cat = lambda xs: np.concatenate(xs) if xs else np.zeros(0, np.int64)  # noqa: E731
-    mk = lambda n_, g_, c_, h_, e_, x_, r_, nt: sm.SimOut(n_, g_, c_, h_, e_, x_, r_, nt, start)  # noqa: E731
-    return (mk(net, gross, cost, held / m, cat(entries), cat(exits), cat(runs), notional),
-            mk(bnet, bgross, bcost, np.zeros(G), cat(bentries), np.zeros(0, np.int64), np.zeros(0), 0.0), start, m)
-
-
 def bench(sd, s: int) -> "sm.SimOut":
     return sd.memo(("bench", s), lambda: sm.simulate(sd.hm, sd.lm, sd.cm, sm.benchmark_d(sd.n, s), s))
 
 
-def _q_line(rec):
-    if rec is None:
-        return None
-    if cd.is_positive(rec):
-        return rec
-    return [rec["n"], rec["effect"]]
-
-
-def evaluate_cell(U, config: dict, symbol: str | None, meta: dict) -> dict:
-    """Pure function of (config, symbol, frozen data). Returns the chunk-line body (without trial id / index)."""
-    fam, params = config["family"], config["params"]
-    horizons = ss.CONDITIONAL_HORIZONS
-    if config["scope"] == "universe":
-        members = []
-        for s in U.symbols:
-            sig = U.build(s, fam, params)
-            if sig is not None:
-                members.append((U.sd[s], sig))
-        if not members:
-            return {"d": NE_SIGNAL, "m": None, "q": None}
-        so, bo, start, m = _pool(members, U)
-        met = sm.metrics(so, bo, U.years_g, U.regime_g, capital_usd=10_000.0 * m, budget_usd=10_000.0 * m,
-                         window_start=start)
-        met["members"] = m
-        met["member_symbols"] = [sd.symbol for sd, _ in members]
-        q = cd.conditional_stats(members, horizons)
-    else:
-        if meta[symbol]["disposition"] != DATA_PRESENT:
-            return {"d": "NON_EVALUABLE_" + meta[symbol]["disposition"], "m": None, "q": None}
-        sd = U.sd[symbol]
-        sig = U.build(symbol, fam, params)
-        if sig is None:
-            return {"d": NE_SIGNAL, "m": None, "q": None}
-        so = sm.simulate(sd.hm, sd.lm, sd.cm, sig.d, sig.s)
-        met = sm.metrics(so, bench(sd, sig.s), sd.years, sd.regime, capital_usd=sm.CAPITAL_USD,
-                         budget_usd=sm.BUDGET_USD, window_start=sig.s + 1)
-        met["signal_start_bar"] = int(sig.s)
-        q = cd.conditional_stats([(sd, sig)], horizons)
-    return {"d": "EVALUABLE", "m": met, "q": {str(h): _q_line(q[h]) for h in horizons}}
+def evaluate_cell(U, config: dict, symbol: str, meta: dict) -> dict:
+    """StrategyEdge economics of one (config, symbol) cell: pure function of the frozen config and bars. Returns the
+    chunk-line body (without trial id / index). Conditional (factor) evidence is a separate registered evaluation."""
+    if meta[symbol]["disposition"] != DATA_PRESENT:
+        return {"d": "NON_EVALUABLE_" + meta[symbol]["disposition"], "m": None}
+    sd = U.sd[symbol]
+    sig = U.build(symbol, config["family"], config["params"])
+    if sig is None:
+        return {"d": NE_SIGNAL, "m": None}
+    so = sm.simulate(sd.hm, sd.lm, sd.cm, sig.d, sig.s)
+    met = sm.metrics(so, bench(sd, sig.s), sd.years, sd.regime, capital_usd=sm.CAPITAL_USD,
+                     budget_usd=sm.BUDGET_USD, window_start=sig.s + 1)
+    met["signal_start_bar"] = int(sig.s)
+    return {"d": "EVALUABLE", "m": met}
 
 
 # --------------------------------------------------------------------------------------------- registry / gate
 
+def grammar_configs(space: dict) -> list[dict]:
+    """The exact 434-config grammar authority, bound to the frozen search space by grammar_id."""
+    g = ss.build_grammar()
+    if g["grammar_id"] != space["grammar_id"]:
+        raise GateRefusal("search space grammar_id differs from the grammar authority")
+    ss.assert_grammar_authority(g["configs"])
+    return g["configs"]
+
+
+def cell_configs(cells) -> list[dict]:
+    """Distinct configs of the cell population in manifest order: the ConditionalEdge factor population is these
+    configs x horizons, so StrategyEdge and ConditionalEdge always share one grammar authority."""
+    seen, out = set(), []
+    for _i, c, _s, _t in cells:
+        if c["config_id"] not in seen:
+            seen.add(c["config_id"])
+            out.append(c)
+    return out
+
+
 def population(universe: dict, space: dict):
     """(configs, symbols, ids, [(config_index, config, symbol, trial_id)]) in manifest order."""
     ids = {k: space[k] for k in ("universe_id", "partitions_id", "protocol_id")}
-    configs, symbols = space["configs"], universe["symbols"]
+    configs, symbols = grammar_configs(space), universe["symbols"]
     cells = []
     index = {c["config_id"]: i for i, c in enumerate(configs)}
     for c, s, tid in ss.iter_cells(configs, symbols, ids):
@@ -181,26 +147,21 @@ def sorted_root(trial_ids) -> str:
     return h.hexdigest()
 
 
-def conditional_root(trial_ids, horizons) -> str:
-    h = hashlib.sha256()
-    for t in sorted(trial_ids):
-        for hz in horizons:
-            h.update(f"{t}:{hz}\n".encode("ascii"))
-    return h.hexdigest()
-
-
-def freeze_record(space: dict, cells) -> dict:
+def freeze_record(space: dict, cells, factor_ids: list[str]) -> dict:
     tids = [c[3] for c in cells]
     if len(set(tids)) != len(tids):
         raise GateRefusal("duplicate cell in expected population")
+    if len(set(factor_ids)) != len(factor_ids):
+        raise GateRefusal("duplicate factor in expected population")
     return {"search_space_id": space["search_space_id"], "strategy_cell_count": len(tids),
-            "manifest_order_root": space["population_root_sha256"], "strategy_population_root": sorted_root(tids), "conditional_horizons": list(ss.CONDITIONAL_HORIZONS),
-            "conditional_query_count": len(tids) * len(ss.CONDITIONAL_HORIZONS),
-            "conditional_population_root": conditional_root(tids, ss.CONDITIONAL_HORIZONS)}
+            "manifest_order_root": space["population_root_sha256"], "strategy_population_root": sorted_root(tids),
+            "conditional_horizons": list(ss.CONDITIONAL_HORIZONS), "conditional_factor_count": len(factor_ids),
+            "conditional_factor_population_root": ss.sha256_canonical(sorted(factor_ids))}
 
 
-def register_population(store: ResearchResultStore, space: dict, cells, *, batch=5000) -> dict:
-    """Register every expected StrategyEdge trial (and the conditional-population freeze marker) before any attempt."""
+def register_population(store: ResearchResultStore, space: dict, cells, ctx: dict, *, batch=5000) -> dict:
+    """Register every expected StrategyEdge trial AND every ConditionalEdge FactorSpec before any attempt, then write
+    the population freeze marker."""
     fam_seen = set()
     for _i, c, _s, _t in cells:
         if c["family"] not in fam_seen:
@@ -213,30 +174,38 @@ def register_population(store: ResearchResultStore, space: dict, cells, *, batch
                  "strategy_id": f"{c['family']}:{c['config_id']}", "protocol_id": ids["protocol_id"],
                  "identity": ss.trial_identity(c, s, ids)} for _i, c, s, t in cells[k:k + batch]]
         store.register_trials_bulk(rows)
-    freeze = freeze_record(space, cells)
+    factor_ids = cd.register_all_factors(store.db_path, cell_configs(cells), ctx)
+    freeze = freeze_record(space, cells, factor_ids)
     store.register_hypothesis(hypothesis_id=FREEZE_PREFIX + freeze["strategy_population_root"],
                               experiment_id=ss.EXPERIMENT_ID,
                               hypothesis_text=json.dumps(freeze, sort_keys=True, separators=(",", ":")))
     return freeze
 
 
-def require_frozen_population(store: ResearchResultStore, space: dict, cells, *, allow_attempts: bool) -> dict:
-    """Refuse unless registered trials == expected population exactly, the freeze marker matches, and (before the
-    first attempt) attempts == 0."""
-    freeze = freeze_record(space, cells)
+def require_frozen_population(store: ResearchResultStore, space: dict, cells, ctx: dict, *, allow_attempts: bool) -> dict:
+    """Refuse unless registered trials == expected StrategyEdge population AND registered factors == expected
+    ConditionalEdge population exactly, the freeze marker matches, and (before the first attempt) all attempts == 0."""
+    factor_ids = cd.expected_factor_ids(cell_configs(cells), ctx)
+    freeze = freeze_record(space, cells, factor_ids)
     digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)
     expected = {c[3] for c in cells}
     got = set(digest)
     if got != expected:
         raise GateRefusal(f"registered != expected: missing={len(expected - got)} extra={len(got - expected)}")
+    try:
+        fpop = cd.registered_population_digest(store.db_path, factor_ids)
+    except RuntimeError as exc:
+        raise GateRefusal(str(exc)) from None
     marker = FREEZE_PREFIX + freeze["strategy_population_root"]
     with __import__("contextlib").closing(store._connect()) as con:  # noqa: SLF001 - read-only probe
         row = con.execute("select hypothesis_text from research_hypotheses where hypothesis_id=?", (marker,)).fetchone()
     if row is None or json.loads(row[0]) != freeze:
         raise GateRefusal("population freeze marker absent or different; attempt before population freeze refused")
-    if not allow_attempts and any(d["attempts"] for d in digest.values()):
+    strategy_attempts = sum(d["attempts"] for d in digest.values())
+    if not allow_attempts and (strategy_attempts or fpop["attempts"]):
         raise GateRefusal("attempts already exist; freeze check demands attempts == 0")
-    return {"registered": len(got), "attempts": sum(d["attempts"] for d in digest.values()), **freeze}
+    return {"registered_trials": len(got), "strategy_attempts": strategy_attempts,
+            "registered_factors": fpop["registered"], "factor_attempts": fpop["attempts"], **freeze}
 
 
 def _line_count(p: Path) -> int:
@@ -248,9 +217,10 @@ def chunk_path(out_dir: Path, k: int) -> Path:
     return Path(out_dir) / "chunks" / f"chunk_{k:05d}.jsonl"
 
 
-def run_chunks(store, U, space, cells, meta, out_dir: Path, *, chunk_size=500, max_chunks=None, log=print) -> dict:
+def run_chunks(store, U, space, cells, meta, ctx: dict, out_dir: Path, *, chunk_size=500, max_chunks=None,
+               log=print) -> dict:
     """Resumable, deterministic-order execution. Chunking never changes identity or economics."""
-    require_frozen_population(store, space, cells, allow_attempts=True)
+    require_frozen_population(store, space, cells, ctx, allow_attempts=True)
     out_dir = Path(out_dir)
     (out_dir / "chunks").mkdir(parents=True, exist_ok=True)
     digest = store.trial_attempt_digest(ss.EXPERIMENT_ID)
@@ -275,7 +245,7 @@ def run_chunks(store, U, space, cells, meta, out_dir: Path, *, chunk_size=500, m
         try:
             for (ci, cfg, sym, tid), (aid, _idx) in zip(part, started):
                 body = evaluate_cell(U, cfg, sym, meta)
-                lines.append(json.dumps({"t": tid, "c": ci, "s": sym or "UNIVERSE", **body}, sort_keys=True,
+                lines.append(json.dumps({"t": tid, "c": ci, "s": sym, **body}, sort_keys=True,
                                         separators=(",", ":")))
                 m = body["m"]
                 fin.append({"attempt_id": aid, "status": "succeeded", "result_summary": {

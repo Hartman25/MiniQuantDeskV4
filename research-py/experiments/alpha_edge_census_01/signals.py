@@ -57,6 +57,7 @@ class SymbolData:
             raise RuntimeError(f"{symbol}: bar date {exc} is not a canonical discovery session; fail closed") from None
         if np.any(np.diff(self.ord) <= 0):
             raise RuntimeError(f"{symbol}: bar dates are not strictly increasing")
+        self.end_iso = np.array([t.isoformat() for t in bars["end_ts"]])
         self.dates = np.array(days, dtype="datetime64[D]")
         self.years = np.array([d.year for d in days], dtype=np.int64)
         self.month_end = np.array([_MONTH_POS[d][1] == 1 for d in days], dtype=bool)
