@@ -560,6 +560,8 @@ class Universe:
 
     def s19(self, symbol: str, p: dict):
         from mqk_research.ml.model_logreg import fit_logreg_deterministic
+        if not isinstance(p.get("feature"), str) or set(p) != {"feature", "label_horizon", "p_entry"}:
+            raise ValueError("S19 is exactly one feature per model; refusing multi-feature params")
         sd = self.sd[symbol]
         lh = p["label_horizon"]
 
