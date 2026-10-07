@@ -23,10 +23,13 @@
 #      account-wide) and Gate 1e (capital_budget), passing the same
 #      ExecutionDomain as Gate 1 and producing disposition
 #      "symbol_day_limit_reached" on trip.
-#   6. decision.rs Gate 7 OutboxEnqueueOutcome::Enqueued arm increments both
-#      the account/domain counter and the symbol/domain counter for the same
-#      domain; Duplicate, RunNotRunning and Err arms (and every pre-Gate-7
-#      refusal) increment neither.
+#   6. decision.rs Gate 7 enqueues through the NEW-ORDER-MODE-FENCED seam
+#      mqk_db::outbox_enqueue_new_order_for_running_run (never the unfenced
+#      outbox_enqueue_for_running_run, which would let a LiveShadow/Backtest
+#      run create an order). Only the OutboxEnqueueOutcome::Enqueued arm
+#      increments the account/domain counter and the symbol/domain counter,
+#      for the same domain; Duplicate, RunModeForbidsNewOrder, RunNotRunning
+#      and Err arms (and every pre-Gate-7 refusal) increment neither.
 #   7. Has the 9 D01..D09 proof tests in
 #      scenario_multi_symbol_day_order_cap_01.rs.
 #   8. This patch's diff introduces no broker/OMS/portfolio direct writes, no
@@ -57,10 +60,17 @@ function Assert-Fail([string]$Msg) {
 
 # Returns $null when the Gate 7 structure holds, otherwise a failure reason.
 function Get-Gate7Failure([string]$Content) {
-    $Anchor = [regex]::Match($Content, 'mqk_db::outbox_enqueue_for_running_run\s*\(')
-    if (-not $Anchor.Success) {
-        return "outbox_enqueue_for_running_run call not found in decision.rs"
+    # The ONLY authoritative order-admission enqueue is the mode-fenced seam.
+    # The older run-state-only seam must not appear anywhere in decision.rs:
+    # it would let a LiveShadow/Backtest run create an economic order.
+    if ([regex]::IsMatch($Content, '\boutbox_enqueue_for_running_run\s*\(')) {
+        return "decision.rs calls the unfenced outbox_enqueue_for_running_run(...); Gate 7 must use mqk_db::outbox_enqueue_new_order_for_running_run(...)"
     }
+    $Calls = [regex]::Matches($Content, 'mqk_db::outbox_enqueue_new_order_for_running_run\s*\(')
+    if ($Calls.Count -ne 1) {
+        return "expected exactly one mqk_db::outbox_enqueue_new_order_for_running_run( call in decision.rs; found $($Calls.Count)"
+    }
+    $Anchor = $Calls[0]
     $Tail = $Content.Substring($Anchor.Index)
 
     $EnqueuedArm = [regex]::Match(
@@ -76,6 +86,18 @@ function Get-Gate7Failure([string]$Content) {
     }
     $EnqueuedBlock = $EnqueuedArm.Groups[1].Value
     $RefusedBlock  = $RefusedTail.Groups[1].Value
+
+    # Every non-Enqueued outcome must be an explicit typed arm inside the
+    # refused tail, so each is covered by the no-quota check below.
+    foreach ($Arm in @(
+        'Ok\(\s*mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder\s*\{',
+        'Ok\(\s*mqk_db::OutboxEnqueueOutcome::RunNotRunning\s*\{',
+        'Err\(\s*\w+\s*\)\s*=>'
+    )) {
+        if (-not [regex]::IsMatch($RefusedBlock, $Arm)) {
+            return "typed refused arm /$Arm/ not found after the Duplicate arm in decision.rs"
+        }
+    }
 
     $Account = [regex]::Match(
         $EnqueuedBlock,
@@ -93,7 +115,7 @@ function Get-Gate7Failure([string]$Content) {
     }
     if ($RefusedBlock -match 'increment_day_signal_count' -or
         $RefusedBlock -match 'increment_symbol_day_order_count') {
-        return "a Duplicate/RunNotRunning/Err path consumes day-order quota"
+        return "a Duplicate/RunModeForbidsNewOrder/RunNotRunning/Err path consumes day-order quota"
     }
     foreach ($Fn in @('increment_day_signal_count', 'increment_symbol_day_order_count')) {
         $Sites = [regex]::Matches($Content, "\b$Fn\(")
@@ -236,18 +258,21 @@ if (Test-Path $DecisionRs) {
         Assert-Fail "G06: Gate 1f NOT found in expected position/domain (between Gate 1 and Gate 1e, same ExecutionDomain as Gate 1) in decision.rs"
     }
 
-    # G07 -- Gate 7 Enqueued outcome increments both counters, for the same
-    # domain, and nothing else does.
+    # G07 -- Gate 7 uses the mode-fenced new-order enqueue seam; its Enqueued
+    # outcome increments both counters, for the same domain, and nothing else
+    # does.
     #
-    # The DB enqueue seam returns OutboxEnqueueOutcome. Scope the proof to the
-    # Enqueued arm and bound it by the following Duplicate arm so increments
-    # elsewhere cannot create a false pass. Every non-Enqueued arm
-    # (Duplicate/RunNotRunning/Err, i.e. everything from the Duplicate arm to
-    # the end of the enclosing function) must consume neither quota, and the
-    # only increment call sites in decision.rs must be the Enqueued arm's.
+    # The DB enqueue seam (outbox_enqueue_new_order_for_running_run) returns
+    # OutboxEnqueueOutcome. Scope the proof to the Enqueued arm and bound it
+    # by the following Duplicate arm so increments elsewhere cannot create a
+    # false pass. Every non-Enqueued arm (Duplicate/RunModeForbidsNewOrder/
+    # RunNotRunning/Err, i.e. everything from the Duplicate arm to the end of
+    # the enclosing function) must consume neither quota, and the only
+    # increment call sites in decision.rs must be the Enqueued arm's. The
+    # unfenced outbox_enqueue_for_running_run must not appear at all.
     $G07Failure = Get-Gate7Failure $DecisionContent
     if ($null -eq $G07Failure) {
-        Assert-Pass "G07: Gate 7 Enqueued arm increments the account/domain and symbol/domain counters for the same domain; Duplicate/refused paths consume neither"
+        Assert-Pass "G07: Gate 7 uses outbox_enqueue_new_order_for_running_run; only the Enqueued arm increments the account/domain and symbol/domain counters (same domain); Duplicate/RunModeForbidsNewOrder/RunNotRunning/Err consume neither"
     } else {
         Assert-Fail "G07: $G07Failure"
     }
@@ -353,22 +378,74 @@ if ($StateContentForG05) {
 }
 
 if ($DecisionContent) {
+    $NewCall = 'mqk_db::outbox_enqueue_new_order_for_running_run('
+    $OldCall = 'mqk_db::outbox_enqueue_for_running_run('
+    $Quota   = 'state.increment_day_signal_count(crate::state::ExecutionDomain::EquityNyse); '
+
+    # Each mutation names the failure reason it MUST trigger, so a mutation
+    # cannot "pass" the selftest by failing for an unrelated reason.
     $G7Mutations = [ordered]@{
-        'symbol counter bound to a different domain than the account counter' =
-            ($DecisionContent -replace '(increment_symbol_day_order_count\(\s*crate::state::)ExecutionDomain::EquityNyse', '${1}ExecutionDomain::Crypto24_7')
-        'symbol counter increment removed from the Enqueued arm' =
-            ($DecisionContent -replace '(?s)\.increment_symbol_day_order_count\(.*?\.await;', '/* removed */')
-        'Duplicate arm consumes quota' =
-            ($DecisionContent -replace '(Ok\(\s*mqk_db::OutboxEnqueueOutcome::Duplicate\s*\)\s*=>\s*)outcome\(', '${1}{ state.increment_day_signal_count(crate::state::ExecutionDomain::EquityNyse); outcome(')
+        'the authoritative call is replaced by the unfenced outbox_enqueue_for_running_run' = @{
+            Reason  = 'unfenced outbox_enqueue_for_running_run'
+            Content = $DecisionContent.Replace($NewCall, $OldCall)
+        }
+        'an unfenced outbox_enqueue_for_running_run call is added alongside the fenced one' = @{
+            Reason  = 'unfenced outbox_enqueue_for_running_run'
+            Content = $DecisionContent + "`nfn stray() { $OldCall db, run, key, json); }`n"
+        }
+        'the fenced new-order call is removed entirely' = @{
+            Reason  = 'expected exactly one'
+            Content = $DecisionContent.Replace($NewCall, 'mqk_db::something_else(')
+        }
+        'symbol counter bound to a different domain than the account counter' = @{
+            Reason  = 'DIFFERENT domains'
+            Content = ($DecisionContent -replace '(increment_symbol_day_order_count\(\s*crate::state::)ExecutionDomain::EquityNyse', '${1}ExecutionDomain::Crypto24_7')
+        }
+        'account counter increment removed from the Enqueued arm' = @{
+            Reason  = 'does not increment both'
+            Content = ($DecisionContent -replace 'state\.increment_day_signal_count\(crate::state::ExecutionDomain::EquityNyse\);', '/* removed */')
+        }
+        'symbol counter increment removed from the Enqueued arm' = @{
+            Reason  = 'does not increment both'
+            Content = ($DecisionContent -replace '(?s)\.increment_symbol_day_order_count\(.*?\.await;', '/* removed */')
+        }
+        'Duplicate arm consumes quota' = @{
+            Reason  = 'consumes day-order quota'
+            Content = ($DecisionContent -replace '(Ok\(\s*mqk_db::OutboxEnqueueOutcome::Duplicate\s*\)\s*=>\s*)outcome\(', "`${1}{ $Quota outcome(")
+        }
+        'RunModeForbidsNewOrder arm consumes quota' = @{
+            Reason  = 'consumes day-order quota'
+            Content = ($DecisionContent -replace '(Ok\(\s*mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder\s*\{\s*run_mode\s*\}\s*\)\s*=>\s*)outcome\(', "`${1}{ $Quota outcome(")
+        }
+        'RunNotRunning arm consumes quota' = @{
+            Reason  = 'consumes day-order quota'
+            Content = ($DecisionContent -replace '(Ok\(\s*mqk_db::OutboxEnqueueOutcome::RunNotRunning\s*\{\s*actual_status\s*\}\s*\)\s*=>\s*)outcome\(', "`${1}{ $Quota outcome(")
+        }
+        'Err arm consumes quota' = @{
+            Reason  = 'consumes day-order quota'
+            Content = ($DecisionContent -replace '(Err\(\s*err\s*\)\s*=>\s*)(outcome\(\s*false,\s*"unavailable",\s*&did,\s*&sid,\s*Some\(active_run_id\),\s*vec!\[format!\("outbox enqueue failed)', "`${1}{ $Quota `${2}")
+        }
+        'RunModeForbidsNewOrder typed arm removed (outcome swallowed by a wildcard)' = @{
+            Reason  = 'typed refused arm'
+            Content = ($DecisionContent -replace 'Ok\(mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder \{ run_mode \}\)', 'Ok(_)')
+        }
+        'a second account-counter increment call site is added elsewhere' = @{
+            Reason  = 'call site'
+            Content = $DecisionContent + "`nfn stray() { $Quota}`n"
+        }
     }
     foreach ($Name in $G7Mutations.Keys) {
-        $Mutated = $G7Mutations[$Name]
+        $Mutated = $G7Mutations[$Name].Content
+        $Reason  = $G7Mutations[$Name].Reason
+        $Failure = Get-Gate7Failure $Mutated
         if ($Mutated -eq $DecisionContent) {
             Assert-Fail "SELFTEST-G07: mutation '$Name' did not change decision.rs -- selftest is vacuous"
-        } elseif ($null -ne (Get-Gate7Failure $Mutated)) {
-            Assert-Pass "SELFTEST-G07: guard correctly fails when $Name"
-        } else {
+        } elseif ($null -eq $Failure) {
             Assert-Fail "SELFTEST-G07: guard still passes when $Name -- checker is too loose"
+        } elseif ($Failure -notmatch [regex]::Escape($Reason)) {
+            Assert-Fail "SELFTEST-G07: guard failed for the WRONG reason when $Name (expected '$Reason', got '$Failure')"
+        } else {
+            Assert-Pass "SELFTEST-G07: guard correctly fails ('$Reason') when $Name"
         }
     }
 } else {
