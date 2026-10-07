@@ -962,3 +962,48 @@ def test_real_engine_reproduces_accepted_baselines_for_a_cohort_sample():
         assert rec["scenarios"]["S1"]["status"] == "PASS" and rec["candidate_id"] == c["candidate_id"]
         assert rec["verdict"] in pp.VERDICTS_STRATEGY
         assert rec["rank_fields"]["alpha_2x"] == rec["scenarios"]["S3"]["alpha_usd"]
+
+
+# --------------------------------------------------------------------------- truth disposition (documentation)
+
+DISP = EXP2 / "results" / "PASS2_PROCESS_DISPOSITION.json"
+RESULT_DOC = TESTS.parents[1] / "docs" / "research" / "ALPHA_EDGE_PASS2_ROBUSTNESS_PURGE_01_RESULT.md"
+needs_results = pytest.mark.skipif(not DISP.exists(), reason="results not present")
+
+
+@needs_results
+def test_disposition_declares_the_strategy_process_contamination_and_zero_advancement():
+    d = json.loads(DISP.read_text(encoding="utf-8"))
+    assert d["STRATEGY_PASS2_PROCESS_STATUS"] == "PROCESS_CONTAMINATED_PRE_FREEZE_REAL_COHORT_SMOKE"
+    assert d["STRATEGY_ADVANCEMENT_AUTHORITY"] == "NONE" and d["STRATEGY_CANDIDATES_AUTHORIZED_TO_ADVANCE"] == 0
+    assert d["STRATEGY_PASS2_SATISFIES_FREEZE_BEFORE_ANY_RESULT_CONTRACT"] is False
+    assert d["strategy_result_rows"]["preserved_unaltered"] is True and d["strategy_result_rows"]["survivors"] == 0
+    assert "false-negative" in d["risk_analysis"] and "cannot create a false-positive" in d["risk_analysis"]
+    c = d["conditional"]
+    assert d["CONDITIONAL_PASS2_STATUS"] == "LOCALLY_COMPLETE_PENDING_FINAL_CHATGPT_ACCEPTANCE"
+    assert (c["denominator"], c["survivors"], c["rejected"], c["blocked"]) == (135, 18, 117, 0)
+    assert c["VALIDATION_STATUS"] == "NOT_VALIDATED" and c["PROMOTION_AUTHORITY"] == "NONE" and c["EXECUTABLE_PNL"] is False
+    assert d["attempt_counts"] == {"pass1_strategy": 38192, "pass1_conditional_v3": 1095, "pass2": 924}
+
+
+@needs_results
+def test_disposition_binds_the_unaltered_result_artifacts_and_the_exact_six_s2_near_misses():
+    d = json.loads(DISP.read_text(encoding="utf-8"))
+    for name, h in d["bound_artifacts_sha256_lf"].items():
+        assert p1.sha_lf(EXP2 / "results" / name) == h, name
+    rows = [json.loads(x) for x in (EXP2 / "results" / "strategy_robustness_ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    only_s2 = sorted(r["candidate_id"] for r in rows if r["failed_gates"] == ["S2"])
+    near = d["strategy_diagnostic_near_misses_s2_only"]
+    assert len(rows) == 789 and len(only_s2) == 6 == len(near) and sorted(n["candidate_id"] for n in near) == only_s2
+    assert all(n["role"].startswith("DIAGNOSTIC_NEAR_MISS_NOT_SURVIVOR") for n in near)
+    assert not any(r["verdict"] == pp.VERDICTS_STRATEGY[0] for r in rows)
+
+
+def test_result_doc_distinguishes_durable_freeze_from_the_pre_freeze_smoke_and_drops_the_misleading_claim():
+    t = RESULT_DOC.read_text(encoding="utf-8")
+    for must in ("PROCESS_CONTAMINATED_PRE_FREEZE_REAL_COHORT_SMOKE", "STRATEGY_ADVANCEMENT_AUTHORITY = NONE",
+                 "STRATEGY_CANDIDATES_AUTHORIZED_TO_ADVANCE = 0", "LOCALLY_COMPLETE_PENDING_FINAL_CHATGPT_ACCEPTANCE",
+                 "does **not** satisfy the freeze-before-any-result contract", "false-negative", "false-positive advancement",
+                 "NOT survivors and NOT Confirmation candidates", "first **durable** Pass-2 attempt", "EXECUTABLE_PNL = false"):
+        assert must in t, must
+    assert "were committed before robustness attempt #1" not in t

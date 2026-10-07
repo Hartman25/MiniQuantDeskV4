@@ -1,6 +1,14 @@
 # ALPHA EDGE PASS 2 — ROBUSTNESS PURGE 01 — RESULT
 
-Status: LOCALLY COMPLETE, awaiting independent review. Discovery-period evidence only. NOT_VALIDATED. PROMOTION_AUTHORITY = NONE.
+Truth disposition (machine-readable: `results/PASS2_PROCESS_DISPOSITION.json`):
+
+* `STRATEGY_PASS2_PROCESS_STATUS = PROCESS_CONTAMINATED_PRE_FREEZE_REAL_COHORT_SMOKE`
+* `STRATEGY_ADVANCEMENT_AUTHORITY = NONE`; `STRATEGY_CANDIDATES_AUTHORIZED_TO_ADVANCE = 0`
+* `CONDITIONAL_PASS2_STATUS = LOCALLY_COMPLETE_PENDING_FINAL_CHATGPT_ACCEPTANCE`
+
+The Strategy Pass-2 experiment does **not** satisfy the freeze-before-any-result contract: the real 789-candidate Strategy scenario
+engine was observed (in memory, aggregate counts) before the committed Pass-2 freeze. Its 789 result rows are preserved unaltered as
+**diagnostic evidence only**. Status below: Discovery-period evidence only. NOT_VALIDATED. PROMOTION_AUTHORITY = NONE.
 Confirmation: NOT RUN. Final holdout: RESERVED / UNCONSUMED. Paper: INACTIVE. Live: DISABLED / UNTOUCHED.
 
 Experiment: `research-py/experiments/alpha_edge_pass2_01/` (modules `p2_*.py`), tests `research-py/tests/test_alpha_edge_pass2_01.py`,
@@ -23,7 +31,11 @@ research analogue of the accepted P9/MAIN concepts. Evidence grade: `DISCOVERY_R
 
 ## Frozen protocol (PASS2_PROTOCOL_ID `a712c301c2c527d8bc37b1ba7e72e6889c16a3ae0b2cd6e10f4dfbf2ee62db15`)
 
-The protocol, cohorts and Pass-1 evidence hashes were committed before robustness attempt #1 (robustness attempts at freeze = 0).
+The protocol, cohorts and Pass-1 evidence hashes were committed before the first **durable** Pass-2 attempt (durable robustness
+attempts at freeze = 0). That is narrower than "before any result": the Strategy engine had already been smoke-executed in memory over the
+real cohort before this commit (see Process disclosures and the truth disposition above). The Conditional engine had not.
+Wording note: the R1 commit message's "no real evaluation" means no durable or persisted evaluation; it does not deny that smoke run.
+Git history is not rewritten.
 The ID is pinned by test; any threshold change moves it and every candidate id.
 
 | Gate | Rule |
@@ -55,7 +67,8 @@ conclusive); none occurred.
 
 ## Result — StrategyEdge (789 / 789)
 
-**0 survivors, 789 rejected, 0 blocked.** S1 baseline replay reproduced all 789 accepted metric sets exactly (no contradiction).
+**Diagnostic evidence only** (`STRATEGY_PASS2_PROCESS_STATUS = PROCESS_CONTAMINATED_PRE_FREEZE_REAL_COHORT_SMOKE`; advancement authority NONE;
+0 candidates authorized to advance). **0 survivors, 789 rejected, 0 blocked.** S1 baseline replay reproduced all 789 accepted metric sets exactly (no contradiction).
 
 | Scenario | candidates failing |
 |---|---|
@@ -68,20 +81,22 @@ conclusive); none occurred.
 | S5 one-session delay | 112 |
 | S3 ×2 cost stress | 78 |
 
-Every candidate fails at least one gate (6 fail only S2; the modal profile is S2+S6+S7+S8). 638 of 789 would pass the ×3 cost diagnostic
+Every candidate fails at least one gate (6 fail only S2 — preserved as diagnostic near-misses, NOT survivors and NOT Confirmation candidates; the modal profile is S2+S6+S7+S8). 638 of 789 would pass the ×3 cost diagnostic
 and 743/789 are CLUSTER_REPLICATED (46 SYMBOL_SPECIFIC) — the apparent Pass-1 StrategyEdges are low-frequency, short-sample and
-year-concentrated rather than cost-fragile. Full failure profiles and per-family/per-replication-class counts are in
+year-concentrated rather than cost-fragile. The pre-freeze observation can create false-negative / discard risk for this
+result; it cannot create a false-positive advancement because zero Strategy candidates are authorized to advance. Full failure profiles and per-family/per-replication-class counts are in
 `results/pass2_summary.json`; the complete denominator is `results/strategy_robustness_ledger.jsonl`.
 
 ## Result — ConditionalEdge (135 / 135)
 
-**18 survivors, 117 rejected, 0 blocked.** C1 reproduced every accepted factor id, evaluation id, observation hash, event count,
+`CONDITIONAL_PASS2_STATUS = LOCALLY_COMPLETE_PENDING_FINAL_CHATGPT_ACCEPTANCE`. **18 survivors, 117 rejected, 0 blocked.** C1 reproduced every accepted factor id, evaluation id, observation hash, event count,
 effect, p and FDR q (no contradiction). Failures: C2 107, C3 59, C5 34, C6 34, C4 1.
 
 Survivors by family: S06 12, S05 4, S13 2. By horizon: h20 8, h10 4, h1 3, h3 2, h5 1. Regime: 9 general / 9 regime-concentrated.
 Horizon support: 11 supported / 7 isolated. Ranked read-only table (not selection authority; consumes no Confirmation data):
 `results/survivor_rankings_readonly.json`. These are diagnostic relationships (`executable_pnl = false`) suitable as
-hypotheses for a later Independent Confirmation stage, not strategies and not promotion candidates.
+hypotheses for a later Independent Confirmation stage (factor hypotheses only), not strategies and not promotion candidates;
+the 18 stay `NOT_VALIDATED`, `PROMOTION_AUTHORITY = NONE`, `EXECUTABLE_PNL = false`.
 
 ## Multiple testing
 
@@ -112,3 +127,11 @@ Focused tests (`tests/test_alpha_edge_pass2_01.py`), mutation proof P01–P22 pl
 source restored byte-for-byte, GREEN after restore — `results/mutation_proof_log.json`), and a second adversarial sweep
 (`results/second_sweep.json`, NO_FINDINGS: every verdict re-derived from raw numbers with literal thresholds, brute-force grid
 adjacency, 40 independent literal-cost re-simulations). Broad Rust workspace acceptance is delegated to GitHub CI.
+
+### mqd-test-proof review of the existing proof (evidentiary verdicts only; no acceptance state)
+
+* "Gates S1–S10 / C1–C6 behave as predeclared" (CODE/TEST): CONFIRMED — table-driven boundary tests on synthetic fixtures, mutations RED with
+  assertion failures, threshold mutations re-checked against behavior tests alone, independent re-derivation in the second sweep.
+* "Freeze-before-any-result" for Strategy (process claim): REJECTED-FALSE-PROOF — the commit gate proves only that the freeze was committed
+  before a durable attempt; it cannot disprove the earlier in-memory observation. Disposition above is the truthful statement.
+* Real-evidence tests skip when the untracked Pass-1 `runs/` directory is absent (e.g. CI), so there they prove only the synthetic part.

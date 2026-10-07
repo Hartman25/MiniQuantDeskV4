@@ -1,0 +1,142 @@
+{
+ "CONDITIONAL_PASS2_STATUS": "LOCALLY_COMPLETE_PENDING_FINAL_CHATGPT_ACCEPTANCE",
+ "STRATEGY_ADVANCEMENT_AUTHORITY": "NONE",
+ "STRATEGY_CANDIDATES_AUTHORIZED_TO_ADVANCE": 0,
+ "STRATEGY_PASS2_PROCESS_STATUS": "PROCESS_CONTAMINATED_PRE_FREEZE_REAL_COHORT_SMOKE",
+ "STRATEGY_PASS2_SATISFIES_FREEZE_BEFORE_ANY_RESULT_CONTRACT": false,
+ "attempt_counts": {
+  "pass1_conditional_v3": 1095,
+  "pass1_strategy": 38192,
+  "pass2": 924
+ },
+ "bound_artifacts_sha256_lf": {
+  "conditional_robustness_ledger.jsonl": "3a786844eea32fa87119ed2a45ea52022131ce80be152a9606a2f231a81b5dc0",
+  "pass2_summary.json": "e7c3377c9354885f107d2182b209bead01c9c8e4603760f9ae5ee5a361dacfc9",
+  "strategy_robustness_ledger.jsonl": "52c1a2e0389d40814c9988d5602cb0316e8a8a0af9a878cf10aa7003500ed4d6",
+  "survivor_rankings_readonly.json": "9fa9de5b6605932c90f36dc0c779ffffab151c7eab8dc2e391f32bf10345a7d0"
+ },
+ "conditional": {
+  "EXECUTABLE_PNL": false,
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "blocked": 0,
+  "conditional_engine_run_on_real_data_before_freeze": false,
+  "denominator": 135,
+  "eligible_for": "later Independent Confirmation as factor hypotheses only",
+  "rejected": 117,
+  "survivors": 18
+ },
+ "experiment": "alpha_edge_pass2_01",
+ "labels": {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED"
+ },
+ "mqd_test_proof_verdicts": {
+  "gate_behavior_code_test": "CONFIRMED",
+  "real_evidence_tests_in_ci_without_runs_dir": "LIKELY (skip; synthetic part only)",
+  "strategy_freeze_before_any_result_process_claim": "REJECTED-FALSE-PROOF"
+ },
+ "ordering_truth": {
+  "committed_freeze_before_first_durable_pass2_attempt": true,
+  "r1_commit_message_wording": "R1 says 'no real evaluation' meaning no durable/persisted evaluation; it does not deny the disclosed in-memory smoke run. Git history is not rewritten.",
+  "strategy_real_cohort_smoke_before_freeze": true
+ },
+ "risk_analysis": "The contamination can create false-negative / discard risk (a rule set seen before freezing). It cannot create a false-positive advancement because zero Strategy candidates are authorized to advance.",
+ "schema_version": "alpha_edge_pass2_process_disposition_v1",
+ "strategy_diagnostic_near_misses_s2_only": [
+  {
+   "candidate_id": "0e8409863b40e2b7baf7c86524dd80e0",
+   "failed_gates": [
+    "S2"
+   ],
+   "family": "S01",
+   "params": {
+    "cadence": "month_end",
+    "lookback": 63
+   },
+   "role": "DIAGNOSTIC_NEAR_MISS_NOT_SURVIVOR_NOT_CONFIRMATION_CANDIDATE",
+   "symbol": "CCL",
+   "trial_id": "ace2-cb4274245126109302e1d85aec8d3a7c"
+  },
+  {
+   "candidate_id": "8fd585c5aca9eeed33d176df520097f1",
+   "failed_gates": [
+    "S2"
+   ],
+   "family": "S01",
+   "params": {
+    "cadence": "month_end",
+    "lookback": 63
+   },
+   "role": "DIAGNOSTIC_NEAR_MISS_NOT_SURVIVOR_NOT_CONFIRMATION_CANDIDATE",
+   "symbol": "GE",
+   "trial_id": "ace2-b8e3d4cd8b02d08b0d4832d2d7a25249"
+  },
+  {
+   "candidate_id": "013f3e96f692dff373236a0ce31b0f59",
+   "failed_gates": [
+    "S2"
+   ],
+   "family": "S02",
+   "params": {
+    "sma": 200
+   },
+   "role": "DIAGNOSTIC_NEAR_MISS_NOT_SURVIVOR_NOT_CONFIRMATION_CANDIDATE",
+   "symbol": "GE",
+   "trial_id": "ace2-c9f94a60c728adee7b3f0a8569e4d2d5"
+  },
+  {
+   "candidate_id": "605bb36052c6737c3a99c4edc15c281d",
+   "failed_gates": [
+    "S2"
+   ],
+   "family": "S03",
+   "params": {
+    "fast": 10,
+    "slow": 150
+   },
+   "role": "DIAGNOSTIC_NEAR_MISS_NOT_SURVIVOR_NOT_CONFIRMATION_CANDIDATE",
+   "symbol": "GE",
+   "trial_id": "ace2-36cc6b187d14bb2f9473a69bd073a2e1"
+  },
+  {
+   "candidate_id": "0334106c1afefe75af1d9da8eb23e177",
+   "failed_gates": [
+    "S2"
+   ],
+   "family": "S04",
+   "params": {
+    "entry": 100,
+    "exit": 50
+   },
+   "role": "DIAGNOSTIC_NEAR_MISS_NOT_SURVIVOR_NOT_CONFIRMATION_CANDIDATE",
+   "symbol": "GE",
+   "trial_id": "ace2-79883af98edbc3a69efe6a9de1e30c88"
+  },
+  {
+   "candidate_id": "d583b8e9c6ca1950cf0aaf0e137fd794",
+   "failed_gates": [
+    "S2"
+   ],
+   "family": "S06",
+   "params": {
+    "entry_z": -2.0,
+    "exit_z": 0.0,
+    "lookback": 60,
+    "trend": "none"
+   },
+   "role": "DIAGNOSTIC_NEAR_MISS_NOT_SURVIVOR_NOT_CONFIRMATION_CANDIDATE",
+   "symbol": "VZ",
+   "trial_id": "ace2-a178b0b26eb5fa3b137627e0a2fbb423"
+  }
+ ],
+ "strategy_reason": "The real 789-candidate Strategy scenario engine was executed in memory and its aggregate counts were observed before the committed Pass-2 freeze (disclosed in PASS2_PREDECLARATION.json). The committed freeze did precede every DURABLE Pass-2 attempt, but that does not undo the earlier observation.",
+ "strategy_result_rows": {
+  "blocked": 0,
+  "denominator": 789,
+  "preserved_unaltered": true,
+  "rejected": 789,
+  "role": "DIAGNOSTIC_EVIDENCE_ONLY",
+  "survivors": 0
+ }
+}
