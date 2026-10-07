@@ -1,0 +1,310 @@
+{
+ "authority": {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED"
+ },
+ "candidate_count_scenarios": {
+  "S0_no_executable_shorts_hypothesis_only": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 56,
+   "conditional_factors": 1075,
+   "configs": 470,
+   "executable_scope_symbols": 0,
+   "note": "strategy_trials=0; labels only",
+   "short_conditions": 215,
+   "strategy_trials": 0,
+   "tiers": "H+L"
+  },
+  "S1_frozen_etf_scope_20_H+L": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 56,
+   "conditional_factors": 1075,
+   "configs": 470,
+   "executable_scope_symbols": 20,
+   "short_conditions": 215,
+   "strategy_trials": 9400,
+   "tiers": "H+L"
+  },
+  "S2_frozen_etf_scope_20_H_only": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 28,
+   "conditional_factors": 1075,
+   "configs": 430,
+   "executable_scope_symbols": 20,
+   "short_conditions": 215,
+   "strategy_trials": 8600,
+   "tiers": "H"
+  },
+  "S3_frozen_etf_scope_20_H+L_complements_excluded": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 56,
+   "conditional_factors": 1075,
+   "configs": 414,
+   "executable_scope_symbols": 20,
+   "short_conditions": 215,
+   "strategy_trials": 8280,
+   "tiers": "H+L"
+  }
+ },
+ "candidate_grammar": {
+  "calendar_family_S14": "NOT_MIRRORED (no coherent short form)",
+  "complement_tagged_configs": 56,
+  "complement_tagged_families": [
+   "SH01",
+   "SH02",
+   "SH03",
+   "LS01",
+   "LS02",
+   "LS03"
+  ],
+  "condition_root_sha256": "4a7e947b1d62d4022869c3cea1ec2981fb797dad3c2fd4fc9abb118f145f8a8b",
+  "conditional_factors": 1075,
+  "config_root_sha256": "572be8991369ee35bcfaaf57cf7e1d486177084e0a601b75ece15821c1ec7708",
+  "horizons": [
+   1,
+   3,
+   5,
+   10,
+   20
+  ],
+  "short_conditions": 215,
+  "tier_H_configs": 430,
+  "tier_H_short_only": {
+   "SH01": 8,
+   "SH02": 6,
+   "SH03": 14,
+   "SH04": 12,
+   "SH05": 72,
+   "SH06": 24,
+   "SH07": 108,
+   "SH08": 36,
+   "SH09": 64,
+   "SH10": 12,
+   "SH11": 18,
+   "SH12": 32,
+   "SH13": 24
+  },
+  "tier_L_configs": 40,
+  "tier_L_long_short_state_pairs": {
+   "LS01": 8,
+   "LS02": 6,
+   "LS03": 14,
+   "LS04": 12
+  },
+  "total_configs": 470
+ },
+ "confirmation_rows_consumed": 0,
+ "contaminated_2024_rows_scored": 0,
+ "evidence_classes": {
+  "A": "A_INDIVIDUAL_EQUITY_SHORT_HYPOTHESIS_ONLY",
+  "B": "B_EXECUTABLE_SHORT_WITH_POINT_IN_TIME_BORROW_TRUTH",
+  "C": "C_LIQUID_ETF_SHORT_FROZEN_CONSERVATIVE_BORROW_ASSUMPTION",
+  "borrow_truth": "UNAVAILABLE_NO_POINT_IN_TIME_BORROW_DATA",
+  "class_B_reachable": false
+ },
+ "feasibility": {
+  "beta_hedged_market_neutral_spreads": "NOT_IMPLEMENTED_DEFERRED: long-name/short-SPY needs only a liquid-ETF short leg but requires a causal rolling-beta contract and a hedge-ratio identity; applying it to existing long candidates would be retroactive rescue of consumed results",
+  "cross_sectional_top_vs_bottom_momentum": "NOT_IMPLEMENTED_DEFERRED: needs a portfolio-level simulator and universe-scope identity; accepted min_cross_section=20 makes a liquid-ETF-only short leg marginal; equity short leg is hypothesis-only without borrow truth. Proposed grammar if included: lookback {21,63,126,252} x month_end x quintile = 4",
+  "sector_relative_residual_mean_reversion": "NOT_FEASIBLE: no sector/industry authority in repo or provider contract; inferring it from symbols is forbidden",
+  "short_only_mirrors_SH01_SH13": "IMPLEMENTED_INFRASTRUCTURE; execution borrow-gated",
+  "symmetric_long_short_state_pairs_LS01_LS04": "IMPLEMENTED_INFRASTRUCTURE; stop-and-reverse flip priced as exit leg + entry leg"
+ },
+ "final_holdout_rows_consumed": 0,
+ "funnel": [
+  "DISCOVERY",
+  "STATISTICAL_ROBUSTNESS",
+  "ECONOMIC_ROBUSTNESS",
+  "INDEPENDENT_CONFIRMATION",
+  "PORTFOLIO_RISK_SUITABILITY",
+  "PROMOTION",
+  "PAPER"
+ ],
+ "funnel_threshold_options": {
+  "parameter_neighborhood": [
+   "REUSE_PASS2_ADJACENT_NEIGHBOUR_SHARE_0_25",
+   "REPORT_ONLY_NO_GATE",
+   "OPERATOR_VALUE"
+  ],
+  "portfolio_mdd_worst5day": [
+   "DEFER_TO_PORTFOLIO_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+   "REUSE_PASS2_MDD_20PCT_WORST5_6PCT",
+   "OPERATOR_VALUE"
+  ],
+  "regime_concentration": [
+   "REUSE_PASS2_MAX_SHARE_0_80",
+   "REPORT_ONLY_NO_GATE",
+   "OPERATOR_VALUE"
+  ],
+  "trade_count_confidence_band": [
+   "REUSE_PASS2_MIN_30_TRADES",
+   "OPERATOR_BAND_REPORTED_AS_CONFIDENCE_INTERVAL_NOT_GATE",
+   "REPORT_ONLY_NO_GATE"
+  ],
+  "year_stability": [
+   "REUSE_PASS2_6_OF_8_POSITIVE_YEARS_AND_LEAVE_BEST_YEAR_OUT",
+   "REPORT_ONLY_NO_GATE",
+   "OPERATOR_VALUE"
+  ]
+ },
+ "mission": "V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01",
+ "multiple_testing_proposal": {
+  "complements": "tagged, counted in the registered denominator, excluded from the effective-independent estimate",
+  "global_disclosure": "Census-01 totals (38,192 strategy trials, 1,095 factors) are reported beside every Census-02 verdict",
+  "local_family": "Census-02 conditional factors form their own BH family (factor_fdr_bh_v1, alpha 0.10)",
+  "registered_population": "frozen population root over every (config x scope symbol) trial and every condition x horizon factor",
+  "strategy_judge": "DEFERRED_FULL_POPULATION; any later DSR/PBO denominator is the pooled Census-01 + Census-02 population"
+ },
+ "operator_decisions_required": {
+  "benchmark_rule": [
+   "NET_POSITIVE_AND_SAME_DIRECTION_HOLD_ALPHA_POSITIVE",
+   "NET_POSITIVE_ONLY",
+   "SAME_DIRECTION_HOLD_ALPHA_ONLY"
+  ],
+  "borrow_policy": [
+   "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+   "NO_EXECUTABLE_SHORTS_HYPOTHESIS_ONLY"
+  ],
+  "complement_handling": [
+   "REGISTER_ALL_TAG_COMPLEMENTS",
+   "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE"
+  ],
+  "conditional_scope": [
+   "ALL_SEED_SYMBOLS",
+   "EQUITY_SYMBOLS_ONLY"
+  ],
+  "etf_borrow_assumption": "explicit list + annual fee bps (see c2_borrow)",
+  "funnel_thresholds": "five-part block, see c2 doc",
+  "grammar_tiers": [
+   "H",
+   "H+L"
+  ],
+  "multiple_testing_denominator": [
+   "LOCAL_CENSUS02",
+   "LOCAL_WITH_GLOBAL_DISCLOSURE",
+   "GLOBAL_POOLED_CENSUS01_CENSUS02"
+  ],
+  "ssr_handling": [
+   "FLAG_ONLY",
+   "DEFER_ENTRY_ON_KNOWN_SSR_DAY"
+  ]
+ },
+ "proposed_etf_scope_for_operator_review": {
+  "note": "the registry carries no instrument-type field; ETF membership must be an explicit operator-frozen list",
+  "status": "PROPOSAL_NOT_FROZEN",
+  "symbols": [
+   "DIA",
+   "EEM",
+   "EFA",
+   "GLD",
+   "IEF",
+   "IWM",
+   "QQQ",
+   "SLV",
+   "SPY",
+   "TLT",
+   "VTI",
+   "XLB",
+   "XLE",
+   "XLF",
+   "XLI",
+   "XLK",
+   "XLP",
+   "XLU",
+   "XLV",
+   "XLY"
+  ]
+ },
+ "real_census02_attempts_executed": 0,
+ "schema_version": "alpha_census02_proposal_v1",
+ "status": "PROPOSED_NOT_FROZEN",
+ "structural_protocol": {
+  "authority": {
+   "PROMOTION_AUTHORITY": "NONE",
+   "VALIDATION_STATUS": "NOT_VALIDATED"
+  },
+  "benchmark_semantics": {
+   "never": "long buy-and-hold as the benchmark of a short-bearing strategy (double-counts the market)",
+   "qualification_rule": "OPERATOR_DECISION benchmark_rule",
+   "recorded_series": [
+    "same_direction_passive_hold_same_window_same_cost_model",
+    "cash_zero"
+   ]
+  },
+  "data_contract": {
+   "confirmation": "[2025-01-01, 2026-03-01) never read",
+   "contaminated_2024": "never scored",
+   "final_holdout": "[2026-03-01, ...) never read",
+   "window": "[2016-01-01, 2024-01-01)"
+  },
+  "execution_contract": {
+   "borrow_cost": "short holding bars accrue |qty|*prior_close*annual_fee_bps/10000/252; fee has NO default; short rebate ZERO; availability/recall assumptions are disclosed, not asserted",
+   "corporate_actions": "adjustment=all total-return series: a short bears dividends through the adjusted series; unsupported corporate actions stay typed EXCLUDED (fail closed)",
+   "cost_model": {
+    "commission_bps_per_side": 10.0,
+    "slippage_bps_per_side": 0.0
+   },
+   "fill": "first bar strictly after t; BUY at high+slip, SELL at low-slip (rust_conservative_bar_range_v1, slippage 5 bps, integer micros); short entry = SELL, cover = BUY; same-bar fill forbidden",
+   "labels": "fwd_ret/close_{t+h}/close_t-1 is a LABEL: EXECUTABLE_PNL=false, never an input to simulate_signed",
+   "open_position_at_end": "marked_to_last_close_no_liquidation (unchanged from Census-01)",
+   "pnl_marking": "signed_qty_held_before_bar*(close_t-close_{t-1}); fill cost = |delta_qty|*adverse(fill vs close)+commission",
+   "positions": "signed_daily_completed_bars: -1 short, 0 flat, +1 long",
+   "signal_knowledge": "signal on bar t uses only bars <= t",
+   "sizing": "qty = sign*floor(10000 USD / completed-signal-bar close); constant per run; no compounding; sign flip = exit leg + entry leg on one fill bar",
+   "ssr": "Rule 201 not represented; trigger is derivable from daily bars and is recorded as a per-fill flag only"
+  },
+  "experiment_id": "alpha_edge_census_02",
+  "funnel": [
+   "DISCOVERY",
+   "STATISTICAL_ROBUSTNESS",
+   "ECONOMIC_ROBUSTNESS",
+   "INDEPENDENT_CONFIRMATION",
+   "PORTFOLIO_RISK_SUITABILITY",
+   "PROMOTION",
+   "PAPER"
+  ],
+  "identity": {
+   "attempt": "infrastructure retry = new attempt of the SAME trial; outcome-based retry forbidden",
+   "evaluation": "slice/job/window; never mints a trial",
+   "trial": "sha256(side,family,params,scope,universe_id,partitions_id,protocol_id); results/attempts never enter"
+  },
+  "partitions": {
+   "contaminated_by_rejected_run": {
+    "end_exclusive": "2025-01-01",
+    "reason": "read by ALPHA_EDGE_CENSUS_01_REJECTED_EXECUTION_20261005",
+    "role": "NEVER_AN_UNREAD_RESERVE",
+    "start_inclusive": "2024-01-01",
+    "status": "CONTAMINATED_BY_REJECTED_RUN"
+   },
+   "discovery": {
+    "end_exclusive": "2024-01-01",
+    "role": "PASS1_CENSUS_DISCOVERY",
+    "start_inclusive": "2016-01-01"
+   },
+   "final_holdout": {
+    "start_inclusive": "2026-03-01",
+    "status": "RESERVED_UNCONSUMED"
+   },
+   "remaining_confirmation_reserve": {
+    "end_exclusive": "2026-03-01",
+    "role": "LATER_INDEPENDENT_CONFIRMATION",
+    "start_inclusive": "2025-01-01",
+    "status": "RESERVED_UNCONSUMED"
+   },
+   "schema_version": "alpha_census_partitions_v2"
+  },
+  "registration_rule": {
+   "denominator": "frozen population root; cannot shrink after results",
+   "winner_only_registration": "forbidden: the complete ledger precedes any registry record"
+  },
+  "retry_rules": {
+   "infrastructure_retry": "same trial, new attempt, same economics",
+   "outcome_based_retry": "forbidden"
+  },
+  "schema_version": "alpha_census02_v1"
+ },
+ "structural_protocol_id": "2375f1016323857b5fca9fc6e32304ac"
+}

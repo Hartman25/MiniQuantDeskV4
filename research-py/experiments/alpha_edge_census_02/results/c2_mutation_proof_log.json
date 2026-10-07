@@ -1,0 +1,210 @@
+{
+ "M01": {
+  "description": "same-bar fill: position follows the decision on the SAME bar",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_same_bar_short_fill_rejected or test_vector_simulator_matches_scalar"
+ },
+ "M02": {
+  "description": "P&L marks against the NEXT bar's close (future data in the cover/mark)",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_cover_chronology or test_vector_simulator_matches_scalar or test_same_bar_short_fill"
+ },
+ "M03": {
+  "description": "price-bar guard removed: a fwd_ret label becomes executable P&L",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_fwd_ret_labels_are_never_executable_pnl"
+ },
+ "M04": {
+  "description": "a result value enters the trial identity",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_trial_identity_is_result_independent"
+ },
+ "M05": {
+  "description": "an attempt id enters the trial identity (a retry mints a trial)",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_trial_identity_is_result_independent or test_retry_is_a_new_attempt"
+ },
+ "M06": {
+  "description": "ledger tolerates a duplicated trial id",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_retry_is_a_new_attempt or test_denominator_cannot_shrink"
+ },
+ "M07": {
+  "description": "discovery fence removed from the bar loader",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_confirmation_contaminated_and_holdout_rows_are_fenced or test_fence_accepts"
+ },
+ "M08": {
+  "description": "any symbol is treated as a frozen ETF (borrow-unavailable equity becomes executable)",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_borrow_classification_and_individual_equity_never_executable"
+ },
+ "M09": {
+  "description": "evidence-class gate removed from the cell evaluator",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_borrow_classification_and_individual_equity_never_executable"
+ },
+ "M10": {
+  "description": "class B reachable without point-in-time borrow data",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_borrow_classification_and_individual_equity_never_executable"
+ },
+ "M11": {
+  "description": "denominator may shrink: missing trials tolerated",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_denominator_cannot_shrink"
+ },
+ "M12": {
+  "description": "winner-only registration allowed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_denominator_cannot_shrink"
+ },
+ "M13": {
+  "description": "benchmark of a short strategy is a LONG hold",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_benchmark_is_same_direction_hold or test_borrow_classification"
+ },
+ "M14": {
+  "description": "short borrow fee defaults to zero when omitted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_without_explicit_borrow_fee"
+ },
+ "M15": {
+  "description": "short mirror emits LONG positions",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_families_never_go_long or test_mirror_semantics or test_s13_upside"
+ },
+ "M16": {
+  "description": "freeze guard accepts a PROPOSED status",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control"
+ },
+ "M17": {
+  "description": "freeze guard does not require a committed file",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control"
+ },
+ "M18": {
+  "description": "freeze guard accepts a protocol id that does not match the decisions",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control"
+ },
+ "M19": {
+  "description": "operator decision completeness check removed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_operator_decisions_must_be_complete"
+ },
+ "M20": {
+  "description": "grammar drift: a parameter value added to SH05",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_grammar_counts_and_arithmetic or test_grammar_drift"
+ },
+ "M21": {
+  "description": "stop-and-reverse leg costs dropped on a flip",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_vector_simulator_matches_scalar_reference"
+ },
+ "M22": {
+  "description": "short borrow accrual removed",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_pnl_sign_and_borrow_fee_arithmetic or test_vector_simulator_matches_scalar"
+ },
+ "M23": {
+  "description": "ETF assumption accepts a missing fee",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_etf_assumption_is_fail_closed"
+ },
+ "M24": {
+  "description": "Census-01 config ids may collide with Census-02 ids",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_forced_census01_id_collision_is_refused"
+ },
+ "M25": {
+  "description": "SH08 gap reads the NEXT bar's open (lookahead in a signal builder)",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_every_config_is_causal_prefix_invariant"
+ },
+ "M26": {
+  "description": "SH13 reversal fades the DOWN day instead of the up day",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_s13_upside_expansion_fade_is_the_mirror"
+ }
+}
