@@ -27,6 +27,33 @@ where
     RecG: ReconcileGate,
     TS: TimeSource,
 {
+    /// Quarantine a claimed row that a run mode forbidding new economic orders
+    /// may not dispatch. `CLAIMED -> FAILED` happens before `DISPATCHING`, so
+    /// the gateway is never reached, the row can never re-enter `PENDING`, and
+    /// no broker delivery is claimed.
+    pub(super) async fn refuse_new_order_claimed_outbox_row(
+        &self,
+        row: &mqk_db::OutboxRow,
+        run_mode: &str,
+    ) -> anyhow::Result<()> {
+        let marked = mqk_db::outbox_mark_failed(&self.pool, &row.idempotency_key).await?;
+        if !marked {
+            return Err(anyhow!(
+                "NO_NEW_ORDER_FENCE: outbox row {} could not be quarantined FAILED for run \
+                 mode '{}'; refusing dispatch",
+                row.idempotency_key,
+                run_mode
+            ));
+        }
+        tracing::warn!(
+            run_id = %self.run_id,
+            order_id = %row.idempotency_key,
+            run_mode = %run_mode,
+            "exec_submit_refused_run_mode_forbids_new_order"
+        );
+        Ok(())
+    }
+
     /// Submit-path dispatcher for one claimed outbox row.
     pub(super) async fn dispatch_submit_claimed_outbox_row(
         &mut self,

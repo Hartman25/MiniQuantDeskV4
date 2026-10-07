@@ -1125,9 +1125,24 @@ where
                 }
             }
         };
+        // LIVESHADOW-NO-ORDER dispatch fence: the run's durable mode decides
+        // whether this run may submit a NEW economic order, whenever and however
+        // the PENDING row was created or recovered. Cancels are not new orders
+        // and keep their own lifecycle authority.
+        let new_orders_permitted = mqk_db::run_mode_permits_new_economic_order(&run.mode);
         for claimed_row in claimed {
             self.refresh_or_acquire_runtime_leadership().await?;
-            match build_claimed_outbox_request(&claimed_row.row)? {
+            let request = build_claimed_outbox_request(&claimed_row.row);
+            // A non-order-capable run dispatches nothing but a valid cancel:
+            // submit intents and unclassifiable payloads (an absent or corrupt
+            // request_type must not evade the fence) are quarantined FAILED.
+            if !new_orders_permitted && !matches!(request, Ok(ClaimedOutboxRequest::Cancel { .. }))
+            {
+                self.refuse_new_order_claimed_outbox_row(&claimed_row.row, &run.mode)
+                    .await?;
+                continue;
+            }
+            match request? {
                 ClaimedOutboxRequest::Submit(req) => {
                     self.dispatch_submit_claimed_outbox_row(claimed_row, req)
                         .await?;

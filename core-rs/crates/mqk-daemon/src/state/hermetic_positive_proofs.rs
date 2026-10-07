@@ -258,6 +258,46 @@ mod tests {
         .await;
     }
 
+    /// The orchestrator's dispatch fence trusts the run row's durable `mode`.
+    /// A real LiveShadow start must therefore stamp a non-order-capable mode.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hermetic_live_shadow_start_stamps_non_order_capable_run_mode() {
+        mqk_db::run_isolated("hermetic_ls_run_mode_stamp", |pool| async move {
+            seed_swing_momentum_registry(&pool).await;
+            let st = armed_live_shadow_state(pool).await;
+            st.set_strategy_fleet_for_test(Some(vec![fleet_entry("swing_momentum")]))
+                .await;
+
+            let start_req = Request::builder()
+                .method("POST")
+                .uri("/v1/run/start")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let (status, json) = call(routes::build_router(Arc::clone(&st)), start_req).await;
+            assert_eq!(status, StatusCode::OK, "start must succeed; got: {json}");
+
+            let db = st.db.as_ref().expect("db configured");
+            let run = mqk_db::fetch_active_run_for_engine(
+                db,
+                "mqk-daemon",
+                DeploymentMode::LiveShadow.as_db_mode(),
+            )
+            .await
+            .expect("active run lookup")
+            .expect("a LiveShadow start must create an active run");
+            assert_eq!(run.mode, "LIVE-SHADOW");
+            assert!(!mqk_db::run_mode_permits_new_economic_order(&run.mode));
+
+            let stop_req = Request::builder()
+                .method("POST")
+                .uri("/v1/run/stop")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let _ = call(routes::build_router(Arc::clone(&st)), stop_req).await;
+        })
+        .await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hermetic_b1a_l05_stop_clears_native_strategy_bootstrap() {
         mqk_db::run_isolated("hermetic_b1a_l05", |pool| async move {
