@@ -7,7 +7,7 @@
   "status": "APPROVED_BY_OPERATOR"
  },
  "attempts_at_freeze": 0,
- "behavior_head": "675549e219b4bb78adc298fde56dd39bae655e45",
+ "behavior_head": "1badd9c9eec3257ac6eb7f9def9d00a0deffda54",
  "behavior_source_manifest": {
   "authority_data": {
    "research-py/experiments/alpha_edge_census_01/ALPHA_CENSUS_SEED_UNIVERSE_V2.json": "ff9a3eff44d688ca092fc4e297fd87d216efcc0433dd34f4c33e545bab0698a7",
@@ -32,8 +32,8 @@
    "research-py/experiments/alpha_edge_census_02/c2_factors.py": "6e07be8f933df435ff7a87433c4b808fd1267c6015d56e12eda65c96345d61ff",
    "research-py/experiments/alpha_edge_census_02/c2_grammar.py": "d224352937c9df4cdec7f6ca08631dd9529eb691a6cc5deb75e235edaf51ea29",
    "research-py/experiments/alpha_edge_census_02/c2_policy.py": "cce29f616766c206811765a15a537862e8f35dcac413e7309314f00f2f815e5c",
-   "research-py/experiments/alpha_edge_census_02/c2_population.py": "eee5e68145213c43fb9d0fc39570f07f706fe2c06610b215c154408cbc0cc5be",
-   "research-py/experiments/alpha_edge_census_02/c2_protocol.py": "997bfb1ccf117ca13216e4000e6ea538dc12ad9bb768be1210a6f5e37d74d59e",
+   "research-py/experiments/alpha_edge_census_02/c2_population.py": "19606e06d9d2b74d8b1a9eb24d34f956961bbf38892c7c2e75b2790bd314a56c",
+   "research-py/experiments/alpha_edge_census_02/c2_protocol.py": "e69aac99f8f4af3ada059f0ffc315a1778fee07081777d57d70c1584bc1b28a4",
    "research-py/experiments/alpha_edge_census_02/c2_runner.py": "d7a507792425e98127ab8367dd095159e6345d1fb43fa70223f7d7eeef9f5d40",
    "research-py/experiments/alpha_edge_census_02/c2_signals.py": "f0739978b14f1e31944dff027049ad4a0a5800e2f9f201c4097f66fde816fde2",
    "research-py/experiments/alpha_edge_census_02/c2_simulate.py": "082e33def85c90f995ae3183b4b7971e26db2a9436518db9bb627378b908632d",
@@ -161,7 +161,7 @@
   "statement": "Census-02 is its own complete predeclared local factor family; Census-01 was frozen and evaluated earlier and is NOT part of one contemporaneous BH family. Strategy DSR/PBO stays DEFERRED_FULL_POPULATION."
  },
  "operator_policy_sha256": "b42ce74a829a59506bd305b8ba0579c383053f712e9270cf007417ca2e34cffe",
- "protocol_id": "573d299c08e0849f715ed322f7e139ea",
+ "protocol_id": "d7a68edde045b46ff830b8f35fce571e",
  "results_present_at_freeze": false,
  "schema_version": "census02_predeclaration_v1",
  "status": "FROZEN_BY_OPERATOR",
@@ -192,9 +192,9 @@
   "complement_tagged_configs": 56,
   "complement_tagged_trials": 1120,
   "config_count": 470,
-  "manifest_order_root": "f9a37f63f7fa308877c742e0d3409e60fb6871e50eee0101765fd7064433333c",
-  "partitions_id": "5e2a018cc5fd82486859f1f1c4a4d8b5",
-  "population_root": "8ad383d43f3929e0753a1f31a4de9543e86cbcfe070bee227cdf23ecaae746dc",
+  "manifest_order_root": "5034301d002953d7a12d71f14f76a636102302586d87dd708fabb5d4efc77f98",
+  "partitions_id": "f197e5f1511bcd655090b0f55b706582",
+  "population_root": "e5c4173f9a2395b7cbb4b9960aac90c03a4c043cc94d2531497949be9ad45fda",
   "trial_count": 9400,
   "universe_id": "e657af053406fbb31e20c3d7c7968f42"
  },
@@ -261,9 +261,9 @@
    "window_start_utc": "2016-01-01T00:00:00+00:00"
   },
   "data_contract": {
-   "confirmation": "[2025-01-01, 2026-03-01) never read",
-   "contaminated_2024": "never scored",
-   "final_holdout": "[2026-03-01, ...) never read",
+   "confirmation": "[2025-01-01, 2026-03-01) consumed by alpha_edge_confirmation_01; never read by Census-02",
+   "contaminated_2024": "never read, never scored",
+   "final_holdout": "[2026-03-01, ...) reserved; never read",
    "window": "[2016-01-01, 2024-01-01)"
   },
   "data_request_contract": {
@@ -321,30 +321,38 @@
    "evaluation": "slice/job/window; never mints a trial",
    "trial": "sha256(side,family,params,scope,universe_id,partitions_id,protocol_id); results/attempts never enter"
   },
+  "partition_authority": "current truth is PARTITION_TRUTH; Census-01 partitions.py is historical and supplies only the hard discovery-fence implementation",
   "partitions": {
-   "contaminated_by_rejected_run": {
+   "census02_access": {
+    "confirmation_window": "NEVER_READ",
+    "contaminated_2024": "NEVER_READ",
+    "discovery": "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01",
+    "final_holdout": "NEVER_READ"
+   },
+   "confirmation_window": {
+    "end_exclusive": "2026-03-01",
+    "role": "CENSUS02_NEVER_READ",
+    "start_inclusive": "2025-01-01",
+    "status": "CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01"
+   },
+   "contaminated_2024": {
     "end_exclusive": "2025-01-01",
-    "reason": "read by ALPHA_EDGE_CENSUS_01_REJECTED_EXECUTION_20261005",
-    "role": "NEVER_AN_UNREAD_RESERVE",
+    "role": "CENSUS02_NEVER_READ",
     "start_inclusive": "2024-01-01",
     "status": "CONTAMINATED_BY_REJECTED_RUN"
    },
    "discovery": {
     "end_exclusive": "2024-01-01",
-    "role": "PASS1_CENSUS_DISCOVERY",
+    "role": "CENSUS02_DISCOVERY_REUSE",
     "start_inclusive": "2016-01-01"
    },
    "final_holdout": {
+    "role": "FINAL_HOLDOUT",
     "start_inclusive": "2026-03-01",
     "status": "RESERVED_UNCONSUMED"
    },
-   "remaining_confirmation_reserve": {
-    "end_exclusive": "2026-03-01",
-    "role": "LATER_INDEPENDENT_CONFIRMATION",
-    "start_inclusive": "2025-01-01",
-    "status": "RESERVED_UNCONSUMED"
-   },
-   "schema_version": "alpha_census_partitions_v2"
+   "schema_version": "census02_partition_truth_v1",
+   "semantics": "the Confirmation window is consumed globally and never read by Census-02; the Final Holdout stays reserved"
   },
   "registration_rule": {
    "denominator": "frozen population root; cannot shrink after results",

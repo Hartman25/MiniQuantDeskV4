@@ -1,14 +1,15 @@
 # Alpha Census 02 — Short / Long-Short Predeclaration (capability census + operator-freeze package)
 
 Mission `V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01`. Baseline `c005e56791f34f1fd5d32e559dd594ec8e30d2c4`.
-Status (C3C): `CENSUS02_READY_TO_REFREEZE` — the C3B freeze (`ab686f15737e3e36ba3c4f34d753f179f9a55bf2`) carried a stale historical partition label and is superseded before result #1 (section 15); the replacement freeze is a later commit (C3D) that changes no bound source — operator policy is **approved** (section 13, `CENSUS02_OPERATOR_POLICY.json`) and the complete
-result-independent campaign (runner, evaluators, populations, environment identity, expanded source manifest) is implemented and proven
-on synthetic data. Sections 1–12 are the historical capability census, proposal and review corrections that led here; where they say
-"operator decision" or "PROPOSED", section 13 supersedes them. The freeze file (`CENSUS02_PREDECLARATION.json`) is created in a separate
-later commit (C3B) that changes no bound source. `VALIDATION_STATUS=NOT_VALIDATED`, `PROMOTION_AUTHORITY=NONE`. Paper INACTIVE, Live DISABLED.
+Status (C3D): `CENSUS02_FROZEN_BY_OPERATOR_BEFORE_RESULT_1`. Operator policy is approved (section 13, `CENSUS02_OPERATOR_POLICY.json`); the complete
+result-independent campaign (runner, evaluators, populations, environment identity, 45-source manifest) is implemented and proven on synthetic data;
+a stale historical Confirmation-window label found in the first freeze (C3B `ab686f15737e3e36ba3c4f34d753f179f9a55bf2`) was corrected in the behavior
+commit C3C `1badd9c9eec3257ac6eb7f9def9d00a0deffda54` (section 15), and the replacement freeze (section 16) supersedes C3B before result #1. Sections
+1–12 are the historical capability census, proposal and review corrections that led here; where they say "operator decision" or "PROPOSED", section
+13 supersedes them. `VALIDATION_STATUS=NOT_VALIDATED`, `PROMOTION_AUTHORITY=NONE`. Paper INACTIVE, Live DISABLED.
 
 Code: `research-py/experiments/alpha_edge_census_02/` (`c2_*.py`, `run_census02.py`); tests
-`research-py/tests/test_alpha_edge_census_02{,_protocol,_campaign}.py`; mutation proof `.../results/c2_mutation_proof_log.json`.
+`research-py/tests/test_alpha_edge_census_02{,_protocol,_campaign,_partition_truth}.py`; mutation proof `.../results/c2_mutation_proof_log.json`.
 The earlier proposal artifact `CENSUS02_PREDECLARATION_PROPOSAL.json` is superseded history and can never satisfy the freeze guard.
 
 ## 1. Fences and consumption (this mission)
@@ -326,5 +327,29 @@ ids / root and factor identities change; the old C3B freeze fails closed (`diffe
 9,400 trials, 215 conditions, 5 horizons, 1,075 factors, 56 complement-tagged configs. The eight approved operator decisions and the numerical
 environment are unchanged. The replacement freeze (C3D) is generated from the exact C3C behavior and adds only the freeze, a supersession record and
 proof artifacts; the C3B file is superseded *before result #1* (zero attempts, zero data reads, zero result values under it), not amended.
+
+## 16. Replacement freeze (C3D)
+
+C3D adds only: the replacement `CENSUS02_PREDECLARATION.json` (generated from the exact C3C behavior), `freeze_evidence/CENSUS02_FREEZE_SUPERSESSION.json`,
+the superseded C3A proof (`..._SUPERSEDED_C3A.json`), the new `CENSUS02_FREEZE_PROOF.json` and this section. No bound source changes between C3C and C3D
+(the freeze guard enforces it with `git diff <behavior_head> HEAD` over every bound path). The C3B freeze is superseded **before result #1** — zero
+attempts, zero real-data reads, zero result values under it — and is not amended; it stays in git history.
+
+| Item | Superseded (C3B) | Replacement (C3D) |
+|---|---|---|
+| behavior head | `675549e219b4bb78adc298fde56dd39bae655e45` | `1badd9c9eec3257ac6eb7f9def9d00a0deffda54` |
+| `protocol_id` | `573d299c08e0849f715ed322f7e139ea` | `d7a68edde045b46ff830b8f35fce571e` |
+| Strategy population root (9,400 trials) | `8ad383d43f3929e0753a1f31a4de9543e86cbcfe070bee227cdf23ecaae746dc` | `e5c4173f9a2395b7cbb4b9960aac90c03a4c043cc94d2531497949be9ad45fda` |
+| Factor coordinate root (1,075 semantic coordinates) | `095af73d36a5a255df5d06e8e1ae9b59ec1bb8e163d0f05b9165f0da28c774bb` | unchanged (condition x horizon coordinates are protocol-independent; FactorSpec ids bind the protocol id and are materialised after authorised acquisition) |
+| bound sources changed | — | `c2_protocol.py`, `c2_population.py` only |
+| counts | 470 / 20 / 9,400 / 215 / 5 / 1,075 | identical |
+| approved decisions; numerical environment (Python 3.13.16, NumPy 2.5.3, Pandas 3.0.5) | — | unchanged |
+| `attempts_at_freeze`; results present | 0; false | 0; false |
+| Confirmation window `[2025-01-01, 2026-03-01)` | labelled `RESERVED_UNCONSUMED` (stale) | `CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01`, `CENSUS02_NEVER_READ` |
+| Final Holdout `[2026-03-01, ...)` | `RESERVED_UNCONSUMED` | `RESERVED_UNCONSUMED` |
+
+**Chronology.** operator policy approved -> runner / evaluators (C3A) -> stale Confirmation label found by independent review -> corrected behavior
+(C3C) -> old freeze proven to fail closed -> replacement freeze (C3D) -> STOP. Real Census-02 attempts 0; Discovery bars read 0; 2024 /
+Confirmation / Final Holdout rows 0; result #1 does not exist.
 
 Full local workspace acceptance: NOT RUN — prohibited by laptop resource-safety rule; broad workspace proof delegated to GitHub CI.

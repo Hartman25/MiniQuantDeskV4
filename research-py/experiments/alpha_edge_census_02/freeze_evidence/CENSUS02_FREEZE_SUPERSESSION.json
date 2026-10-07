@@ -1,0 +1,60 @@
+{
+ "attempts_under_superseded_freeze": 0,
+ "bound_sources_changed_by_correction": [
+  "research-py/experiments/alpha_edge_census_02/c2_population.py",
+  "research-py/experiments/alpha_edge_census_02/c2_protocol.py"
+ ],
+ "counts_new": [
+  470,
+  20,
+  9400,
+  215,
+  5,
+  1075
+ ],
+ "counts_old": [
+  470,
+  20,
+  9400,
+  215,
+  5,
+  1075
+ ],
+ "counts_unchanged": {
+  "class_c_symbols": 20,
+  "complement_tagged_configs": 56,
+  "conditions": 215,
+  "factors": 1075,
+  "horizons": 5,
+  "strategy_configs": 470,
+  "strategy_trials": 9400
+ },
+ "defect_class": "current-state metadata truth, NOT leakage: Census-02 read and consumed zero Confirmation rows",
+ "environment_identity": {
+  "numpy": "2.5.3",
+  "pandas": "3.0.5",
+  "python": "3.13.16"
+ },
+ "environment_identity_unchanged": true,
+ "evidence_is_not_identity": "this record is audit evidence only; it is bound by no manifest and enters no candidate, trial, factor or protocol identity",
+ "factor_coordinate_root_note": "semantic (condition x horizon) coordinates; independent of protocol identity, hence unchanged. FactorSpec ids bind the protocol id and are materialised only after authorised acquisition, so they change with it.",
+ "history": "C3B is not amended or rewritten; it remains in git history as the superseded freeze",
+ "new_factor_coordinate_root": "095af73d36a5a255df5d06e8e1ae9b59ec1bb8e163d0f05b9165f0da28c774bb",
+ "new_protocol_id": "d7a68edde045b46ff830b8f35fce571e",
+ "new_strategy_population_root": "e5c4173f9a2395b7cbb4b9960aac90c03a4c043cc94d2531497949be9ad45fda",
+ "old_factor_coordinate_root": "095af73d36a5a255df5d06e8e1ae9b59ec1bb8e163d0f05b9165f0da28c774bb",
+ "old_freeze_fails_closed_after_correction": true,
+ "old_protocol_id": "573d299c08e0849f715ed322f7e139ea",
+ "old_strategy_population_root": "8ad383d43f3929e0753a1f31a4de9543e86cbcfe070bee227cdf23ecaae746dc",
+ "operator_decisions_unchanged": true,
+ "real_data_reads_under_superseded_freeze": 0,
+ "reason": "stale historical partition metadata incorrectly labelled the already-used Confirmation window RESERVED_UNCONSUMED (the frozen protocol copied Census-01's historical partitions.py object; alpha_edge_confirmation_01 had completed over [2025-01-01, 2026-03-01))",
+ "replacement_behavior_head": "1badd9c9eec3257ac6eb7f9def9d00a0deffda54",
+ "result_values_under_superseded_freeze": 0,
+ "run_directory_exists_at_supersession": false,
+ "schema_version": "census02_freeze_supersession_v1",
+ "superseded_before_result_1": true,
+ "superseded_freeze_behavior_head": "675549e219b4bb78adc298fde56dd39bae655e45",
+ "superseded_freeze_commit": "ab686f15737e3e36ba3c4f34d753f179f9a55bf2",
+ "superseded_freeze_file_git_blob": "698500def2ce08577b6c2d1470fecd6d70351e9d"
+}

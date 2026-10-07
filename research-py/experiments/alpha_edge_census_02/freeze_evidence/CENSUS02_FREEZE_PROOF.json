@@ -1,6 +1,6 @@
 {
  "all_ok": true,
- "behavior_head": "675549e219b4bb78adc298fde56dd39bae655e45",
+ "behavior_head": "1badd9c9eec3257ac6eb7f9def9d00a0deffda54",
  "confirmation_rows_consumed": 0,
  "derived_facts": [
   {
@@ -116,6 +116,170 @@
     "python"
    ],
    "ok": true
+  },
+  {
+   "expected": [
+    "CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01",
+    "CENSUS02_NEVER_READ",
+    "NEVER_READ"
+   ],
+   "id": "15_confirmation_window_consumed_never_read",
+   "observed": [
+    "CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01",
+    "CENSUS02_NEVER_READ",
+    "NEVER_READ"
+   ],
+   "ok": true
+  },
+  {
+   "expected": [
+    "RESERVED_UNCONSUMED",
+    "NEVER_READ"
+   ],
+   "id": "16_final_holdout_reserved_never_read",
+   "observed": [
+    "RESERVED_UNCONSUMED",
+    "NEVER_READ"
+   ],
+   "ok": true
+  },
+  {
+   "expected": [
+    "2024-01-01",
+    "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01"
+   ],
+   "id": "17_discovery_fence",
+   "observed": [
+    "2024-01-01",
+    "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01"
+   ],
+   "ok": true
+  },
+  {
+   "expected": true,
+   "id": "18_old_freeze_refused",
+   "observed": true,
+   "ok": true
+  },
+  {
+   "expected": {
+    "numpy": "2.5.3",
+    "pandas": "3.0.5",
+    "python": "3.13.16"
+   },
+   "id": "19_environment_unchanged_vs_superseded_freeze",
+   "observed": {
+    "numpy": "2.5.3",
+    "pandas": "3.0.5",
+    "python": "3.13.16"
+   },
+   "ok": true
+  },
+  {
+   "expected": {
+    "benchmark_rule": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+    "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+    "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
+    "conditional_scope": "ALL_SEED_SYMBOLS",
+    "etf_borrow_assumption": {
+     "annual_borrow_fee_bps": 100.0,
+     "availability": "ALWAYS_AVAILABLE_FOR_SCOPE_ASSUMED",
+     "etf_short_scope": [
+      "DIA",
+      "EEM",
+      "EFA",
+      "GLD",
+      "IEF",
+      "IWM",
+      "QQQ",
+      "SLV",
+      "SPY",
+      "TLT",
+      "VTI",
+      "XLB",
+      "XLE",
+      "XLF",
+      "XLI",
+      "XLK",
+      "XLP",
+      "XLU",
+      "XLV",
+      "XLY"
+     ],
+     "recall": "NONE_ASSUMED",
+     "short_rebate": "ZERO"
+    },
+    "funnel_thresholds": {
+     "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
+     "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+     "regime_concentration": "REPORT_ONLY_NO_GATE",
+     "trade_count_confidence_band": {
+      "15_to_29": "MODERATE_SAMPLE",
+      "30_plus": "STRONG_SAMPLE",
+      "5_to_14": "LOW_SAMPLE",
+      "hard_gate": "closed_round_trips >= 5 only",
+      "kind": "CLASSIFICATION_WITH_TYPED_MINIMUM",
+      "under_5": "INSUFFICIENT"
+     },
+     "year_stability": "REPORT_ONLY_NO_GATE"
+    },
+    "grammar_tiers": "H+L",
+    "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
+    "ssr_handling": "FLAG_ONLY"
+   },
+   "id": "20_operator_decisions_unchanged_vs_superseded_freeze",
+   "observed": {
+    "benchmark_rule": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+    "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+    "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
+    "conditional_scope": "ALL_SEED_SYMBOLS",
+    "etf_borrow_assumption": {
+     "annual_borrow_fee_bps": 100.0,
+     "availability": "ALWAYS_AVAILABLE_FOR_SCOPE_ASSUMED",
+     "etf_short_scope": [
+      "DIA",
+      "EEM",
+      "EFA",
+      "GLD",
+      "IEF",
+      "IWM",
+      "QQQ",
+      "SLV",
+      "SPY",
+      "TLT",
+      "VTI",
+      "XLB",
+      "XLE",
+      "XLF",
+      "XLI",
+      "XLK",
+      "XLP",
+      "XLU",
+      "XLV",
+      "XLY"
+     ],
+     "recall": "NONE_ASSUMED",
+     "short_rebate": "ZERO"
+    },
+    "funnel_thresholds": {
+     "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
+     "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+     "regime_concentration": "REPORT_ONLY_NO_GATE",
+     "trade_count_confidence_band": {
+      "15_to_29": "MODERATE_SAMPLE",
+      "30_plus": "STRONG_SAMPLE",
+      "5_to_14": "LOW_SAMPLE",
+      "hard_gate": "closed_round_trips >= 5 only",
+      "kind": "CLASSIFICATION_WITH_TYPED_MINIMUM",
+      "under_5": "INSUFFICIENT"
+     },
+     "year_stability": "REPORT_ONLY_NO_GATE"
+    },
+    "grammar_tiers": "H+L",
+    "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
+    "ssr_handling": "FLAG_ONLY"
+   },
+   "ok": true
   }
  ],
  "discovery_bars_read": 0,
@@ -128,30 +292,45 @@
  "final_holdout_rows_consumed": 0,
  "load_bearing_tests": {
   "node_ids": {
+   "census01_historical_files_unchanged": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_historical_census01_authority_is_unchanged_and_deliberately_not_current",
    "census02_bar_loader_fence": "research-py/tests/test_alpha_edge_census_02.py::test_symbol_data_builder_is_fenced_before_any_array_is_built",
    "complete_registration_precedes_evaluation": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_complete_population_registration_precedes_any_evaluation",
+   "confirmation_and_holdout_input_refused": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_confirmation_input_is_refused_and_discovery_is_accepted",
+   "counts_unchanged_by_correction": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_counts_and_complements_are_unchanged_by_the_correction",
    "default_loader_is_the_guarded_entrance": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_default_loader_is_the_guarded_entrance_and_receives_the_frozen_protocol_id",
    "direct_data_entrance_refused_without_gate": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_direct_data_entrance_without_the_freeze_gate_is_refused_before_any_io",
    "environment_mismatch_refused": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_numerical_environment_mismatch_is_refused_before_anything_else",
+   "every_row_ge_2024_refused": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_every_row_at_or_after_2024_is_refused_with_the_true_census02_partition",
+   "forged_stale_partition_freeze_refused": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_a_self_consistent_forged_stale_partition_freeze_is_refused",
    "freeze_first_missing_or_invalid_never_reaches_loader": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_a_missing_or_invalid_freeze_never_reaches_the_loader",
    "freeze_first_uncommitted_never_reaches_loader": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_uncommitted_freeze_never_reaches_the_loader",
    "gate_executes_before_loader_then_synthetic_run": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_freeze_gate_executes_before_the_loader_and_the_run_proceeds_on_synthetic_bars",
+   "identity_builders_open_no_confirmation_file": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_building_every_identity_opens_no_confirmation_file",
    "import_time_no_io": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_importing_the_runner_and_cli_performs_no_io_and_creates_no_run_directory",
    "manifest_covers_reachable_sources": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_manifest_covers_every_reachable_behavior_source_or_documents_why_not",
+   "no_confirmation_outcome_in_identity": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_no_confirmation_outcome_participates_in_protocol_factor_or_trial_identity",
    "no_dynamic_imports": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_no_dynamic_import_in_any_bound_source_beyond_the_reviewed_stdlib_one",
    "no_hard_30_trade_veto": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_no_hard_30_trade_veto_only_the_typed_minimum_of_5",
+   "old_freeze_refused_for_the_right_reason": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_the_old_freeze_is_refused_for_the_right_reason_in_a_controlled_repo",
+   "old_freeze_stale_and_refused": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_the_old_freeze_cannot_pass_require_freeze_after_the_correction",
    "operator_policy_exact": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_operator_policy_is_encoded_exactly",
    "partial_or_lazy_registration_refused": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_partial_lazy_or_winner_only_factor_registration_cannot_be_evaluated",
+   "partition_truth_exact": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_current_partition_truth_is_exact",
    "reserve_fences": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_confirmation_contaminated_and_holdout_rows_are_fenced",
    "result_independent_identity": "research-py/tests/test_alpha_edge_census_02.py::test_trial_identity_is_result_independent_and_side_bound",
-   "single_guarded_entrance_ast": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_only_the_single_guarded_entrance_can_reach_data_acquisition"
+   "single_guarded_entrance_ast": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_only_the_single_guarded_entrance_can_reach_data_acquisition",
+   "structural_protocol_carries_current_truth": "research-py/tests/test_alpha_edge_census_02_partition_truth.py::test_the_structural_protocol_carries_current_truth_never_the_historical_object"
   },
   "pytest_returncode": 0,
-  "summary": "33 passed in 34.93s"
+  "summary": "50 passed in 37.48s"
  },
- "protocol_id_for_this_behavior_state": "573d299c08e0849f715ed322f7e139ea",
+ "old_freeze_refusals": {
+  "in_place_c3b_freeze": "REFUSED: behavior-bearing source differs from the frozen manifest: ['research-py/experiments/alpha_edge_census_02/c2_population.py', 'research-py/experiments/alpha_edge_",
+  "superseded_fixture": "REFUSED: behavior-bearing source differs from the frozen manifest: ['research-py/experiments/alpha_edge_census_02/c2_population.py', 'research-py/experiments/alpha_edge_"
+ },
+ "protocol_id_for_this_behavior_state": "d7a68edde045b46ff830b8f35fce571e",
  "real_census02_attempts": 0,
  "rows_2024_read": 0,
  "schema_version": "census02_freeze_proof_v1",
- "strategy_population_root": "8ad383d43f3929e0753a1f31a4de9543e86cbcfe070bee227cdf23ecaae746dc"
+ "strategy_population_root": "e5c4173f9a2395b7cbb4b9960aac90c03a4c043cc94d2531497949be9ad45fda"
 }
