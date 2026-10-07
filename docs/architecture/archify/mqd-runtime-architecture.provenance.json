@@ -6,8 +6,8 @@
   "branch": "main",
   "source_commit_sha": "c81695de3da1bec7b3b8bc1b951fae8d0e95f307",
   "working_tree_clean_at_start": true,
-  "generation_head_sha": "5a451b83be5c736c11688c39f9ea237a5829f454",
-  "generation_head_note": "HEAD at generation = source commit + one tooling commit (Archify skill install). That commit touches no cited source path.",
+  "generation_head_sha": "390ae7a0d84adacdad8ba98e99d7da12cf8c4ccd",
+  "generation_head_note": "HEAD at regeneration = review-branch commit 390ae7a0 (source anchor + Archify install + first diagram). This corrected version is committed on top of it; a commit cannot name its own SHA. The source anchor is unchanged.",
   "agent": "Claude Code cloud",
   "archify_version": "3.0.1",
   "archify_upstream_commit": "73aaa0696e8f72c232ea710e6fa94fd953f3e773",
@@ -15,11 +15,11 @@
   "archify_skill_computed_hash": "d96f95fd2f5c043c18919bfade7688fb0eb62a051b3be4ab98faa312fc2ee927",
   "diagram_type": "architecture",
   "typed_source": "mqd-runtime-architecture.json",
-  "typed_source_sha256": "5008fa358460bd16b7a0f7cc41b2a17bfcb84746836987e53aa22c4084e80a51",
+  "typed_source_sha256": "e158bb85113856dae09aa559216085259a1eec64f5ec8e71c3b0f6f0f06484cc",
   "generated_html": "mqd-runtime-architecture.html",
-  "generated_html_sha256": "e434a094b93e59f5802e62c4c504a140ea4059bfefdd76ee45aebe34941218c8",
+  "generated_html_sha256": "6979f58fb03e4d42aa496537eb76ccd3a876f2ee65809b762dfbd09d2ca04533",
   "hash_scope": "SHA-256 over the committed bytes of the two files named above; this provenance file is not self-hashed.",
-  "generation_timestamp_utc": "2026-10-07T09:26:13Z",
+  "generation_timestamp_utc": "2026-10-07T17:38:55Z",
   "validation": {
     "command": "archify finalize architecture --repo-root <repo> --quality showcase",
     "gates": {
@@ -40,7 +40,6 @@
     "core-rs/crates/mqk-config/src/lib.rs",
     "core-rs/crates/mqk-daemon/src/bind.rs",
     "core-rs/crates/mqk-daemon/src/decision.rs",
-    "core-rs/crates/mqk-daemon/src/mode_transition.rs",
     "core-rs/crates/mqk-daemon/src/promotion_evidence_validation.rs",
     "core-rs/crates/mqk-daemon/src/promotion_gate.rs",
     "core-rs/crates/mqk-daemon/src/research_evidence_gate.rs",
@@ -68,16 +67,21 @@
     "core-rs/mqk-gui/src/features/ingest/api.ts",
     "core-rs/mqk-gui/src/features/system/api.ts",
     "research-py/src/mqk_research/data/alpaca_historical.py",
-    "research-py/src/mqk_research/scanner/risk_simulation.py"
+    "research-py/src/mqk_research/scanner/risk_simulation.py",
+    "scripts/windows/Start-MiniQuantDesk.ps1"
   ],
   "also_inspected_not_cited": [
     "README_TECHNICAL.md",
-    "docs/CURRENT_MISSION.md",
     "core-rs/Cargo.toml",
     "core-rs/crates/*/Cargo.toml (dependency graph)",
+    "core-rs/crates/mqk-daemon/src/mode_transition.rs",
+    "core-rs/crates/mqk-daemon/src/promotion_gate.rs",
+    "docs/CURRENT_MISSION.md",
+    "research-py/experiments/alpha_edge_confirmation_01/results/CONFIRMATION_RESULT.md",
     "research-py/src/mqk_research (repository search for broker/order/DB-write paths)",
-    "research-py/experiments/alpha_edge_confirmation_01/results/CONFIRMATION_RESULT.md"
+    "scripts/windows/Start-LiveShadowSmoke.ps1"
   ],
   "inference_policy": "Facts shown as edges/nodes were established from code at the source commit. Items that could not be established from committed code are marked CONCEPTUAL, UNKNOWN or INFERRED in the diagram cards. Runtime/DB state (daemon running, Paper deployment, promotion rows) was NOT inspected; documented state is quoted from docs and labelled as such.",
-  "edge_evidence": "Archify schema has no per-edge source field; see README.md edge evidence table."
+  "edge_evidence": "Archify schema has no per-edge source field; see README.md edge evidence table.",
+  "revision": "2 \u2014 corrected after independent review: LiveShadow/LiveCapital wording, exact repo-root-relative README evidence paths"
 }

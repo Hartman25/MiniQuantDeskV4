@@ -191,14 +191,14 @@
       "id": "modeconfig",
       "type": "security",
       "label": "Mode & Config Gate",
-      "sublabel": "Paper only · Live refused",
-      "tag": "LIVE NOT ENABLED",
+      "sublabel": "Paper execution · LiveShadow monitor-only · LiveCapital refused",
+      "tag": "LIVECAPITAL NOT ENABLED",
       "pos": [
         947,
         220
       ],
       "size": [
-        184,
+        400,
         76
       ],
       "sources": [
@@ -209,10 +209,10 @@
           "label": "LiveCapital start refused"
         },
         {
-          "path": "core-rs/crates/mqk-daemon/src/mode_transition.rs",
-          "line": 1,
-          "end_line": 40,
-          "label": "mode transition state machine"
+          "path": "scripts/windows/Start-MiniQuantDesk.ps1",
+          "line": 501,
+          "end_line": 527,
+          "label": "LiveShadow: real connectivity, no orders"
         },
         {
           "path": "core-rs/crates/mqk-config/src/lib.rs",
@@ -688,10 +688,10 @@
       "dot": "orange",
       "title": "Paper vs Live",
       "items": [
-        "Paper: the only wired mode that can reach a broker (Alpaca paper endpoint).",
-        "LiveCapital start is refused unless live_trust_complete=true, which the current parity pipeline cannot produce.",
-        "LiveShadow and LiveCapital map to the same Alpaca live base URL in code, but no Live path is claimed enabled here.",
-        "Documented state at the anchor, NOT runtime-verified: Paper INACTIVE, Live DISABLED, no promoted candidate, PROMOTION_AUTHORITY = NONE."
+        "Paper is the only currently authorized order-submitting runtime mode: Paper + Alpaca routes to paper-api.alpaca.markets and is the broker-backed order path.",
+        "LiveShadow is wired for real Alpaca connectivity (api.alpaca.markets) but is no-order / monitor-only: the launcher never arms or starts the runtime, and strategy-originated outbox admission denies every Live mode. The no-order contract is documented as a runtime design invariant.",
+        "LiveCapital order execution is not enabled: start is refused unless live_trust_complete=true, which the current parity pipeline cannot produce.",
+        "Broker connectivity is not order authority. Documented state at the anchor, NOT runtime-verified: Paper INACTIVE, Live DISABLED (documentation wording), no promoted candidate, PROMOTION_AUTHORITY = NONE."
       ]
     },
     {
@@ -717,7 +717,7 @@
       "dot": "violet",
       "title": "Not shown, conceptual or unknown",
       "items": [
-        "CONCEPTUAL, not wired: Live trading, non-equity asset classes (V2 scaffold), IBKR adapter (not a daemon dependency).",
+        "CONCEPTUAL / NOT ENABLED: LiveCapital order execution (start refused), non-equity asset classes (V2 scaffold), IBKR adapter (not a daemon dependency).",
         "UNKNOWN: whether a daemon is running, Paper DB contents and migration level, deployed strategy.",
         "INFERRED: 'research has no order path' is a repository-search result, not a proof; research-py's only network egress found is GET to data.alpaca.markets.",
         "Not drawn: CLI direct DB bookkeeping (mqk run/db/ingest), WS transport and gap recovery, Postgres audit_events, crypto and option modules."

@@ -50,32 +50,44 @@ required to contain its claimed symbol in the anchor blob (37/37).
 Archify's schema has no per-edge source field, so edge evidence is recorded here (all paths relative to the
 repo root; line numbers valid at the anchor):
 
-| Edge | Evidence |
+| Edge | Evidence (repo-root-relative, valid at the anchor commit) |
 |---|---|
 | operator → daemon (commands, Bearer) | `core-rs/mqk-gui/src/features/ingest/api.ts:693`; `core-rs/crates/mqk-daemon/src/routes.rs:103,1013-1015` |
 | daemon → operator (status, `truth_state`) | `core-rs/mqk-gui/src/features/system/api.ts:489-560` |
 | mode/config gate → daemon (start gate) | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1567-1615` |
-| daemon → promotion (token POST) | `core-rs/crates/mqk-daemon/src/routes.rs:924`; `routes/strategy_promotions.rs:1-20` |
+| daemon → promotion (token POST) | `core-rs/crates/mqk-daemon/src/routes.rs:924`; `core-rs/crates/mqk-daemon/src/routes/strategy_promotions.rs:1-20` |
 | provider → research (GET bars only) | `research-py/src/mqk_research/data/alpaca_historical.py:218-220,650-652` |
-| research → promotion (artifact files) | `mqk-daemon/src/promotion_evidence_validation.rs:702`; `research_evidence_gate.rs:83`; `mqk-promotion/src/research_registry.rs:297` (read-only SQLite) |
-| promotion → Postgres (durable transition) | `mqk-daemon/src/routes/strategy_promotions.rs:47-49,811`; `mqk-db/src/strategy_promotion.rs:611` |
-| provider → ingest (bars) | `mqk-md/src/provider.rs:402`; `mqk-daemon/src/main.rs:146`; `state/autonomous_completed_bar_task.rs:232` |
-| ingest → Postgres (`md_bars`) | `mqk-db/src/md.rs:478` |
-| Postgres → strategy (bars, promotion, arm) | `mqk-db/src/md.rs:1423`; `mqk-daemon/src/state.rs:4546`; `decision.rs:7-24`; `promotion_gate.rs:184` |
-| strategy → Postgres (outbox enqueue) | `mqk-daemon/src/decision.rs:1667`; `state/loop_runner.rs:2166` |
-| Postgres → orchestrator (claim outbox) | `mqk-db/src/orders.rs:588`; `mqk-runtime/src/orchestrator.rs:1-20` |
-| safety → orchestrator (gate verdicts) | `mqk-execution/src/gateway.rs:1-30`; `mqk-daemon/src/state/orchestrator_build.rs:493-507` |
-| orchestrator → adapter (submit) | `mqk-runtime/src/orchestrator.rs:1-12`; `mqk-daemon/src/state/broker.rs:61-70` |
-| adapter → broker (REST orders) | `mqk-broker-alpaca/src/lib.rs:1-20`; `mqk-daemon/src/state/broker.rs:144-162` |
-| broker → truth (WS/REST events) | `mqk-runtime/src/orchestrator.rs:14-20`; `mqk-runtime/src/alpaca_inbound.rs:1-30` |
-| truth → safety (reconcile) | `mqk-daemon/src/state/loop_runner.rs:2308`; `state/types.rs:207-233`; `mqk-reconcile/src/lib.rs:1-14`. Simplification: the REST broker-snapshot fetch that reconcile compares against is not drawn as its own edge (`state/types.rs:756-763`) |
-| truth → Postgres (inbox, ledger) | `mqk-db/src/inbox.rs:216`; `mqk-runtime/src/orchestrator/apply.rs:312` |
-| Postgres → daemon (durable reads) / daemon → Postgres (arm, run state) | `mqk-db/src/arm_state.rs:15`; `state/loop_runner.rs:179` |
+| research → promotion (artifact files) | `core-rs/crates/mqk-daemon/src/promotion_evidence_validation.rs:702`; `core-rs/crates/mqk-daemon/src/research_evidence_gate.rs:83`; `core-rs/crates/mqk-promotion/src/research_registry.rs:297` (read-only SQLite) |
+| promotion → Postgres (durable transition) | `core-rs/crates/mqk-daemon/src/routes/strategy_promotions.rs:47-49,811`; `core-rs/crates/mqk-db/src/strategy_promotion.rs:611` |
+| provider → ingest (bars) | `core-rs/crates/mqk-md/src/provider.rs:402`; `core-rs/crates/mqk-daemon/src/main.rs:146`; `core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_task.rs:232` |
+| ingest → Postgres (`md_bars`) | `core-rs/crates/mqk-db/src/md.rs:478` |
+| Postgres → strategy (bars, promotion, arm) | `core-rs/crates/mqk-db/src/md.rs:1423`; `core-rs/crates/mqk-daemon/src/state.rs:4546`; `core-rs/crates/mqk-daemon/src/decision.rs:7-24`; `core-rs/crates/mqk-daemon/src/promotion_gate.rs:184` |
+| strategy → Postgres (outbox enqueue) | `core-rs/crates/mqk-daemon/src/decision.rs:1667`; `core-rs/crates/mqk-daemon/src/state/loop_runner.rs:2166` |
+| Postgres → orchestrator (claim outbox) | `core-rs/crates/mqk-db/src/orders.rs:588`; `core-rs/crates/mqk-runtime/src/orchestrator.rs:1-20` |
+| safety → orchestrator (gate verdicts) | `core-rs/crates/mqk-execution/src/gateway.rs:1-30`; `core-rs/crates/mqk-daemon/src/state/orchestrator_build.rs:493-507` |
+| orchestrator → adapter (submit) | `core-rs/crates/mqk-runtime/src/orchestrator.rs:1-12`; `core-rs/crates/mqk-daemon/src/state/broker.rs:61-70` |
+| adapter → broker (REST orders) | `core-rs/crates/mqk-broker-alpaca/src/lib.rs:1-20`; `core-rs/crates/mqk-daemon/src/state/broker.rs:144-162` |
+| broker → truth (WS/REST events) | `core-rs/crates/mqk-runtime/src/orchestrator.rs:14-20`; `core-rs/crates/mqk-runtime/src/alpaca_inbound.rs:1-30` |
+| truth → safety (reconcile) | `core-rs/crates/mqk-daemon/src/state/loop_runner.rs:2308`; `core-rs/crates/mqk-daemon/src/state/types.rs:207-233`; `core-rs/crates/mqk-reconcile/src/lib.rs:1-14`; (simplification: the REST broker-snapshot fetch reconcile compares against is not drawn as its own edge; see `core-rs/crates/mqk-daemon/src/state/types.rs:756-763`) |
+| truth → Postgres (inbox, ledger) | `core-rs/crates/mqk-db/src/inbox.rs:216`; `core-rs/crates/mqk-runtime/src/orchestrator/apply.rs:312` |
+| Postgres → daemon (durable reads) / daemon → Postgres (arm, run state) | `core-rs/crates/mqk-db/src/arm_state.rs:15`; `core-rs/crates/mqk-daemon/src/state/loop_runner.rs:179` |
+
+Mode claims (what the mode/config node asserts). Broker connectivity is not order authority:
+
+| Claim | Evidence (repo-root-relative) |
+|---|---|
+| Paper + Alpaca routes to `paper-api.alpaca.markets`; the local `LockedPaperBroker` is refused as an execution path | `core-rs/crates/mqk-daemon/src/state/broker.rs:144-162`, `core-rs/crates/mqk-daemon/src/state/broker.rs:167-185` |
+| LiveShadow and LiveCapital map to the real Alpaca live base URL (`api.alpaca.markets`); credentials are the `_LIVE` pair | `core-rs/crates/mqk-daemon/src/state/broker.rs:144-162`, `core-rs/crates/mqk-daemon/src/state/broker.rs:186-200` |
+| LiveShadow is monitor-only: real broker connectivity, no orders submitted, no arm, no runtime auto-start (launcher contract) | `scripts/windows/Start-MiniQuantDesk.ps1:501-527`, `scripts/windows/Start-MiniQuantDesk.ps1:1819` |
+| LiveShadow no-order behaviour is described by the repo as a runtime design invariant (this review did not independently prove it in the daemon) | `scripts/windows/Start-LiveShadowSmoke.ps1:48-50`, `scripts/windows/Start-LiveShadowSmoke.ps1:345-347` |
+| Dormant strategy is allowed for LiveShadow monitor-only operation | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1795-1798` |
+| Strategy-originated outbox admission denies every Live mode (LiveShadow and LiveCapital map to `PromotionRunMode::Live`) | `core-rs/crates/mqk-daemon/src/promotion_gate.rs:45-66` |
+| LiveCapital start is refused unless `live_trust_complete=true`; Paper/LiveShadow to LiveCapital transitions are fail-closed | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1567-1615`, `core-rs/crates/mqk-daemon/src/mode_transition.rs:213` |
 
 ## Conceptual, unknown and inferred
 
-- **CONCEPTUAL (not wired, not drawn as live):** Live trading; non-equity asset classes (V2 scaffold,
-  `mqk-execution/src/lib.rs:28-36`); IBKR adapter (crate exists, not a daemon dependency).
+- **CONCEPTUAL / NOT ENABLED:** LiveCapital order execution (start refused); non-equity asset classes (V2 scaffold,
+  `core-rs/crates/mqk-execution/src/lib.rs:28-36`); IBKR adapter (crate exists, not a daemon dependency).
 - **UNKNOWN (not inspected):** whether a daemon is running, Paper DB contents and migration level, the
   deployed strategy, promotion rows. The diagram quotes documented state at the anchor (Paper INACTIVE,
   Live DISABLED, no promoted candidate, `PROMOTION_AUTHORITY = NONE`; `README_TECHNICAL.md`,
@@ -91,8 +103,8 @@ repo root; line numbers valid at the anchor):
 ## Discrepancies found (documented only; nothing was changed)
 
 1. `core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_driver.rs` header says the driver is not
-   started from `main.rs`; `main.rs:146` spawns it for Paper+Alpaca (the header is stale).
-2. `mqk-daemon` declares a dependency on `mqk-audit` (`Cargo.toml:51`) but never references it; audit rows
+   started from `core-rs/crates/mqk-daemon/src/main.rs`; `core-rs/crates/mqk-daemon/src/main.rs:146` spawns it for Paper+Alpaca (the header is stale).
+2. `mqk-daemon` declares a dependency on `mqk-audit` (`core-rs/crates/mqk-daemon/Cargo.toml:51`) but never references it; audit rows
    go to Postgres `audit_events` via `mqk-db`.
 3. `README_TECHNICAL.md` §2 cites an older accepted baseline (`fac22592`, CI #623) than this anchor.
 
@@ -100,11 +112,20 @@ repo root; line numbers valid at the anchor):
 
 Archify `finalize` (validate, deliver, strict check, browser check) with `--repo-root` evidence verification;
 desktop screenshot reviewed by the author (no crossings; one advisory 3-bend route, promotion → Postgres);
-content check of all 37 references; secret-pattern scan; typed-source/HTML SHA-256 recorded in the provenance
-file. Negative controls (isolated copies, discarded): anchor SHA missing or nonexistent, hash mismatches,
-HTML tamper, title or provenance relabelled authoritative, Live tag changed to enabled, research edges to
-orchestrator/broker/Postgres, component without sources, secret-shaped string, evidence line/path/end-line/
-commit broken, and a shifted evidence range.
+content check of all 37 component references; every path token in this README resolved at the anchor (61
+tokens, no shorthand); secret-pattern scan; typed-source/HTML SHA-256 recorded in the provenance file.
+Negative controls (isolated copies, discarded): anchor SHA missing or nonexistent, hash mismatches, HTML
+tamper, title or provenance relabelled authoritative, LiveCapital tag changed to enabled, LiveShadow relabelled
+as order-submitting or as fully disabled, research edges to orchestrator/broker/Postgres, component without
+sources, secret-shaped string, evidence line/path/end-line/commit broken, a shifted evidence range, and a
+shortened or nonexistent README evidence path.
+
+## Revision note
+
+Corrected after independent review of the first version: (1) the mode node and cards now distinguish broker
+connectivity from order authority (Paper executes; LiveShadow is real-connectivity but monitor-only;
+LiveCapital is refused); (2) every README evidence path is now an exact repo-root-relative path. The source
+anchor is unchanged; the topology is unchanged.
 
 ## Regenerating
 
