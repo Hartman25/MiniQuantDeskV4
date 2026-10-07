@@ -1,0 +1,552 @@
+{
+ "EVIDENCE_GRADE": "DISCOVERY_ROBUSTNESS_NOT_P9_PROMOTION_GRADE",
+ "PASS2_PROTOCOL_ID": "a712c301c2c527d8bc37b1ba7e72e6889c16a3ae0b2cd6e10f4dfbf2ee62db15",
+ "PROMOTION_AUTHORITY": "NONE",
+ "VALIDATION_STATUS": "NOT_VALIDATED",
+ "conditional": {
+  "blocked_by_scenario": {},
+  "denominator": 135,
+  "failure_profiles": {
+   "C2": 44,
+   "C2,C3": 15,
+   "C2,C3,C4,C5": 1,
+   "C2,C3,C5": 21,
+   "C2,C3,C5,C6": 9,
+   "C2,C3,C6": 9,
+   "C2,C5": 1,
+   "C2,C6": 7,
+   "C3": 1,
+   "C3,C5,C6": 1,
+   "C3,C6": 2,
+   "C5,C6": 1,
+   "C6": 5,
+   "NONE": 18
+  },
+  "failures_by_family": {
+   "S01": {
+    "C1": 0,
+    "C2": 5,
+    "C3": 3,
+    "C4": 0,
+    "C5": 0,
+    "C6": 7
+   },
+   "S02": {
+    "C1": 0,
+    "C2": 6,
+    "C3": 6,
+    "C4": 0,
+    "C5": 2,
+    "C6": 2
+   },
+   "S03": {
+    "C1": 0,
+    "C2": 15,
+    "C3": 15,
+    "C4": 0,
+    "C5": 10,
+    "C6": 7
+   },
+   "S04": {
+    "C1": 0,
+    "C2": 10,
+    "C3": 3,
+    "C4": 0,
+    "C5": 1,
+    "C6": 1
+   },
+   "S05": {
+    "C1": 0,
+    "C2": 4,
+    "C3": 5,
+    "C4": 0,
+    "C5": 4,
+    "C6": 2
+   },
+   "S06": {
+    "C1": 0,
+    "C2": 3,
+    "C3": 2,
+    "C4": 0,
+    "C5": 0,
+    "C6": 5
+   },
+   "S07": {
+    "C1": 0,
+    "C2": 12,
+    "C3": 5,
+    "C4": 0,
+    "C5": 3,
+    "C6": 2
+   },
+   "S08": {
+    "C1": 0,
+    "C2": 5,
+    "C3": 5,
+    "C4": 1,
+    "C5": 1,
+    "C6": 0
+   },
+   "S09": {
+    "C1": 0,
+    "C2": 13,
+    "C3": 3,
+    "C4": 0,
+    "C5": 1,
+    "C6": 0
+   },
+   "S10": {
+    "C1": 0,
+    "C2": 13,
+    "C3": 7,
+    "C4": 0,
+    "C5": 7,
+    "C6": 0
+   },
+   "S11": {
+    "C1": 0,
+    "C2": 1,
+    "C3": 1,
+    "C4": 0,
+    "C5": 1,
+    "C6": 2
+   },
+   "S12": {
+    "C1": 0,
+    "C2": 15,
+    "C3": 3,
+    "C4": 0,
+    "C5": 3,
+    "C6": 1
+   },
+   "S13": {
+    "C1": 0,
+    "C2": 5,
+    "C3": 1,
+    "C4": 0,
+    "C5": 1,
+    "C6": 5
+   }
+  },
+  "failures_by_horizon": {
+   "1": {
+    "C1": 0,
+    "C2": 39,
+    "C3": 20,
+    "C4": 1,
+    "C5": 8,
+    "C6": 12
+   },
+   "10": {
+    "C1": 0,
+    "C2": 11,
+    "C3": 6,
+    "C4": 0,
+    "C5": 4,
+    "C6": 6
+   },
+   "20": {
+    "C1": 0,
+    "C2": 16,
+    "C3": 6,
+    "C4": 0,
+    "C5": 4,
+    "C6": 1
+   },
+   "3": {
+    "C1": 0,
+    "C2": 20,
+    "C3": 13,
+    "C4": 0,
+    "C5": 9,
+    "C6": 5
+   },
+   "5": {
+    "C1": 0,
+    "C2": 21,
+    "C3": 14,
+    "C4": 0,
+    "C5": 9,
+    "C6": 10
+   }
+  },
+  "failures_by_scenario": {
+   "C1": 0,
+   "C2": 107,
+   "C3": 59,
+   "C4": 1,
+   "C5": 34,
+   "C6": 34
+  },
+  "horizon_class_all_candidates": {
+   "HORIZON_ISOLATED": 45,
+   "HORIZON_SUPPORTED": 90
+  },
+  "not_applicable_by_scenario": {},
+  "regime_class_all_candidates": {
+   "GENERAL_REGIME": 30,
+   "REGIME_CONCENTRATED": 105
+  },
+  "survivors_by_family": {
+   "S05": 4,
+   "S06": 12,
+   "S13": 2
+  },
+  "survivors_by_horizon": {
+   "1": 3,
+   "3": 2,
+   "5": 1,
+   "10": 4,
+   "20": 8
+  },
+  "survivors_by_horizon_support_class": {
+   "HORIZON_ISOLATED": 7,
+   "HORIZON_SUPPORTED": 11
+  },
+  "survivors_by_regime_class": {
+   "GENERAL_REGIME": 9,
+   "REGIME_CONCENTRATED": 9
+  },
+  "verdicts": {
+   "PASS2_CONDITIONAL_REJECTED": 117,
+   "PASS2_CONDITIONAL_SURVIVOR": 18
+  },
+  "verdicts_by_horizon": {
+   "1": {
+    "PASS2_CONDITIONAL_REJECTED": 44,
+    "PASS2_CONDITIONAL_SURVIVOR": 3
+   },
+   "10": {
+    "PASS2_CONDITIONAL_REJECTED": 12,
+    "PASS2_CONDITIONAL_SURVIVOR": 4
+   },
+   "20": {
+    "PASS2_CONDITIONAL_REJECTED": 16,
+    "PASS2_CONDITIONAL_SURVIVOR": 8
+   },
+   "3": {
+    "PASS2_CONDITIONAL_REJECTED": 21,
+    "PASS2_CONDITIONAL_SURVIVOR": 2
+   },
+   "5": {
+    "PASS2_CONDITIONAL_REJECTED": 24,
+    "PASS2_CONDITIONAL_SURVIVOR": 1
+   }
+  }
+ },
+ "input_fence": {
+  "confirmation_rows_read": 0,
+  "final_holdout_rows_read": 0,
+  "loads": 4,
+  "max_end_ts_read": "2023-12-29 05:00:00+00:00"
+ },
+ "schema_version": "alpha_edge_pass2_summary_v1",
+ "strategy": {
+  "blocked_by_scenario": {},
+  "denominator": 789,
+  "diagnostic_3x_pass_all_candidates": {
+   "false": 151,
+   "true": 638
+  },
+  "failure_profiles": {
+   "S2": 6,
+   "S2,S3,S5,S6": 3,
+   "S2,S3,S5,S6,S7": 5,
+   "S2,S3,S5,S6,S7,S8": 13,
+   "S2,S3,S5,S6,S7,S8,S9": 9,
+   "S2,S3,S5,S6,S7,S9": 2,
+   "S2,S3,S5,S6,S8,S10": 1,
+   "S2,S3,S5,S6,S9": 2,
+   "S2,S3,S5,S8": 1,
+   "S2,S3,S6,S7": 9,
+   "S2,S3,S6,S7,S8": 13,
+   "S2,S3,S6,S7,S8,S9": 12,
+   "S2,S3,S6,S7,S9": 1,
+   "S2,S3,S6,S8": 1,
+   "S2,S3,S6,S9": 1,
+   "S2,S3,S7": 1,
+   "S2,S5,S6": 1,
+   "S2,S5,S6,S7": 15,
+   "S2,S5,S6,S7,S10": 4,
+   "S2,S5,S6,S7,S8": 18,
+   "S2,S5,S6,S7,S8,S10": 7,
+   "S2,S5,S6,S7,S8,S9": 11,
+   "S2,S5,S6,S7,S8,S9,S10": 3,
+   "S2,S5,S6,S7,S9": 3,
+   "S2,S5,S6,S8": 5,
+   "S2,S5,S6,S8,S10": 1,
+   "S2,S5,S6,S8,S9": 2,
+   "S2,S5,S6,S9": 3,
+   "S2,S5,S7,S8,S10": 1,
+   "S2,S6": 55,
+   "S2,S6,S10": 19,
+   "S2,S6,S7": 56,
+   "S2,S6,S7,S10": 41,
+   "S2,S6,S7,S8": 134,
+   "S2,S6,S7,S8,S10": 63,
+   "S2,S6,S7,S8,S9": 44,
+   "S2,S6,S7,S8,S9,S10": 5,
+   "S2,S6,S7,S9": 17,
+   "S2,S6,S7,S9,S10": 5,
+   "S2,S6,S8": 42,
+   "S2,S6,S8,S10": 84,
+   "S2,S6,S8,S9": 13,
+   "S2,S6,S8,S9,S10": 5,
+   "S2,S6,S9": 3,
+   "S2,S6,S9,S10": 2,
+   "S2,S7,S10": 1,
+   "S2,S7,S8,S9": 1,
+   "S2,S7,S9": 1,
+   "S2,S8": 4,
+   "S2,S8,S10": 20,
+   "S3,S5,S6,S7": 1,
+   "S3,S5,S6,S7,S9": 1,
+   "S3,S6,S7,S8": 2,
+   "S6,S7": 1,
+   "S6,S7,S10": 2,
+   "S6,S7,S8": 1,
+   "S6,S7,S8,S10": 7,
+   "S6,S7,S9,S10": 1,
+   "S6,S8,S10": 4
+  },
+  "failures_by_family": {
+   "S01": {
+    "S1": 0,
+    "S10": 34,
+    "S2": 58,
+    "S3": 1,
+    "S5": 10,
+    "S6": 57,
+    "S7": 38,
+    "S8": 44,
+    "S9": 23
+   },
+   "S02": {
+    "S1": 0,
+    "S10": 28,
+    "S2": 27,
+    "S3": 1,
+    "S5": 5,
+    "S6": 36,
+    "S7": 24,
+    "S8": 29,
+    "S9": 7
+   },
+   "S03": {
+    "S1": 0,
+    "S10": 58,
+    "S2": 143,
+    "S3": 13,
+    "S5": 7,
+    "S6": 139,
+    "S7": 90,
+    "S8": 99,
+    "S9": 11
+   },
+   "S04": {
+    "S1": 0,
+    "S10": 30,
+    "S2": 70,
+    "S3": 6,
+    "S5": 7,
+    "S6": 64,
+    "S7": 46,
+    "S8": 46,
+    "S9": 4
+   },
+   "S05": {
+    "S1": 0,
+    "S10": 1,
+    "S2": 52,
+    "S3": 6,
+    "S5": 11,
+    "S6": 52,
+    "S7": 37,
+    "S8": 36,
+    "S9": 18
+   },
+   "S06": {
+    "S1": 0,
+    "S10": 1,
+    "S2": 36,
+    "S3": 7,
+    "S5": 12,
+    "S6": 34,
+    "S7": 24,
+    "S8": 21,
+    "S9": 12
+   },
+   "S07": {
+    "S1": 0,
+    "S10": 0,
+    "S2": 27,
+    "S3": 2,
+    "S5": 6,
+    "S6": 27,
+    "S7": 20,
+    "S8": 20,
+    "S9": 10
+   },
+   "S08": {
+    "S1": 0,
+    "S10": 0,
+    "S2": 7,
+    "S3": 2,
+    "S5": 7,
+    "S6": 7,
+    "S7": 5,
+    "S8": 3,
+    "S9": 1
+   },
+   "S09": {
+    "S1": 0,
+    "S10": 116,
+    "S2": 277,
+    "S3": 31,
+    "S5": 30,
+    "S6": 265,
+    "S7": 172,
+    "S8": 172,
+    "S9": 44
+   },
+   "S10": {
+    "S1": 0,
+    "S10": 2,
+    "S2": 33,
+    "S3": 4,
+    "S5": 8,
+    "S6": 36,
+    "S7": 30,
+    "S8": 25,
+    "S9": 6
+   },
+   "S11": {
+    "S1": 0,
+    "S10": 0,
+    "S2": 4,
+    "S3": 2,
+    "S5": 2,
+    "S6": 4,
+    "S7": 2,
+    "S8": 4,
+    "S9": 0
+   },
+   "S13": {
+    "S1": 0,
+    "S10": 3,
+    "S2": 15,
+    "S3": 1,
+    "S5": 3,
+    "S6": 15,
+    "S7": 13,
+    "S8": 12,
+    "S9": 11
+   },
+   "S14": {
+    "S1": 0,
+    "S10": 3,
+    "S2": 20,
+    "S3": 2,
+    "S5": 4,
+    "S6": 17,
+    "S7": 10,
+    "S8": 16,
+    "S9": 0
+   }
+  },
+  "failures_by_replication_class": {
+   "CLUSTER_REPLICATED": {
+    "S1": 0,
+    "S10": 271,
+    "S2": 724,
+    "S3": 70,
+    "S5": 97,
+    "S6": 707,
+    "S7": 476,
+    "S8": 493,
+    "S9": 133
+   },
+   "SYMBOL_SPECIFIC": {
+    "S1": 0,
+    "S10": 5,
+    "S2": 45,
+    "S3": 8,
+    "S5": 15,
+    "S6": 46,
+    "S7": 35,
+    "S8": 34,
+    "S9": 14
+   }
+  },
+  "failures_by_scenario": {
+   "S1": 0,
+   "S10": 276,
+   "S2": 769,
+   "S3": 78,
+   "S5": 112,
+   "S6": 753,
+   "S7": 511,
+   "S8": 527,
+   "S9": 147
+  },
+  "not_applicable_by_scenario": {
+   "S9": 20
+  },
+  "survivors_by_3x_cost_diagnostic": {},
+  "survivors_by_family": {},
+  "survivors_by_replication_class": {},
+  "survivors_by_symbol": {},
+  "verdicts": {
+   "PASS2_STRATEGY_REJECTED": 789
+  },
+  "verdicts_by_family": {
+   "S01": {
+    "PASS2_STRATEGY_REJECTED": 63
+   },
+   "S02": {
+    "PASS2_STRATEGY_REJECTED": 37
+   },
+   "S03": {
+    "PASS2_STRATEGY_REJECTED": 143
+   },
+   "S04": {
+    "PASS2_STRATEGY_REJECTED": 70
+   },
+   "S05": {
+    "PASS2_STRATEGY_REJECTED": 52
+   },
+   "S06": {
+    "PASS2_STRATEGY_REJECTED": 36
+   },
+   "S07": {
+    "PASS2_STRATEGY_REJECTED": 27
+   },
+   "S08": {
+    "PASS2_STRATEGY_REJECTED": 7
+   },
+   "S09": {
+    "PASS2_STRATEGY_REJECTED": 279
+   },
+   "S10": {
+    "PASS2_STRATEGY_REJECTED": 36
+   },
+   "S11": {
+    "PASS2_STRATEGY_REJECTED": 4
+   },
+   "S13": {
+    "PASS2_STRATEGY_REJECTED": 15
+   },
+   "S14": {
+    "PASS2_STRATEGY_REJECTED": 20
+   }
+  },
+  "verdicts_by_replication_class": {
+   "CLUSTER_REPLICATED": {
+    "PASS2_STRATEGY_REJECTED": 743
+   },
+   "SYMBOL_SPECIFIC": {
+    "PASS2_STRATEGY_REJECTED": 46
+   }
+  }
+ }
+}

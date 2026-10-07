@@ -1,0 +1,97 @@
+{
+ "before_equals_after": true,
+ "conditional_v3_attempts_before_after": [
+  1095,
+  1095
+ ],
+ "new_pass1_factors": 0,
+ "new_pass1_strategy_trials": 0,
+ "predeclared_binding": {
+  "attempt_counts": {
+   "conditional_v3": {
+    "not_evaluable": 30,
+    "succeeded": 1065
+   },
+   "conditional_v3_total": 1095,
+   "strategy": {
+    "succeeded": 38192
+   },
+   "strategy_total": 38192
+  },
+  "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+  "committed_files_sha256_lf": {
+   "ALPHA_CENSUS_BARS_MANIFEST_V2.json": "6e4a4befe3797d45b97ba474374f3326e4b3cbec6efa3666307c339459e596d6",
+   "ALPHA_CENSUS_CONDITION_GRAMMAR_V3.json": "fd8039d1add1638fbdba14e81afa2c1257e8beafc34f6b012f1dea7d467dfddb",
+   "ALPHA_CENSUS_GRAMMAR_V2.json": "d7ccafea17b1944d5a67bb35fd562fce55c2ce739bed86b225ff4963c46ca50c",
+   "ALPHA_CENSUS_PARTITIONS_V2.json": "9549618bd8fae8a57716e50bcd3f22be1c8b67791645389933772c3d379b9c4d",
+   "ALPHA_CENSUS_PROTOCOL_V2.json": "89cb014cde1453383b4aadb69a3a3794b4549c892b80b3642ac62b1dac651f9f",
+   "ALPHA_CENSUS_SEARCH_SPACE_V2.json": "9b6670732bcb6082713e9fcc6c3598376d47de4d9b0e54ad180d927515b8cdc0",
+   "ALPHA_CENSUS_SEED_UNIVERSE_V2.json": "ff9a3eff44d688ca092fc4e297fd87d216efcc0433dd34f4c33e545bab0698a7",
+   "ALPHA_CENSUS_UNIVERSE_V2.json": "e0be5e6ce1491947314b133eb93f40b8ce579db78397b0d23cdcbf7d02a47dea",
+   "CAMPAIGN_EVIDENCE_V2.json": "c72034ca5b187e5da23623b1ca1b3f7c07abd21fddaabba152237b37bee671a9",
+   "CAMPAIGN_EVIDENCE_V3.json": "568b0e886e723e63f4d3b8767dafedbd78a122290408ae1ad4bdf0fd26f78a67",
+   "CONDITIONAL_V2_DISPOSITION.json": "431058cb76d95b950a229e30637a411365bce9eb8fd3ad540a0c2e0e91fc3a23",
+   "FACTOR_FREEZE_PROOF_V3.json": "b00baf1d3ec85c12461e4a61ce571629200431ad7a3d4216e997e6975958c0f2",
+   "POPULATION_FREEZE_PROOF_V2.json": "a9e6943dac4b38fae667d570d4fe07006e6958328a3cdcc0b964c5ccf69cf69c"
+  },
+  "factor_freeze_conditional_population_root": "6d51d30d384fb347364524fa90285e7f6f1b425927683458b9a0d6bab064c72c",
+  "run_files_sha256": {
+   "edge_registry_summary_v3.json": "deec6b38f954ab270115d557f5d90e6c3e58f9b0311779f02fd9ecbafbcbed8a",
+   "edge_registry_v3.jsonl": "8532132a50f43ee4ffe38bdff708bb58284a3d5104ecc782413a9fae854bb4d0",
+   "factor_fdr_report_v3.json": "e71a4c07cd8cc11eae262593502b55bdfc640f7b1143f8d4b29451c776d8d9df",
+   "factor_ledger_v3.jsonl": "f99ddcf583c05c9b3cca7e53c12effbfaa79bd9c8a4062f0260b97415c0c702a",
+   "registry.sqlite": "4286bad9d1bd7238b19f4e3ee4445a3091582abe520082f8023100c71966189d",
+   "registry_conditional_v3.sqlite": "5ef1b9a7b62ab1071910c8becf7eb651ac5099f4736aad80e9a3b74c6a9d8a5a",
+   "search_ledger_v2.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5",
+   "search_ledger_v3.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5"
+  },
+  "strategy_chunks_root_sha256": "f66aa88998bc2aa0bc784841d540e69a394633abf3763df86a25f7ac1b6866d3",
+  "strategy_population_root": "6e8cf8133f408d1054e346238ec644c12bf3ae4865aff6b18f583a04cf103208"
+ },
+ "recomputed_after": {
+  "attempt_counts": {
+   "conditional_v3": {
+    "not_evaluable": 30,
+    "succeeded": 1065
+   },
+   "conditional_v3_total": 1095,
+   "strategy": {
+    "succeeded": 38192
+   },
+   "strategy_total": 38192
+  },
+  "bars_manifest_sha256": "22296162850a5f65372c5e019112753c117b8f5fb0d8c6164df831d736cc44b2",
+  "committed_files_sha256_lf": {
+   "ALPHA_CENSUS_BARS_MANIFEST_V2.json": "6e4a4befe3797d45b97ba474374f3326e4b3cbec6efa3666307c339459e596d6",
+   "ALPHA_CENSUS_CONDITION_GRAMMAR_V3.json": "fd8039d1add1638fbdba14e81afa2c1257e8beafc34f6b012f1dea7d467dfddb",
+   "ALPHA_CENSUS_GRAMMAR_V2.json": "d7ccafea17b1944d5a67bb35fd562fce55c2ce739bed86b225ff4963c46ca50c",
+   "ALPHA_CENSUS_PARTITIONS_V2.json": "9549618bd8fae8a57716e50bcd3f22be1c8b67791645389933772c3d379b9c4d",
+   "ALPHA_CENSUS_PROTOCOL_V2.json": "89cb014cde1453383b4aadb69a3a3794b4549c892b80b3642ac62b1dac651f9f",
+   "ALPHA_CENSUS_SEARCH_SPACE_V2.json": "9b6670732bcb6082713e9fcc6c3598376d47de4d9b0e54ad180d927515b8cdc0",
+   "ALPHA_CENSUS_SEED_UNIVERSE_V2.json": "ff9a3eff44d688ca092fc4e297fd87d216efcc0433dd34f4c33e545bab0698a7",
+   "ALPHA_CENSUS_UNIVERSE_V2.json": "e0be5e6ce1491947314b133eb93f40b8ce579db78397b0d23cdcbf7d02a47dea",
+   "CAMPAIGN_EVIDENCE_V2.json": "c72034ca5b187e5da23623b1ca1b3f7c07abd21fddaabba152237b37bee671a9",
+   "CAMPAIGN_EVIDENCE_V3.json": "568b0e886e723e63f4d3b8767dafedbd78a122290408ae1ad4bdf0fd26f78a67",
+   "CONDITIONAL_V2_DISPOSITION.json": "431058cb76d95b950a229e30637a411365bce9eb8fd3ad540a0c2e0e91fc3a23",
+   "FACTOR_FREEZE_PROOF_V3.json": "b00baf1d3ec85c12461e4a61ce571629200431ad7a3d4216e997e6975958c0f2",
+   "POPULATION_FREEZE_PROOF_V2.json": "a9e6943dac4b38fae667d570d4fe07006e6958328a3cdcc0b964c5ccf69cf69c"
+  },
+  "factor_freeze_conditional_population_root": "6d51d30d384fb347364524fa90285e7f6f1b425927683458b9a0d6bab064c72c",
+  "run_files_sha256": {
+   "edge_registry_summary_v3.json": "deec6b38f954ab270115d557f5d90e6c3e58f9b0311779f02fd9ecbafbcbed8a",
+   "edge_registry_v3.jsonl": "8532132a50f43ee4ffe38bdff708bb58284a3d5104ecc782413a9fae854bb4d0",
+   "factor_fdr_report_v3.json": "e71a4c07cd8cc11eae262593502b55bdfc640f7b1143f8d4b29451c776d8d9df",
+   "factor_ledger_v3.jsonl": "f99ddcf583c05c9b3cca7e53c12effbfaa79bd9c8a4062f0260b97415c0c702a",
+   "registry.sqlite": "4286bad9d1bd7238b19f4e3ee4445a3091582abe520082f8023100c71966189d",
+   "registry_conditional_v3.sqlite": "5ef1b9a7b62ab1071910c8becf7eb651ac5099f4736aad80e9a3b74c6a9d8a5a",
+   "search_ledger_v2.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5",
+   "search_ledger_v3.jsonl": "a16be288f9f1bc3e2f0d59c327a41f5dd43f48ece497847c1dab9c58e33437f5"
+  },
+  "strategy_chunks_root_sha256": "f66aa88998bc2aa0bc784841d540e69a394633abf3763df86a25f7ac1b6866d3",
+  "strategy_population_root": "6e8cf8133f408d1054e346238ec644c12bf3ae4865aff6b18f583a04cf103208"
+ },
+ "strategy_attempts_before_after": [
+  38192,
+  38192
+ ]
+}

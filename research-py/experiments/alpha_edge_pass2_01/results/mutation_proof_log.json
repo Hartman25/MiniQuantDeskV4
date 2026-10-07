@@ -1,0 +1,292 @@
+{
+ "P01": {
+  "description": "read a 2024 row (fence only refuses >= 2025)",
+  "file": "p2_pass1.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.41s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p01_p03_fence_refuses_contaminated_confirmation_and_holdout_rows[2024-01-02-CONTAMINATED_BY_REJECTED_RUN]\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.48s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p01_p03_fence_refuses and 2024-01-02"
+ },
+ "P02": {
+  "description": "read 2025+ confirmation data (fence only refuses the final holdout)",
+  "file": "p2_pass1.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.35s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p01_p03_fence_refuses_contaminated_confirmation_and_holdout_rows[2025-06-02-REMAINING_CONFIRMATION_RESERVE]\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.39s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p01_p03_fence_refuses and 2025-06-02"
+ },
+ "P03": {
+  "description": "read final-holdout data (no fence)",
+  "file": "p2_pass1.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "....                                                                     [100%]\n4 passed, 81 deselected in 1.70s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p01_p03_fence_refuses_contaminated_confirmation_and_holdout_rows[2024-01-02-CONTAMINATED_BY_REJECTED_RUN]\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 81 deselected in 1.45s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p01_p03"
+ },
+ "P04": {
+  "description": "change the 789 Strategy cohort (WEAK also advances)",
+  "file": "p2_cohort.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.35s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_strategy_cohort_is_exactly_the_moderate_class_and_refuses_any_other_count\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.37s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_strategy_cohort_is_exactly"
+ },
+ "P04b": {
+  "description": "the Strategy cohort count refusal is removed",
+  "file": "p2_cohort.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.37s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_strategy_cohort_is_exactly_the_moderate_class_and_refuses_any_other_count\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.41s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_strategy_cohort_is_exactly"
+ },
+ "P05": {
+  "description": "change the 135 Conditional cohort (MODERATE also advances)",
+  "file": "p2_cohort.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.35s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_conditional_cohort_is_exactly_the_strong_class_and_refuses_any_other_count\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.40s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_conditional_cohort_is_exactly"
+ },
+ "P05b": {
+  "description": "the Conditional cohort count refusal is removed",
+  "file": "p2_cohort.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.34s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_conditional_cohort_is_exactly_the_strong_class_and_refuses_any_other_count\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.53s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_conditional_cohort_is_exactly"
+ },
+ "P06": {
+  "description": "lower the 2X cost stress to 1X",
+  "file": "p2_protocol.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "....                                                                     [100%]\n4 passed, 81 deselected in 1.62s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_protocol_thresholds_are_the_predeclared_numbers\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 81 deselected in 1.41s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_protocol_thresholds or test_protocol_document or test_stress_at_multiplier or test_pass2_protocol_id_is_pinned"
+ },
+ "P07": {
+  "description": "net-positive but benchmark-negative 2X stress passes",
+  "file": "p2_strategy.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.66s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p07_net_positive_but_benchmark_negative_stress_does_not_pass\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.68s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p07"
+ },
+ "P08": {
+  "description": "remove the one-bar decision delay",
+  "file": "p2_strategy.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.73s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p08_p18_delay_is_one_whole_session_and_the_fill_is_still_strictly_after_the_decision\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.65s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p08_p18"
+ },
+ "P09": {
+  "description": "drop the worst year instead of the best (leave-best-year-out)",
+  "file": "p2_strategy.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".....                                                                    [100%]\n5 passed, 80 deselected in 1.34s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p09_s7_removes_the_best_year_never_the_worst[vals0-FAIL-2016]\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 80 deselected in 1.46s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p09 or test_s7"
+ },
+ "P10": {
+  "description": "require 5 positive years instead of 6",
+  "file": "p2_protocol.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "......                                                                   [100%]\n6 passed, 79 deselected in 1.40s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_protocol_thresholds_are_the_predeclared_numbers\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 79 deselected in 1.41s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p10 or test_protocol_thresholds or test_protocol_document"
+ },
+ "P11": {
+  "description": "allow regime concentration up to 0.95",
+  "file": "p2_protocol.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".......                                                                  [100%]\n7 passed, 78 deselected in 1.35s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_protocol_thresholds_are_the_predeclared_numbers\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 78 deselected in 1.35s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p11 or test_protocol_thresholds or test_protocol_document"
+ },
+ "P12": {
+  "description": "WEAK neighbours support S9",
+  "file": "p2_strategy.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.68s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p12_moderate_support_set_excludes_weak_cells\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.69s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p12"
+ },
+ "P13": {
+  "description": "invent off-grid S9 neighbours",
+  "file": "p2_strategy.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "..                                                                       [100%]\n2 passed, 83 deselected in 1.73s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p13_the_pass2_strategy_context_uses_exactly_the_accepted_neighbour_authority\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 1 passed, 83 deselected in 1.80s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p13"
+ },
+ "P14": {
+  "description": "execution-only params allowed in the conditional neighbourhood",
+  "file": "p2_conditional.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.39s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p14_conditional_neighbourhood_forbids_execution_only_parameters\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.39s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p14"
+ },
+ "P15": {
+  "description": "allow top-symbol share up to 0.95 through C4",
+  "file": "p2_protocol.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "...                                                                      [100%]\n3 passed, 82 deselected in 1.91s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_protocol_thresholds_are_the_predeclared_numbers\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 82 deselected in 1.40s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p15 or test_protocol_thresholds or test_protocol_document"
+ },
+ "P16": {
+  "description": "drop a failing leave-one-symbol-out slice",
+  "file": "p2_conditional.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "..                                                                       [100%]\n2 passed, 83 deselected in 1.87s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p16_c5_a_left_out_slice_below_30_events_fails_and_is_never_dropped\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 83 deselected in 1.86s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p16 or test_c4_c5"
+ },
+ "P17": {
+  "description": "forward-return labels become Strategy P&L",
+  "file": "p2_strategy.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "..                                                                       [100%]\n2 passed, 83 deselected in 1.76s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_stress_at_multiplier_one_equals_the_accepted_baseline_and_x2_x3_cost_strictly_more\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 83 deselected in 1.77s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p17 or test_stress_at_multiplier"
+ },
+ "P18": {
+  "description": "a same-bar fill is created",
+  "file": "simulate.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.63s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p08_p18_delay_is_one_whole_session_and_the_fill_is_still_strictly_after_the_decision\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.63s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p08_p18"
+ },
+ "P19": {
+  "description": "a robustness candidate is registered as a Pass-1 Strategy trial",
+  "file": "p2_runner.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "..                                                                       [100%]\n2 passed, 83 deselected in 1.55s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_freeze_gate_requires_exact_registration_marker_and_zero_attempts\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 83 deselected in 1.48s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p19 or test_freeze_gate"
+ },
+ "P20": {
+  "description": "rejected candidates are deleted from the Pass-2 denominator",
+  "file": "p2_runner.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.58s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p20_the_complete_denominator_is_collected_including_rejected_candidates\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.47s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p20"
+ },
+ "P21": {
+  "description": "a completed candidate is re-run on resume",
+  "file": "p2_runner.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "..                                                                       [100%]\n2 passed, 83 deselected in 1.57s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_p21_terminal_candidates_are_never_reexecuted_and_resume_is_idempotent\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 83 deselected in 1.50s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p21 or test_partial_completion"
+ },
+ "P22": {
+  "description": "Pass-2 output claims VALIDATED / promotion authority",
+  "file": "p2_protocol.py",
+  "green_after_restore": true,
+  "pytest_tail_green": "....                                                                     [100%]\n4 passed, 81 deselected in 1.65s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_protocol_thresholds_are_the_predeclared_numbers\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 81 deselected in 1.41s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_p22 or test_strategy_record or test_protocol_thresholds or test_protocol_document"
+ },
+ "Q01": {
+  "description": "S1 baseline replay tolerates any metric difference",
+  "file": "p2_strategy.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.68s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_s1_replay_reproduces_accepted_metrics_and_any_difference_is_a_contradiction\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.66s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_s1_replay"
+ },
+ "Q02": {
+  "description": "MAIN drawdown bar loosened to 25% of capital",
+  "file": "p2_protocol.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".........                                                                [100%]\n9 passed, 76 deselected in 1.39s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_protocol_thresholds_are_the_predeclared_numbers\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 76 deselected in 1.39s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_s10 or test_protocol_thresholds or test_protocol_document"
+ },
+ "Q03": {
+  "description": "trade floor lowered to 20",
+  "file": "p2_protocol.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".....                                                                    [100%]\n5 passed, 80 deselected in 1.33s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_protocol_thresholds_are_the_predeclared_numbers\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 80 deselected in 1.40s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_s2 or test_protocol_thresholds or test_protocol_document"
+ },
+ "Q04": {
+  "description": "a modified (uncommitted) freeze file is accepted",
+  "file": "p2_cohort.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.89s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_the_freeze_must_be_committed_and_unmodified_before_any_attempt\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.67s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_the_freeze_must_be_committed"
+ },
+ "Q05": {
+  "description": "a defect-failed candidate is retried by outcome",
+  "file": "p2_runner.py",
+  "green_after_restore": true,
+  "pytest_tail_green": ".                                                                        [100%]\n1 passed, 84 deselected in 1.46s",
+  "pytest_tail_red": "=========================== short test summary info ===========================\nFAILED tests/test_alpha_edge_pass2_01.py::test_a_defect_is_durably_failed_never_retried_by_outcome_and_later_candidates_stay_pending\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 84 deselected in 1.52s",
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_a_defect_is_durably_failed"
+ }
+}

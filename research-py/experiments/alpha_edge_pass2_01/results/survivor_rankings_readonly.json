@@ -1,0 +1,315 @@
+{
+ "conditional": [
+  {
+   "factor_id": "47fe69152ddb1925bade045c809a9428",
+   "family": "S13",
+   "horizon": 20,
+   "horizon_class": "HORIZON_ISOLATED",
+   "leave_best_year_out_effect": 0.02793913430492857,
+   "min_loo_effect": 0.04932824111883805,
+   "params": {
+    "expansion_ratio": 2.0,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 10
+   },
+   "positive_years": 6,
+   "q_value": 0.056367100666878375,
+   "rank": 1,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "2ba560eee3d43c3036a23236a2196134",
+   "family": "S13",
+   "horizon": 20,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.006919801235614385,
+   "min_loo_effect": 0.03696495022268081,
+   "params": {
+    "expansion_ratio": 1.5,
+    "long_vol": 60,
+    "mode": "reversal",
+    "short_vol": 20
+   },
+   "positive_years": 7,
+   "q_value": 0.040601589752387486,
+   "rank": 2,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "90d112d853fd4f30f354cd43f63df9e3",
+   "family": "S06",
+   "horizon": 20,
+   "horizon_class": "HORIZON_ISOLATED",
+   "leave_best_year_out_effect": 0.007932232959001077,
+   "min_loo_effect": 0.008098599014422113,
+   "params": {
+    "entry_z": -2.0,
+    "lookback": 60,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.09295627127520294,
+   "rank": 3,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "ceae5c392a17d497ae8d656936079538",
+   "family": "S06",
+   "horizon": 10,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.007946671665298414,
+   "min_loo_effect": 0.0077038462674208046,
+   "params": {
+    "entry_z": -2.0,
+    "lookback": 60,
+    "trend": "sma200"
+   },
+   "positive_years": 7,
+   "q_value": 0.09295627127520294,
+   "rank": 4,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "8963850f67cdf313361e19352e599ddd",
+   "family": "S06",
+   "horizon": 20,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.006668769119038636,
+   "min_loo_effect": 0.006365005568788861,
+   "params": {
+    "entry_z": -1.5,
+    "lookback": 60,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.023548922056384744,
+   "rank": 5,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "948f2a9cbf1ed16b9691658d1b2e8166",
+   "family": "S06",
+   "horizon": 10,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.008788520800934176,
+   "min_loo_effect": 0.005928692979082755,
+   "params": {
+    "entry_z": -2.5,
+    "lookback": 60,
+    "trend": "sma200"
+   },
+   "positive_years": 6,
+   "q_value": 0.08278917910447761,
+   "rank": 6,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "2d6ddd29f21ba1d328130b28cb61cab1",
+   "family": "S06",
+   "horizon": 20,
+   "horizon_class": "HORIZON_ISOLATED",
+   "leave_best_year_out_effect": 0.0035610343461823747,
+   "min_loo_effect": 0.005238138345532323,
+   "params": {
+    "entry_z": -2.0,
+    "lookback": 20,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.040601589752387486,
+   "rank": 7,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "f3a5ff79f8308b75fe89101e8b0373ba",
+   "family": "S06",
+   "horizon": 5,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.004492556332888978,
+   "min_loo_effect": 0.005027484416260126,
+   "params": {
+    "entry_z": -2.0,
+    "lookback": 40,
+    "trend": "sma200"
+   },
+   "positive_years": 6,
+   "q_value": 0.023548922056384744,
+   "rank": 8,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "c0a0fe8e279f54169d457ec3d193c362",
+   "family": "S06",
+   "horizon": 20,
+   "horizon_class": "HORIZON_ISOLATED",
+   "leave_best_year_out_effect": 0.002739973480344555,
+   "min_loo_effect": 0.004608928906790449,
+   "params": {
+    "entry_z": -2.5,
+    "lookback": 20,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.040601589752387486,
+   "rank": 9,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "fd50b6561cd6c528a7bb163c5991ce50",
+   "family": "S06",
+   "horizon": 20,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.005094035868862182,
+   "min_loo_effect": 0.004477360449468604,
+   "params": {
+    "entry_z": -1.5,
+    "lookback": 40,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.023548922056384744,
+   "rank": 10,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "2dbd39eab7a675d034419df65bcda385",
+   "family": "S06",
+   "horizon": 3,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.003050542631736283,
+   "min_loo_effect": 0.0038652223341043065,
+   "params": {
+    "entry_z": -2.0,
+    "lookback": 40,
+    "trend": "sma200"
+   },
+   "positive_years": 6,
+   "q_value": 0.040601589752387486,
+   "rank": 11,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "b5bd9508a28c258905588951b20161ad",
+   "family": "S05",
+   "horizon": 1,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.002422027266721271,
+   "min_loo_effect": 0.0032482481756656305,
+   "params": {
+    "entry_below": 10,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "positive_years": 7,
+   "q_value": 0.023548922056384744,
+   "rank": 12,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "c7bb0c5ba251686e4fb7ba9acc758e3e",
+   "family": "S06",
+   "horizon": 20,
+   "horizon_class": "HORIZON_ISOLATED",
+   "leave_best_year_out_effect": 0.0018093978793862551,
+   "min_loo_effect": 0.002563165763842678,
+   "params": {
+    "entry_z": -1.5,
+    "lookback": 20,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.06948862246146317,
+   "rank": 13,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "1ee3215a0469282b53743d37a2b96b58",
+   "family": "S06",
+   "horizon": 10,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.002832924830106811,
+   "min_loo_effect": 0.0025110671313352552,
+   "params": {
+    "entry_z": -1.5,
+    "lookback": 60,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.023548922056384744,
+   "rank": 14,
+   "regime_class": "REGIME_CONCENTRATED"
+  },
+  {
+   "factor_id": "f13f8dc0f742a35b24ae16468e77516a",
+   "family": "S05",
+   "horizon": 3,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.0006934470358453335,
+   "min_loo_effect": 0.0018129128576620584,
+   "params": {
+    "entry_below": 10,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "positive_years": 7,
+   "q_value": 0.023548922056384744,
+   "rank": 15,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "5fc230eb9d597478df0ffefe8f454831",
+   "family": "S06",
+   "horizon": 10,
+   "horizon_class": "HORIZON_SUPPORTED",
+   "leave_best_year_out_effect": 0.0004861133611568803,
+   "min_loo_effect": 0.0006897516362985727,
+   "params": {
+    "entry_z": -1.5,
+    "lookback": 40,
+    "trend": "none"
+   },
+   "positive_years": 7,
+   "q_value": 0.09295627127520294,
+   "rank": 16,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "7a8ff7065ef839c73a23653dc269e021",
+   "family": "S05",
+   "horizon": 1,
+   "horizon_class": "HORIZON_ISOLATED",
+   "leave_best_year_out_effect": 5.5997460554652594e-05,
+   "min_loo_effect": 0.0005321099527282629,
+   "params": {
+    "entry_below": 20,
+    "period": 10,
+    "trend": "sma200"
+   },
+   "positive_years": 6,
+   "q_value": 0.023548922056384744,
+   "rank": 17,
+   "regime_class": "GENERAL_REGIME"
+  },
+  {
+   "factor_id": "910d7e56b2d18087e1033b7c11879e53",
+   "family": "S05",
+   "horizon": 1,
+   "horizon_class": "HORIZON_ISOLATED",
+   "leave_best_year_out_effect": 6.659890938169137e-05,
+   "min_loo_effect": 0.00011133977188084707,
+   "params": {
+    "entry_below": 20,
+    "period": 3,
+    "trend": "none"
+   },
+   "positive_years": 6,
+   "q_value": 0.023548922056384744,
+   "rank": 18,
+   "regime_class": "REGIME_CONCENTRATED"
+  }
+ ],
+ "consumes_confirmation_data": false,
+ "ranking_is_not_selection_authority": true,
+ "strategy": []
+}

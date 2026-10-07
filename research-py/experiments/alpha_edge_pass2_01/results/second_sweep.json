@@ -1,0 +1,34 @@
+{
+ "checks": [
+  "verdict+failed_gates re-derived from raw numbers with literal thresholds",
+  "S9/C6 neighbour counts vs brute-force grid adjacency",
+  "S11 counts vs Pass-1 edge registry + search ledger",
+  "C1 p/q/effect vs accepted factor ledger",
+  "C8 re-derivation",
+  "C5 slices never dropped",
+  "cohort/identity/denominator vs frozen manifest and Pass-1 class sets",
+  "strict JSON (no NaN/Infinity)",
+  "S3/S4/S5 independent re-simulation sample",
+  "TODO/FIXME/NotImplemented/xfail scan"
+ ],
+ "code_marker_counts": {
+  "p2_cohort.py": 0,
+  "p2_conditional.py": 0,
+  "p2_mutation_proof.py": 0,
+  "p2_pass1.py": 0,
+  "p2_protocol.py": 0,
+  "p2_runner.py": 0,
+  "p2_strategy.py": 0
+ },
+ "conditional": {
+  "records": 135
+ },
+ "findings": [],
+ "independent_literal_cost_resimulations": 40,
+ "result": "NO_FINDINGS",
+ "schema_version": "alpha_edge_pass2_second_sweep_v1",
+ "strategy": {
+  "near_boundary_s10_records": 0,
+  "records": 789
+ }
+}
