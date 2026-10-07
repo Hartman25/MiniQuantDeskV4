@@ -7,13 +7,13 @@
   "quality": "showcase",
   "specification": {
     "path": "/home/user/MiniQuantDeskV4/docs/architecture/archify/mqd-runtime-architecture.json",
-    "sha256": "e158bb85113856dae09aa559216085259a1eec64f5ec8e71c3b0f6f0f06484cc",
-    "bytes": 20194
+    "sha256": "1dc106b47bb1f42083d65003e6f13f32f8c15cf3f900a41b04c4c8ed5310e014",
+    "bytes": 21680
   },
   "artifact": {
     "path": "/home/user/MiniQuantDeskV4/docs/architecture/archify/mqd-runtime-architecture.html",
-    "sha256": "6979f58fb03e4d42aa496537eb76ccd3a876f2ee65809b762dfbd09d2ca04533",
-    "bytes": 798405
+    "sha256": "de3e9b57bf0b9a60f2f401daf06e20d26850988a219c17dc07383e9f5d83ddbe",
+    "bytes": 799726
   },
   "gates": {
     "validate": "pass",
@@ -44,7 +44,7 @@
     "reason": "disabled"
   },
   "visualReview": "not-requested",
-  "durationMs": 4574,
+  "durationMs": 3197,
   "visualReviewRecommendation": {
     "action": "inspect-route-readability",
     "signals": {

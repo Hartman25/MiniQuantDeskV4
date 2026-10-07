@@ -180,10 +180,10 @@
           "label": "loopback bind by default"
         },
         {
-          "path": "core-rs/crates/mqk-daemon/src/state/loop_runner.rs",
-          "line": 1,
-          "end_line": 9,
-          "label": "owns execution loop + reconcile tick"
+          "path": "core-rs/crates/mqk-daemon/src/routes/helpers.rs",
+          "line": 574,
+          "end_line": 614,
+          "label": "arm checks reconcile + risk only; no mode fence"
         }
       ]
     },
@@ -191,14 +191,14 @@
       "id": "modeconfig",
       "type": "security",
       "label": "Mode & Config Gate",
-      "sublabel": "Paper execution · LiveShadow monitor-only · LiveCapital refused",
-      "tag": "LIVECAPITAL NOT ENABLED",
+      "sublabel": "Paper execution · LiveShadow NO-ORDER INVARIANT NOT PROVEN · LiveCapital refused",
+      "tag": "LIVESHADOW GAP · LIVECAPITAL REFUSED",
       "pos": [
         947,
         220
       ],
       "size": [
-        400,
+        540,
         76
       ],
       "sources": [
@@ -212,13 +212,13 @@
           "path": "scripts/windows/Start-MiniQuantDesk.ps1",
           "line": 501,
           "end_line": 527,
-          "label": "LiveShadow: real connectivity, no orders"
+          "label": "launcher: connectivity, no orders"
         },
         {
-          "path": "core-rs/crates/mqk-config/src/lib.rs",
-          "line": 14,
-          "end_line": 30,
-          "label": "layered config; secret leaves rejected"
+          "path": "core-rs/crates/mqk-daemon/src/routes/execution.rs",
+          "line": 198,
+          "end_line": 373,
+          "label": "manual order route: outbox write, no mode gate"
         }
       ]
     },
@@ -660,7 +660,10 @@
       "id": "daemon-to-db",
       "from": "daemon",
       "to": "postgres",
-      "label": "arm · run state"
+      "label": "arm · run · orders",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight"
     }
   ],
   "cards": [
@@ -680,18 +683,28 @@
       "items": [
         "RESEARCH HAS NO ORDER-SUBMISSION AUTHORITY: research-py and mqk-backtest have no broker or outbox path.",
         "Research reaches runtime only via the Promotion Gate: operator POST, evidence re-validated, durable transition row.",
-        "registered + enabled is never tradable; admission requires an exact (strategy_id, symbol, timeframe) active_paper row bound to the strategy config fingerprint.",
-        "Promotion gate hard-codes tradable_live = false and denies Live and Unknown modes."
+        "Strategy-originated orders need an exact (strategy_id, symbol, timeframe) active_paper row bound to the strategy config fingerprint; registered + enabled is never tradable. The manual operator order route is a separate admission surface outside this gate.",
+        "Promotion gate hard-codes tradable_live = false and denies Live and Unknown modes (including LiveShadow) for strategy-originated orders."
       ]
     },
     {
       "dot": "orange",
       "title": "Paper vs Live",
       "items": [
-        "Paper is the only currently authorized order-submitting runtime mode: Paper + Alpaca routes to paper-api.alpaca.markets and is the broker-backed order path.",
-        "LiveShadow is wired for real Alpaca connectivity (api.alpaca.markets) but is no-order / monitor-only: the launcher never arms or starts the runtime, and strategy-originated outbox admission denies every Live mode. The no-order contract is documented as a runtime design invariant.",
+        "Paper + Alpaca (paper-api.alpaca.markets) is the intended promotion-gated order-submitting runtime mode.",
+        "LiveShadow is wired for real Alpaca connectivity (api.alpaca.markets). Do NOT read it as monitor-only or no-order: its daemon-wide no-order truth is NOT PROVEN at this anchor (see the LiveShadow gap card).",
         "LiveCapital order execution is not enabled: start is refused unless live_trust_complete=true, which the current parity pipeline cannot produce.",
         "Broker connectivity is not order authority. Documented state at the anchor, NOT runtime-verified: Paper INACTIVE, Live DISABLED (documentation wording), no promoted candidate, PROMOTION_AUTHORITY = NONE."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "LiveShadow order-authority gap",
+      "items": [
+        "Canonical LiveShadow launcher: real Alpaca connectivity, but the launcher does not arm, start the execution runtime, or submit orders.",
+        "Strategy-originated LiveShadow decisions fail closed before the outbox: LiveShadow maps to PromotionRunMode::Live, which the promotion gate denies (internal decision seam and strategy signal route; DB-backed test cited in the README).",
+        "SAFETY DISCREPANCY: the generic arm and run-start routes have no deployment-mode fence, and POST /api/v1/execution/orders is a separate order-admission route outside the promotion gate. An existing hermetic proof (cited in the README) creates a PENDING manual-order outbox row under LiveShadow.",
+        "Therefore daemon-wide LiveShadow no-order truth is NOT PROVEN at this anchor. Whether such a row can reach a broker is a separate, untested safety question. Actual live-broker submission was NOT tested and is NOT claimed."
       ]
     },
     {
@@ -718,7 +731,7 @@
       "title": "Not shown, conceptual or unknown",
       "items": [
         "CONCEPTUAL / NOT ENABLED: LiveCapital order execution (start refused), non-equity asset classes (V2 scaffold), IBKR adapter (not a daemon dependency).",
-        "UNKNOWN: whether a daemon is running, Paper DB contents and migration level, deployed strategy.",
+        "UNKNOWN: whether a daemon is running, Paper DB contents and migration level, deployed strategy; whether a LiveShadow PENDING manual-order row can reach a broker (untested).",
         "INFERRED: 'research has no order path' is a repository-search result, not a proof; research-py's only network egress found is GET to data.alpaca.markets.",
         "Not drawn: CLI direct DB bookkeeping (mqk run/db/ingest), WS transport and gap recovery, Postgres audit_events, crypto and option modules."
       ]
@@ -729,7 +742,8 @@
       "items": [
         "The completed-bar driver module header says it is not started from main.rs; main.rs spawns it for Paper+Alpaca.",
         "mqk-daemon declares mqk-audit but never uses it; audit rows go to Postgres audit_events via mqk-db.",
-        "README_TECHNICAL.md cites an older accepted baseline than this anchor."
+        "README_TECHNICAL.md cites an older accepted baseline than this anchor.",
+        "SAFETY DISCREPANCY: LiveShadow is documented as no-order, but the manual order route and generic arm/start are not mode-fenced; see the LiveShadow gap card. Observational only, not repaired here."
       ]
     }
   ]

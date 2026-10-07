@@ -70,19 +70,27 @@ repo root; line numbers valid at the anchor):
 | broker → truth (WS/REST events) | `core-rs/crates/mqk-runtime/src/orchestrator.rs:14-20`; `core-rs/crates/mqk-runtime/src/alpaca_inbound.rs:1-30` |
 | truth → safety (reconcile) | `core-rs/crates/mqk-daemon/src/state/loop_runner.rs:2308`; `core-rs/crates/mqk-daemon/src/state/types.rs:207-233`; `core-rs/crates/mqk-reconcile/src/lib.rs:1-14`; (simplification: the REST broker-snapshot fetch reconcile compares against is not drawn as its own edge; see `core-rs/crates/mqk-daemon/src/state/types.rs:756-763`) |
 | truth → Postgres (inbox, ledger) | `core-rs/crates/mqk-db/src/inbox.rs:216`; `core-rs/crates/mqk-runtime/src/orchestrator/apply.rs:312` |
-| Postgres → daemon (durable reads) / daemon → Postgres (arm, run state) | `core-rs/crates/mqk-db/src/arm_state.rs:15`; `core-rs/crates/mqk-daemon/src/state/loop_runner.rs:179` |
+| Postgres → daemon (durable reads) / daemon → Postgres (arm, run state, manual orders) | `core-rs/crates/mqk-db/src/arm_state.rs:15`; `core-rs/crates/mqk-daemon/src/state/loop_runner.rs:179`; `core-rs/crates/mqk-daemon/src/routes/execution.rs:198-373` |
 
-Mode claims (what the mode/config node asserts). Broker connectivity is not order authority:
+Mode and order-authority claims. Broker connectivity is not order authority, and the launcher workflow is not a daemon invariant:
 
 | Claim | Evidence (repo-root-relative) |
 |---|---|
 | Paper + Alpaca routes to `paper-api.alpaca.markets`; the local `LockedPaperBroker` is refused as an execution path | `core-rs/crates/mqk-daemon/src/state/broker.rs:144-162`, `core-rs/crates/mqk-daemon/src/state/broker.rs:167-185` |
-| LiveShadow and LiveCapital map to the real Alpaca live base URL (`api.alpaca.markets`); credentials are the `_LIVE` pair | `core-rs/crates/mqk-daemon/src/state/broker.rs:144-162`, `core-rs/crates/mqk-daemon/src/state/broker.rs:186-200` |
-| LiveShadow is monitor-only: real broker connectivity, no orders submitted, no arm, no runtime auto-start (launcher contract) | `scripts/windows/Start-MiniQuantDesk.ps1:501-527`, `scripts/windows/Start-MiniQuantDesk.ps1:1819` |
-| LiveShadow no-order behaviour is described by the repo as a runtime design invariant (this review did not independently prove it in the daemon) | `scripts/windows/Start-LiveShadowSmoke.ps1:48-50`, `scripts/windows/Start-LiveShadowSmoke.ps1:345-347` |
-| Dormant strategy is allowed for LiveShadow monitor-only operation | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1795-1798` |
-| Strategy-originated outbox admission denies every Live mode (LiveShadow and LiveCapital map to `PromotionRunMode::Live`) | `core-rs/crates/mqk-daemon/src/promotion_gate.rs:45-66` |
+| LiveShadow and LiveCapital map to the real Alpaca live base URL (`api.alpaca.markets`) with the `_LIVE` credential pair (connectivity) | `core-rs/crates/mqk-daemon/src/state/broker.rs:144-162`, `core-rs/crates/mqk-daemon/src/state/broker.rs:186-200` |
+| **Canonical launcher only:** LiveShadow is real broker connectivity with no orders submitted, no arm, no runtime auto-start | `scripts/windows/Start-MiniQuantDesk.ps1:501-527`, `scripts/windows/Start-MiniQuantDesk.ps1:1819` |
+| The repo itself calls LiveShadow's no-order behaviour a runtime design invariant that its smoke wrapper does not prove | `scripts/windows/Start-LiveShadowSmoke.ps1:48-50`, `scripts/windows/Start-LiveShadowSmoke.ps1:345-347` |
+| **Strategy-originated orders fail closed in LiveShadow:** `PromotionRunMode::from(LiveShadow)` is `Live`; the gate denies any mode other than Paper with `promotion_live_not_authorized` | `core-rs/crates/mqk-daemon/src/promotion_gate.rs:45-66`, `core-rs/crates/mqk-daemon/src/promotion_gate.rs:184-205` |
+| Both strategy-originated outbox writers call that gate before their outbox write (internal decision seam; strategy signal route) | `core-rs/crates/mqk-daemon/src/decision.rs:1400-1412`, `core-rs/crates/mqk-daemon/src/routes/strategy.rs:1152-1175`, `core-rs/crates/mqk-daemon/src/routes/strategy.rs:1448` |
+| DB-backed test: LiveShadow+Alpaca internal decision is refused, `promotion_live_not_authorized`, zero outbox rows (`internal_active_paper_denied_when_daemon_mode_is_live`; `#[ignore]`, needs `MQK_DATABASE_URL`; not executed in this mission) | `core-rs/crates/mqk-daemon/tests/scenario_strategy_promotion_runtime_gate_01.rs:1231-1268` |
+| **Generic arm has no mode fence:** `check_arm_safety` checks reconcile and risk only; `integrity_arm` and `arm-execution` call it | `core-rs/crates/mqk-daemon/src/routes/helpers.rs:574-614`, `core-rs/crates/mqk-daemon/src/routes/control_plane.rs:48-56`, `core-rs/crates/mqk-daemon/src/routes/control_plane.rs:239-241` |
+| Hermetic proof arms a LiveShadow+Alpaca state through `/v1/integrity/arm` (HTTP 200) and starts the runtime through `/v1/run/start` (HTTP 200, active bootstrap) | `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:163-176`, `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:208-250` |
+| **Manual order route is a separate admission surface:** gates are DB present, durable arm state, active running run and the options-lifecycle fence; no deployment-mode or promotion gate before `outbox_enqueue_for_running_run`. The source describes it as "a second real economic-order-admission surface" | `core-rs/crates/mqk-daemon/src/routes/execution.rs:198-373`, `core-rs/crates/mqk-daemon/src/routes/execution.rs:326-333`, `core-rs/crates/mqk-daemon/src/routes.rs:877` |
+| **Hermetic proof of the gap** (`hermetic_order_submit_enqueues_one_pending_outbox_row`): a LiveShadow+Alpaca state is armed, the manual-order POST returns HTTP 200 `accepted=true`/`enqueued`, and the durable outbox row has `status=PENDING`. The proof deliberately spawns no broker dispatch and uses a test-only hermetic broker seam, so it says nothing about downstream broker submission | `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:396-415`, `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:498-507`, `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:567-596` |
+| A start-gate code comment names "LiveShadow running in monitor-only mode" as an example of a deployment allowed a dormant strategy; it is a comment about strategy dormancy, not an order fence | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1795-1798` |
 | LiveCapital start is refused unless `live_trust_complete=true`; Paper/LiveShadow to LiveCapital transitions are fail-closed | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1567-1615`, `core-rs/crates/mqk-daemon/src/mode_transition.rs:213` |
+
+**Not tested:** no real order was submitted to any broker, and none must be. Whether a LiveShadow `PENDING` manual-order row can progress through the remaining gates to an actual broker submission is a separate, untested safety question. Nothing in this package claims it can or cannot.
 
 ## Conceptual, unknown and inferred
 
@@ -107,25 +115,32 @@ Mode claims (what the mode/config node asserts). Broker connectivity is not orde
 2. `mqk-daemon` declares a dependency on `mqk-audit` (`core-rs/crates/mqk-daemon/Cargo.toml:51`) but never references it; audit rows
    go to Postgres `audit_events` via `mqk-db`.
 3. `README_TECHNICAL.md` §2 cites an older accepted baseline (`fac22592`, CI #623) than this anchor.
+4. **SAFETY DISCREPANCY (observational, not repaired):** the launcher and docs describe LiveShadow as no-order, but at this anchor only strategy-originated orders are fenced by the promotion gate. Generic arm/run-start have no deployment-mode fence, and `POST /api/v1/execution/orders` is a separate order-admission route outside the promotion gate; an existing hermetic proof enqueues a `PENDING` manual-order row under LiveShadow. Daemon-wide LiveShadow no-order truth is NOT PROVEN. Evidence: see the mode and order-authority table above. A separate, authorized safety-repair mission is required; this package does not repair or test it.
 
 ## Verification performed for this artifact
 
 Archify `finalize` (validate, deliver, strict check, browser check) with `--repo-root` evidence verification;
 desktop screenshot reviewed by the author (no crossings; one advisory 3-bend route, promotion → Postgres);
-content check of all 37 component references; every path token in this README resolved at the anchor (61
-tokens, no shorthand); secret-pattern scan; typed-source/HTML SHA-256 recorded in the provenance file.
-Negative controls (isolated copies, discarded): anchor SHA missing or nonexistent, hash mismatches, HTML
-tamper, title or provenance relabelled authoritative, LiveCapital tag changed to enabled, LiveShadow relabelled
-as order-submitting or as fully disabled, research edges to orchestrator/broker/Postgres, component without
-sources, secret-shaped string, evidence line/path/end-line/commit broken, a shifted evidence range, and a
-shortened or nonexistent README evidence path.
+content check of all 37 component references; every path token in this README resolved at the anchor and every
+line range lies inside its file, with no shorthand; secret-pattern scan; typed-source/HTML SHA-256 recorded in
+the provenance file. The new order-authority claims were read against source at the anchor; the cited tests
+are DB-backed and were not executed. Negative controls (isolated copies, discarded): anchor SHA changed,
+missing or nonexistent, hash mismatches, HTML tamper, title or provenance relabelled authoritative,
+unconditional LiveShadow "no-order"/"monitor-only" reintroduced, LiveShadow relabelled as order-submitting or
+disabled, the manual-order discrepancy removed, actual broker submission falsely claimed, research edges to
+orchestrator/broker/Postgres, component without sources, secret-shaped string, evidence line/path/end-line/
+commit broken, a shifted evidence range, and shortened or nonexistent README evidence paths.
 
 ## Revision note
 
-Corrected after independent review of the first version: (1) the mode node and cards now distinguish broker
-connectivity from order authority (Paper executes; LiveShadow is real-connectivity but monitor-only;
-LiveCapital is refused); (2) every README evidence path is now an exact repo-root-relative path. The source
-anchor is unchanged; the topology is unchanged.
+Revision 3 (this version) supersedes revision 2's statement that LiveShadow is "monitor-only / no-order".
+That is true of the canonical launcher workflow, but it is not a proven daemon-wide invariant at the anchor:
+strategy-originated LiveShadow orders fail closed at the promotion gate, while the generic arm/run-start routes
+and the separate manual order route are not mode-fenced, and an existing hermetic proof enqueues a `PENDING`
+manual-order row under LiveShadow. The diagram and README now state this as a disclosed safety discrepancy
+(fourth discrepancy above) and do not claim or test actual broker submission. Revision 2 corrected the
+broker-connectivity versus order-authority wording and made every README evidence path repo-root-relative.
+The source anchor and topology are unchanged. This package is observational; it repairs nothing.
 
 ## Regenerating
 
