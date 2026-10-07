@@ -1,0 +1,195 @@
+{
+ "checks": 31,
+ "defects": 0,
+ "findings": [
+  {
+   "check": "denominator is exactly the committed 18 and the ledger has one row per factor",
+   "detail": "18 rows",
+   "id": "S01",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "FDR family is the complete 18 incl. non-evaluables, alpha 0.10",
+   "detail": "18/18",
+   "id": "S02",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent BH q-values equal the reported q-values (|diff| < 1e-12)",
+   "detail": "recomputed",
+   "id": "S03",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "p = (exceed+1)/(n+1) with n=200, seed 0",
+   "detail": "all evaluable rows",
+   "id": "S04",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent decision table reproduces every disposition",
+   "detail": "mismatches=[]",
+   "id": "S05",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "no STRONG row lacks events>=30, effect>0, p<=0.10 and q<=0.10; STRONG count recomputed",
+   "detail": "strong=0",
+   "id": "S06",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "no 2024 scored row and no label endpoint at/after the fence in any factor",
+   "detail": "bounds per factor",
+   "id": "S07",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "no final-holdout row read/scored; provider max < fence; nothing at/after the fence loaded",
+   "detail": "2026-02-27T05:00:00+00:00",
+   "id": "S08",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "every row carries NOT_VALIDATED / NONE / EXECUTABLE_PNL=false",
+   "detail": "18 rows",
+   "id": "S09",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "exactly one succeeded attempt per factor, zero failed/started/extra (second run created nothing)",
+   "detail": "attempts=18",
+   "id": "S10",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "ledger evaluation_ids equal the stored succeeded records and the manifest (no foreign ids)",
+   "detail": "18/18",
+   "id": "S11",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "attempt ledger file lists exactly the 18 attempts",
+   "detail": "18 rows",
+   "id": "S12",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "universe: 87 eligible, the single exclusion is typed, SPY present, nothing at/after the fence",
+   "detail": "{\"EXCLUDED_UNSUPPORTED_CORPORATE_ACTION\": 1}",
+   "id": "S13",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 2304==2304 effect -0.00281561 vs -0.00281561",
+   "id": "S14:1ee3215a04",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 152==152 effect 0.0594215 vs 0.0594215",
+   "id": "S14:2ba560eee3",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 914==914 effect 0.00929835 vs 0.00929835",
+   "id": "S14:2d6ddd29f2",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 316==316 effect -0.00195829 vs -0.00195829",
+   "id": "S14:2dbd39eab7",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 91==91 effect 0.0694323 vs 0.0694323",
+   "id": "S14:47fe69152d",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 2372==2372 effect -0.00206636 vs -0.00206636",
+   "id": "S14:5fc230eb9d",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 469==469 effect -0.00228752 vs -0.00228752",
+   "id": "S14:7a8ff7065e",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 2105==2105 effect -0.0042029 vs -0.0042029",
+   "id": "S14:8963850f67",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 860==860 effect -0.00583886 vs -0.00583886",
+   "id": "S14:90d112d853",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 5354==5354 effect 0.000963137 vs 0.000963137",
+   "id": "S14:910d7e56b2",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 64==64 effect -0.0273049 vs -0.0273049",
+   "id": "S14:948f2a9cbf",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 95==95 effect -0.00382541 vs -0.00382541",
+   "id": "S14:b5bd9508a2",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 265==265 effect 0.035787 vs 0.035787",
+   "id": "S14:c0a0fe8e27",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 2319==2319 effect 0.0016247 vs 0.0016247",
+   "id": "S14:c7bb0c5ba2",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 178==178 effect -0.0248278 vs -0.0248278",
+   "id": "S14:ceae5c392a",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 95==95 effect -0.0153493 vs -0.0153493",
+   "id": "S14:f13f8dc0f7",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 315==315 effect -0.000858512 vs -0.000858512",
+   "id": "S14:f3a5ff79f8",
+   "result": "ALREADY CORRECT + PROVEN"
+  },
+  {
+   "check": "independent event count/effect sign from raw bars",
+   "detail": "events 2140==2140 effect -0.00534388 vs -0.00534388",
+   "id": "S14:fd50b6561c",
+   "result": "ALREADY CORRECT + PROVEN"
+  }
+ ],
+ "max_abs_effect_diff": 1.3877787807814457e-17,
+ "max_abs_event_count_diff": 0.0,
+ "schema_version": "alpha_edge_confirmation_second_sweep_v1"
+}

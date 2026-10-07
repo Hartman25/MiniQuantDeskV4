@@ -664,3 +664,26 @@ def test_write_immutable_refuses_a_differing_regeneration(tmp_path):
     with pytest.raises(cr.ConfirmationRefusal):
         cr.write_immutable(p, {"a": 2}, "doc")
     cr.write_immutable(p, {"a": 1, "b": 2}, "doc", ignore=("b",))
+
+
+def _proof_inputs(raw_max):
+    rec = {"scored_bounds": {"rows": 5, "min_period": "2025-01-02T05:00:00+00:00", "max_period": "2026-02-13T05:00:00+00:00",
+                             "max_label_end": "2026-02-27T05:00:00+00:00"}}
+    info = {"warmup_min": "2024-01-02T05:00:00+00:00", "warmup_max": "2024-12-31T05:00:00+00:00",
+            "reserve_min": "2025-01-02T05:00:00+00:00", "reserve_max": "2026-02-27T05:00:00+00:00",
+            "rows_at_or_after_fence": 0, "eligible": 87, "universe_count": 88, "excluded_by_disposition": {}}
+    st = {"first_request_utc": "2026-10-07T00:00:00+00:00", "bar_requests": 1, "raw_rows": 3, "raw_max_t": raw_max}
+    return [rec], info, [st]
+
+
+def test_C24_consumption_proof_records_zero_holdout_rows_and_refuses_a_fence_row():
+    doc = cr.consumption_proof(*_proof_inputs("2026-02-27T05:00:00+00:00"))
+    assert doc["CONFIRMATION_RESERVE_CONSUMED"] is True and doc["final_holdout_rows_read"] == 0
+    assert doc["final_holdout_rows_scored"] == 0 and doc["max_label_endpoint"] < cp.SCORE_END_EXCLUSIVE
+    for bad in ("2026-03-01T05:00:00+00:00", "2026-03-02T05:00:00+00:00"):
+        with pytest.raises(ce_breach()):
+            cr.consumption_proof(*_proof_inputs(bad))
+
+
+def ce_breach():
+    return ev.LabelFenceBreach

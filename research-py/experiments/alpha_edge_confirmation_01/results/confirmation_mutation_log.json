@@ -1,0 +1,924 @@
+{
+ "isolated_copy": "git archive HEAD",
+ "log": [
+  {
+   "description": "isolated copy of committed HEAD",
+   "id": "BASELINE",
+   "result": "GREEN",
+   "summary": "69 passed in 10.54s"
+  },
+  {
+   "description": "Confirmation access before the committed freeze (guard skips the committed check)",
+   "files": [
+    "c1_cohort.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.72s"
+   },
+   "id": "C01",
+   "mutated_sha256": {
+    "c1_cohort.py": "4e1be745c5aa13f028b56aebdc9addf521709fbfabc4b519a31f061ff05246a8"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C01_guard_refuses_freeze_files_present_but_uncommitted"
+    ],
+    "failed_tests": [
+     "test_C01_guard_refuses_freeze_files_present_but_uncommitted",
+     "test_guard_refuses_dirty_or_changed_bound_source"
+    ],
+    "summary": "2 failed, 67 passed in 8.88s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "acquire_symbol no longer runs the freeze guard before the provider",
+   "files": [
+    "c1_data.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.76s"
+   },
+   "id": "C01b",
+   "mutated_sha256": {
+    "c1_data.py": "b0523f23c7c9a23b78ee60f9c298672a5a8bb26274846a3506f5ab077c19ceab"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_acquire_and_load_refuse_before_any_provider_call_pre_freeze"
+    ],
+    "failed_tests": [
+     "test_acquire_and_load_refuse_before_any_provider_call_pre_freeze"
+    ],
+    "summary": "1 failed, 68 passed in 9.73s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "cohort != 18 accepted (count, ranking and family guards off; a survivor dropped)",
+   "files": [
+    "c1_cohort.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.73s"
+   },
+   "id": "C02",
+   "mutated_sha256": {
+    "c1_cohort.py": "730face75530dbba905d892580a67a9c2ad940560be60ee5c46dd8f9c6d106c3"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_cohort_not_18_is_refused_dropping_or_adding_a_rejected_factor"
+    ],
+    "failed_tests": [
+     "test_cohort_not_18_is_refused_dropping_or_adding_a_rejected_factor"
+    ],
+    "summary": "1 failed, 68 passed in 9.77s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "a rejected factor added to the cohort",
+   "files": [
+    "c1_cohort.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.76s"
+   },
+   "id": "C03",
+   "mutated_sha256": {
+    "c1_cohort.py": "c38b83f328677907d8b28746ed60521d7d94a2ddab632798296503f10b0cbfde"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_cohort_is_exactly_the_18_committed_pass2_survivors"
+    ],
+    "failed_tests": [
+     "test_C04_C16_bh_denominator_is_all_18_including_non_evaluables",
+     "test_C11_scored_frame_never_reaches_the_fence_for_every_horizon",
+     "test_C13_below_the_event_floor_is_not_evaluable_not_not_confirmed",
+     "test_attempt_is_opened_before_evaluation_and_second_run_creates_nothing",
+     "test_cohort_is_exactly_the_18_committed_pass2_survivors",
+     "test_cohort_not_18_is_refused_dropping_or_adding_a_rejected_factor",
+     "test_effect_and_events_match_an_independent_recomputation",
+     "test_evaluation_identity_is_result_independent_and_bound",
+     "test_evaluation_is_deterministic_and_p_uses_the_frozen_null",
+     "test_freeze_marker_gate_and_registration",
+     "test_guard_passes_only_when_everything_is_committed_and_matches",
+     "test_guard_refuses_a_cohort_that_rederives_differently",
+     "test_guard_refuses_dirty_or_changed_bound_source",
+     "test_only_infrastructure_interruption_is_retried",
+     "test_scored_frame_contains_no_warmup_rows_and_baseline_is_over_scored_rows",
+     "test_summary_counts_every_row_once"
+    ],
+    "summary": "16 failed, 53 passed in 4.06s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "the weakest p-value dropped from the BH denominator",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.87s"
+   },
+   "id": "C04",
+   "mutated_sha256": {
+    "c1_eval.py": "2cdbed916f0cb4a34f103e446e11c0f3fb818765aabdcb88ff7e0b46db31948d"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C04_C16_bh_denominator_is_all_18_including_non_evaluables"
+    ],
+    "failed_tests": [
+     "test_C04_C16_bh_denominator_is_all_18_including_non_evaluables",
+     "test_C17_C18_C19_strong_requires_p_q_and_positive_effect"
+    ],
+    "summary": "2 failed, 67 passed in 9.77s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "direction flipped inside the estimator",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.83s"
+   },
+   "id": "C05",
+   "mutated_sha256": {
+    "c1_eval.py": "ddf7dab9c326e67bd67eb187cf444d41654075b2b948352e9336beff2f5dcb3e"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_effect_and_events_match_an_independent_recomputation"
+    ],
+    "failed_tests": [
+     "test_effect_and_events_match_an_independent_recomputation"
+    ],
+    "summary": "1 failed, 68 passed in 9.74s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "factor parameters changed",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.83s"
+   },
+   "id": "C06",
+   "mutated_sha256": {
+    "c1_eval.py": "bed37a6b043ffe3936f8c02c9e8a64bdf1d5fcc00ec867bec4c67aee4ab87f52"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_effect_and_events_match_an_independent_recomputation"
+    ],
+    "failed_tests": [
+     "test_effect_and_events_match_an_independent_recomputation"
+    ],
+    "summary": "1 failed, 68 passed in 10.76s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "horizon changed",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.73s"
+   },
+   "id": "C07",
+   "mutated_sha256": {
+    "c1_eval.py": "903cf50436951f9c9d633d2ced4829f7bee656d5499f7b8d10bbaabcb56cd8cb"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_effect_and_events_match_an_independent_recomputation"
+    ],
+    "failed_tests": [
+     "test_effect_and_events_match_an_independent_recomputation"
+    ],
+    "summary": "1 failed, 68 passed in 9.70s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "a 2024 warm-up observation scored",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.62s"
+   },
+   "id": "C08",
+   "mutated_sha256": {
+    "c1_eval.py": "f4c44cea3c250dda6455b067f3158e7cb4e2fa366be5fabec4b479c5401ec49b"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C08_C11_assert_scored_refuses_warmup_rows_and_fence_endpoints",
+     "test_scored_frame_contains_no_warmup_rows_and_baseline_is_over_scored_rows"
+    ],
+    "failed_tests": [
+     "test_C08_C11_assert_scored_refuses_warmup_rows_and_fence_endpoints",
+     "test_C11_scored_frame_never_reaches_the_fence_for_every_horizon",
+     "test_effect_and_events_match_an_independent_recomputation",
+     "test_scored_frame_contains_no_warmup_rows_and_baseline_is_over_scored_rows"
+    ],
+    "summary": "4 failed, 65 passed in 13.04s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "2024 used in the unconditional baseline",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.79s"
+   },
+   "id": "C09",
+   "mutated_sha256": {
+    "c1_eval.py": "9e4eaaeb7bc7b5c964fe3c7440e1f0079ad8b4ca4498007a5c2572659e8da89d"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_effect_and_events_match_an_independent_recomputation",
+     "test_scored_frame_contains_no_warmup_rows_and_baseline_is_over_scored_rows"
+    ],
+    "failed_tests": [
+     "test_effect_and_events_match_an_independent_recomputation",
+     "test_scored_frame_contains_no_warmup_rows_and_baseline_is_over_scored_rows"
+    ],
+    "summary": "2 failed, 67 passed in 9.73s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "provider row at/after the fence accepted by the transport",
+   "files": [
+    "c1_data.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.81s"
+   },
+   "id": "C10a",
+   "mutated_sha256": {
+    "c1_data.py": "b6eea853004f872550da008d34f9126e672319821c3acbfa1c9be5e61fe60ee1"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C10_transport_refuses_a_provider_row_at_or_after_the_fence"
+    ],
+    "failed_tests": [
+     "test_C10_transport_refuses_a_provider_row_at_or_after_the_fence"
+    ],
+    "summary": "1 failed, 68 passed in 9.91s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "bar at/after the fence accepted by the symbol grid",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 10.07s"
+   },
+   "id": "C10b",
+   "mutated_sha256": {
+    "c1_eval.py": "98efd1b433c649655c2fd7dfbba798b6c7d6a6d45b459948623902744180676a"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C10_symbol_data_refuses_a_bar_at_or_after_the_fence"
+    ],
+    "failed_tests": [
+     "test_C10_symbol_data_refuses_a_bar_at_or_after_the_fence"
+    ],
+    "summary": "1 failed, 68 passed in 9.87s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "window checker accepts a row at/after the fence",
+   "files": [
+    "c1_data.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.84s"
+   },
+   "id": "C10c",
+   "mutated_sha256": {
+    "c1_data.py": "543b6b823f1ccd7ee7fbf7c6e29cf443689474cd2dacf6b60e233eaecc1cc176"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_window_checker_refuses_fence_pre_window_and_empty[ts0]"
+    ],
+    "failed_tests": [
+     "test_window_checker_refuses_fence_pre_window_and_empty[ts0]"
+    ],
+    "summary": "1 failed, 68 passed in 9.66s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "label endpoint at/after the fence not refused by assert_scored",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.99s"
+   },
+   "id": "C11",
+   "mutated_sha256": {
+    "c1_eval.py": "8961a38f7c0bf0f686a63ef96371b418a01eaa4b6cca7513298eeb902914a921"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C08_C11_assert_scored_refuses_warmup_rows_and_fence_endpoints"
+    ],
+    "failed_tests": [
+     "test_C08_C11_assert_scored_refuses_warmup_rows_and_fence_endpoints"
+    ],
+    "summary": "1 failed, 68 passed in 9.86s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "forward label declared executable P&L",
+   "files": [
+    "c1_protocol.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.85s"
+   },
+   "id": "C12a",
+   "mutated_sha256": {
+    "c1_protocol.py": "fdff5361905af546c107afbac8b9145d92b2fba4f35b3256192fe0a85d903e58"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C23_C24_label_contract_refuses_promotion_validation_pnl_and_holdout_claims",
+     "test_protocol_id_is_pinned"
+    ],
+    "failed_tests": [
+     "test_C12_record_without_the_no_pnl_label_is_refused",
+     "test_C21_persisted_record_with_a_foreign_evaluation_id_refuses",
+     "test_C22_terminal_succeeded_attempt_is_not_rerun_even_if_the_function_would_differ",
+     "test_C23_C24_label_contract_refuses_promotion_validation_pnl_and_holdout_claims",
+     "test_attempt_is_opened_before_evaluation_and_second_run_creates_nothing",
+     "test_only_infrastructure_interruption_is_retried",
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "summary": "8 failed, 61 passed in 9.50s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "record-level no-P&L label check removed",
+   "files": [
+    "c1_runner.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.79s"
+   },
+   "id": "C12b",
+   "mutated_sha256": {
+    "c1_runner.py": "f5f5a8e025e22c10146707a6375ae55af126ff3aff1848b3c124866e02bedce4"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C12_record_without_the_no_pnl_label_is_refused"
+    ],
+    "failed_tests": [
+     "test_C12_record_without_the_no_pnl_label_is_refused"
+    ],
+    "summary": "1 failed, 68 passed in 9.80s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "event floor lowered below 30",
+   "files": [
+    "c1_protocol.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.75s"
+   },
+   "id": "C13",
+   "mutated_sha256": {
+    "c1_protocol.py": "499ef499ae8002f0c6a5a6f536613ab65f10b4aca728bbbf96a78d2a91f7d702"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "failed_tests": [
+     "test_decision_rule_table[29-0.002-0.001-0.001-NOT_EVALUABLE_IN_CONFIRMATION]",
+     "test_every_threshold_is_bound_into_the_protocol_id[path0-29]",
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "summary": "4 failed, 65 passed in 9.94s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "permutation count changed",
+   "files": [
+    "c1_protocol.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.69s"
+   },
+   "id": "C14a",
+   "mutated_sha256": {
+    "c1_protocol.py": "7f1a71376660e8618384f92844f3e983c897210e5a752220cedcdb9a6418f710"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "failed_tests": [
+     "test_evaluation_is_deterministic_and_p_uses_the_frozen_null",
+     "test_every_threshold_is_bound_into_the_protocol_id[path1-199]",
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "summary": "4 failed, 65 passed in 9.73s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "null base seed changed",
+   "files": [
+    "c1_protocol.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.91s"
+   },
+   "id": "C14b",
+   "mutated_sha256": {
+    "c1_protocol.py": "2eb3131b315b89e8feac84ca7fdce8429d1472faa1a5763808c32e201b70497d"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "failed_tests": [
+     "test_evaluation_is_deterministic_and_p_uses_the_frozen_null",
+     "test_every_threshold_is_bound_into_the_protocol_id[path2-1]",
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "summary": "4 failed, 65 passed in 9.81s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "BH alpha changed",
+   "files": [
+    "c1_protocol.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.82s"
+   },
+   "id": "C15",
+   "mutated_sha256": {
+    "c1_protocol.py": "be7271b9098ddd542284789a6139abd81bbc9631ee4356ab21b9a9880e98439c"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "failed_tests": [
+     "test_decision_rule_table[30-0.002-0.05-0.1001-CONFIRMED_DIRECTIONAL_ONLY]",
+     "test_protocol_id_is_pinned",
+     "test_protocol_thresholds_are_the_predeclared_numbers"
+    ],
+    "summary": "3 failed, 66 passed in 9.88s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "BH computed on evaluable winners only",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.85s"
+   },
+   "id": "C16",
+   "mutated_sha256": {
+    "c1_eval.py": "e2066d8b53a9e45eee863310005379d1b52669f27467b559708db47950a7f35d"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C04_C16_bh_denominator_is_all_18_including_non_evaluables"
+    ],
+    "failed_tests": [
+     "test_C04_C16_bh_denominator_is_all_18_including_non_evaluables"
+    ],
+    "summary": "1 failed, 68 passed in 9.80s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "p > 0.10 can be CONFIRMED_STRONG",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.87s"
+   },
+   "id": "C17",
+   "mutated_sha256": {
+    "c1_eval.py": "4c68b10f947b91047e1ccd522eef68cea6be19754efdb30becd6b554e16f85af"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_decision_rule_table[30-0.002-0.1001-0.05-CONFIRMED_DIRECTIONAL_ONLY]"
+    ],
+    "failed_tests": [
+     "test_decision_rule_table[30-0.002-0.1001-0.05-CONFIRMED_DIRECTIONAL_ONLY]"
+    ],
+    "summary": "1 failed, 68 passed in 9.90s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "q > 0.10 can be CONFIRMED_STRONG",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.86s"
+   },
+   "id": "C18",
+   "mutated_sha256": {
+    "c1_eval.py": "19e611a297b3f71ba580ce7b261db65d449a3916a3ed012bd7997b14de52d915"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_decision_rule_table[30-0.002-0.05-0.1001-CONFIRMED_DIRECTIONAL_ONLY]"
+    ],
+    "failed_tests": [
+     "test_decision_rule_table[30-0.002-0.05-0.1001-CONFIRMED_DIRECTIONAL_ONLY]"
+    ],
+    "summary": "1 failed, 68 passed in 9.84s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "zero effect called confirmed",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.81s"
+   },
+   "id": "C19a",
+   "mutated_sha256": {
+    "c1_eval.py": "90bf5b98a47e1151f84eddced600787e4aaab196937baa94fb8b1ee99af5a7b9"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_decision_rule_table[500-0.0-0.001-0.001-NOT_CONFIRMED]"
+    ],
+    "failed_tests": [
+     "test_decision_rule_table[500-0.0-0.001-0.001-NOT_CONFIRMED]"
+    ],
+    "summary": "1 failed, 68 passed in 10.01s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "negative effect called confirmed",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.92s"
+   },
+   "id": "C19b",
+   "mutated_sha256": {
+    "c1_eval.py": "c272f7395b8ec30f3053a372788b8abd94322ab4f8bd4af8d00713277caeb528"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C17_C18_C19_strong_requires_p_q_and_positive_effect",
+     "test_decision_rule_table[500--0.002-0.001-0.001-NOT_CONFIRMED]",
+     "test_decision_rule_table[500-0.0-0.001-0.001-NOT_CONFIRMED]"
+    ],
+    "failed_tests": [
+     "test_C17_C18_C19_strong_requires_p_q_and_positive_effect",
+     "test_decision_rule_table[500--0.002-0.001-0.001-NOT_CONFIRMED]",
+     "test_decision_rule_table[500-0.0-0.001-0.001-NOT_CONFIRMED]"
+    ],
+    "summary": "3 failed, 66 passed in 9.86s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "a statistical failure is retried",
+   "files": [
+    "c1_runner.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.75s"
+   },
+   "id": "C20",
+   "mutated_sha256": {
+    "c1_runner.py": "354587818fb8a394ad3aa79863556b2c182e91815b8acea263e35d9b353b2422"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C20_statistical_failure_is_terminal_and_never_retried"
+    ],
+    "failed_tests": [
+     "test_C20_statistical_failure_is_terminal_and_never_retried"
+    ],
+    "summary": "1 failed, 68 passed in 10.02s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "persisted record under a foreign evaluation_id accepted",
+   "files": [
+    "c1_runner.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.71s"
+   },
+   "id": "C21a",
+   "mutated_sha256": {
+    "c1_runner.py": "74049555f9d2948ee8849bae08e23d84d98160846c8e3a377eb3e801a2bb5888"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C21_persisted_record_with_a_foreign_evaluation_id_refuses"
+    ],
+    "failed_tests": [
+     "test_C21_persisted_record_with_a_foreign_evaluation_id_refuses"
+    ],
+    "summary": "1 failed, 68 passed in 9.80s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "resume under an unregistered evaluation_id proceeds",
+   "files": [
+    "c1_runner.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.73s"
+   },
+   "id": "C21b",
+   "mutated_sha256": {
+    "c1_runner.py": "525130c4234c1cbb42a1c1488738c148fd305caa6c1a9ec7eab8c18d60e2e8d5"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C21_foreign_evaluation_id_fails_closed_before_mutation"
+    ],
+    "failed_tests": [
+     "test_C21_foreign_evaluation_id_fails_closed_before_mutation"
+    ],
+    "summary": "1 failed, 68 passed in 9.68s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "a terminal succeeded attempt is re-executed",
+   "files": [
+    "c1_runner.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.86s"
+   },
+   "id": "C22",
+   "mutated_sha256": {
+    "c1_runner.py": "32fff4cd488ff5789b5275bb781e70c987380add4a24d1b6f5c5ece666729064"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C22_terminal_succeeded_attempt_is_not_rerun_even_if_the_function_would_differ"
+    ],
+    "failed_tests": [
+     "test_C21_persisted_record_with_a_foreign_evaluation_id_refuses",
+     "test_C22_terminal_succeeded_attempt_is_not_rerun_even_if_the_function_would_differ",
+     "test_attempt_is_opened_before_evaluation_and_second_run_creates_nothing"
+    ],
+    "summary": "3 failed, 66 passed in 9.76s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "Promotion claim accepted",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.90s"
+   },
+   "id": "C23",
+   "mutated_sha256": {
+    "c1_eval.py": "6f5e32be365bd730f291811fe59667923f20a4e4f737a36f7919e7ea42b287e7"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C23_C24_label_contract_refuses_promotion_validation_pnl_and_holdout_claims"
+    ],
+    "failed_tests": [
+     "test_C23_C24_label_contract_refuses_promotion_validation_pnl_and_holdout_claims"
+    ],
+    "summary": "1 failed, 68 passed in 9.84s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "Final Holdout consumption claim accepted",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.75s"
+   },
+   "id": "C24a",
+   "mutated_sha256": {
+    "c1_eval.py": "8f743963449b082d848288d12829cab526aef48534f524abae933706bebe0f88"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C23_C24_label_contract_refuses_promotion_validation_pnl_and_holdout_claims"
+    ],
+    "failed_tests": [
+     "test_C23_C24_label_contract_refuses_promotion_validation_pnl_and_holdout_claims"
+    ],
+    "summary": "1 failed, 68 passed in 9.87s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "consumption proof accepts a provider row at/after the fence",
+   "files": [
+    "c1_runner.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.93s"
+   },
+   "id": "C24b",
+   "mutated_sha256": {
+    "c1_runner.py": "ebb7ac1d8e791c56344514012e61848e1de72909c19785f94cecb7253bb55500"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C24_consumption_proof_records_zero_holdout_rows_and_refuses_a_fence_row"
+    ],
+    "failed_tests": [
+     "test_C24_consumption_proof_records_zero_holdout_rows_and_refuses_a_fence_row"
+    ],
+    "summary": "1 failed, 68 passed in 9.85s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  },
+  {
+   "description": "ranking mutates the rows it presents (alters status/order source)",
+   "files": [
+    "c1_eval.py"
+   ],
+   "green_after_restore": {
+    "exit": 0,
+    "summary": "69 passed in 9.84s"
+   },
+   "id": "C25",
+   "mutated_sha256": {
+    "c1_eval.py": "269946da84ba012dde01080abf62d1b8a737e0efd4090cbd77f82580038a4120"
+   },
+   "red": {
+    "exit": 1,
+    "expected_test_hit": [
+     "test_C25_ranking_is_read_only_and_never_changes_status"
+    ],
+    "failed_tests": [
+     "test_C25_ranking_is_read_only_and_never_changes_status"
+    ],
+    "summary": "1 failed, 68 passed in 9.82s"
+   },
+   "restored_byte_identical": true,
+   "verdict": "KILLED_RED_THEN_GREEN"
+  }
+ ],
+ "mutations": 33,
+ "not_proven": 0,
+ "schema_version": "alpha_edge_confirmation_mutation_log_v1"
+}
