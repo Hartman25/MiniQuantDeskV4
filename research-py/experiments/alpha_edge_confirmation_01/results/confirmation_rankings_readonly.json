@@ -1,0 +1,73 @@
+{
+ "EVIDENCE_GRADE": "CONFIRMATION_FACTOR_DIAGNOSTIC_NOT_PROMOTION_GRADE",
+ "EXECUTABLE_PNL": false,
+ "PROMOTION_AUTHORITY": "NONE",
+ "VALIDATION_STATUS": "NOT_VALIDATED",
+ "alters_status_or_identity": false,
+ "confirmed_directional_only_separate_table": [
+  {
+   "effect": 0.05942151547624058,
+   "events": 152,
+   "factor_id": "2ba560eee3d43c3036a23236a2196134",
+   "family": "S13",
+   "horizon": 20,
+   "p_value": 0.03980099502487562,
+   "q_value": 0.14328358208955222,
+   "status": "CONFIRMED_DIRECTIONAL_ONLY"
+  },
+  {
+   "effect": 0.03578696867528137,
+   "events": 265,
+   "factor_id": "c0a0fe8e279f54169d457ec3d193c362",
+   "family": "S06",
+   "horizon": 20,
+   "p_value": 0.05472636815920398,
+   "q_value": 0.16417910447761194,
+   "status": "CONFIRMED_DIRECTIONAL_ONLY"
+  },
+  {
+   "effect": 0.009298349431758321,
+   "events": 914,
+   "factor_id": "2d6ddd29f21ba1d328130b28cb61cab1",
+   "family": "S06",
+   "horizon": 20,
+   "p_value": 0.13930348258706468,
+   "q_value": 0.31343283582089554,
+   "status": "CONFIRMED_DIRECTIONAL_ONLY"
+  },
+  {
+   "effect": 0.06943225765868104,
+   "events": 91,
+   "factor_id": "47fe69152ddb1925bade045c809a9428",
+   "family": "S13",
+   "horizon": 20,
+   "p_value": 0.27860696517412936,
+   "q_value": 0.5014925373134329,
+   "status": "CONFIRMED_DIRECTIONAL_ONLY"
+  },
+  {
+   "effect": 0.0016247017058439775,
+   "events": 2319,
+   "factor_id": "c7bb0c5ba251686e4fb7ba9acc758e3e",
+   "family": "S06",
+   "horizon": 20,
+   "p_value": 0.46766169154228854,
+   "q_value": 0.6475315729047073,
+   "status": "CONFIRMED_DIRECTIONAL_ONLY"
+  },
+  {
+   "effect": 0.0009631373184288964,
+   "events": 5354,
+   "factor_id": "910d7e56b2d18087e1033b7c11879e53",
+   "family": "S05",
+   "horizon": 1,
+   "p_value": 0.5671641791044776,
+   "q_value": 0.6805970149253732,
+   "status": "CONFIRMED_DIRECTIONAL_ONLY"
+  }
+ ],
+ "confirmed_strong": [],
+ "ordering": "q_asc,p_asc,effect_desc,events_desc,factor_id_asc",
+ "read_only": true,
+ "schema_version": "alpha_edge_confirmation_rankings_v1"
+}
