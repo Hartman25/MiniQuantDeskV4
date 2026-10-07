@@ -8,7 +8,7 @@ architecture, promotion, Paper or Live authority. Where it disagrees with commit
 proof, those win; then binding specs/ledgers/runbooks; then this diagram. Do not repair architecture to make
 the picture cleaner.
 
-- Anchor commit: `f4e4fb3e5fc34302c81d282a329956e019c35094` (production fix `LiveShadow: refuse new economic orders at every admission seam`; local branch `liveshadow-no-order-authority-closure-01`, not pushed, CI not yet run on it). Previous anchor: `c81695de3da1bec7b3b8bc1b951fae8d0e95f307` (`main`, CI #630).
+- Anchor commit: `8a08dc7a070c17b8762931efc9ab0b4ff2113faa` (production fix `fix: fence LiveShadow submit intents at dispatch authority`; local review branch `liveshadow-no-order-authority-closure-01`, CI not yet run on it). Previous anchors: `f4e4fb3e5fc34302c81d282a329956e019c35094` (admission fence), `c81695de3da1bec7b3b8bc1b951fae8d0e95f307` (`main`, CI #630).
 - Produced by Archify 3.0.1, operator-invoked only. Not wired into CI, hooks or schedules.
 - Open `mqd-runtime-architecture.html` in a browser (self-contained; no network needed to view).
 
@@ -89,12 +89,15 @@ Mode and order-authority claims. Broker connectivity is not order authority, and
 | **Durable fence (fix):** `outbox_enqueue_new_order_for_running_run` checks the locked run row's `mode` inside the run-state fence transaction and returns `RunModeForbidsNewOrder` with zero mutation. Manual order, internal decision, strategy signal, operator flatten and pre-event flatten all use it; the unfenced `outbox_enqueue_for_running_run` remains only for manual cancel of an existing broker-mapped order, enforced by a source guard test | `core-rs/crates/mqk-db/src/orders.rs:448-455`, `core-rs/crates/mqk-daemon/src/routes/execution.rs:382`, `core-rs/crates/mqk-daemon/src/decision.rs:1667`, `core-rs/crates/mqk-daemon/src/routes/strategy.rs:1448`, `core-rs/crates/mqk-daemon/src/pre_event_flatten.rs:511` |
 | **Manual order route (fixed):** it refuses by deployment mode before any lifecycle, DB or arm work, then keeps its arm, run, options-lifecycle gates and now uses the fenced enqueue. The source still describes it as "a second real economic-order-admission surface" | `core-rs/crates/mqk-daemon/src/routes/execution.rs:216-229`, `core-rs/crates/mqk-daemon/src/routes/execution.rs:340-355`, `core-rs/crates/mqk-daemon/src/routes/execution.rs:382` |
 | Pre-event flatten (system-generated close orders) enqueues nothing for a mode that may not create orders; the operator flatten route is Paper-only | `core-rs/crates/mqk-daemon/src/pre_event_flatten.rs:495-505`, `core-rs/crates/mqk-daemon/src/state/loop_runner.rs:1196-1201`, `core-rs/crates/mqk-daemon/src/routes/control_plane.rs:1744-1745` |
-| **Hermetic proofs (isolated disposable Postgres, no broker, no network):** Paper positive control `hermetic_order_submit_enqueues_one_pending_outbox_row` still enqueues one `PENDING` row; `hermetic_live_shadow_manual_order_refused_with_zero_outbox_rows` is refused (HTTP 403) with zero rows | `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:578-606`, `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:705-733` |
+| **Hermetic proofs (isolated disposable Postgres, no broker, no network):** Paper positive control `hermetic_order_submit_enqueues_one_pending_outbox_row` still enqueues one `PENDING` row; `hermetic_live_shadow_manual_order_refused_with_zero_outbox_rows` is refused (HTTP 403) with zero rows | `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:618-646`, `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:745-773` |
 | DB-backed proofs of the durable fence, the external signal route and pre-event flatten under LiveShadow (plus a Paper positive control) | `core-rs/crates/mqk-db/tests/scenario_outbox_new_order_mode_fence_01.rs:65-170`, `core-rs/crates/mqk-daemon/tests/scenario_liveshadow_no_order_authority_01.rs:43-170` |
+| **Dispatch fence (closure):** orchestrator Phase 1, the only claim-to-gateway-submit path, derives authority from the run row's durable mode. For a non-order-capable run only a valid cancel dispatches; a submit intent, or a payload with an absent, unknown or corrupt `request_type`, is quarantined `CLAIMED -> FAILED` before `DISPATCHING`, so the gateway is never reached and the row cannot be redispatched. Pre-fix rows and rows returned to `PENDING` by release, stale reset, dispatching reset or retry take the same path | `core-rs/crates/mqk-runtime/src/orchestrator.rs:1128-1155`, `core-rs/crates/mqk-runtime/src/orchestrator/dispatch.rs:30-55`, `core-rs/crates/mqk-db/src/orders.rs:375-377` |
+| Dispatch proofs (fake counting broker, local DB, no real broker): LiveShadow pre-existing and recovered `PENDING` submit rows reach the broker 0 times and end `FAILED`; unclassifiable payloads cannot evade; a LiveShadow cancel of an existing mapped order still reaches the fake broker and ends `ACKED` with 0 submits; Paper and LiveCapital submits are unchanged; Backtest and unknown modes fail closed; a source guard allows the gateway submit only from the fenced path | `core-rs/crates/mqk-testkit/tests/scenario_liveshadow_dispatch_fence_01.rs:243-520` |
+| A real LiveShadow `/v1/run/start` stamps the run row `LIVE-SHADOW`, which the dispatch fence reads | `core-rs/crates/mqk-daemon/src/state/hermetic_positive_proofs.rs:264-299` |
 | A start-gate code comment names "LiveShadow running in monitor-only mode" as an example of a deployment allowed a dormant strategy; it is a comment about strategy dormancy, not an order fence | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1795-1798` |
 | LiveCapital start is refused unless `live_trust_complete=true`; Paper/LiveShadow to LiveCapital transitions are fail-closed | `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:1567-1615`, `core-rs/crates/mqk-daemon/src/mode_transition.rs:213` |
 
-**Not tested:** no real order was submitted to any broker, and none must be. All proofs stop at the durable outbox; nothing here claims anything about downstream broker submission. Rows enqueued before this fix are not migrated or purged. LiveCapital behaviour is unchanged.
+**Not tested:** no real order was submitted to any broker, and none must be. Admission proofs stop at the durable outbox; dispatch proofs use a fake counting broker. Nothing here claims anything about real-broker behaviour. Rows enqueued before the fixes are not migrated or purged, but a non-order-capable run now refuses to dispatch them. LiveCapital behaviour is unchanged.
 
 ## Conceptual, unknown and inferred
 
@@ -119,7 +122,7 @@ Mode and order-authority claims. Broker connectivity is not order authority, and
 2. `mqk-daemon` declares a dependency on `mqk-audit` (`core-rs/crates/mqk-daemon/Cargo.toml:51`) but never references it; audit rows
    go to Postgres `audit_events` via `mqk-db`.
 3. `README_TECHNICAL.md` §2 cites an older accepted baseline (`fac22592`, CI #623) than this anchor.
-4. **SAFETY DISCREPANCY (disclosed at `c81695de`, FIXED at `f4e4fb3`):** the launcher and docs described LiveShadow as no-order, but `POST /api/v1/execution/orders` had no deployment-mode gate and a hermetic proof enqueued a `PENDING` manual-order row under LiveShadow. LiveShadow now refuses every new-order admission seam server-side (see the mode and order-authority table above). Generic arm/run-start remain deliberately unfenced so LiveShadow can observe broker truth.
+4. **SAFETY DISCREPANCY (disclosed at `c81695de`; admission FIXED at `f4e4fb3`; dispatch FIXED at `8a08dc7a`):** the launcher and docs described LiveShadow as no-order, but `POST /api/v1/execution/orders` had no deployment-mode gate and a hermetic proof enqueued a `PENDING` manual-order row under LiveShadow. LiveShadow now refuses every new-order admission seam server-side and the dispatcher refuses any LiveShadow submit intent, however created or recovered (see the mode and order-authority table above). Generic arm/run-start remain deliberately unfenced so LiveShadow can observe broker truth.
 
 ## Verification performed for this artifact
 
@@ -149,6 +152,11 @@ The source anchor and topology are unchanged. This package is observational; it 
 Revision 4 (anchor `f4e4fb3`) re-anchors the map after the LiveShadow no-new-order repair. The topology is unchanged;
 only the LiveShadow order-authority claims, the affected source line citations and the anchor changed. The
 previously disclosed discrepancy is kept as history and marked fixed. Revisions 1-3 below are unchanged in meaning.
+
+Revision 5 (anchor `8a08dc7a`) re-anchors the map after the dispatch-side LiveShadow fence. Revision 4 proved that LiveShadow
+cannot create a new order; revision 5 adds that the orchestrator also refuses to submit a LiveShadow submit intent that
+already exists or was recovered to `PENDING`, while cancels keep their own authority. The daemon-wide LiveShadow
+no-new-order invariant is now proven by hermetic admission and dispatch tests. The topology is unchanged.
 
 ## Regenerating
 

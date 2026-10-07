@@ -2,14 +2,14 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "MQD Runtime Architecture @ f4e4fb3 — DESCRIPTIVE / NON-AUTHORITATIVE",
+    "title": "MQD Runtime Architecture @ 8a08dc7 — DESCRIPTIVE / NON-AUTHORITATIVE",
     "subtitle": "STALE IF VIEWED AGAINST A DIFFERENT REPOSITORY COMMIT. Code, tests, Git and DB win over this diagram. Research has no order-submission authority.",
     "output": "mqd-runtime-architecture.html",
     "quality_profile": "showcase",
     "repository": {
       "url": "https://github.com/Hartman25/MiniQuantDeskV4",
       "provider": "github",
-      "revision": "f4e4fb3e5fc34302c81d282a329956e019c35094"
+      "revision": "8a08dc7a070c17b8762931efc9ab0b4ff2113faa"
     },
     "views": [
       {
@@ -191,7 +191,7 @@
       "id": "modeconfig",
       "type": "security",
       "label": "Mode & Config Gate",
-      "sublabel": "Paper execution · LiveShadow refuses new orders (server-side) · LiveCapital refused",
+      "sublabel": "Paper execution · LiveShadow: no new orders (admission + dispatch) · LiveCapital refused",
       "tag": "LIVESHADOW NO NEW ORDERS · LIVECAPITAL REFUSED",
       "pos": [
         947,
@@ -320,7 +320,7 @@
       "type": "backend",
       "label": "Execution Orchestrator",
       "sublabel": "outbox claim → gateway submit",
-      "tag": "SINGLE CHOKE-POINT",
+      "tag": "SINGLE CHOKE-POINT · MODE-FENCED",
       "pos": [
         947,
         410
@@ -340,6 +340,12 @@
           "path": "core-rs/crates/mqk-db/src/orders.rs",
           "line": 642,
           "label": "outbox_claim_batch (row lock)"
+        },
+        {
+          "path": "core-rs/crates/mqk-runtime/src/orchestrator.rs",
+          "line": 1128,
+          "end_line": 1155,
+          "label": "dispatch fence: non-order modes cancel-only"
         }
       ]
     },
@@ -672,7 +678,7 @@
       "title": "Authority & staleness",
       "items": [
         "DESCRIPTIVE / NON-AUTHORITATIVE. Observes MQD; does not control it.",
-        "STALE IF VIEWED AGAINST A DIFFERENT REPOSITORY COMMIT. Anchor: f4e4fb3e (full 40-char SHA in every SRC link, the README and the provenance file).",
+        "STALE IF VIEWED AGAINST A DIFFERENT REPOSITORY COMMIT. Anchor: 8a08dc7a (full 40-char SHA in every SRC link, the README and the provenance file).",
         "Authority order: code/tests/Git/DB proof, then binding specs and ledgers, then this diagram.",
         "SRC badges are verified against committed blobs at the anchor. Edges carry no individual source references; see the README evidence table."
       ]
@@ -684,7 +690,7 @@
         "RESEARCH HAS NO ORDER-SUBMISSION AUTHORITY: research-py and mqk-backtest have no broker or outbox path.",
         "Research reaches runtime only via the Promotion Gate: operator POST, evidence re-validated, durable transition row.",
         "Strategy-originated orders need an exact (strategy_id, symbol, timeframe) active_paper row bound to the strategy config fingerprint; registered + enabled is never tradable. The manual operator order route is a separate admission surface with its own deployment-mode gate.",
-        "Promotion gate hard-codes tradable_live = false and denies Live and Unknown modes (including LiveShadow) for strategy-originated orders. Every new-order writer additionally passes the run-mode-fenced outbox enqueue."
+        "Promotion gate hard-codes tradable_live = false and denies Live and Unknown modes (including LiveShadow) for strategy-originated orders. Every new-order writer passes the run-mode-fenced outbox enqueue, and the orchestrator re-checks the run's mode before any submit."
       ]
     },
     {
@@ -692,21 +698,21 @@
       "title": "Paper vs Live",
       "items": [
         "Paper + Alpaca (paper-api.alpaca.markets) is the intended promotion-gated order-submitting runtime mode.",
-        "LiveShadow is wired for real Alpaca connectivity (api.alpaca.markets) and observes broker truth, but may never create a new economic order: every new-order admission seam refuses before the outbox (see the LiveShadow order-authority card).",
+        "LiveShadow is wired for real Alpaca connectivity (api.alpaca.markets) and observes broker truth, but may never create or submit a new economic order: admission refuses before the outbox and the dispatcher refuses any submit intent, however created or recovered (see the LiveShadow order-authority card).",
         "LiveCapital order execution is not enabled: start is refused unless live_trust_complete=true, which the current parity pipeline cannot produce.",
         "Broker connectivity is not order authority. Documented state at the anchor, NOT runtime-verified: Paper INACTIVE, Live DISABLED (documentation wording), no promoted candidate, PROMOTION_AUTHORITY = NONE."
       ]
     },
     {
       "dot": "rose",
-      "title": "LiveShadow order authority (gap fixed at f4e4fb3)",
+      "title": "LiveShadow order authority (closed at 8a08dc7)",
       "items": [
         "Canonical LiveShadow launcher: real Alpaca connectivity, but the launcher does not arm, start the execution runtime, or submit orders.",
-        "Canonical rule: only PAPER and LIVE-CAPITAL runs may create a new economic order (mqk_db::run_mode_permits_new_economic_order); LIVE-SHADOW, BACKTEST and unknown fail closed. DeploymentMode::allows_new_economic_order delegates to it.",
-        "Durable fence: outbox_enqueue_new_order_for_running_run checks the locked run row's mode inside the run-state fence transaction. Manual order, internal decision, strategy signal, operator flatten and pre-event flatten all use it; a source guard allows the unfenced enqueue only for manual cancel of an existing broker-mapped order.",
-        "Manual order route and pre-event flatten also refuse earlier by deployment mode; strategy-originated decisions are additionally denied by the promotion gate (Live mode). Arm and run-start remain unfenced by design: LiveShadow still observes broker truth.",
-        "Previously disclosed discrepancy (anchor c81695d): the manual order route had no mode gate and a hermetic proof enqueued a PENDING manual-order row under LiveShadow. Fixed at f4e4fb3; proven by hermetic and DB-backed tests, not by any broker order. Actual live-broker submission was NOT tested.",
-        "Residual: LiveCapital behaviour is unchanged; rows enqueued before this fix are not migrated or purged."
+        "Canonical rule: only PAPER and LIVE-CAPITAL runs may create or submit a new economic order (mqk_db::run_mode_permits_new_economic_order); LIVE-SHADOW, BACKTEST and unknown fail closed.",
+        "Admission: outbox_enqueue_new_order_for_running_run checks the locked run row's mode; manual order, internal decision, strategy signal, operator flatten and pre-event flatten all use it. The unfenced enqueue remains only for manual cancel of an existing broker-mapped order (source guard).",
+        "Dispatch: orchestrator Phase 1, the only claim-to-gateway-submit path, derives authority from the run's durable mode. For a non-order-capable run only a valid cancel dispatches; a submit intent, or a payload with an absent, unknown or corrupt request_type, is quarantined CLAIMED -> FAILED before DISPATCHING. Rows created before the admission fix, or returned to PENDING by release, stale reset, dispatching reset or retry, cannot reach the broker.",
+        "Cancels are separate: a LiveShadow cancel of an existing broker-mapped order keeps its own lifecycle gates. Arm and run-start stay unfenced by design so LiveShadow can observe broker truth.",
+        "History: the discrepancy disclosed at c81695d (manual order route unfenced) was fixed at f4e4fb3; the dispatch-side residual (pre-existing PENDING submit rows) is fixed at 8a08dc7. Proven by hermetic admission and dispatch tests with a fake broker; no broker order was sent. LiveCapital behaviour is unchanged."
       ]
     },
     {
@@ -733,7 +739,7 @@
       "title": "Not shown, conceptual or unknown",
       "items": [
         "CONCEPTUAL / NOT ENABLED: LiveCapital order execution (start refused), non-equity asset classes (V2 scaffold), IBKR adapter (not a daemon dependency).",
-        "UNKNOWN: whether a daemon is running, Paper DB contents and migration level, deployed strategy; whether any pre-fix LiveShadow PENDING outbox row exists in a given database.",
+        "UNKNOWN: whether a daemon is running, Paper DB contents and migration level, deployed strategy; real-broker behaviour (never tested).",
         "INFERRED: 'research has no order path' is a repository-search result, not a proof; research-py's only network egress found is GET to data.alpaca.markets.",
         "Not drawn: CLI direct DB bookkeeping (mqk run/db/ingest), WS transport and gap recovery, Postgres audit_events, crypto and option modules."
       ]
@@ -745,7 +751,7 @@
         "The completed-bar driver module header says it is not started from main.rs; main.rs spawns it for Paper+Alpaca.",
         "mqk-daemon declares mqk-audit but never uses it; audit rows go to Postgres audit_events via mqk-db.",
         "README_TECHNICAL.md cites an older accepted baseline than this anchor.",
-        "FIXED at f4e4fb3 (disclosed at c81695d): LiveShadow was documented as no-order, but the manual order route was not mode-fenced; every new-order seam now refuses LiveShadow. Generic arm/start remain unfenced by design."
+        "FIXED (disclosed at c81695d; admission fixed at f4e4fb3; dispatch fixed at 8a08dc7): LiveShadow was documented as no-order, but the manual order route was not mode-fenced and pre-existing PENDING submit rows were not fenced at dispatch. Generic arm/start remain unfenced by design."
       ]
     }
   ]
