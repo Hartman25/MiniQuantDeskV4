@@ -11,6 +11,8 @@ engine was observed (in memory, aggregate counts) before the committed Pass-2 fr
 **diagnostic evidence only**. Status below: Discovery-period evidence only. NOT_VALIDATED. PROMOTION_AUTHORITY = NONE.
 Confirmation: NOT RUN. Final holdout: RESERVED / UNCONSUMED. Paper: INACTIVE. Live: DISABLED / UNTOUCHED.
 
+> Later status (this document is otherwise unchanged): Confirmation was subsequently executed on the 18 Conditional survivors only; "Confirmation: NOT RUN" above describes the state at Pass-2 closure. See `research-py/experiments/alpha_edge_confirmation_01/results/CONFIRMATION_RESULT.md`.
+
 Experiment: `research-py/experiments/alpha_edge_pass2_01/` (modules `p2_*.py`), tests `research-py/tests/test_alpha_edge_pass2_01.py`,
 evidence `research-py/experiments/alpha_edge_pass2_01/{PASS2_PREDECLARATION,PASS2_COHORT_MANIFEST,PASS2_FREEZE_PROOF}.json` and `results/`.
 

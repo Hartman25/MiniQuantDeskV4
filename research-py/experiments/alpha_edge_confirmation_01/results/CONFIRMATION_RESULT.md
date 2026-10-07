@@ -3,6 +3,15 @@
 VERDICT: **CONFIRMATION_COMPLETE — 0 CONFIRMED_STRONG, 6 CONFIRMED_DIRECTIONAL_ONLY, 12 NOT_CONFIRMED, 0 NOT_EVALUABLE, 0 BLOCKED.**
 Nothing advances toward Final Holdout. All rows: `VALIDATION_STATUS=NOT_VALIDATED`, `PROMOTION_AUTHORITY=NONE`, `EXECUTABLE_PNL=false`.
 
+## Status and authority
+- `CONFIRMATION_STATUS = LOCALLY_COMPLETE_PENDING_FINAL_CHATGPT_ACCEPTANCE`. Confirmation validation: `NOT_VALIDATED` for every row; no factor is an executable or profitable strategy.
+- Promotion: `PROMOTION_AUTHORITY = NONE` (not claimed). Paper: INACTIVE. Live: DISABLED. Final Holdout: RESERVED / UNCONSUMED (0 rows read, 0 scored).
+- DSR/PBO: not applicable to this stage (factor-level diagnostics only; no Strategy trials or walk-forward artifacts); Strategy DSR/PBO stays `DEFERRED_FULL_POPULATION` as recorded in Pass-2.
+- Pass-1/Pass-2 evidence and result files are unmodified by this mission (`git diff 9d3635c..HEAD` touches only `alpha_edge_confirmation_01/` and `test_alpha_edge_confirmation_01.py`).
+- Full `research-py` acceptance (2463 passed, 7 skipped) was run in the local continuation at C5 (94d7fbc7) and is not re-run in the cloud closure; this closure changes documentation only.
+- Latest evidence timestamp: provider raw max `2026-02-27T05:00:00+00:00` (< fence); max scored observation `2026-02-26`; Confirmation period `[2025-01-01, 2026-03-01)`; 2024 is indicator warm-up only (no 2024 row scored).
+- RKLB exclusion: `EXCLUDED_UNSUPPORTED_CORPORATE_ACTION` (`name_change`, effective 2025-05-27, not covered by Alpaca `adjustment=all` semantics and not role-aware-resolved); 0 bar requests; the universe stays 87 of 88 with no silent shrink.
+
 ## Scope
 - Denominator: exactly the 18 Pass-2 Conditional survivors (S06 x12, S05 x4, S13 x2), frozen and committed (187f79b7) before any provider request.
 - Strategy rows (789, PROCESS_CONTAMINATED_PRE_FREEZE_REAL_COHORT_SMOKE) were not confirmed; the six S2 near-misses were not rescued.
