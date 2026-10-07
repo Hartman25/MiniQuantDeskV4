@@ -1,0 +1,32 @@
+{
+ "CONFIRMATION_RESERVE_CONSUMED": true,
+ "EVIDENCE_GRADE": "CONFIRMATION_FACTOR_DIAGNOSTIC_NOT_PROMOTION_GRADE",
+ "EXECUTABLE_PNL": false,
+ "PROMOTION_AUTHORITY": "NONE",
+ "VALIDATION_STATUS": "NOT_VALIDATED",
+ "actual_confirmation_max": "2026-02-27T05:00:00+00:00",
+ "actual_confirmation_min": "2025-01-02T05:00:00+00:00",
+ "eligible_symbols": 87,
+ "excluded_by_disposition": {
+  "EXCLUDED_UNSUPPORTED_CORPORATE_ACTION": 1
+ },
+ "final_holdout_rows_read": 0,
+ "final_holdout_rows_scored": 0,
+ "first_authorized_read_utc": "2026-10-07T04:20:53.227752+00:00",
+ "max_label_endpoint": "2026-02-27T05:00:00+00:00",
+ "max_scored_observation": "2026-02-26T05:00:00+00:00",
+ "min_scored_observation": "2025-01-02T05:00:00+00:00",
+ "provider_bar_requests": 87,
+ "provider_raw_max_t": "2026-02-27T05:00:00+00:00",
+ "provider_raw_rows": 47067,
+ "requested_bounds": {
+  "end_utc_exclusive": "2026-03-01T00:00:00+00:00",
+  "start_utc": "2024-01-01T00:00:00+00:00"
+ },
+ "rows_at_or_after_fence_loaded": 0,
+ "schema_version": "alpha_edge_confirmation_consumption_v1",
+ "scored_rows_by_factor_total": 433956,
+ "universe_symbols": 88,
+ "warmup_max": "2024-12-31T05:00:00+00:00",
+ "warmup_min": "2024-01-02T05:00:00+00:00"
+}

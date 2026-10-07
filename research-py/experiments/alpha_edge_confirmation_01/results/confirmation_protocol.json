@@ -1,0 +1,165 @@
+{
+ "CONFIRMATION_PROTOCOL_ID": "50d18700c997c477ec1e60de8185c997f7fedfeee6a42dfe5d73e4a627937557",
+ "protocol": {
+  "attempts": {
+   "foreign_evaluation_id": "fail closed before mutation",
+   "opened_before_computation": true,
+   "retry_eligible_only": "infrastructure_interrupted",
+   "statistical_failure_terminal": true,
+   "store": "separate Confirmation-only ResearchResultStore",
+   "terminal_never_reexecuted": true
+  },
+  "cohort": {
+   "count_mismatch": "REFUSE_BEFORE_ANY_CONFIRMATION_READ",
+   "discovery_fields_diagnostic_only": [
+    "effect",
+    "p_value",
+    "q_value",
+    "event_count",
+    "horizon_class"
+   ],
+   "expected_count": 18,
+   "expected_family_counts": {
+    "S05": 4,
+    "S06": 12,
+    "S13": 2
+   },
+   "frozen_fields": [
+    "factor_id",
+    "condition_id",
+    "edge_id",
+    "family",
+    "params",
+    "horizon",
+    "direction"
+   ],
+   "pass2_denominator": 135,
+   "pass2_rejected": 117,
+   "rejected_factors_added": false,
+   "rule": "every Pass-2 conditional_robustness_ledger row with verdict == PASS2_CONDITIONAL_SURVIVOR, derived from the committed Pass-2 evidence bound by PASS2_PROCESS_DISPOSITION sha256_lf",
+   "strategy_rows_confirmed": false,
+   "strategy_s2_near_misses_rescued": false
+  },
+  "confirmation_attempts_at_freeze": 0,
+  "consumption_record": [
+   "CONFIRMATION_RESERVE_CONSUMED",
+   "first_authorized_read",
+   "requested_bounds",
+   "scored_min_max",
+   "warmup_min_max",
+   "max_scored_observation",
+   "max_label_endpoint",
+   "final_holdout_rows_read",
+   "final_holdout_rows_scored"
+  ],
+  "data_contract": {
+   "adjustment": "all",
+   "asof": "2026-10-06",
+   "calendar": "us_equity_regular_sessions_v1",
+   "corporate_action_metadata_caveat": "corporate-action discovery uses process-date bounds up to the wall clock, so metadata may name post-fence events; no bar value at or after the fence is ever requested or retained",
+   "end_utc_exclusive": "2026-03-01T00:00:00+00:00",
+   "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+   "feed": "sip",
+   "march_2026_fetch_forbidden": true,
+   "per_symbol_failure": "typed per-symbol disposition, never a silent universe shrink; SPY missing => BLOCKED",
+   "provenance": "registered bars provenance + SIP/all attestation + physical sha256, per symbol",
+   "provider": "alpaca",
+   "provider_rows_ge_end_refused": true,
+   "start_utc": "2024-01-01T00:00:00+00:00",
+   "timeframe": "1Day",
+   "universe": "ALPHA_CENSUS_UNIVERSE_V2 (88 symbols, unchanged, not point-in-time)"
+  },
+  "diagnostics_not_gates": [
+   "retention_ratio",
+   "per_month",
+   "per_quarter",
+   "per_symbol",
+   "symbols_represented",
+   "top_symbol_event_share",
+   "regime_distribution",
+   "pass2_horizon_class"
+  ],
+  "dispositions": {
+   "BLOCKED": "only a genuine system/provider/provenance contradiction",
+   "CONFIRMED_DIRECTIONAL_ONLY": "events >= 30, finite effect > 0, STRONG p/q requirement not met",
+   "CONFIRMED_STRONG": "events >= 30, finite effect > 0, p <= 0.1, complete-family BH q <= 0.1; the only status that may advance toward Final Holdout",
+   "NOT_CONFIRMED": "events >= 30 and effect <= 0",
+   "NOT_EVALUABLE_IN_CONFIRMATION": "events < 30 or typed evaluation insufficiency; never merged with NOT_CONFIRMED"
+  },
+  "estimator": {
+   "accepted": "census conditional.event_diagnostics + mqk_research.factors.diagnostics.evaluate_factor_ic_ir",
+   "below_floor": "NOT_EVALUABLE_IN_CONFIRMATION",
+   "effect": "mean over event rows of (label - same-symbol baseline), direction applied; direction frozen per factor (no flip, no absolute value)",
+   "events_counted_over": "valid scored frame rows",
+   "min_cross_section": 10,
+   "min_events": 30,
+   "min_periods": 30,
+   "n_quantiles": 2
+  },
+  "evidence_grade": "CONFIRMATION_FACTOR_DIAGNOSTIC_NOT_PROMOTION_GRADE",
+  "experiment_id": "alpha_edge_confirmation_01",
+  "fdr": {
+   "alpha": 0.1,
+   "family": "exactly the frozen 18",
+   "non_evaluable_p": 1.0,
+   "non_evaluable_stay_in_denominator": true,
+   "protocol": "benjamini_hochberg_complete_frozen_family_v1",
+   "winner_only_fdr": false
+  },
+  "final_holdout": "RESERVED_UNCONSUMED",
+  "forbidden_gates": [
+   "6-of-8 years",
+   "leave-best-year-out",
+   "neighborhood",
+   "max drawdown",
+   "trade count",
+   "delay",
+   "cost"
+  ],
+  "identity": "evaluation_id = sha256(protocol_id, factor_id, partition identity, data provenance identity, label protocol, null protocol, FDR-family identity)[:32]; result-independent",
+  "labels": {
+   "EVIDENCE_GRADE": "CONFIRMATION_FACTOR_DIAGNOSTIC_NOT_PROMOTION_GRADE",
+   "EXECUTABLE_PNL": false,
+   "PROMOTION_AUTHORITY": "NONE",
+   "VALIDATION_STATUS": "NOT_VALIDATED"
+  },
+  "null": {
+   "base_seed": 0,
+   "n_permutations": 200,
+   "p": "(exceed+1)/(n+1)",
+   "protocol": "alpha_census_fast_empirical_null_two_sided_v1",
+   "tails": "two_sided"
+  },
+  "observations": {
+   "factor_value": "completed-bar 0/1 condition, causal, unchanged Pass-1 builders (signals.PER_SYMBOL)",
+   "label": "close_{t+h}/close_t - 1 minus same-symbol same-horizon mean over the scored valid rows (diagnostic forward LABEL, never executable P&L)",
+   "label_endpoint_rule": "observation dropped unless the t+h bar exists and its session is < 2026-03-01",
+   "label_protocol": "alpha_confirmation_fwd_close_return_minus_symbol_baseline_v1",
+   "scored_window": [
+    "2025-01-01",
+    "2026-03-01"
+   ],
+   "warmup_contributes_observations": false
+  },
+  "partitions": {
+   "final_holdout": "[2026-03-01,) never requested",
+   "label_endpoint_exclusive_max": "2026-03-01",
+   "scored": "[2025-01-01,2026-03-01) CONFIRMATION_RESERVE",
+   "warmup": "[2024-01-01,2025-01-01) CONTAMINATED_BY_REJECTED_RUN: indicator warm-up context only; never scored, never baseline"
+  },
+  "promotion": "NOT_CLAIMED",
+  "ranking_readonly_not_selection": {
+   "alters_status_or_identity": false,
+   "directional_only_table_separate": true,
+   "strong": [
+    "q_asc",
+    "p_asc",
+    "effect_desc",
+    "events_desc",
+    "factor_id_asc"
+   ]
+  },
+  "schema_version": "alpha_edge_confirmation_protocol_v1",
+  "scope": "Independent Confirmation of exactly the 18 Pass-2 Conditional survivors as factor hypotheses; no new hypotheses; no Strategy candidate; no Promotion/Paper/Live; the final holdout is never requested"
+ }
+}

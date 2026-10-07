@@ -1,0 +1,1609 @@
+{
+ "acquisition": [
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "AAL"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "AAPL"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "ACHR"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "AFRM"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "AMD"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "AMZN"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "ARKK"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "BAC"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "BITO"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "CCL"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "CHPT"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "CSCO"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "CVX"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "DIA"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "DKNG"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "EEM"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "EFA"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "F"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "FXI"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "GDX"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "GDXJ"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "GE"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "GLD"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "GOOGL"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "GS"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "HD"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "HIMS"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "HOOD"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "IBM"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "ICLN"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "IEF"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "INTC"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "IONQ"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "IWM"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "JBLU"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "JNJ"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "JOBY"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "JPM"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "KGC"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "KO"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "KWEB"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "LCID"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "LYFT"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "MARA"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "META"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "MSFT"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "NCLH"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "NEM"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "NFLX"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "NIO"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "NVDA"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "OPEN"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "ORCL"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "PEP"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "PFE"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "PLTR"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "PLUG"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "QQQ"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "RBLX"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "RIOT"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "RIVN"
+  },
+  {
+   "bar_requests": null,
+   "disposition": "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION",
+   "first_end_ts": null,
+   "infrastructure_attempts": 1,
+   "last_end_ts": null,
+   "raw_max_t": null,
+   "raw_rows": null,
+   "rows": null,
+   "symbol": "RKLB"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "SHY"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "SLV"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "SMH"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "SOFI"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "SPY"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "T"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "TAN"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "TLT"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "TSLA"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "UAL"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "UPST"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "VNQ"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "VTI"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "VZ"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "WFC"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "WMT"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLB"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLE"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLF"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLI"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLK"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLP"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLU"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLV"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XLY"
+  },
+  {
+   "bar_requests": 1,
+   "disposition": "DATA_PRESENT",
+   "first_end_ts": "2024-01-02T05:00:00+00:00",
+   "infrastructure_attempts": 1,
+   "last_end_ts": "2026-02-27T05:00:00+00:00",
+   "raw_max_t": "2026-02-27T05:00:00+00:00",
+   "raw_rows": 541,
+   "rows": 541,
+   "symbol": "XOM"
+  }
+ ],
+ "calendar_contract": "us_equity_regular_sessions_v1",
+ "data_provenance_identity": "38381b423fd9f50ac0c53f3b4917c4d7d5e60abc2f9f2f221597f0ffb21e0086",
+ "eligible": 87,
+ "excluded_by_disposition": {
+  "EXCLUDED_UNSUPPORTED_CORPORATE_ACTION": 1
+ },
+ "request_contract": {
+  "adjustment": "all",
+  "asof": "2026-10-06",
+  "end_utc_exclusive": "2026-03-01T00:00:00+00:00",
+  "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+  "feed": "sip",
+  "provider": "alpaca",
+  "start_utc": "2024-01-01T00:00:00+00:00",
+  "timeframe": "1Day"
+ },
+ "schema_version": "alpha_edge_confirmation_data_provenance_v1",
+ "survivorship_caveat": "frozen 88-symbol current-registry snapshot; not point-in-time",
+ "symbols": [
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a04b499fa6fb24f380d79fcb0252193cf62a99b509e8b79b17664d6ec80b4a87",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "AAL"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "5d23166c2e8993624e98a273745722670da2afed0f349ff5d99b40a7bdb32073",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "AAPL"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "fc47e04a1db098c13f3a91bbebf8a5bda0dd5bec3e92d11d81abef07ef49edb2",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "ACHR"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "42f9157186e736cfb831c80db46872ee69bcae13c1596e559e5b777a27055fa2",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "AFRM"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "ed892e74681ba7806b96bff0e1046375a294eb89eeb1bfe42e5581bbe86248e0",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "AMD"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "073c002f8a8c4d3f494a67ab0d5d903c7a9903f8904463ae2750bb4aa035f501",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "AMZN"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "59b3a7d09d1341f8faea41ec54c9c3c86e6a7badc5fb82f0571066465d946ac3",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "ARKK"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b2638ce39aed9005dd18b25d650c234436145d5c5460075366660936ea23c369",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "BAC"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "3360c73638896b8471e4b2418f88e7bcd504fbe70d9aa5d632c36885ee254eb0",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "BITO"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e9fcc15c86969d1a24b9fb0d9057d1d9510a6af0d2dd3ae93daee82161072fb3",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "CCL"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "0fe2f92e3d703a412849dbad27781115628d4c8670e3626772a67126525d8eb4",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "CHPT"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "d46a8181012414062c64e816b615554b57f0f66b3428286acdadfd33f442f945",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "CSCO"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "2169b13024f6f5ad7319e7d152e573b6d6ce5c972db2cee4e4fa7c87404687cd",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "CVX"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "eaa9218f3e3353222e9431d51efde967f5b34210403307f042ed5f66ea3901c0",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "DIA"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "683b00fbe2defe2d8e5942407a59e7812b883b8a6eaf3756bbf3130a8e6bca89",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "DKNG"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "0e6949dd5f1da02f50611a5d025bef888333f13cab2379466ef7824a52a344e2",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "EEM"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b937b845eb55d962181a7b353f8217d7e60ff144f3aa6ba1d97e643beb61e2b6",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "EFA"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "02d93cec683a1dd887a60a2a5e18ac57254d6aa8c3f81caa720599824dc60e4d",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "F"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1a861c62b3ff62b5b2226bbcd84bac346e506fb4aeca62ce8eecf762a1385580",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "FXI"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "14c5416987fb3feb3303c2e3e52973894939ed35111fe2eab2754b30b48572c4",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "GDX"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "538ba714fc10d4ebd2e297feb256c9dbedf1cccf4b6e0643258b2709500bf54f",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "GDXJ"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "8d933a306524b4375fa55d67d71d6e17d660e60ed37dcc72f780d40fe6308327",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "GE"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "21cce2406938285bc2ee6a5f1bb1aa8c955b75469271b0c2e485bbab7f4ad898",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "GLD"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "4703a2fac93df8b95a8b4ae8fa58e88154788473bced617ec9399594aaf929ed",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "GOOGL"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "37e8466122b0e10aef68e89fdc4ad2a9666cfb0f06f2b05a4140d96bd5e89fdc",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "GS"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "0bbacb2f606542dbe1883993a8809a9b5690351cb737c3c0c5381926f50dc279",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "HD"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "7fbc7f9dd1546ba0c3a35140b6538910bb3f1d33d3d2fb4d581cfd76fb0de112",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "HIMS"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "bfa7a90d3e4b14ec0451d5410b2a6079be2d4a0afbe5c7839789c5eee6479207",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "HOOD"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c3b93a64f77897bfac6b712c6b92c7f100fee3279249897cd5231943e1f3fd84",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "IBM"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "d9542d8b2c304762314ac182cd1df2bfc198087a4b9ce318efaf9b0eb023ab41",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "ICLN"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "42d2698f11120f01fe8189db53cbfd8551ef102485d6433fa301080a2e5f660a",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "IEF"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "3df329a573c7d20e4466419d6df0632644a9f964cadaef08e148d692d0807a7e",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "INTC"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "d788dd49ab3e65acf9398dd0bc3f4a91438e8ad7898c8b7e31228b53c11041f2",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "IONQ"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "be1367cd86f70635cc2f2a26a11b9da2b113085cecf6f419e6af31a5593334f0",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "IWM"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "d4e9e0bd985ddec0abf2e6f6e16f307b03ba7f1a418f14259d6ee145470c1e65",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "JBLU"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "0ac2128865bc23cfb966e0996811cf2bd7f6db1ff70bf82aee0e0767b36da7e0",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "JNJ"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "2e56b487f52d792de979de87c412f4ab6f9f3aaf68a15e56d891c72e84b5a941",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "JOBY"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "57a98dd1ddcc38e6ef4d08db74624d556948b7c76dcd2c2a5c39d70395766984",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "JPM"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "8cefe4443cce3b5f3a32840cf73b9d96fe9cc9a80824dd3a7e498656a40dacba",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "KGC"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e4c41a208b33ce29b8845c45f13e76907b6eb34dde46e1ec2f8e28d9ef71c5d1",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "KO"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "316ae72fad81a7a77108f85c41011ec17ab3cdbb9f8afab34a483f6421d83797",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "KWEB"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "93b12177fed25b2ecff818ac899cc6b17023240e8c3a8be7833f1142ab02609b",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "LCID"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "5ac12af82430252a627372a7764c849f1a59bad0bed2655d9bb1c6041b8190d1",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "LYFT"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a9812c29f28910a1f6fa095ef378f3106618b7aa264f67f18cf15bcdc8bc7219",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "MARA"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "9122b774aaffcf9e494e9874b16437fa3b17da55b6f2cdfc7b3a12d33757f77e",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "META"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1b551510fc4a3b8546674f94721e712a1eaf3445d795fb10f6c312dcac389562",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "MSFT"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e72f74724b12711270beb7b9ab159831f4b0dfabf4cf3bc37d7e48772f764f8b",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "NCLH"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "58bed268c67e1497114b426ea1cf5fc3d8824406f4c93da57ca85c05df1014c0",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "NEM"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "35941eeae7de06e68ae939365b30947a556ccf02db023ef385c571ec032b2bcd",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "NFLX"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "cb94b47f30f4bb833a30f3d2727e487146c695312785fad78d79e698c274db3c",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "NIO"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "943d5a0b76afd0b035753dc483dc374868e5a88636d1409e79b21c846a3f8cb3",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "NVDA"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "737d87e4bbec1910c86a246926f5e363da3cfbdbd3a196cd851308759c00bbd1",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "OPEN"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1c44fdddb38a380dea51d1158ac32fa3a458c25424c134f70e006424b65855c3",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "ORCL"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "d385c179825b6a0691ab895e819cd689272196a55bb9ff15d63bdc149fe4bb05",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "PEP"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "b70c85f0bc5b6ff88510f30bb00f8f2413240e75f4cfca0debb8c97d5b944198",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "PFE"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "35daa2abb1d09ec70466e4dd67c622a2b6aa2cfc69eba0f7287c0be2f00e8082",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "PLTR"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1714d0c2d6977942485d2f48ff88c9286db4a4310b480d2571d2d0666c8c6314",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "PLUG"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "725bf503e1b099fec3a5ad8f4616f23ce98b9b11c493eca044448b0e68c879d2",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "QQQ"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "21f9b819dc1f645f940993b98ccb06306889044529e9eab2ea8f6a17535fb527",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "RBLX"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1918002629217c7e0f64e2348c5431db8676e28cb9a96e451d9f1895d1e471a4",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "RIOT"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "6fa18759d844be646f06b98793f3a8689bf1b315608fcc3ccf79884794f65970",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "RIVN"
+  },
+  {
+   "acquisition_status": "NON_EVALUABLE_UNSUPPORTED_CORPORATE_ACTION",
+   "detail": "Fail-closed: the following corporate action(s) intersect the requested symbol/range, are NOT covered by Alpaca's adjustment='all' semantics, and could not be role-aware-resolved (see classify_corporate_action_resolution) -- refusing to produce official research bars provenance until an explicit handling policy or reviewed resolution exists for them. Narrow the symbol universe or date range to exclude the affected symbol/period, or wait for a future patch that adds explicit handling: [{'symbol': 'RKLB', 'action_type': 'name_change', 'effective_start_ts': '2025-05-27', 'effective_end_ts': '2025-",
+   "disposition": "EXCLUDED_UNSUPPORTED_CORPORATE_ACTION",
+   "symbol": "RKLB"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "76332a2c3abe28a9867ef5e82d8516c87bb55fc341498392661ca76c4ee73fd4",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "SHY"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "008e8fbb34f5791f4b66c43dcb69e8a0c5162b1974b85b7db6d0dea330a66af9",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "SLV"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "16b5745484c7289ae052a3bd3b96dbbe674130b22f4f8359ed7630391ffe600f",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "SMH"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a415b7ece220aa19fa6e49417e940f27c047ca612811f8940f325563431cfe02",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "SOFI"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "281fdf761baabe08c4662d31e0e2980150026c5e3a050e36a3e667b08bee460f",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "SPY"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "1f6e891e6ebe5024320cc8cda85fbfd7b7162f6639947b49846042a73c75c1cc",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "T"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "2097de261dfd82d9d2678cb6d233df07da3f9dff5d2a594f2f8ed3d74f9e9ae6",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "TAN"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "7d7d69954a65bbb4f399251a434a7670c5542cd243c547bace13a6df893ed46f",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "TLT"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "75b62febdc4fd572e1668febdc56c482ad5d8205f3e5734ca573514b2c58f44f",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "TSLA"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "c9c33714764419b38a4b6eb07decd4603ae98d81868a72302eb92b28cd9aab70",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "UAL"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "f9bc284c75308e9c1d59cad907e826d679eb6aea864a1bec2ac85a502d220961",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "UPST"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "7c242b415e4a1b6c8027f194d50d67c87d7b796de430cd5c341512fb4a24e2e9",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "VNQ"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "9e3fddd6f4a1af663fbad70bfa48c6b2a64f53871fc01f31eb34d20ee816cb5f",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "VTI"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "53dc6f4eb492075dee6c767b94ce561a1c3a49f191d9edc6fb5a12574ab366ca",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "VZ"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "614c10d9f317904b33b5d77a6236c776b85f469eb258b656f2a280f913d88df9",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "WFC"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "e1f64b5f04b1e77ec350fe3df240fc8801db63b501db8f4b20975b3b789235af",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "WMT"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "dca31b3bf9d638aaf18c4de7ccf9a42c9b46d6ce4100166bdc11f21486b47308",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLB"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "5f5ee6ab99f48677a992b869339eb4c0ee4f28a12ec67c3de44495615281f398",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLE"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "cfd662a4ebee562f73fb86dc09959eccd46649a8ebcdd824f076270fc663b66b",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLF"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "347daa8cf9a4329e5a1c30e4d6bdbb6d8df88d574e6b6f172dacac277cf8cbad",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLI"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "028a6684eefcc1a975e09b6c4ab2a7d9707bf9068b421eae972b3f8533609182",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLK"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "216a198a35061ecf70a989fb480a596cb626c9073c4a0e03d717b8244613579f",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLP"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "51918085d39162f06a6bbe9e4a9fb8481331f69588993ef55eba3bcd810eaa8b",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLU"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "a2dc24d35201477d2a4b7209343b89757e8fc4ee11f000a2532c11f0bbdb0ddb",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLV"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "9cfd0a55ee179ec3c06edbef05bae8779e8c495f30b27435eeddb5ce1da9c18e",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XLY"
+  },
+  {
+   "acquisition_status": "DATA_PRESENT",
+   "artifact_sha256": "bf43642a37df252b3ec860049959f7bb583e25aabfe1386c1df84d738a0bd6f2",
+   "disposition": "ELIGIBLE",
+   "observations": 541,
+   "symbol": "XOM"
+  }
+ ],
+ "universe_count": 88,
+ "universe_sha256_lf": "e0be5e6ce1491947314b133eb93f40b8ce579db78397b0d23cdcbf7d02a47dea"
+}
