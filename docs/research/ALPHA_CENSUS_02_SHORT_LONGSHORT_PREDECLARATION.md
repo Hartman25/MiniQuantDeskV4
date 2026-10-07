@@ -1,7 +1,7 @@
 # Alpha Census 02 — Short / Long-Short Predeclaration (capability census + operator-freeze package)
 
 Mission `V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01`. Baseline `c005e56791f34f1fd5d32e559dd594ec8e30d2c4`.
-Status (C3A): `CENSUS02_READY_TO_FREEZE` — operator policy is **approved** (section 13, `CENSUS02_OPERATOR_POLICY.json`) and the complete
+Status (C3B): `CENSUS02_FROZEN_BY_OPERATOR_BEFORE_RESULT_1` (the freeze commit follows the behavior commit C3A `675549e219b4bb78adc298fde56dd39bae655e45`; section 14). Status at C3A: `CENSUS02_READY_TO_FREEZE` — operator policy is **approved** (section 13, `CENSUS02_OPERATOR_POLICY.json`) and the complete
 result-independent campaign (runner, evaluators, populations, environment identity, expanded source manifest) is implemented and proven
 on synthetic data. Sections 1–12 are the historical capability census, proposal and review corrections that led here; where they say
 "operator decision" or "PROPOSED", section 13 supersedes them. The freeze file (`CENSUS02_PREDECLARATION.json`) is created in a separate
@@ -277,5 +277,27 @@ outcomes (result-key scan of the builder output). Remaining in-scope defects: NO
 (current-registry snapshot), no point-in-time borrow truth, daily-bar SSR can only flag a possible hazard, the factor loop is sequential.
 
 Real Census-02 attempts: 0. Discovery bars read: 0. 2024 / Confirmation / Final Holdout rows: 0.
+
+## 14. Freeze (C3B) and chronology
+
+Behavior commit **C3A** `675549e219b4bb78adc298fde56dd39bae655e45` (no bound source has changed since). The freeze commit C3B adds only
+`CENSUS02_PREDECLARATION.json`, the pre-freeze proof `freeze_evidence/CENSUS02_FREEZE_PROOF.json` (+ its generator) and this section. It does not
+(and cannot) contain its own commit SHA; `behavior_head` is the recorded parent authority and `require_freeze` additionally refuses if any bound source
+differs between `behavior_head` and `HEAD`.
+
+| Item | Frozen value |
+|---|---|
+| status / `attempts_at_freeze` / results present | `FROZEN_BY_OPERATOR` / 0 / false |
+| `protocol_id` | `573d299c08e0849f715ed322f7e139ea` (binds structural protocol, approved decisions, 45-source manifest + 2 authority files, numerical environment) |
+| Strategy population | 9,400 trials (470 configs x 20 Class-C symbols); root `8ad383d43f3929e0753a1f31a4de9543e86cbcfe070bee227cdf23ecaae746dc` |
+| Factor semantic population | 1,075 coordinates (215 conditions x 5 horizons), `lower_is_better`, ALL_SEED_SYMBOLS; root `095af73d36a5a255df5d06e8e1ae9b59ec1bb8e163d0f05b9165f0da28c774bb` |
+| Numerical environment | Python 3.13.16, NumPy 2.5.3, Pandas 3.0.5 (exact; compared before any data access; no package was changed) |
+| Future request contract | alpaca / SIP / adjustment all / 1Day / `[2016-01-01, 2024-01-01)` / asof 2026-10-05 (not executed) |
+| Disclosure | Census-01: 38,192 Strategy trials, 1,095 factors; local family; DSR/PBO deferred |
+
+**Chronology.** (A) operator policy approved -> (B) result-independent runner/evaluator completed -> (C) proven on synthetic data (222 Census-02 tests,
+101 mutations) -> (D) behavior committed (C3A) -> (E) source / environment manifests computed against that commit -> (F) this freeze committed
+(C3B) -> (G) STOP for independent chronology review -> (H) only a future explicit authorization may open attempt #1. Real Census-02 attempts 0;
+Discovery bars read 0; 2024 / Confirmation / Final Holdout rows 0.
 
 Full local workspace acceptance: NOT RUN — prohibited by laptop resource-safety rule; broad workspace proof delegated to GitHub CI.
