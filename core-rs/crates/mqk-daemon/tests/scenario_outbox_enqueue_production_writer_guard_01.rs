@@ -119,3 +119,52 @@ fn t10_every_unfenced_outbox_enqueue_caller_in_src_is_allowlisted_test_fixture()
          or itself migrated), narrow the allowlist rather than leaving a stale entry"
     );
 }
+
+/// LIVESHADOW-NO-ORDER-AUTHORITY-CLOSURE-01: the run-mode-unfenced
+/// `outbox_enqueue_for_running_run(` may not create a new economic order.
+/// Its only production caller is the manual cancel route, which can only
+/// target an existing, durably broker-mapped order. Every other writer must
+/// use the mode-fenced `outbox_enqueue_new_order_for_running_run(`.
+const ALLOWED_MODE_UNFENCED_CALLERS: &[&str] = &["routes/execution.rs"];
+
+#[test]
+fn t11_only_cancel_route_uses_mode_unfenced_run_state_enqueue() {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_dir, &mut files);
+
+    let mut callers: Vec<String> = Vec::new();
+    for file in &files {
+        let content = std::fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("guard: failed to read {}: {e}", file.display()));
+        // "outbox_enqueue_new_order_for_running_run(" does not contain this
+        // substring ("enqueue_new_order_for", not "enqueue_for").
+        if content.contains("outbox_enqueue_for_running_run(") {
+            callers.push(
+                file.strip_prefix(&src_dir)
+                    .unwrap_or(file)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    callers.sort();
+    assert_eq!(
+        callers, ALLOWED_MODE_UNFENCED_CALLERS,
+        "only the manual cancel route may call the mode-unfenced outbox_enqueue_for_running_run(); \
+         every writer that can create a NEW economic order must call \
+         outbox_enqueue_new_order_for_running_run() so LiveShadow/Backtest runs are refused"
+    );
+
+    // The cancel route must still be exactly one non-order request type.
+    let exec = std::fs::read_to_string(src_dir.join("routes/execution.rs")).expect("read");
+    assert_eq!(
+        exec.matches("outbox_enqueue_for_running_run(").count(),
+        1,
+        "routes/execution.rs must call the unfenced enqueue exactly once (cancel)"
+    );
+    assert!(
+        exec.contains("outbox_enqueue_new_order_for_running_run("),
+        "the manual order submit route must use the mode-fenced enqueue"
+    );
+}

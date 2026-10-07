@@ -118,5 +118,13 @@ name = "scenario_outbox_enqueue_run_state_fence_01"
 path = "tests/scenario_outbox_enqueue_run_state_fence_01.rs"
 required-features = ["testkit"]
 
+# LIVESHADOW-NO-ORDER-AUTHORITY-CLOSURE-01: run-mode fence on new-order enqueue.
+# Run: MQK_DATABASE_URL=... cargo test -p mqk-db --features testkit \
+#      --test scenario_outbox_new_order_mode_fence_01 -- --include-ignored --test-threads=1
+[[test]]
+name = "scenario_outbox_new_order_mode_fence_01"
+path = "tests/scenario_outbox_new_order_mode_fence_01.rs"
+required-features = ["testkit"]
+
 [dev-dependencies]
 tempfile = "3"

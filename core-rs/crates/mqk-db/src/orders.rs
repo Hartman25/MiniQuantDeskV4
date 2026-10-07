@@ -359,6 +359,21 @@ pub enum OutboxEnqueueOutcome {
     /// from `Duplicate` -- callers must not conflate "already exists" with
     /// "durable run no longer permits creation of economic intent".
     RunNotRunning { actual_status: String },
+    /// Refused: the run's durable `mode` does not permit creating a NEW
+    /// economic order (see [`run_mode_permits_new_economic_order`]). Zero
+    /// mutation. Only [`outbox_enqueue_new_order_for_running_run`] returns this.
+    RunModeForbidsNewOrder { run_mode: String },
+}
+
+/// Canonical order-authority primitive: may a run stamped with this durable
+/// `runs.mode` create a NEW economic order?
+///
+/// `PAPER` and `LIVE-CAPITAL` only; their remaining authority (arm, start
+/// and promotion gates) is unchanged and enforced elsewhere. `LIVE-SHADOW`
+/// observes real broker truth but never creates an order; `BACKTEST` and any
+/// unrecognized or legacy value fail closed.
+pub fn run_mode_permits_new_economic_order(run_mode: &str) -> bool {
+    matches!(run_mode, "PAPER" | "LIVE-CAPITAL")
 }
 
 /// PAPER-SOAK-OUTBOX-ENQUEUE-RUN-STATE-FENCE-01 -- production-fenced outbox
@@ -408,11 +423,43 @@ pub enum OutboxEnqueueOutcome {
 /// (e.g. `AppState` status) is advisory only and does not close this race by
 /// itself -- it can go stale between the check and the DB write. This
 /// function is the durable enforcement point.
+///
+/// Applies NO run-mode fence: it must never create a new economic order. Use
+/// [`outbox_enqueue_new_order_for_running_run`] for that.
 pub async fn outbox_enqueue_for_running_run(
     pool: &PgPool,
     run_id: Uuid,
     idempotency_key: &str,
     order_json: Value,
+) -> Result<OutboxEnqueueOutcome> {
+    enqueue_for_running_run_inner(pool, run_id, idempotency_key, order_json, false).await
+}
+
+/// Mode-fenced variant of [`outbox_enqueue_for_running_run`] for every writer
+/// that creates a NEW economic order (manual order, strategy signal,
+/// internal decision, flatten). Identical run-state fence, plus: the locked
+/// run row's durable `mode` must satisfy
+/// [`run_mode_permits_new_economic_order`], else
+/// [`OutboxEnqueueOutcome::RunModeForbidsNewOrder`] with zero mutation.
+///
+/// [`outbox_enqueue_for_running_run`] (no mode fence) is reserved for
+/// requests that cannot create a new order, i.e. cancel of an existing,
+/// durably broker-mapped order.
+pub async fn outbox_enqueue_new_order_for_running_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    idempotency_key: &str,
+    order_json: Value,
+) -> Result<OutboxEnqueueOutcome> {
+    enqueue_for_running_run_inner(pool, run_id, idempotency_key, order_json, true).await
+}
+
+async fn enqueue_for_running_run_inner(
+    pool: &PgPool,
+    run_id: Uuid,
+    idempotency_key: &str,
+    order_json: Value,
+    require_new_order_mode: bool,
 ) -> Result<OutboxEnqueueOutcome> {
     let order_json = stamp_order_json_schema_version(order_json)?;
 
@@ -421,19 +468,26 @@ pub async fn outbox_enqueue_for_running_run(
         .await
         .context("outbox_enqueue_for_running_run: begin tx failed")?;
 
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+    let run: Option<(String, String)> =
+        sqlx::query_as("SELECT status, mode FROM runs WHERE run_id = $1 FOR UPDATE")
             .bind(run_id)
             .fetch_optional(&mut *tx)
             .await
             .context("outbox_enqueue_for_running_run: run lock failed")?;
 
-    let Some(status) = status else {
+    let Some((status, run_mode)) = run else {
         tx.rollback().await.ok();
         return Err(anyhow!(
             "outbox_enqueue_for_running_run: run {run_id} not found"
         ));
     };
+
+    if require_new_order_mode && !run_mode_permits_new_economic_order(&run_mode) {
+        tx.rollback()
+            .await
+            .context("outbox_enqueue_for_running_run: rollback (mode forbids) failed")?;
+        return Ok(OutboxEnqueueOutcome::RunModeForbidsNewOrder { run_mode });
+    }
 
     if status != "RUNNING" {
         tx.rollback()

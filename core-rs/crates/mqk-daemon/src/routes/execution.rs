@@ -213,6 +213,20 @@ pub(crate) async fn execution_order_submit(
         }
     };
 
+    if !st.deployment_mode().allows_new_economic_order() {
+        return manual_order_submit_response(
+            StatusCode::FORBIDDEN,
+            false,
+            "rejected",
+            validated.client_request_id,
+            None,
+            vec![format!(
+                "execution order submit refused: deployment mode '{}' may not create new economic orders",
+                st.deployment_mode().as_api_label()
+            )],
+        );
+    }
+
     let _lifecycle = st
         .lifecycle_guard(crate::state::ExecutionDomain::EquityNyse)
         .await;
@@ -365,7 +379,7 @@ pub(crate) async fn execution_order_submit(
     }
 
     let order_json = validated.order_json();
-    match mqk_db::outbox_enqueue_for_running_run(
+    match mqk_db::outbox_enqueue_new_order_for_running_run(
         db,
         active_run_id,
         &validated.client_request_id,
@@ -403,6 +417,18 @@ pub(crate) async fn execution_order_submit(
                 validated.client_request_id,
                 Some(active_run_id),
                 blockers,
+            )
+        }
+        Ok(mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder { run_mode }) => {
+            manual_order_submit_response(
+                StatusCode::FORBIDDEN,
+                false,
+                "rejected",
+                validated.client_request_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order submit refused: durable run mode '{run_mode}' may not create new economic orders"
+                )],
             )
         }
         Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
@@ -688,6 +714,20 @@ pub(crate) async fn execution_order_cancel(
             Some(active_run_id),
             vec![],
         ),
+        // The unfenced cancel enqueue never returns this; refuse fail-closed
+        // rather than treat it as success if that ever changes.
+        Ok(mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder { run_mode }) => {
+            manual_order_cancel_response(
+                StatusCode::FORBIDDEN,
+                false,
+                "rejected",
+                order_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order cancel refused: durable run mode '{run_mode}' is not order-capable"
+                )],
+            )
+        }
         Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
             manual_order_cancel_response(
                 StatusCode::CONFLICT,

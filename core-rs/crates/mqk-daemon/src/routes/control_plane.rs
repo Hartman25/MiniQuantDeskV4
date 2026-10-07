@@ -2113,8 +2113,13 @@ pub(crate) async fn ops_action(
                         ts_secs,
                         active_run_id,
                     );
-                match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &key, order_json)
-                    .await
+                match mqk_db::outbox_enqueue_new_order_for_running_run(
+                    db,
+                    active_run_id,
+                    &key,
+                    order_json,
+                )
+                .await
                 {
                     Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
                         info!(
@@ -2142,6 +2147,18 @@ pub(crate) async fn ops_action(
                         );
                         already_pending_symbols.push(symbol.clone());
                         warnings.push(format!("already_pending: symbol={symbol} key={key}"));
+                    }
+                    Ok(mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder { run_mode }) => {
+                        tracing::warn!(
+                            run_id = %active_run_id,
+                            symbol = %symbol,
+                            run_mode = %run_mode,
+                            "operator_flatten_close_run_mode_forbids_new_order"
+                        );
+                        failed_symbols.push(symbol.clone());
+                        warnings.push(format!(
+                            "order_authority_denied: symbol={symbol} run_mode={run_mode}"
+                        ));
                     }
                     Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
                         tracing::warn!(

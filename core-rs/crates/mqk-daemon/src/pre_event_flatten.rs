@@ -483,3 +483,78 @@ pub fn build_operator_flatten_close_order_json(
 
     (idempotency_key, order_json)
 }
+
+/// EVENT-RISK-FLATTEN-WIRE-01: for each non-flat position whose event-risk
+/// sources require (or cannot rule out) a flatten, enqueue a market close
+/// into the outbox. Idempotent per (run, symbol, minute); enqueue failure is
+/// non-fatal and retried next tick. Returns the number of newly enqueued rows.
+///
+/// A flatten close is a NEW economic order: a deployment mode that may not
+/// create one (LiveShadow) enqueues nothing, and the mode-fenced durable
+/// enqueue independently refuses.
+pub async fn enqueue_pre_event_flatten_closes(
+    mode: crate::state::DeploymentMode,
+    pool: &sqlx::PgPool,
+    run_id: uuid::Uuid,
+    positions_to_check: &[(String, QtyMicros)],
+) -> usize {
+    if !mode.allows_new_economic_order() {
+        return 0;
+    }
+    let mut enqueued = 0usize;
+    for (symbol, net_qty) in positions_to_check {
+        let ts_secs = chrono::Utc::now().timestamp();
+        let outcome = evaluate_flatten_trigger_from_env(symbol, ts_secs, DEFAULT_FLATTEN_LEAD_SECS);
+        if outcome.is_flatten_required() || outcome.is_unavailable() {
+            let (key, order_json) =
+                build_flatten_close_order_json(symbol, *net_qty, ts_secs, run_id);
+            match mqk_db::outbox_enqueue_new_order_for_running_run(pool, run_id, &key, order_json)
+                .await
+            {
+                Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
+                    enqueued += 1;
+                    tracing::warn!(
+                        run_id = %run_id,
+                        symbol = %symbol,
+                        net_qty = %net_qty,
+                        idempotency_key = %key,
+                        "pre_event_flatten_close_enqueued"
+                    );
+                }
+                Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {
+                    tracing::debug!(
+                        run_id = %run_id,
+                        symbol = %symbol,
+                        idempotency_key = %key,
+                        "pre_event_flatten_close_already_pending"
+                    );
+                }
+                Ok(mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder { run_mode }) => {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        symbol = %symbol,
+                        run_mode = %run_mode,
+                        "pre_event_flatten_close_run_mode_forbids_new_order"
+                    );
+                }
+                Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
+                    tracing::debug!(
+                        run_id = %run_id,
+                        symbol = %symbol,
+                        actual_status = %actual_status,
+                        "pre_event_flatten_close_run_not_running"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        symbol = %symbol,
+                        error = %err,
+                        "pre_event_flatten_close_enqueue_failed"
+                    );
+                }
+            }
+        }
+    }
+    enqueued
+}

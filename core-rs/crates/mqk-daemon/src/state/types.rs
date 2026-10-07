@@ -711,6 +711,15 @@ impl DeploymentMode {
         }
     }
 
+    /// Canonical order-authority predicate: may this deployment create a NEW
+    /// economic order? Delegates to the one durable primitive
+    /// ([`mqk_db::run_mode_permits_new_economic_order`]) that
+    /// `outbox_enqueue_new_order_for_running_run` enforces against the run's
+    /// stamped mode, so route-level and durable fences cannot drift.
+    pub fn allows_new_economic_order(&self) -> bool {
+        mqk_db::run_mode_permits_new_economic_order(self.as_db_mode())
+    }
+
     pub fn as_api_label(&self) -> &'static str {
         match self {
             Self::Backtest => "backtest",

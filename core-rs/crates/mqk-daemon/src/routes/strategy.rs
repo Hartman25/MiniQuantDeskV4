@@ -1445,7 +1445,7 @@ pub(crate) async fn strategy_signal(
 
     // Gate 7: enqueue to outbox (idempotent).
     let order_json = validated.order_json();
-    match mqk_db::outbox_enqueue_for_running_run(
+    match mqk_db::outbox_enqueue_new_order_for_running_run(
         db,
         active_run_id,
         &validated.signal_id,
@@ -1522,6 +1522,22 @@ pub(crate) async fn strategy_signal(
                 validated.strategy_id,
                 Some(active_run_id),
                 vec![dup_note],
+            )
+        }
+        Ok(mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder { run_mode }) => {
+            refused_signal_response(
+                StatusCode::FORBIDDEN,
+                "gate_7_outbox",
+                "order_authority_denied",
+                RefusedSignalArgs {
+                    signal_id: validated.signal_id,
+                    strategy_id: validated.strategy_id,
+                    symbol: validated.symbol,
+                    active_run_id: Some(active_run_id),
+                    blockers: vec![format!(
+                        "signal refused: durable run mode '{run_mode}' may not create new economic orders"
+                    )],
+                },
             )
         }
         Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {

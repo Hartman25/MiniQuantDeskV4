@@ -1193,62 +1193,13 @@ pub(super) fn spawn_execution_loop(
                                 })
                                 .unwrap_or_default()
                         };
-                        for (symbol, net_qty) in &positions_to_check {
-                            let ts_secs = Utc::now().timestamp();
-                            let outcome =
-                                crate::pre_event_flatten::evaluate_flatten_trigger_from_env(
-                                    symbol,
-                                    ts_secs,
-                                    crate::pre_event_flatten::DEFAULT_FLATTEN_LEAD_SECS,
-                                );
-                            if outcome.is_flatten_required() || outcome.is_unavailable() {
-                                let (key, order_json) =
-                                    crate::pre_event_flatten::build_flatten_close_order_json(
-                                        symbol, *net_qty, ts_secs, run_id,
-                                    );
-                                match mqk_db::outbox_enqueue_for_running_run(
-                                    pool, run_id, &key, order_json,
-                                )
-                                .await
-                                {
-                                    Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
-                                        tracing::warn!(
-                                            run_id = %run_id,
-                                            symbol = %symbol,
-                                            net_qty = %net_qty,
-                                            idempotency_key = %key,
-                                            "pre_event_flatten_close_enqueued"
-                                        );
-                                    }
-                                    Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {
-                                        tracing::debug!(
-                                            run_id = %run_id,
-                                            symbol = %symbol,
-                                            idempotency_key = %key,
-                                            "pre_event_flatten_close_already_pending"
-                                        );
-                                    }
-                                    Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning {
-                                        actual_status,
-                                    }) => {
-                                        tracing::debug!(
-                                            run_id = %run_id,
-                                            symbol = %symbol,
-                                            actual_status = %actual_status,
-                                            "pre_event_flatten_close_run_not_running"
-                                        );
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            run_id = %run_id,
-                                            symbol = %symbol,
-                                            error = %err,
-                                            "pre_event_flatten_close_enqueue_failed"
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                        crate::pre_event_flatten::enqueue_pre_event_flatten_closes(
+                            state_arc.deployment_mode(),
+                            pool,
+                            run_id,
+                            &positions_to_check,
+                        )
+                        .await;
                     }
 
                     // B1C: Dispatch pending strategy bar input and submit Live-intent

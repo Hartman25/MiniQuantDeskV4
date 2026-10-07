@@ -1664,7 +1664,9 @@ pub async fn submit_internal_strategy_decision(
 
     let order_json = build_order_json(&decision, &instrument_context);
 
-    match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &did, order_json).await {
+    match mqk_db::outbox_enqueue_new_order_for_running_run(db, active_run_id, &did, order_json)
+        .await
+    {
         Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
             state.increment_day_signal_count(crate::state::ExecutionDomain::EquityNyse);
@@ -1686,6 +1688,16 @@ pub async fn submit_internal_strategy_decision(
             Some(active_run_id),
             vec![format!(
                 "decision_id '{did}' already exists in outbox; no new row was created"
+            )],
+        ),
+        Ok(mqk_db::OutboxEnqueueOutcome::RunModeForbidsNewOrder { run_mode }) => outcome(
+            false,
+            "order_authority_denied",
+            &did,
+            &sid,
+            Some(active_run_id),
+            vec![format!(
+                "internal decision refused: durable run mode '{run_mode}' may not create new economic orders"
             )],
         ),
         Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => outcome(

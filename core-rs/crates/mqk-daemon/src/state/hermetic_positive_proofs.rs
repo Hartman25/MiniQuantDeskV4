@@ -130,6 +130,14 @@ mod tests {
     }
 
     async fn seed_required_risk_created_run(pool: &sqlx::PgPool, seed: &str) {
+        seed_required_risk_created_run_for_mode(pool, seed, DeploymentMode::LiveShadow).await;
+    }
+
+    async fn seed_required_risk_created_run_for_mode(
+        pool: &sqlx::PgPool,
+        seed: &str,
+        mode: DeploymentMode,
+    ) {
         let run_id = uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_DNS,
             format!("mqk.hermetic.required-risk.{seed}").as_bytes(),
@@ -139,14 +147,14 @@ mod tests {
             &mqk_db::NewRun {
                 run_id,
                 engine_id: "mqk-daemon".to_string(),
-                mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
+                mode: mode.as_db_mode().to_string(),
                 started_at_utc: chrono::Utc::now(),
                 git_hash: "TEST".to_string(),
                 config_hash: "hermetic-required-risk".to_string(),
                 config_json: serde_json::json!({
                     "runtime": "mqk-daemon",
                     "adapter": "alpaca",
-                    "mode": DeploymentMode::LiveShadow.as_db_mode(),
+                    "mode": mode.as_db_mode(),
                     "risk": {
                         "initial_equity_micros": 100_000_000_000_i64,
                         "daily_loss_limit": 0.02,
@@ -393,22 +401,23 @@ mod tests {
         })
     }
 
+    /// Order-submit fixture: Paper+Alpaca, the only order-capable
+    /// deployment. The route under test never starts the runtime (the run is
+    /// seeded RUNNING directly), so the Paper `daily_data_readiness` start
+    /// gate is not involved; the hermetic broker override avoids real Alpaca
+    /// credentials.
     async fn hermetic_order_daemon_state(pool: sqlx::PgPool) -> Arc<AppState> {
-        // Explicit LiveShadow+Alpaca, not the ambient-env-resolved default
-        // (Paper+Paper, refused at the deployment_mode gate itself as "not an
-        // honest paper trading path" before any broker is constructed) and
-        // not Paper+Alpaca (Paper mode with an Alpaca adapter resolves
-        // strategy_market_data_source to ExternalSignalIngestion, which
-        // brings the daily_data_readiness gate into play -- see
-        // FULL-AUDIT-FAIL-011 -- and these order-submit fixtures set no
-        // MQK_STRATEGY_SYMBOL, so that gate would always refuse). LiveShadow
-        // bypasses both: deployment_mode-honest for +Alpaca, and
-        // daily_data_readiness only applies to Paper mode. The hermetic
-        // override (below) is what avoids needing real Alpaca credentials.
-        seed_required_risk_created_run(&pool, "order-daemon").await;
+        hermetic_order_daemon_state_for_mode(pool, DeploymentMode::Paper).await
+    }
+
+    async fn hermetic_order_daemon_state_for_mode(
+        pool: sqlx::PgPool,
+        mode: DeploymentMode,
+    ) -> Arc<AppState> {
+        seed_required_risk_created_run_for_mode(&pool, "order-daemon", mode).await;
         let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
             pool,
-            DeploymentMode::LiveShadow,
+            mode,
             BrokerKind::Alpaca,
         ));
         enable_hermetic_broker_with_seeded_snapshot(&st).await;
@@ -438,6 +447,7 @@ mod tests {
         st: &Arc<AppState>,
         pool: &sqlx::PgPool,
     ) -> uuid::Uuid {
+        let mode = st.deployment_mode();
         let run_id = uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk.hermetic.order-submit.enqueue-only",
@@ -449,14 +459,14 @@ mod tests {
             &mqk_db::NewRun {
                 run_id,
                 engine_id: "mqk-daemon".to_string(),
-                mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
+                mode: mode.as_db_mode().to_string(),
                 started_at_utc: now,
                 git_hash: "TEST".to_string(),
                 config_hash: "hermetic-order-enqueue-only".to_string(),
                 config_json: serde_json::json!({
                     "runtime": "mqk-daemon",
                     "adapter": "alpaca",
-                    "mode": DeploymentMode::LiveShadow.as_db_mode(),
+                    "mode": mode.as_db_mode(),
                     "risk": {
                         "initial_equity_micros": 100_000_000_000_i64,
                         "daily_loss_limit": 0.02,
@@ -675,6 +685,53 @@ mod tests {
         .await;
     }
 
+    async fn outbox_row_count_for_key(pool: &sqlx::PgPool, key: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM oms_outbox WHERE idempotency_key = $1")
+            .bind(key)
+            .fetch_one(pool)
+            .await
+            .expect("count outbox rows")
+    }
+
+    // -----------------------------------------------------------------
+    // LIVESHADOW-NO-ORDER-AUTHORITY-CLOSURE-01: LiveShadow observes real
+    // broker truth but may never create a manual economic order. The same
+    // armed, RUNNING, otherwise-valid fixture that is enqueued under Paper
+    // (`hermetic_order_submit_enqueues_one_pending_outbox_row`) is refused
+    // here before any durable write.
+    // -----------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hermetic_live_shadow_manual_order_refused_with_zero_outbox_rows() {
+        mqk_db::run_isolated("hermetic_order_live_shadow_refused", |pool| async move {
+            let st = hermetic_order_daemon_state_for_mode(pool, DeploymentMode::LiveShadow).await;
+            arm(&st).await;
+            let db = st.db.as_ref().expect("db configured");
+            let _run_id = seed_active_order_run_without_dispatch(&st, db).await;
+
+            let (status, json) = post_manual_order(&st, valid_order_request()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "must refuse: {json}");
+            assert_eq!(json["accepted"], false);
+            assert_eq!(json["disposition"], "rejected");
+            // Route-level authority refusal (not the arm/run/outbox gates).
+            let blockers = json["blockers"].to_string();
+            assert!(
+                blockers
+                    .contains("deployment mode 'live-shadow' may not create new economic orders"),
+                "route-level order-authority blocker expected: {json}"
+            );
+            let pool = st.db.as_ref().expect("db configured");
+            assert_eq!(
+                outbox_row_count_for_key(pool, "manual-order-001").await,
+                0,
+                "LiveShadow must never create an outbox row"
+            );
+
+            st.stop_for_shutdown().await;
+        })
+        .await;
+    }
+
     // -----------------------------------------------------------------
     // D3 (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01) second-sweep finding:
     // the pending-lifecycle gate must also cover the manual operator
@@ -698,7 +755,7 @@ mod tests {
             mqk_db::BrokerAccountAuthority::new(
                 "alpaca",
                 "hermetic-order-submit-acct",
-                DeploymentMode::LiveShadow.as_api_label(),
+                DeploymentMode::Paper.as_api_label(),
             )
             .map_err(|e| e.to_string())
         }
@@ -723,7 +780,7 @@ mod tests {
             let authority = mqk_db::BrokerAccountAuthority::new(
                 "alpaca",
                 "hermetic-order-submit-acct",
-                DeploymentMode::LiveShadow.as_api_label(),
+                DeploymentMode::Paper.as_api_label(),
             )
             .expect("authority");
             mqk_db::verify_or_register_broker_account_authority(db, &authority, chrono::Utc::now())
@@ -735,7 +792,7 @@ mod tests {
                     activity_id: "hermetic-d3-opexc".to_string(),
                     broker_account_id: authority.key(),
                     engine_id: "mqk-daemon".to_string(),
-                    mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
+                    mode: DeploymentMode::Paper.as_db_mode().to_string(),
                     activity_type:
                         mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
                     option_symbol: Some("AAPL230721C00150000".to_string()),
