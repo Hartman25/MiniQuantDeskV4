@@ -167,5 +167,9 @@ def evaluate_short_cell(sd, config: dict, evidence_class: str, *, borrow_fee_bps
         hold = simulate_signed(sd.hm, sd.lm, sd.cm, benchmark_hold(sd.n, sig.s, _HOLD_DIRECTION[name]), sig.s,
                                borrow_fee_bps_annual=borrow_fee_bps_annual)
         recs[name] = s1.metrics(so, hold, sd.years, sd.regime, **kw)
+    # SSR is FLAG_ONLY in Discovery: a daily-bar hazard flag per short entry fill, never an input to the position or the fill.
+    short_entries = [int(e) for e in so.entries if sig.d[e - 1] < 0]
+    ssr = {"basis": "daily_bar_rule201_possible_hazard_flag_only_intraday_sequence_unknown", "short_entries": len(short_entries),
+           "ssr_hazard_entries": sum(1 for e in short_entries if ssr_flag(sd.lm, sd.cm, e))}
     return {"d": "EVALUABLE", "m": recs, "evidence_class": evidence_class, "executable_pnl": True,
-            "benchmark_roles": dict(BENCHMARK_ROLES[config["side"]]), "signal_start_bar": int(sig.s)}
+            "benchmark_roles": dict(BENCHMARK_ROLES[config["side"]]), "signal_start_bar": int(sig.s), "ssr": ssr}

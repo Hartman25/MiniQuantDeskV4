@@ -105,6 +105,7 @@ L_FAMILIES = {"LS01": ("LONG_SHORT_TIME_SERIES_MOMENTUM", _grid_SH01), "LS02": (
               "LS03": ("LONG_SHORT_SMA_CROSS_STATE", _grid_SH03),
               "LS04": ("LONG_SHORT_52W_PROXIMITY", lambda: [_g(lookback=L, distance=d, cadence=c) for L in (126, 252)
                                                               for d in (0.03, 0.05, 0.10) for c in CADENCES])}
+FAMILY_NAMES = {**{f: n for f, (n, _g) in H_FAMILIES.items()}, **{f: n for f, (n, _g) in L_FAMILIES.items()}}
 SIDE = {**{f: "short" for f in H_FAMILIES}, **{f: "long_short" for f in L_FAMILIES}}
 
 CONDITION_PARAM_KEYS = {
@@ -116,6 +117,10 @@ CONDITION_PARAM_KEYS = {
     "SH13": ("short_vol", "long_vol", "expansion_ratio", "mode")}
 EXECUTION_ONLY_KEYS = {"SH04": ("exit",), "SH05": ("exit_below",), "SH06": ("exit_z",), "SH07": ("hold",), "SH08": ("hold",),
                        "SH09": ("exit",), "SH11": ("hold",), "SH12": ("hold",), "SH13": ("hold",)}
+# Neutral in-grid values used only to instantiate the Strategy builders when evaluating a condition; the condition series is
+# proven independent of them (execution-only parameters change d, never cond or the first-defined bar).
+EXECUTION_ONLY_FILL = {"SH04": {"exit": 10}, "SH05": {"exit_below": 50}, "SH06": {"exit_z": 0.0}, "SH07": {"hold": 1},
+                       "SH08": {"hold": 1}, "SH09": {"exit": 10}, "SH11": {"hold": 1}, "SH12": {"hold": 1}, "SH13": {"hold": 1}}
 EXPECTED_CONDITION_COUNTS = {"SH01": 8, "SH02": 6, "SH03": 14, "SH04": 5, "SH05": 36, "SH06": 24, "SH07": 36, "SH08": 12,
                              "SH09": 32, "SH10": 12, "SH11": 6, "SH12": 16, "SH13": 8}
 EXPECTED_CONDITION_TOTAL = 215

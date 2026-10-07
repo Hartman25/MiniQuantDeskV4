@@ -3,8 +3,10 @@ fences and denominator/ledger guards. Nothing here reads prices or results."""
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,12 +21,15 @@ import pandas as pd  # noqa: E402
 import partitions as pt  # noqa: E402  (Census-01 fence authority, reused unchanged)
 import simulate as _c1sim  # noqa: E402  (Census-01 cost/sizing constants: the single authority the protocol must equal)
 import c2_borrow as bw  # noqa: E402
+import c2_environment as env  # noqa: E402
+import c2_policy as pol  # noqa: E402
 
 REPO = HERE.parents[2]
 EXPERIMENT_ID = "alpha_edge_census_02"
 SCHEMA = "alpha_census02_v1"
 TRIAL_PREFIX = "ac02-"
 STATUS_PROPOSED = "PROPOSED_NOT_FROZEN"
+STATUS_SUPERSEDED = "PROPOSAL_SUPERSEDED_BY_OPERATOR_POLICY"
 STATUS_FROZEN = "FROZEN_BY_OPERATOR"
 PREDECLARATION_FILE = HERE / "CENSUS02_PREDECLARATION.json"
 PROPOSAL_FILE = HERE / "CENSUS02_PREDECLARATION_PROPOSAL.json"
@@ -61,6 +66,40 @@ FACTOR_SEMANTICS = {
     "executable_pnl": False, "post_result_direction_flip": "forbidden"}
 
 
+# Future Discovery acquisition contract: identical to the accepted Census-01 contract (a test pins the equality) plus the
+# policy facts the Census-01 protocol carried beside it. Never executed in the predeclaration phase.
+DATA_REQUEST_CONTRACT = {
+    "provider": "alpaca", "feed": "sip", "adjustment": "all", "timeframe": "1Day",
+    "start_utc": pt.DATA_REQUEST_START_UTC.isoformat(), "end_utc_exclusive": pt.DISCOVERY_END_EXCLUSIVE.isoformat(),
+    "asof": "2026-10-05", "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "no_iex_fallback": True, "symbol_failure_policy": "typed_EXCLUDED_disposition", "min_eligible_observations": 252}
+
+# Accepted Census-01 factor statistics, reused unchanged (a test pins every value to the Census-01 constants).
+CONDITIONAL_STATISTICS = {
+    "label_protocol_version": "alpha_census_fwd_close_return_minus_symbol_baseline_v1",
+    "window_start_utc": "2016-01-01T00:00:00+00:00", "window_end_utc": "2024-01-01T00:00:00+00:00",
+    "n_quantiles": 2, "min_cross_section": 10, "min_periods": 30, "min_events": 30, "conditional_p_alpha": 0.1,
+    "empirical_null": {"n_permutations": 200, "base_seed": 0, "tail": "two_sided_abs_mean_ic",
+                       "source": "mqk_research.factors.fdr.compute_empirical_pvalue (accepted repo defaults)"},
+    "fdr": {"protocol": "factor_fdr_bh_v1", "alpha": 0.1,
+            "population": "all registered Census-02 factors; failed/non-evaluable stay accounted; local family"},
+    "classes": {"WEAK": ">=min_events and direction_adjusted_effect>0", "MODERATE": "WEAK and p<=conditional_p_alpha",
+                "STRONG": "MODERATE and complete-family BH q<=fdr.alpha"},
+    "multiple_testing": "LOCAL_WITH_GLOBAL_DISCLOSURE: own complete local factor family; Census-01 populations disclosed, "
+                        "not pooled; Strategy DSR/PBO DEFERRED_FULL_POPULATION"}
+
+STRATEGY_QUALIFICATION = {
+    "common_minimum": "closed_round_trips >= 5, otherwise typed INSUFFICIENT_CLOSED_ROUND_TRIPS",
+    "executable_scope": "Class C only; individual-equity cells are never executable Strategy trials",
+    "short": "net_pnl > 0 AND alpha vs passive short hold > 0 (same window/execution/slippage/commission/borrow/sizing)",
+    "long_short": "net_pnl > 0 vs cash; passive long and short holds DIAGNOSTIC_ONLY",
+    "trade_count_band": {"5_to_14": "LOW_SAMPLE", "15_to_29": "MODERATE_SAMPLE", "30_plus": "STRONG_SAMPLE",
+                         "kind": "classification only; no hard gate above 5"},
+    "report_only": ["year_stability", "regime_concentration", "parameter_neighborhood", "max_drawdown_recorded_no_veto"],
+    "ssr": "FLAG_ONLY: a daily-bar POSSIBLE Rule-201 hazard flag per short entry (intraday sequence unknowable from daily bars); never rejects or defers a fill in Discovery",
+    "dsr_pbo": "DEFERRED_FULL_POPULATION; never manufactured", "validation_status": "NOT_VALIDATED"}
+
+
 def cost_truth() -> dict:
     """Machine-readable cost/sizing truth, read from the actual simulator constants (never re-typed)."""
     return {"commission_bps_per_side": _c1sim.COMMISSION_BPS, "fill_slippage_bps_per_side": _c1sim.SLIPPAGE_BPS,
@@ -92,7 +131,7 @@ def build_structural_protocol() -> dict:
             "open_position_at_end": "marked_to_last_close_no_liquidation (unchanged from Census-01)",
             "corporate_actions": "adjustment=all total-return series: a short bears dividends through the adjusted series; "
                                  "unsupported corporate actions stay typed EXCLUDED (fail closed)",
-            "ssr": "Rule 201 not represented; trigger is derivable from daily bars and is recorded as a per-fill flag only",
+            "ssr": "Rule 201 not represented; a possible-hazard flag is derived from daily bars (no intraday sequence is claimed) and recorded per short entry only",
             "labels": "fwd_ret/close_{t+h}/close_t-1 is a LABEL: EXECUTABLE_PNL=false, never an input to simulate_signed",
         },
         "benchmark_semantics": {
@@ -103,6 +142,10 @@ def build_structural_protocol() -> dict:
             "rules": list(BENCHMARK_RULES), "qualification_rule": "OPERATOR_DECISION benchmark_rule",
         },
         "conditional_factor_semantics": dict(FACTOR_SEMANTICS),
+        "conditional_statistics": copy.deepcopy(CONDITIONAL_STATISTICS),
+        "strategy_qualification": copy.deepcopy(STRATEGY_QUALIFICATION),
+        "data_request_contract": dict(DATA_REQUEST_CONTRACT),
+        "global_disclosure": dict(pol.GLOBAL_DISCLOSURE),
         "identity": {"trial": "sha256(side,family,params,scope,universe_id,partitions_id,protocol_id); results/attempts never enter",
                      "attempt": "infrastructure retry = new attempt of the SAME trial; outcome-based retry forbidden",
                      "evaluation": "slice/job/window; never mints a trial"},
@@ -169,10 +212,12 @@ def validate_decisions(decisions) -> dict:
     return decisions
 
 
-def frozen_protocol_id(structural: dict, decisions: dict, source_manifest: dict) -> str:
-    """Binds the protocol, the operator decisions AND the behavior-source manifest, so a source edit changes every id."""
+def frozen_protocol_id(structural: dict, decisions: dict, source_manifest: dict, environment: dict) -> str:
+    """Binds the protocol, the operator decisions, the behavior-source manifest AND the numerical-runtime identity, so a source
+    edit or a materially different runtime changes every id."""
     validate_decisions(decisions)
-    return sha256_canonical({"structural": structural, "decisions": decisions, "behavior_source_manifest": source_manifest})[:32]
+    return sha256_canonical({"structural": structural, "decisions": decisions, "behavior_source_manifest": source_manifest,
+                             "environment_identity": environment})[:32]
 
 
 # ------------------------------------------------------------------------------- behavior-source manifest
@@ -181,21 +226,27 @@ _C2 = "research-py/experiments/alpha_edge_census_02/"
 _SRC = "research-py/src/mqk_research/"
 # Pre-result sources that can change the candidate grammar, signal values, execution chronology, price/cost arithmetic,
 # factor direction/identity or partition fencing. Generated outputs and result values are never bound.
+_P = "research-py/"
 BEHAVIOR_SOURCES = tuple(sorted((
-    _C2 + "c2_protocol.py", _C2 + "c2_borrow.py", _C2 + "c2_grammar.py", _C2 + "c2_factors.py", _C2 + "c2_signals.py",
-    _C2 + "c2_simulate.py",
-    _C1 + "search_space.py", _C1 + "signals.py", _C1 + "simulate.py", _C1 + "partitions.py", _C1 + "calendar_authority.py",
-    _SRC + "indicators/core.py", _SRC + "factors/contracts.py", _SRC + "exp_distributed/hashing.py")))
-# Frozen pre-result input data a behavior source reads (the seed universe validates the borrow scope).
-AUTHORITY_DATA = (_C1 + "ALPHA_CENSUS_SEED_UNIVERSE_V2.json",)
+    *(_C2 + f for f in ("c2_protocol.py", "c2_borrow.py", "c2_grammar.py", "c2_factors.py", "c2_signals.py", "c2_simulate.py",
+                        "c2_policy.py", "c2_environment.py", "c2_population.py", "c2_strategy.py", "c2_factor_eval.py",
+                        "c2_runner.py", "c2_data.py", "run_census02.py")),
+    *(_C1 + f for f in ("search_space.py", "signals.py", "simulate.py", "partitions.py", "calendar_authority.py", "data.py",
+                        "census.py", "conditional.py", "edge_registry.py")),
+    *(_SRC + f for f in ("__init__.py", "data/__init__.py", "data/alpaca_historical.py", "data/bars_provenance.py",
+                         "data/ca_reviewed_resolutions.py", "exp_distributed/__init__.py", "exp_distributed/hashing.py",
+                         "exp_distributed/models.py", "exp_distributed/storage.py", "factors/__init__.py",
+                         "factors/contracts.py", "factors/diagnostics.py", "factors/fdr.py", "factors/null_controls.py",
+                         "factors/registry.py", "factors/runner.py", "factors/universe.py", "indicators/__init__.py",
+                         "indicators/core.py", "ml/__init__.py", "ml/util_hash.py")),
+    _P + "pyproject.toml")))
+# Frozen pre-result input data a behavior source reads (the seed universe validates the scope; the policy artifact is the
+# machine-readable operator approval).
+AUTHORITY_DATA = (_C1 + "ALPHA_CENSUS_SEED_UNIVERSE_V2.json", _C2 + "CENSUS02_OPERATOR_POLICY.json")
 # In-repo modules reachable by import that were inspected and are NOT behavior-bearing for Census-02 values.
 REVIEWED_NON_BEHAVIOR = {
-    _C1 + "data.py": "imported by search_space for Census-01 eligibility constants and acquisition; no Census-02 value uses it",
-    _SRC + "data/alpaca_historical.py": "provider acquisition path reached only via data.py; Census-02 never acquires data",
-    _SRC + "data/bars_provenance.py": "acquisition provenance, reached only via alpaca_historical",
-    _SRC + "data/ca_reviewed_resolutions.py": "acquisition corporate-action resolutions, reached only via alpaca_historical",
-    _SRC + "ml/util_hash.py": "hash helper reached only via ca_reviewed_resolutions",
-    _SRC + "universe/snapshot.py": "used only by search_space.build_seed_universe, which Census-02 never calls",
+    _SRC + "universe/snapshot.py": "reached only through the lazy import in search_space.build_seed_universe, which Census-02 never "
+                                   "calls (the seed universe is a frozen bound data file)",
 }
 
 
@@ -230,30 +281,89 @@ def require_committed(paths, repo: Path) -> str:
     return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
 
 
+# Process-level latch: set ONLY by a successful require_freeze, cleared at the start of every call. The single data entrance
+# (c2_data) demands it, so a direct call that skips the runner cannot acquire or read a bar.
+_GATE: dict = {}
+
+
+def assert_freeze_gate_passed(protocol_id: str) -> None:
+    if not _GATE or _GATE.get("protocol_id") != protocol_id:
+        raise FreezeRefusal("real-data access refused: require_freeze has not passed in this process for this protocol")
+
+
 def require_freeze(repo: Path = REPO, predeclaration: Path = PREDECLARATION_FILE) -> dict:
-    """Gate for ANY real-data Census-02 access: a committed, operator-frozen predeclaration whose decisions are complete
-    and whose protocol id equals the recomputed one. A proposal file can never satisfy it."""
+    """Gate for ANY real-data Census-02 access: a committed, operator-frozen predeclaration whose decisions equal the approved
+    policy, whose behavior sources and numerical runtime equal the frozen identities, and whose protocol id and population
+    authority equal the recomputed ones. A proposal file can never satisfy it."""
+    _GATE.clear()
     predeclaration = Path(predeclaration)
     if not predeclaration.exists():
         raise FreezeRefusal(f"{predeclaration.name} does not exist: real Census-02 execution is refused (policy not frozen)")
     head = require_committed([predeclaration], repo)
-    doc = json.loads(predeclaration.read_text(encoding="utf-8"))
+    try:
+        doc = json.loads(predeclaration.read_text(encoding="utf-8"))
+    except ValueError:
+        raise FreezeRefusal("predeclaration is not valid JSON") from None
+    if not isinstance(doc, dict):
+        raise FreezeRefusal("predeclaration is not a JSON object")
     if doc.get("status") != STATUS_FROZEN:
         raise FreezeRefusal(f"predeclaration status {doc.get('status')!r} is not {STATUS_FROZEN}")
     if doc.get("attempts_at_freeze") != 0:
         raise FreezeRefusal("freeze must precede every attempt (attempts_at_freeze != 0)")
-    require_committed([Path(repo) / rel for rel in (*BEHAVIOR_SOURCES, *AUTHORITY_DATA)], repo)
+    try:
+        env.require_environment(doc.get("environment_identity"))
+    except env.EnvironmentMismatch as exc:
+        raise FreezeRefusal(str(exc)) from None
+    bound = [*BEHAVIOR_SOURCES, *AUTHORITY_DATA]
+    require_committed([Path(repo) / rel for rel in bound], repo)
     manifest = behavior_source_manifest(repo)
     if doc.get("behavior_source_manifest") != manifest:
         drift = sorted(k for k, v in manifest["sources"].items()
                        if (doc.get("behavior_source_manifest") or {}).get("sources", {}).get(k) != v)
         raise FreezeRefusal(f"behavior-bearing source differs from the frozen manifest: {drift or 'manifest malformed'}")
+    bh = doc.get("behavior_head")
+    if not isinstance(bh, str) or not re.fullmatch(r"[0-9a-f]{40}", bh):
+        raise FreezeRefusal("behavior_head is missing or malformed")
+    if _git_rc(Path(repo), "merge-base", "--is-ancestor", bh, "HEAD") != 0:
+        raise FreezeRefusal("behavior_head is not an ancestor of HEAD")
+    if _git_rc(Path(repo), "diff", "--quiet", bh, "HEAD", "--", *bound) != 0:
+        raise FreezeRefusal("a bound source changed between the frozen behavior head and HEAD")
+    if doc.get("decisions") != pol.APPROVED_DECISIONS:
+        raise FreezeRefusal("frozen decisions differ from the operator-approved policy")
     structural = build_structural_protocol()
     if doc.get("structural_protocol") != structural:
         raise FreezeRefusal("structural protocol differs from the committed predeclaration (a value changed after the freeze)")
-    if doc.get("protocol_id") != frozen_protocol_id(structural, doc.get("decisions"), manifest):
+    if doc.get("data_request_contract") != DATA_REQUEST_CONTRACT or doc.get("global_disclosure") != pol.GLOBAL_DISCLOSURE:
+        raise FreezeRefusal("data request contract or global disclosure differs from the frozen protocol")
+    if doc.get("protocol_id") != frozen_protocol_id(structural, doc["decisions"], manifest, doc["environment_identity"]):
         raise FreezeRefusal("protocol_id does not equal the recomputed id")
+    import c2_population  # lazy: c2_population depends on this module
+    auth = c2_population.population_authority(doc["decisions"], doc["protocol_id"])
+    if doc.get("strategy_population") != auth["strategy_population"] or doc.get("factor_population") != auth["factor_population"]:
+        raise FreezeRefusal("frozen population authority differs from the recomputed Strategy / factor population")
+    _GATE.update({"protocol_id": doc["protocol_id"], "head": head})
     return {"head": head, "predeclaration": doc}
+
+
+def build_predeclaration(repo: Path = REPO) -> dict:
+    """The FROZEN_BY_OPERATOR document for the current clean, committed behavior state. Refuses on any uncommitted bound
+    source. Result-free by construction; the freeze commit's own SHA cannot be (and is not) placed inside it."""
+    repo = Path(repo)
+    behavior_head = require_committed([repo / rel for rel in (*BEHAVIOR_SOURCES, *AUTHORITY_DATA)], repo)
+    decisions = pol.approved_decisions()
+    validate_decisions(decisions)
+    manifest, environment, structural = behavior_source_manifest(repo), env.environment_identity(), build_structural_protocol()
+    protocol_id = frozen_protocol_id(structural, decisions, manifest, environment)
+    import c2_population
+    return {"schema_version": "census02_predeclaration_v1", "status": STATUS_FROZEN, "attempts_at_freeze": 0,
+            "results_present_at_freeze": False, "approval": dict(pol.APPROVAL), "behavior_head": behavior_head,
+            "decisions": decisions, "structural_protocol": structural, "behavior_source_manifest": manifest,
+            "environment_identity": environment, "protocol_id": protocol_id, "data_request_contract": dict(DATA_REQUEST_CONTRACT),
+            "global_disclosure": dict(pol.GLOBAL_DISCLOSURE), "operator_policy_sha256": _sha_lf(repo / AUTHORITY_DATA[1]),
+            **c2_population.population_authority(decisions, protocol_id),
+            "fences": {"discovery": "[2016-01-01, 2024-01-01)", "2024": "never scored", "confirmation": "never read",
+                       "final_holdout": "never read"},
+            "chronology": "behavior sources committed at behavior_head; this file is committed afterwards and changes no bound source"}
 
 
 # ---------------------------------------------------------------------------------------------------- data fences

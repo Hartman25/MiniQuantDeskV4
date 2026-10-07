@@ -1,15 +1,15 @@
 # Alpha Census 02 — Short / Long-Short Predeclaration (capability census + operator-freeze package)
 
 Mission `V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01`. Baseline `c005e56791f34f1fd5d32e559dd594ec8e30d2c4`.
-Status: `CENSUS02_PREDECLARATION_READY_FOR_OPERATOR_FREEZE` — the proposal package is complete and tested, but the freeze itself is **not**
-executed: eight scientific / economic policies are not resolved by any binding repo authority (section 9), so no freeze file exists and no
-real Census-02 data was read. The session stops at the operator-decision boundary. `VALIDATION_STATUS=NOT_VALIDATED`, `PROMOTION_AUTHORITY=NONE`. Paper INACTIVE, Live DISABLED.
+Status (C3A): `CENSUS02_READY_TO_FREEZE` — operator policy is **approved** (section 13, `CENSUS02_OPERATOR_POLICY.json`) and the complete
+result-independent campaign (runner, evaluators, populations, environment identity, expanded source manifest) is implemented and proven
+on synthetic data. Sections 1–12 are the historical capability census, proposal and review corrections that led here; where they say
+"operator decision" or "PROPOSED", section 13 supersedes them. The freeze file (`CENSUS02_PREDECLARATION.json`) is created in a separate
+later commit (C3B) that changes no bound source. `VALIDATION_STATUS=NOT_VALIDATED`, `PROMOTION_AUTHORITY=NONE`. Paper INACTIVE, Live DISABLED.
 
-Consolidated independent-review correction (D1–D8, section 12) applied after C2; every policy below is still `PROPOSED_NOT_FROZEN`.
-
-Machine-readable proposal: `research-py/experiments/alpha_edge_census_02/CENSUS02_PREDECLARATION_PROPOSAL.json` (status
-`PROPOSED_NOT_FROZEN`; it can never satisfy `c2_protocol.require_freeze`). Code: `research-py/experiments/alpha_edge_census_02/c2_*.py`;
-tests `research-py/tests/test_alpha_edge_census_02{,_protocol}.py`; mutation proof `.../results/c2_mutation_proof_log.json`.
+Code: `research-py/experiments/alpha_edge_census_02/` (`c2_*.py`, `run_census02.py`); tests
+`research-py/tests/test_alpha_edge_census_02{,_protocol,_campaign}.py`; mutation proof `.../results/c2_mutation_proof_log.json`.
+The earlier proposal artifact `CENSUS02_PREDECLARATION_PROPOSAL.json` is superseded history and can never satisfy the freeze guard.
 
 ## 1. Fences and consumption (this mission)
 
@@ -149,7 +149,7 @@ or relaxed only by an explicit operator choice; no old Pass-2 candidate is rescu
 | Parameter neighbourhood | reuse Pass-2 adjacent share `>=25%` / report-only / operator value |
 | Portfolio MDD / worst-5-day | defer to the portfolio-suitability stage under the MAIN risk bar (recommended: not a stage-1 gate) / reuse Pass-2 20% & 6% / operator value |
 
-## 9. Decisions still required from the operator (`c2_protocol.DECISIONS`)
+## 9. Decisions that were required from the operator (`c2_protocol.DECISIONS`) — now ALL APPROVED, see section 13
 
 1. `borrow_policy` (+ `etf_borrow_assumption`: explicit sorted ETF list and annual fee bps).
 2. `grammar_tiers`: H / H+L (tier X, cross-sectional, is deferred and needs a later amendment).
@@ -183,13 +183,11 @@ or relaxed only by an explicit operator choice; no old Pass-2 candidate is rescu
 | Survivorship | BLOCKED (no point-in-time universe); mandatory label | disclosed limit |
 | Margin / buying power / squeezes | out of scope: per-cell fixed notional; belongs to the portfolio-suitability stage | — |
 
-## 11. Not done / deferred (not required by this gate)
+## 11. Not done / deferred
 
-Census-02 conditional runner (FactorSpec registration with `lower_is_better`, label fence), strategy chunk runner, cross-sectional and
-beta-hedged simulators, population/universe manifests (need data dispositions), `CENSUS02_PREDECLARATION.json` itself. The freeze package (C3)
-is intentionally **not** committed: it requires the operator decisions above.
-The future runner's first statement must be `c2_protocol.require_freeze()`; no Census-02 module currently has a data path to guard (static test), so this
-obligation is recorded here and must be unit-tested when the runner is built.
+Superseded by section 13: the conditional evaluator, the Strategy chunk runner, the guarded runner / CLI, the population authority and the
+freeze builder are implemented in C3A and proven on synthetic data. Still deferred (out of this campaign's grammar): cross-sectional (tier X)
+and beta-hedged simulators, an equity-only factor family (needs a separately frozen instrument-class mapping), a multi-process factor loop.
 
 ## 12. Independent-review consolidated correction (D1–D8)
 
@@ -219,5 +217,65 @@ universe. Reviewed and excluded with a stated reason (acquisition/provenance/uni
 funnel: trade count <5 INSUFFICIENT, 5–14 LOW_SAMPLE, 15–29 MODERATE_SAMPLE, ≥30 STRONG_SAMPLE as classification/confidence only (only <5 may be
 typed insufficient; no blanket ≥30 veto), year stability / regime concentration / parameter neighbourhood REPORT_ONLY_NO_GATE, portfolio MDD /
 worst-5-day deferred to the portfolio-risk-suitability stage under the MAIN risk bar. No freeze file exists; real Census-02 attempts 0.
+
+## 13. Approved operator policy and final campaign authority (C3A)
+
+**Approved policy (encoded verbatim in `c2_policy.py`, mirrored in `CENSUS02_OPERATOR_POLICY.json`, enforced by the freeze guard).**
+Borrow policy `EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION`: individual-equity shorts are hypothesis / label evidence only; the
+explicit 20-instrument Class-C scope is `DIA EEM EFA GLD IEF IWM QQQ SLV SPY TLT VTI XLB XLE XLF XLI XLK XLP XLU XLV XLY` (the list is the
+authority; nothing is inferred from ticker spelling). `annual_borrow_fee_bps = 100.0` is a **frozen base research assumption, not borrow
+truth**; availability `ALWAYS_AVAILABLE_FOR_SCOPE_ASSUMED`, recall `NONE_ASSUMED`, rebate `ZERO`. Grammar `H+L`; complements
+`REGISTER_ALL_TAG_COMPLEMENTS`; benchmark `SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH`; multiple testing
+`LOCAL_WITH_GLOBAL_DISCLOSURE`; conditional scope `ALL_SEED_SYMBOLS`; SSR `FLAG_ONLY`; funnel: closed-round-trip minimum 5 is the only gate
+(`<5` typed `INSUFFICIENT`; 5–14 `LOW_SAMPLE`, 15–29 `MODERATE_SAMPLE`, ≥30 `STRONG_SAMPLE` are classifications, not vetoes), year stability /
+regime concentration / parameter neighbourhood `REPORT_ONLY_NO_GATE`, portfolio MDD / worst-5-day deferred to the portfolio-risk stage.
+
+**Frozen populations.** Strategy: 470 configs x 20 Class-C symbols = **9,400** executable trials (no individual-equity cell exists), 56 complement-tagged
+configs = 1,120 tagged trials, all still registered and counted; the disclosure reports an effective-independent estimate beside the registered count.
+Factors: 215 short conditions x 5 horizons = **1,075** semantic coordinates, direction `lower_is_better`, evaluated once over the frozen eligible
+universe (not x88). FactorSpec identity needs post-acquisition provenance, so the freeze binds the complete semantic coordinate root and the
+runner materialises ALL 1,075 specs against the real provenance, requires exact parity, and registers them all before the first evaluation.
+
+**Statistics (reused unchanged from accepted Census-01 and pinned by test):** per-symbol demeaned `fwd_ret` label (a LABEL, never P&L), registered
+diagnostics, two-sided empirical null with 200 permutations and base seed 0, complete-family BH/FDR alpha 0.1, classes WEAK / MODERATE / STRONG
+by the accepted rule. Census-02 is its own local family; the 38,192 Census-01 trials and 1,095 factors are disclosed beside every verdict and are
+not pooled. Strategy DSR/PBO stays `DEFERRED_FULL_POPULATION` and is never manufactured.
+
+**Data request contract (frozen, never executed here):** alpaca / SIP / adjustment `all` / 1Day / `[2016-01-01, 2024-01-01)` / asof `2026-10-05`,
+identical to the accepted Census-01 contract (pinned by test); 2024 is never scored; Confirmation and Final Holdout are never read.
+
+**Runner order (the contract).** `run_campaign`: (1) `require_freeze` — committed FROZEN predeclaration, numerical runtime equal to the frozen
+identity, decisions equal to the approved policy, 45 bound sources + 2 authority files equal to the frozen manifest and unchanged since the
+frozen `behavior_head`, recomputed `protocol_id` and population authority; (2) the single guarded loader (`c2_data`, reachable only through the
+runner, demanding the process-level freeze latch as its first statement); (3) the discovery fence; (4) complete Strategy + factor registration and
+parity checks; (5) only then evaluation. Outputs (edge records, FDR report, disclosure) are written only after both populations are settled and
+the complete-ledger proof passes. `run_census02.py` offers `write-policy`, `freeze` (read-only on data) and `run`.
+
+**Numerical environment.** `{python, numpy, pandas}` exact versions are frozen into the predeclaration and into `protocol_id`; a mismatch refuses
+before any data access. Nothing was installed, upgraded or downgraded. `research-py/pyproject.toml` is bound as dependency authority.
+
+**Behavior-source manifest (final).** 45 sources: the 14 Census-02 modules (`c2_protocol/borrow/grammar/factors/signals/simulate/policy/
+environment/population/strategy/factor_eval/runner/data.py`, `run_census02.py`), Census-01 `search_space/signals/simulate/partitions/
+calendar_authority/data/census/conditional/edge_registry.py`, 21 `mqk_research` files (indicators, factor contracts / diagnostics / fdr /
+null_controls / registry / runner / universe, exp_distributed hashing / models / storage, data alpaca_historical / bars_provenance /
+ca_reviewed_resolutions, util_hash, package `__init__`s) and `pyproject.toml`; authority data: the seed universe and the operator-policy artifact.
+Reviewed exclusion: `universe/snapshot.py` (reached only by a lazy import in `search_space.build_seed_universe`, never called). Dynamic imports /
+`exec` / `eval` / `importlib` are forbidden by test in every bound source (the single reviewed stdlib `__import__("contextlib")` aside); the static
+reachability walk (relative, lazy and package-init imports) is supporting proof only.
+
+**Freeze-first call-order proof.** A raising loader is never called for a missing / proposed / environment-mismatched / policy-changed /
+attempts-open / manifest-drifted / uncommitted freeze, and no run directory is created; a valid synthetic freeze runs gate -> loader -> fence ->
+complete registration -> bounded evaluation with provider, network and real-data paths booby-trapped; mutation M48 (loader before gate) is RED.
+
+**Second adversarial sweep (all FIXED+PROVEN or ALREADY CORRECT+PROVEN):** behavior added after the manifest (behavior-head chronology, M67);
+runner / evaluator unbound (M50, M51); environment unbound (M49, M71); loader reachable before the freeze (M48, M65, AST order); import-time
+I/O (subprocess test); provider request before the freeze (single entrance); lazy denominator (M62, M63, parity refusals); result-derived
+registration (complete-ledger gate); retry minting a trial (M64); Class-A equity executable (M70); Class-C scope / fee / benchmark drift (M56-M58);
+complement mistake (tags, M54, disclosure of the effective-independent estimate); SSR overclaim (wording, flag-only, M59); hard >=30 veto (M60);
+2024 / Confirmation / Holdout leakage (fences, M07, M61); stale proposal wording (superseded + equality test); freeze artifact containing
+outcomes (result-key scan of the builder output). Remaining in-scope defects: NONE. Out of scope / disclosed limits: survivorship
+(current-registry snapshot), no point-in-time borrow truth, daily-bar SSR can only flag a possible hazard, the factor loop is sequential.
+
+Real Census-02 attempts: 0. Discovery bars read: 0. 2024 / Confirmation / Final Holdout rows: 0.
 
 Full local workspace acceptance: NOT RUN — prohibited by laptop resource-safety rule; broad workspace proof delegated to GitHub CI.

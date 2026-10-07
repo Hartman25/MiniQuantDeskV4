@@ -1,5 +1,5 @@
-"""Writes the result-independent Census-02 predeclaration PROPOSAL. It is not a freeze: it can never satisfy
-c2_protocol.require_freeze, carries no result field, and every open policy is an operator decision."""
+"""Writes the result-independent Census-02 predeclaration PROPOSAL (historical review record). It is not a freeze and can never
+satisfy c2_protocol.require_freeze; the operator later approved the policy (CENSUS02_OPERATOR_POLICY.json), which supersedes it."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import c2_borrow as bw  # noqa: E402
 import c2_grammar as gr  # noqa: E402
+import c2_policy as pol  # noqa: E402
 import c2_protocol as pr  # noqa: E402
 
 PROPOSED_ETF_SCOPE = ["DIA", "EEM", "EFA", "GLD", "IEF", "IWM", "QQQ", "SLV", "SPY", "TLT", "VTI", "XLB", "XLE", "XLF",
@@ -51,7 +52,8 @@ def build_proposal() -> dict:
         "S4_frozen_etf_scope_20_H_complements_excluded": gr.candidate_arithmetic(len(PROPOSED_ETF_SCOPE), "H", complements_excluded=True),
     }
     return {
-        "schema_version": "alpha_census02_proposal_v1", "status": pr.STATUS_PROPOSED,
+        "schema_version": "alpha_census02_proposal_v1", "status": pr.STATUS_SUPERSEDED,
+        "superseded_by": {"operator_policy": "CENSUS02_OPERATOR_POLICY.json", "freeze": "CENSUS02_PREDECLARATION.json"},
         "mission": "V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01",
         "structural_protocol_id": pr.sha256_canonical(structural)[:32], "structural_protocol": structural,
         "real_census02_attempts_executed": 0, "confirmation_rows_consumed": 0, "final_holdout_rows_consumed": 0,
@@ -87,18 +89,8 @@ def build_proposal() -> dict:
             "never_binds": "generated outputs and result values"},
         "benchmark_contract": {"roles": {k: dict(v) for k, v in pr.BENCHMARK_ROLES.items()}, "rules": list(pr.BENCHMARK_RULES),
                                "note": "a switching long/short strategy has no single-direction benchmark; passive holds are diagnostics"},
-        "independent_review_recommendations": {
-            "status": "RECOMMENDED_AWAITING_EXPLICIT_OPERATOR_APPROVAL_NOT_FROZEN",
-            "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
-            "etf_short_scope": PROPOSED_ETF_SCOPE, "annual_borrow_fee_bps": "100 (base research assumption, not a historical-fact claim)",
-            "grammar_tiers": "H+L", "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
-            "benchmark_rule": pr.BENCHMARK_RULES[0], "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
-            "conditional_scope": "ALL_SEED_SYMBOLS", "ssr_handling": "FLAG_ONLY",
-            "funnel": {"trade_count": "<5 INSUFFICIENT; 5-14 LOW_SAMPLE; 15-29 MODERATE_SAMPLE; >=30 STRONG_SAMPLE "
-                                      "(classification/confidence only; only <5 may be typed insufficient; no blanket >=30 veto)",
-                       "year_stability": "REPORT_ONLY_NO_GATE", "regime_concentration": "REPORT_ONLY_NO_GATE",
-                       "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
-                       "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR"}},
+        "operator_policy": {"status": "APPROVED_BY_OPERATOR_BEFORE_RESULT_1", "artifact": "CENSUS02_OPERATOR_POLICY.json",
+                            "decisions": pol.approved_decisions()},
         "multiple_testing_proposal": {
             "registered_population": "frozen population root over every (config x scope symbol) trial and every condition x horizon factor",
             "local_family": "Census-02 conditional factors form their own BH family (factor_fdr_bh_v1, alpha 0.10)",

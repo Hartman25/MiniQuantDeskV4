@@ -1,0 +1,66 @@
+{
+ "approval": {
+  "annual_borrow_fee_bps_meaning": "FROZEN BASE RESEARCH ASSUMPTION, not historical borrow truth",
+  "approved_before_result_1": true,
+  "contains_results": false,
+  "individual_equity_shorts": "HYPOTHESIS / LABEL EVIDENCE ONLY; no executable-P&L claim without point-in-time borrow truth",
+  "status": "APPROVED_BY_OPERATOR"
+ },
+ "decisions": {
+  "benchmark_rule": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+  "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+  "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
+  "conditional_scope": "ALL_SEED_SYMBOLS",
+  "etf_borrow_assumption": {
+   "annual_borrow_fee_bps": 100.0,
+   "availability": "ALWAYS_AVAILABLE_FOR_SCOPE_ASSUMED",
+   "etf_short_scope": [
+    "DIA",
+    "EEM",
+    "EFA",
+    "GLD",
+    "IEF",
+    "IWM",
+    "QQQ",
+    "SLV",
+    "SPY",
+    "TLT",
+    "VTI",
+    "XLB",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLP",
+    "XLU",
+    "XLV",
+    "XLY"
+   ],
+   "recall": "NONE_ASSUMED",
+   "short_rebate": "ZERO"
+  },
+  "funnel_thresholds": {
+   "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
+   "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+   "regime_concentration": "REPORT_ONLY_NO_GATE",
+   "trade_count_confidence_band": {
+    "15_to_29": "MODERATE_SAMPLE",
+    "30_plus": "STRONG_SAMPLE",
+    "5_to_14": "LOW_SAMPLE",
+    "hard_gate": "closed_round_trips >= 5 only",
+    "kind": "CLASSIFICATION_WITH_TYPED_MINIMUM",
+    "under_5": "INSUFFICIENT"
+   },
+   "year_stability": "REPORT_ONLY_NO_GATE"
+  },
+  "grammar_tiers": "H+L",
+  "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
+  "ssr_handling": "FLAG_ONLY"
+ },
+ "global_disclosure": {
+  "census01_conditional_factors": 1095,
+  "census01_strategy_trials": 38192,
+  "statement": "Census-02 is its own complete predeclared local factor family; Census-01 was frozen and evaluated earlier and is NOT part of one contemporaneous BH family. Strategy DSR/PBO stays DEFERRED_FULL_POPULATION."
+ },
+ "schema_version": "census02_operator_policy_v1"
+}

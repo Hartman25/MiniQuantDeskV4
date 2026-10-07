@@ -69,6 +69,26 @@ def sd(bars):
     return s
 
 
+RESULT_KEYS = {"net_pnl_usd", "net_alpha_usd", "gross_pnl_usd", "sharpe_annualized", "p_value", "pvalue", "q_values", "mean_ic",
+               "event_count", "direction_adjusted_effect", "trade_count", "round_trips", "survivors", "edge_records"}
+
+
+def result_keys(obj, found=None):
+    """Every dict key (any depth) that names a result value and holds a number / structure. Keys, not prose: protocol text may
+    DEFINE a quantity ("direction_adjusted_effect": "-raw_effect") without containing one."""
+    found = set() if found is None else found
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in RESULT_KEYS and (isinstance(v, (int, float)) and not isinstance(v, bool) or isinstance(v, (dict, list))
+                                     and not isinstance(v, str)):
+                found.add(k)
+            result_keys(v, found)
+    elif isinstance(obj, list):
+        for v in obj:
+            result_keys(v, found)
+    return found
+
+
 def micros(*xs):
     return [np.array([int(round(v * 1e6)) for v in x], np.int64) for x in xs]
 
@@ -630,7 +650,7 @@ def test_borrow_classification_and_individual_equity_never_executable(sd):
 
 def test_proposal_artifact_cannot_satisfy_the_freeze_and_holds_no_result():
     doc = json.loads(pr.PROPOSAL_FILE.read_text(encoding="utf-8"))
-    assert doc["status"] == pr.STATUS_PROPOSED and doc["real_census02_attempts_executed"] == 0
+    assert doc["status"] == pr.STATUS_SUPERSEDED and doc["real_census02_attempts_executed"] == 0
     assert doc["confirmation_rows_consumed"] == 0 and doc["final_holdout_rows_consumed"] == 0
     import c2_proposal
     assert doc == json.loads(json.dumps(c2_proposal.build_proposal())), "committed proposal drifted from the grammar authority"
@@ -645,13 +665,12 @@ def test_proposal_artifact_cannot_satisfy_the_freeze_and_holds_no_result():
     assert doc["operator_decisions_required"]["conditional_scope"] == ["ALL_SEED_SYMBOLS"]
     assert doc["benchmark_contract"]["roles"]["long_short"]["passive_long_hold"] == "DIAGNOSTIC_ONLY"
     assert set(doc["behavior_source_manifest_scope"]["sources"]) == set(pr.BEHAVIOR_SOURCES)
-    rec = doc["independent_review_recommendations"]
-    assert rec["status"].startswith("RECOMMENDED_AWAITING") and rec["status"].endswith("NOT_FROZEN")
-    assert doc["status"] == pr.STATUS_PROPOSED
+    import c2_policy
+    assert doc["operator_policy"]["decisions"] == c2_policy.approved_decisions()           # no stale wording / divergent values
+    assert doc["operator_policy"]["status"] == "APPROVED_BY_OPERATOR_BEFORE_RESULT_1"
+    assert "independent_review_recommendations" not in doc
     assert doc["structural_protocol_id"] == pr.sha256_canonical(pr.build_structural_protocol())[:32]
-    blob = json.dumps(doc)
-    for forbidden in ("net_pnl", "alpha_usd", "sharpe", "p_value", "survivors"):
-        assert forbidden not in blob
+    assert not result_keys(doc), f"result-valued keys in a predeclaration artifact: {result_keys(doc)}"
     with pytest.raises(pr.FreezeRefusal):
         pr.require_freeze(pr.REPO, pr.PROPOSAL_FILE)
 
