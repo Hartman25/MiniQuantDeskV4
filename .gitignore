@@ -116,6 +116,8 @@ build/
 !/.claude/skills/mqd-external-research/
 /.claude/skills/mqd-external-research/*
 !/.claude/skills/mqd-external-research/SKILL.md
+# Third-party Archify skill (project-scoped copy; evaluation only). See skills-lock.json.
+!/.claude/skills/archify/
 
 .worktree_rescue/
 .continue/

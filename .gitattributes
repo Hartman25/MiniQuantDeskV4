@@ -36,3 +36,5 @@ core-rs/crates/mqk-db/migrations/0088_broker_account_authority.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0089_option_lifecycle_raw_provenance_and_event_state.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0090_option_lifecycle_adjustment_journal.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0091_strategy_held_sizing_state.sql text eol=lf
+# Vendored third-party Archify skill: preserve upstream bytes; exempt from whitespace checks.
+.claude/skills/archify/** -whitespace
