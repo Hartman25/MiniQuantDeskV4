@@ -3,11 +3,62 @@
   "PROMOTION_AUTHORITY": "NONE",
   "VALIDATION_STATUS": "NOT_VALIDATED"
  },
+ "behavior_source_manifest_scope": {
+  "authority_data": [
+   "research-py/experiments/alpha_edge_census_01/ALPHA_CENSUS_SEED_UNIVERSE_V2.json"
+  ],
+  "binds": "grammar, signal values, execution chronology, price/cost arithmetic, factor direction/identity, partition fence",
+  "mechanism": "sha256 (LF-normalised) of every behavior-bearing pre-result source, recomputed by require_freeze",
+  "never_binds": "generated outputs and result values",
+  "reviewed_non_behavior": {
+   "research-py/experiments/alpha_edge_census_01/data.py": "imported by search_space for Census-01 eligibility constants and acquisition; no Census-02 value uses it",
+   "research-py/src/mqk_research/data/alpaca_historical.py": "provider acquisition path reached only via data.py; Census-02 never acquires data",
+   "research-py/src/mqk_research/data/bars_provenance.py": "acquisition provenance, reached only via alpaca_historical",
+   "research-py/src/mqk_research/data/ca_reviewed_resolutions.py": "acquisition corporate-action resolutions, reached only via alpaca_historical",
+   "research-py/src/mqk_research/ml/util_hash.py": "hash helper reached only via ca_reviewed_resolutions",
+   "research-py/src/mqk_research/universe/snapshot.py": "used only by search_space.build_seed_universe, which Census-02 never calls"
+  },
+  "sources": [
+   "research-py/experiments/alpha_edge_census_01/calendar_authority.py",
+   "research-py/experiments/alpha_edge_census_01/partitions.py",
+   "research-py/experiments/alpha_edge_census_01/search_space.py",
+   "research-py/experiments/alpha_edge_census_01/signals.py",
+   "research-py/experiments/alpha_edge_census_01/simulate.py",
+   "research-py/experiments/alpha_edge_census_02/c2_borrow.py",
+   "research-py/experiments/alpha_edge_census_02/c2_factors.py",
+   "research-py/experiments/alpha_edge_census_02/c2_grammar.py",
+   "research-py/experiments/alpha_edge_census_02/c2_protocol.py",
+   "research-py/experiments/alpha_edge_census_02/c2_signals.py",
+   "research-py/experiments/alpha_edge_census_02/c2_simulate.py",
+   "research-py/src/mqk_research/exp_distributed/hashing.py",
+   "research-py/src/mqk_research/factors/contracts.py",
+   "research-py/src/mqk_research/indicators/core.py"
+  ]
+ },
+ "benchmark_contract": {
+  "note": "a switching long/short strategy has no single-direction benchmark; passive holds are diagnostics",
+  "roles": {
+   "long_short": {
+    "cash_zero": "QUALIFICATION_NET",
+    "passive_long_hold": "DIAGNOSTIC_ONLY",
+    "passive_short_hold": "DIAGNOSTIC_ONLY"
+   },
+   "short": {
+    "cash_zero": "QUALIFICATION_NET",
+    "passive_short_hold": "QUALIFICATION_ALPHA"
+   }
+  },
+  "rules": [
+   "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+   "NET_POSITIVE_ONLY_ALL_SIDES"
+  ]
+ },
  "candidate_count_scenarios": {
   "S0_no_executable_shorts_hypothesis_only": {
    "census01_conditional_factors": 1095,
    "census01_strategy_trials": 38192,
    "complement_tagged_configs": 56,
+   "complements_excluded": false,
    "conditional_factors": 1075,
    "configs": 470,
    "executable_scope_symbols": 0,
@@ -20,6 +71,7 @@
    "census01_conditional_factors": 1095,
    "census01_strategy_trials": 38192,
    "complement_tagged_configs": 56,
+   "complements_excluded": false,
    "conditional_factors": 1075,
    "configs": 470,
    "executable_scope_symbols": 20,
@@ -31,6 +83,7 @@
    "census01_conditional_factors": 1095,
    "census01_strategy_trials": 38192,
    "complement_tagged_configs": 28,
+   "complements_excluded": false,
    "conditional_factors": 1075,
    "configs": 430,
    "executable_scope_symbols": 20,
@@ -41,17 +94,43 @@
   "S3_frozen_etf_scope_20_H+L_complements_excluded": {
    "census01_conditional_factors": 1095,
    "census01_strategy_trials": 38192,
-   "complement_tagged_configs": 56,
-   "conditional_factors": 1075,
+   "complement_tagged_configs": 0,
+   "complements_excluded": true,
+   "conditional_factors": 935,
    "configs": 414,
    "executable_scope_symbols": 20,
-   "short_conditions": 215,
+   "short_conditions": 187,
    "strategy_trials": 8280,
    "tiers": "H+L"
+  },
+  "S4_frozen_etf_scope_20_H_complements_excluded": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 0,
+   "complements_excluded": true,
+   "conditional_factors": 935,
+   "configs": 402,
+   "executable_scope_symbols": 20,
+   "short_conditions": 187,
+   "strategy_trials": 8040,
+   "tiers": "H"
   }
  },
  "candidate_grammar": {
   "calendar_family_S14": "NOT_MIRRORED (no coherent short form)",
+  "complement_handling_arithmetic": {
+   "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE": {
+    "conditional_factors": 935,
+    "conditions": 187,
+    "configs": 414,
+    "removed": "SH01-03 and LS01-03 configs (56); SH01-03 conditions (8+6+14=28); LS01-03 mint no factor of their own"
+   },
+   "REGISTER_ALL_TAG_COMPLEMENTS": {
+    "conditional_factors": 1075,
+    "conditions": 215,
+    "configs": 470
+   }
+  },
   "complement_tagged_configs": 56,
   "complement_tagged_families": [
    "SH01",
@@ -96,6 +175,16 @@
    "LS04": 12
   },
   "total_configs": 470
+ },
+ "conditional_factor_semantics": {
+  "direction": "lower_is_better",
+  "direction_adjusted_effect": "-raw_effect (positive = favorable evidence for the short hypothesis)",
+  "executable_pnl": false,
+  "family": "alpha_census02_short_conditional_v1",
+  "label": "fwd_close_return_minus_same_symbol_same_horizon_unconditional_mean",
+  "post_result_direction_flip": "forbidden",
+  "protocol_version": "alpha_census02_short_conditional_factor_v1",
+  "raw_effect": "conditional_mean_fwd_ret - same_symbol_same_horizon_unconditional_mean"
  },
  "confirmation_rows_consumed": 0,
  "contaminated_2024_rows_scored": 0,
@@ -150,6 +239,46 @@
    "OPERATOR_VALUE"
   ]
  },
+ "independent_review_recommendations": {
+  "annual_borrow_fee_bps": "100 (base research assumption, not a historical-fact claim)",
+  "benchmark_rule": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+  "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+  "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
+  "conditional_scope": "ALL_SEED_SYMBOLS",
+  "etf_short_scope": [
+   "DIA",
+   "EEM",
+   "EFA",
+   "GLD",
+   "IEF",
+   "IWM",
+   "QQQ",
+   "SLV",
+   "SPY",
+   "TLT",
+   "VTI",
+   "XLB",
+   "XLE",
+   "XLF",
+   "XLI",
+   "XLK",
+   "XLP",
+   "XLU",
+   "XLV",
+   "XLY"
+  ],
+  "funnel": {
+   "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
+   "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+   "regime_concentration": "REPORT_ONLY_NO_GATE",
+   "trade_count": "<5 INSUFFICIENT; 5-14 LOW_SAMPLE; 15-29 MODERATE_SAMPLE; >=30 STRONG_SAMPLE (classification/confidence only; only <5 may be typed insufficient; no blanket >=30 veto)",
+   "year_stability": "REPORT_ONLY_NO_GATE"
+  },
+  "grammar_tiers": "H+L",
+  "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
+  "ssr_handling": "FLAG_ONLY",
+  "status": "RECOMMENDED_AWAITING_EXPLICIT_OPERATOR_APPROVAL_NOT_FROZEN"
+ },
  "mission": "V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01",
  "multiple_testing_proposal": {
   "complements": "tagged, counted in the registered denominator, excluded from the effective-independent estimate",
@@ -160,9 +289,8 @@
  },
  "operator_decisions_required": {
   "benchmark_rule": [
-   "NET_POSITIVE_AND_SAME_DIRECTION_HOLD_ALPHA_POSITIVE",
-   "NET_POSITIVE_ONLY",
-   "SAME_DIRECTION_HOLD_ALPHA_ONLY"
+   "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+   "NET_POSITIVE_ONLY_ALL_SIDES"
   ],
   "borrow_policy": [
    "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
@@ -173,8 +301,7 @@
    "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE"
   ],
   "conditional_scope": [
-   "ALL_SEED_SYMBOLS",
-   "EQUITY_SYMBOLS_ONLY"
+   "ALL_SEED_SYMBOLS"
   ],
   "etf_borrow_assumption": "explicit list + annual fee bps (see c2_borrow)",
   "funnel_thresholds": "five-part block, see c2 doc",
@@ -227,12 +354,34 @@
    "VALIDATION_STATUS": "NOT_VALIDATED"
   },
   "benchmark_semantics": {
-   "never": "long buy-and-hold as the benchmark of a short-bearing strategy (double-counts the market)",
+   "never": "long buy-and-hold as the benchmark of a short-only strategy (double-counts the market); a switching long/short strategy has no single-direction benchmark",
+   "passive_holds": "same window, same execution/cost/borrow assumptions as the strategy",
    "qualification_rule": "OPERATOR_DECISION benchmark_rule",
-   "recorded_series": [
-    "same_direction_passive_hold_same_window_same_cost_model",
-    "cash_zero"
+   "roles": {
+    "long_short": {
+     "cash_zero": "QUALIFICATION_NET",
+     "passive_long_hold": "DIAGNOSTIC_ONLY",
+     "passive_short_hold": "DIAGNOSTIC_ONLY"
+    },
+    "short": {
+     "cash_zero": "QUALIFICATION_NET",
+     "passive_short_hold": "QUALIFICATION_ALPHA"
+    }
+   },
+   "rules": [
+    "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+    "NET_POSITIVE_ONLY_ALL_SIDES"
    ]
+  },
+  "conditional_factor_semantics": {
+   "direction": "lower_is_better",
+   "direction_adjusted_effect": "-raw_effect (positive = favorable evidence for the short hypothesis)",
+   "executable_pnl": false,
+   "family": "alpha_census02_short_conditional_v1",
+   "label": "fwd_close_return_minus_same_symbol_same_horizon_unconditional_mean",
+   "post_result_direction_flip": "forbidden",
+   "protocol_version": "alpha_census02_short_conditional_factor_v1",
+   "raw_effect": "conditional_mean_fwd_ret - same_symbol_same_horizon_unconditional_mean"
   },
   "data_contract": {
    "confirmation": "[2025-01-01, 2026-03-01) never read",
@@ -244,8 +393,14 @@
    "borrow_cost": "short holding bars accrue |qty|*prior_close*annual_fee_bps/10000/252; fee has NO default; short rebate ZERO; availability/recall assumptions are disclosed, not asserted",
    "corporate_actions": "adjustment=all total-return series: a short bears dividends through the adjusted series; unsupported corporate actions stay typed EXCLUDED (fail closed)",
    "cost_model": {
+    "additional_slippage_bps": 0.0,
+    "annualization_days": 252,
     "commission_bps_per_side": 10.0,
-    "slippage_bps_per_side": 0.0
+    "entry_budget_usd": 10000.0,
+    "fill_slippage_bps_per_side": 5,
+    "initial_capital_usd": 100000.0,
+    "pricing_model_id": "rust_conservative_bar_range_v1",
+    "volatility_mult_bps": 0
    },
    "fill": "first bar strictly after t; BUY at high+slip, SELL at low-slip (rust_conservative_bar_range_v1, slippage 5 bps, integer micros); short entry = SELL, cover = BUY; same-bar fill forbidden",
    "labels": "fwd_ret/close_{t+h}/close_t-1 is a LABEL: EXECUTABLE_PNL=false, never an input to simulate_signed",
@@ -306,5 +461,5 @@
   },
   "schema_version": "alpha_census02_v1"
  },
- "structural_protocol_id": "2375f1016323857b5fca9fc6e32304ac"
+ "structural_protocol_id": "3ca64633cfa25c8e70f2ac2e3a6527a1"
 }

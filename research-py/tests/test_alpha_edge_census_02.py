@@ -17,6 +17,7 @@ EXP1 = EXP2.parent / "alpha_edge_census_01"
 sys.path.insert(0, str(EXP2))
 
 import c2_borrow as bw  # noqa: E402
+import c2_factors as fx  # noqa: E402
 import c2_grammar as gr  # noqa: E402
 import c2_protocol as pr  # noqa: E402
 import c2_signals as sg2  # noqa: E402
@@ -111,8 +112,29 @@ def test_grammar_counts_and_arithmetic():
     assert len({c["config_id"] for c in cfgs}) == 470
     a = gr.candidate_arithmetic(20)
     assert (a["strategy_trials"], a["conditional_factors"], a["complement_tagged_configs"]) == (9_400, 1_075, 56)
-    assert gr.candidate_arithmetic(20, complements_excluded=True)["configs"] == 414
     assert gr.candidate_arithmetic(88, "H")["strategy_trials"] == 37_840
+    # REGISTER_ALL_TAG_COMPLEMENTS keeps the whole population; EXCLUDE removes 56 configs AND the 28 SH01-03 conditions
+    keep = gr.candidate_arithmetic(20)
+    drop = gr.candidate_arithmetic(20, complements_excluded=True)
+    assert (keep["configs"], keep["short_conditions"], keep["conditional_factors"]) == (470, 215, 1075)
+    assert (drop["configs"], drop["short_conditions"], drop["conditional_factors"], drop["strategy_trials"]) == (414, 187, 935, 8_280)
+    assert drop["complement_tagged_configs"] == 0
+    h_drop = gr.candidate_arithmetic(20, "H", complements_excluded=True)
+    assert (h_drop["configs"], h_drop["short_conditions"], h_drop["conditional_factors"]) == (402, 187, 935)
+
+
+def test_complement_exclusion_removes_exactly_the_complement_families_and_their_conditions():
+    full_c, full_k = gr.selected_population("H+L", False)
+    cut_c, cut_k = gr.selected_population("H+L", True)
+    assert {c["family"] for c in full_c} - {c["family"] for c in cut_c} == set(gr.COMPLEMENT_FAMILIES)
+    assert {k["family"] for k in full_k} - {k["family"] for k in cut_k} == {"SH01", "SH02", "SH03"}
+    assert len(full_k) - len(cut_k) == 8 + 6 + 14
+    assert {k["condition_id"] for k in cut_k} <= {k["condition_id"] for k in full_k}
+    assert not any(k["family"].startswith("LS") for k in full_k)                      # LS mints no factor of its own
+    with pytest.raises(gr.GrammarRefusal):                                           # stale arithmetic: 215 conditions under exclusion
+        gr.build_conditions(cut_c, complements_excluded=False)
+    with pytest.raises(gr.GrammarRefusal):
+        gr.build_conditions(full_c, complements_excluded=True)
 
 
 def test_no_collision_with_census01_and_sides_are_not_long():
@@ -426,6 +448,163 @@ def test_ssr_flag_hand_cases():
     assert sim2.ssr_flag(lm, cm, 4) is False and sim2.ssr_flag(lm, cm, 1) is False
 
 
+# ======================================================================== side-aware benchmark (D2)
+def _cell_metrics(net, short_hold_alpha=None):
+    m = {"cash_zero": {"net_pnl_usd": net}}
+    if short_hold_alpha is not None:
+        m["passive_short_hold"] = {"net_alpha_usd": short_hold_alpha}
+    return m
+
+
+R_SIDE, R_NET = sim2.BENCHMARK_RULES
+
+
+@pytest.mark.parametrize("net,alpha,expect", [(5, 3, True), (5, -3, False), (-1, 9, False), (0, 9, False), (5, 0, False)])
+def test_short_only_needs_net_positive_and_alpha_vs_passive_short_hold(net, alpha, expect):
+    assert sim2.qualifies("short", _cell_metrics(net, alpha), R_SIDE) is expect
+
+
+@pytest.mark.parametrize("net,expect", [(5, True), (0.01, True), (0, False), (-5, False)])
+def test_long_short_qualifies_on_net_vs_cash_and_never_consults_a_hold(net, expect):
+    only_cash = _cell_metrics(net)                                   # no passive-hold record at all: must not be required
+    assert sim2.qualifies("long_short", only_cash, R_SIDE) is expect
+    losing_both_holds = {**only_cash, "passive_long_hold": {"net_alpha_usd": -1e9}, "passive_short_hold": {"net_alpha_usd": -1e9}}
+    assert sim2.qualifies("long_short", losing_both_holds, R_SIDE) is expect     # diagnostics cannot veto a switching strategy
+
+
+def test_benchmark_rules_fail_closed():
+    with pytest.raises(KeyError):
+        sim2.qualifies("short", _cell_metrics(5), R_SIDE)              # short-only record missing its passive short hold
+    with pytest.raises(ValueError):
+        sim2.qualifies("long", _cell_metrics(5), R_SIDE)
+    with pytest.raises(ValueError):
+        sim2.qualifies("short", _cell_metrics(5, 1), "NET_POSITIVE_AND_SAME_DIRECTION_HOLD_ALPHA_POSITIVE")
+    assert sim2.qualifies("short", _cell_metrics(5), R_NET) is True    # the net-only rule needs no hold
+    with pytest.raises(ValueError):
+        sim2.benchmark_direction("long_short", np.zeros(3, np.int8))   # no single direction for a switching strategy
+
+
+def test_evaluated_cells_record_side_aware_benchmarks_with_matched_cost_and_borrow(sd):
+    short_cfg = next(c for c in gr.build_configs() if c["family"] == "SH02")
+    ls_cfg = next(c for c in gr.build_configs() if c["family"] == "LS02")
+    a = sim2.evaluate_short_cell(sd, short_cfg, bw.EVIDENCE_C, borrow_fee_bps_annual=100)
+    b = sim2.evaluate_short_cell(sd, ls_cfg, bw.EVIDENCE_C, borrow_fee_bps_annual=100)
+    assert set(a["m"]) == {"cash_zero", "passive_short_hold"} and a["benchmark_roles"]["passive_short_hold"] == "QUALIFICATION_ALPHA"
+    assert set(b["m"]) == {"cash_zero", "passive_long_hold", "passive_short_hold"}
+    assert b["benchmark_roles"] == {"cash_zero": "QUALIFICATION_NET", "passive_long_hold": "DIAGNOSTIC_ONLY",
+                                    "passive_short_hold": "DIAGNOSTIC_ONLY"}
+    # the passive short hold carries the same borrow fee: dropping it must change the benchmark cost
+    free = sim2.evaluate_short_cell(sd, short_cfg, bw.EVIDENCE_C, borrow_fee_bps_annual=0)
+    assert a["m"]["passive_short_hold"]["benchmark_cost_usd"] > free["m"]["passive_short_hold"]["benchmark_cost_usd"]
+    # a long hold never accrues borrow
+    assert b["m"]["passive_long_hold"]["benchmark_cost_usd"] == sim2.evaluate_short_cell(
+        sd, ls_cfg, bw.EVIDENCE_C, borrow_fee_bps_annual=0)["m"]["passive_long_hold"]["benchmark_cost_usd"]
+    assert sim2.qualifies("short", a["m"], R_SIDE) in (True, False) and sim2.qualifies("long_short", b["m"], R_SIDE) in (True, False)
+
+
+# =================================================================== short conditional factor direction (D4)
+CTX = {"universe_identity": {"universe_id": "u", "symbols_sha256": "s"}, "data_provenance_identity": {"bars": "b"}}
+
+
+def test_short_factors_are_lower_is_better_and_the_population_is_exact():
+    conds = gr.build_conditions(gr.build_configs())
+    specs = [(c, h, sp) for c, h, sp in fx.iter_factor_specs(conds, CTX)]
+    assert len(specs) == 1075 and {sp.direction for _c, _h, sp in specs} == {"lower_is_better"}
+    ids = fx.expected_factor_ids(conds, CTX)
+    assert len(set(ids)) == 1075 and fx.FACTOR_FAMILY.startswith("alpha_census02")
+    assert pr.build_structural_protocol()["conditional_factor_semantics"]["direction"] == "lower_is_better"
+    assert all(sp.params["side"] == "short" for _c, _h, sp in specs)
+    cut = gr.build_conditions(gr.build_configs(complements_excluded=True), complements_excluded=True)
+    assert len(fx.expected_factor_ids(cut, CTX)) == 935
+
+
+def test_direction_is_identity_bound_and_a_flip_is_refused():
+    conds = gr.build_conditions(gr.build_configs())
+    cond = conds[0]
+    good = fx.factor_spec(cond, 5, CTX)
+    flipped = fx.factor_spec(cond, 5, CTX, direction="higher_is_better")
+    assert good.compute_factor_id() != flipped.compute_factor_id()                 # direction is in the factor identity
+    assert good.identity_payload()["direction"] == "lower_is_better"
+    assert fx.require_registered_short_factor(good, conds, CTX) == good.compute_factor_id()
+    with pytest.raises(fx.FactorAuthorityRefusal):
+        fx.require_registered_short_factor(flipped, conds, CTX)
+    import dataclasses
+    with pytest.raises(fx.FactorAuthorityRefusal):                                  # same direction label, different identity field
+        fx.require_registered_short_factor(dataclasses.replace(good, horizon_periods=3), conds, CTX)
+    with pytest.raises(fx.FactorAuthorityRefusal):
+        fx.direction_adjusted_effect(0.01, "higher_is_better")
+
+
+def test_direction_adjusted_effect_is_minus_the_raw_effect_and_matches_census01_diagnostics():
+    assert fx.direction_adjusted_effect(-0.02) == pytest.approx(0.02) and fx.direction_adjusted_effect(0.03) == pytest.approx(-0.03)
+    import conditional as cd1
+    n = 6
+    frame = pd.DataFrame({"symbol": ["A"] * n, "factor_value": [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                          "label_fwd_ret": [-0.02, -0.04, 0.0, 0.01, 0.01, 0.01]})
+    aux = pd.DataFrame({"year": [2016] * n, "regime": [1] * n})
+    d = cd1.event_diagnostics(frame, aux, "lower_is_better")
+    assert d["effect"] == pytest.approx(-0.02) and d["direction_adjusted_effect"] == pytest.approx(fx.direction_adjusted_effect(d["effect"]))
+    assert d["direction_adjusted_effect"] > 0                                       # falling after the event favors the short
+
+
+def test_condition_lookback_matches_the_first_defined_bar_of_the_builder(gappy):
+    sdg = sg2.build_symbol_data("G", gappy)
+    checked = 0
+    for cond in gr.build_conditions(gr.build_configs()):
+        cfg = next(c for c in gr.build_configs() if c["side"] == "short" and c["family"] == cond["family"]
+                   and gr.condition_params(c["family"], c["params"]) == cond["params"])
+        sig = sg2.build(sdg, cfg["family"], cfg["params"])
+        assert sig is not None
+        base = fx.condition_lookback(cond["family"], cond["params"])
+        exec_pad = max([cfg["params"].get("exit", 0)] if cond["family"] in ("SH04", "SH09") else [0])
+        assert sig.s == max(base, exec_pad), (cond["family"], cond["params"], sig.s, base)
+        checked += 1
+    assert checked == 215
+
+
+# ==================================================================== fail-closed simulator inputs (D8)
+def _ok_bars():
+    return hand_bars()
+
+
+def test_zero_or_negative_low_is_refused_even_when_close_is_positive():
+    hm, lm, cm = _ok_bars()
+    d = np.zeros(9, np.int8)
+    d[2:5] = -1
+    for bad_low in (0, -1):
+        lm2 = lm.copy()
+        lm2[4] = bad_low                                              # high >= close >= low holds; low > 0 does not
+        assert (hm >= cm).all() and (cm >= lm2).all() and (cm > 0).all()
+        with pytest.raises(TypeError):
+            sim2.simulate_signed(hm, lm2, cm, d, 2, borrow_fee_bps_annual=0.0)
+
+
+@pytest.mark.parametrize("kw", [
+    {"commission_bps": -1.0}, {"commission_bps": float("nan")}, {"commission_bps": float("inf")}, {"commission_bps": True},
+    {"commission_bps": "10"}, {"slippage_bps": -1}, {"slippage_bps": 2.5}, {"slippage_bps": float("nan")},
+    {"slippage_bps": True}, {"slippage_bps": "5"}, {"slippage_bps": np.float64(5.0)}])
+def test_malformed_cost_overrides_are_refused_not_coerced(kw):
+    hm, lm, cm = _ok_bars()
+    d = np.zeros(9, np.int8)
+    d[2:5] = -1
+    with pytest.raises(ValueError):
+        sim2.simulate_signed(hm, lm, cm, d, 2, borrow_fee_bps_annual=0.0, **kw)
+
+
+def test_valid_cost_overrides_are_accepted_and_malformed_borrow_fee_is_refused_even_without_a_short():
+    hm, lm, cm = _ok_bars()
+    d = np.zeros(9, np.int8)
+    d[2:5] = -1
+    base = sim2.simulate_signed(hm, lm, cm, d, 2, borrow_fee_bps_annual=0.0)
+    hi = sim2.simulate_signed(hm, lm, cm, d, 2, borrow_fee_bps_annual=0.0, commission_bps=20.0, slippage_bps=np.int64(10))
+    assert hi.cost.sum() > base.cost.sum() > 0
+    long_only = np.zeros(9, np.int8)
+    long_only[2:5] = 1
+    for bad in (-1.0, float("nan"), True):
+        with pytest.raises(bw.BorrowRefusal):
+            sim2.simulate_signed(hm, lm, cm, long_only, 2, borrow_fee_bps_annual=bad)
+
+
 # ============================================================================================ borrow capability
 def test_borrow_classification_and_individual_equity_never_executable(sd):
     assert bw.classify_evidence("SPY", None) == bw.EVIDENCE_A                  # no frozen assumption: nothing is executable
@@ -441,7 +620,7 @@ def test_borrow_classification_and_individual_equity_never_executable(sd):
     with pytest.raises(bw.BorrowRefusal):
         bw.require_executable(bw.EVIDENCE_B)                                   # class B needs point-in-time data
     ok = sim2.evaluate_short_cell(sd, cfg, bw.EVIDENCE_C, borrow_fee_bps_annual=50)
-    assert ok["executable_pnl"] is True and set(ok["m"]) == {"cash_zero", "same_direction_hold"}
+    assert ok["executable_pnl"] is True and set(ok["m"]) == {"cash_zero", "passive_short_hold"}
     assert pr.assert_executable_record(ok) is ok
 
 
@@ -458,6 +637,17 @@ def test_proposal_artifact_cannot_satisfy_the_freeze_and_holds_no_result():
     assert sorted(doc["operator_decisions_required"]) == sorted(pr.DECISIONS)
     assert doc["candidate_grammar"]["tier_H_configs"] == 430 and doc["candidate_grammar"]["tier_L_configs"] == 40
     assert doc["candidate_grammar"]["short_conditions"] == 215 and doc["candidate_grammar"]["conditional_factors"] == 1075
+    cha = doc["candidate_grammar"]["complement_handling_arithmetic"]
+    assert cha["REGISTER_ALL_TAG_COMPLEMENTS"] == {"configs": 470, "conditions": 215, "conditional_factors": 1075}
+    assert {k: cha["EXCLUDE_COMPLEMENTS_BEFORE_FREEZE"][k] for k in ("configs", "conditions", "conditional_factors")} == {
+        "configs": 414, "conditions": 187, "conditional_factors": 935}
+    assert doc["conditional_factor_semantics"]["direction"] == "lower_is_better"
+    assert doc["operator_decisions_required"]["conditional_scope"] == ["ALL_SEED_SYMBOLS"]
+    assert doc["benchmark_contract"]["roles"]["long_short"]["passive_long_hold"] == "DIAGNOSTIC_ONLY"
+    assert set(doc["behavior_source_manifest_scope"]["sources"]) == set(pr.BEHAVIOR_SOURCES)
+    rec = doc["independent_review_recommendations"]
+    assert rec["status"].startswith("RECOMMENDED_AWAITING") and rec["status"].endswith("NOT_FROZEN")
+    assert doc["status"] == pr.STATUS_PROPOSED
     assert doc["structural_protocol_id"] == pr.sha256_canonical(pr.build_structural_protocol())[:32]
     blob = json.dumps(doc)
     for forbidden in ("net_pnl", "alpha_usd", "sharpe", "p_value", "survivors"):

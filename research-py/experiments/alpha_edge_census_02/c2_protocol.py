@@ -17,6 +17,7 @@ for _p in (str(HERE), str(C1_DIR), str(HERE.parents[1] / "src")):
 
 import pandas as pd  # noqa: E402
 import partitions as pt  # noqa: E402  (Census-01 fence authority, reused unchanged)
+import simulate as _c1sim  # noqa: E402  (Census-01 cost/sizing constants: the single authority the protocol must equal)
 import c2_borrow as bw  # noqa: E402
 
 REPO = HERE.parents[2]
@@ -45,6 +46,29 @@ def sha256_canonical(obj) -> str:
     return hashlib.sha256(canonical(obj).encode("utf-8")).hexdigest()
 
 
+# Side-aware benchmark contract (PROPOSED, not frozen).
+BENCHMARK_ROLES = {
+    "short": {"cash_zero": "QUALIFICATION_NET", "passive_short_hold": "QUALIFICATION_ALPHA"},
+    "long_short": {"cash_zero": "QUALIFICATION_NET", "passive_long_hold": "DIAGNOSTIC_ONLY", "passive_short_hold": "DIAGNOSTIC_ONLY"},
+}
+BENCHMARK_RULES = ("SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH", "NET_POSITIVE_ONLY_ALL_SIDES")
+
+FACTOR_SEMANTICS = {
+    "family": "alpha_census02_short_conditional_v1", "protocol_version": "alpha_census02_short_conditional_factor_v1",
+    "direction": "lower_is_better", "label": "fwd_close_return_minus_same_symbol_same_horizon_unconditional_mean",
+    "raw_effect": "conditional_mean_fwd_ret - same_symbol_same_horizon_unconditional_mean",
+    "direction_adjusted_effect": "-raw_effect (positive = favorable evidence for the short hypothesis)",
+    "executable_pnl": False, "post_result_direction_flip": "forbidden"}
+
+
+def cost_truth() -> dict:
+    """Machine-readable cost/sizing truth, read from the actual simulator constants (never re-typed)."""
+    return {"commission_bps_per_side": _c1sim.COMMISSION_BPS, "fill_slippage_bps_per_side": _c1sim.SLIPPAGE_BPS,
+            "volatility_mult_bps": _c1sim.VOL_MULT_BPS, "additional_slippage_bps": 0.0,
+            "pricing_model_id": "rust_conservative_bar_range_v1", "annualization_days": _c1sim.ANNUALIZATION,
+            "entry_budget_usd": _c1sim.BUDGET_USD, "initial_capital_usd": _c1sim.CAPITAL_USD}
+
+
 # ------------------------------------------------------------------------------------------ structural protocol
 def build_structural_protocol() -> dict:
     """Execution/cost/benchmark semantics that need no new scientific threshold: every numeric value is the accepted
@@ -57,14 +81,14 @@ def build_structural_protocol() -> dict:
         "execution_contract": {
             "positions": "signed_daily_completed_bars: -1 short, 0 flat, +1 long",
             "signal_knowledge": "signal on bar t uses only bars <= t",
-            "fill": "first bar strictly after t; BUY at high+slip, SELL at low-slip (rust_conservative_bar_range_v1, "
-                    "slippage 5 bps, integer micros); short entry = SELL, cover = BUY; same-bar fill forbidden",
+            "fill": f"first bar strictly after t; BUY at high+slip, SELL at low-slip (rust_conservative_bar_range_v1, "
+                    f"slippage {_c1sim.SLIPPAGE_BPS} bps, integer micros); short entry = SELL, cover = BUY; same-bar fill forbidden",
             "pnl_marking": "signed_qty_held_before_bar*(close_t-close_{t-1}); fill cost = |delta_qty|*adverse(fill vs close)+commission",
-            "cost_model": {"commission_bps_per_side": 10.0, "slippage_bps_per_side": 0.0},
-            "sizing": "qty = sign*floor(10000 USD / completed-signal-bar close); constant per run; no compounding; "
-                      "sign flip = exit leg + entry leg on one fill bar",
-            "borrow_cost": "short holding bars accrue |qty|*prior_close*annual_fee_bps/10000/252; fee has NO default; "
-                           "short rebate ZERO; availability/recall assumptions are disclosed, not asserted",
+            "cost_model": cost_truth(),
+            "sizing": f"qty = sign*floor({_c1sim.BUDGET_USD:g} USD / completed-signal-bar close); constant per run; no "
+                      "compounding; sign flip = exit leg + entry leg on one fill bar",
+            "borrow_cost": f"short holding bars accrue |qty|*prior_close*annual_fee_bps/10000/{_c1sim.ANNUALIZATION}; fee has "
+                           "NO default; short rebate ZERO; availability/recall assumptions are disclosed, not asserted",
             "open_position_at_end": "marked_to_last_close_no_liquidation (unchanged from Census-01)",
             "corporate_actions": "adjustment=all total-return series: a short bears dividends through the adjusted series; "
                                  "unsupported corporate actions stay typed EXCLUDED (fail closed)",
@@ -72,10 +96,13 @@ def build_structural_protocol() -> dict:
             "labels": "fwd_ret/close_{t+h}/close_t-1 is a LABEL: EXECUTABLE_PNL=false, never an input to simulate_signed",
         },
         "benchmark_semantics": {
-            "never": "long buy-and-hold as the benchmark of a short-bearing strategy (double-counts the market)",
-            "recorded_series": ["same_direction_passive_hold_same_window_same_cost_model", "cash_zero"],
-            "qualification_rule": "OPERATOR_DECISION benchmark_rule",
+            "never": "long buy-and-hold as the benchmark of a short-only strategy (double-counts the market); a switching "
+                     "long/short strategy has no single-direction benchmark",
+            "roles": {side: dict(roles) for side, roles in BENCHMARK_ROLES.items()},
+            "passive_holds": "same window, same execution/cost/borrow assumptions as the strategy",
+            "rules": list(BENCHMARK_RULES), "qualification_rule": "OPERATOR_DECISION benchmark_rule",
         },
+        "conditional_factor_semantics": dict(FACTOR_SEMANTICS),
         "identity": {"trial": "sha256(side,family,params,scope,universe_id,partitions_id,protocol_id); results/attempts never enter",
                      "attempt": "infrastructure retry = new attempt of the SAME trial; outcome-based retry forbidden",
                      "evaluation": "slice/job/window; never mints a trial"},
@@ -116,11 +143,11 @@ DECISIONS = {
     "grammar_tiers": (("H", "H+L"), _opt("H", "H+L")),   # tier X (cross-sectional) is not implemented: a later amendment
     "complement_handling": (("REGISTER_ALL_TAG_COMPLEMENTS", "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE"),
                             _opt("REGISTER_ALL_TAG_COMPLEMENTS", "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE")),
-    "benchmark_rule": (("NET_POSITIVE_AND_SAME_DIRECTION_HOLD_ALPHA_POSITIVE", "NET_POSITIVE_ONLY", "SAME_DIRECTION_HOLD_ALPHA_ONLY"),
-                       _opt("NET_POSITIVE_AND_SAME_DIRECTION_HOLD_ALPHA_POSITIVE", "NET_POSITIVE_ONLY", "SAME_DIRECTION_HOLD_ALPHA_ONLY")),
+    "benchmark_rule": (BENCHMARK_RULES, _opt(*BENCHMARK_RULES)),
     "multiple_testing_denominator": (("LOCAL_CENSUS02", "LOCAL_WITH_GLOBAL_DISCLOSURE", "GLOBAL_POOLED_CENSUS01_CENSUS02"),
                                      _opt("LOCAL_CENSUS02", "LOCAL_WITH_GLOBAL_DISCLOSURE", "GLOBAL_POOLED_CENSUS01_CENSUS02")),
-    "conditional_scope": (("ALL_SEED_SYMBOLS", "EQUITY_SYMBOLS_ONLY"), _opt("ALL_SEED_SYMBOLS", "EQUITY_SYMBOLS_ONLY")),
+    # An equity-only family would need a separately frozen complete instrument-class mapping that does not exist.
+    "conditional_scope": (("ALL_SEED_SYMBOLS",), _opt("ALL_SEED_SYMBOLS")),
     "ssr_handling": (("FLAG_ONLY", "DEFER_ENTRY_ON_KNOWN_SSR_DAY"), _opt("FLAG_ONLY", "DEFER_ENTRY_ON_KNOWN_SSR_DAY")),
     "funnel_thresholds": ("five-part block, see c2 doc", _threshold_block),
 }
@@ -142,9 +169,49 @@ def validate_decisions(decisions) -> dict:
     return decisions
 
 
-def frozen_protocol_id(structural: dict, decisions: dict) -> str:
+def frozen_protocol_id(structural: dict, decisions: dict, source_manifest: dict) -> str:
+    """Binds the protocol, the operator decisions AND the behavior-source manifest, so a source edit changes every id."""
     validate_decisions(decisions)
-    return sha256_canonical({"structural": structural, "decisions": decisions})[:32]
+    return sha256_canonical({"structural": structural, "decisions": decisions, "behavior_source_manifest": source_manifest})[:32]
+
+
+# ------------------------------------------------------------------------------- behavior-source manifest
+_C1 = "research-py/experiments/alpha_edge_census_01/"
+_C2 = "research-py/experiments/alpha_edge_census_02/"
+_SRC = "research-py/src/mqk_research/"
+# Pre-result sources that can change the candidate grammar, signal values, execution chronology, price/cost arithmetic,
+# factor direction/identity or partition fencing. Generated outputs and result values are never bound.
+BEHAVIOR_SOURCES = tuple(sorted((
+    _C2 + "c2_protocol.py", _C2 + "c2_borrow.py", _C2 + "c2_grammar.py", _C2 + "c2_factors.py", _C2 + "c2_signals.py",
+    _C2 + "c2_simulate.py",
+    _C1 + "search_space.py", _C1 + "signals.py", _C1 + "simulate.py", _C1 + "partitions.py", _C1 + "calendar_authority.py",
+    _SRC + "indicators/core.py", _SRC + "factors/contracts.py", _SRC + "exp_distributed/hashing.py")))
+# Frozen pre-result input data a behavior source reads (the seed universe validates the borrow scope).
+AUTHORITY_DATA = (_C1 + "ALPHA_CENSUS_SEED_UNIVERSE_V2.json",)
+# In-repo modules reachable by import that were inspected and are NOT behavior-bearing for Census-02 values.
+REVIEWED_NON_BEHAVIOR = {
+    _C1 + "data.py": "imported by search_space for Census-01 eligibility constants and acquisition; no Census-02 value uses it",
+    _SRC + "data/alpaca_historical.py": "provider acquisition path reached only via data.py; Census-02 never acquires data",
+    _SRC + "data/bars_provenance.py": "acquisition provenance, reached only via alpaca_historical",
+    _SRC + "data/ca_reviewed_resolutions.py": "acquisition corporate-action resolutions, reached only via alpaca_historical",
+    _SRC + "ml/util_hash.py": "hash helper reached only via ca_reviewed_resolutions",
+    _SRC + "universe/snapshot.py": "used only by search_space.build_seed_universe, which Census-02 never calls",
+}
+
+
+def _sha_lf(path: Path) -> str:
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise FreezeRefusal(f"behavior source {Path(path).name} unreadable ({type(exc).__name__})") from None
+    return hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def behavior_source_manifest(repo: Path = REPO) -> dict:
+    repo = Path(repo)
+    return {"schema_version": "census02_behavior_source_manifest_v1", "hash": "sha256_lf",
+            "sources": {rel: _sha_lf(repo / rel) for rel in BEHAVIOR_SOURCES},
+            "authority_data": {rel: _sha_lf(repo / rel) for rel in AUTHORITY_DATA}}
 
 
 # ------------------------------------------------------------------------------------------------- freeze guard
@@ -175,10 +242,16 @@ def require_freeze(repo: Path = REPO, predeclaration: Path = PREDECLARATION_FILE
         raise FreezeRefusal(f"predeclaration status {doc.get('status')!r} is not {STATUS_FROZEN}")
     if doc.get("attempts_at_freeze") != 0:
         raise FreezeRefusal("freeze must precede every attempt (attempts_at_freeze != 0)")
+    require_committed([Path(repo) / rel for rel in (*BEHAVIOR_SOURCES, *AUTHORITY_DATA)], repo)
+    manifest = behavior_source_manifest(repo)
+    if doc.get("behavior_source_manifest") != manifest:
+        drift = sorted(k for k, v in manifest["sources"].items()
+                       if (doc.get("behavior_source_manifest") or {}).get("sources", {}).get(k) != v)
+        raise FreezeRefusal(f"behavior-bearing source differs from the frozen manifest: {drift or 'manifest malformed'}")
     structural = build_structural_protocol()
     if doc.get("structural_protocol") != structural:
         raise FreezeRefusal("structural protocol differs from the committed predeclaration (a value changed after the freeze)")
-    if doc.get("protocol_id") != frozen_protocol_id(structural, doc.get("decisions")):
+    if doc.get("protocol_id") != frozen_protocol_id(structural, doc.get("decisions"), manifest):
         raise FreezeRefusal("protocol_id does not equal the recomputed id")
     return {"head": head, "predeclaration": doc}
 

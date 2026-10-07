@@ -5,6 +5,8 @@ Status: `CENSUS02_PREDECLARATION_READY_FOR_OPERATOR_FREEZE` — the proposal pac
 executed: eight scientific / economic policies are not resolved by any binding repo authority (section 9), so no freeze file exists and no
 real Census-02 data was read. The session stops at the operator-decision boundary. `VALIDATION_STATUS=NOT_VALIDATED`, `PROMOTION_AUTHORITY=NONE`. Paper INACTIVE, Live DISABLED.
 
+Consolidated independent-review correction (D1–D8, section 12) applied after C2; every policy below is still `PROPOSED_NOT_FROZEN`.
+
 Machine-readable proposal: `research-py/experiments/alpha_edge_census_02/CENSUS02_PREDECLARATION_PROPOSAL.json` (status
 `PROPOSED_NOT_FROZEN`; it can never satisfy `c2_protocol.require_freeze`). Code: `research-py/experiments/alpha_edge_census_02/c2_*.py`;
 tests `research-py/tests/test_alpha_edge_census_02{,_protocol}.py`; mutation proof `.../results/c2_mutation_proof_log.json`.
@@ -63,7 +65,10 @@ conflicting states cancel to flat): LS01 8 (S01+SH01), LS02 6, LS03 14, LS04 12 
 **Count arithmetic** (computed by `c2_grammar.candidate_arithmetic`, pinned by test): configs 430 (H) / 470 (H+L); short conditions 215
 (SH01 8, 02 6, 03 14, 04 5, 05 36, 06 24, 07 36, 08 12, 09 32, 10 12, 11 6, 12 16, 13 8); conditional factors 215 x 5 horizons = **1,075**.
 Strategy trials = configs x executable-scope symbols: e.g. frozen scope of 20 ETFs -> 9,400 (H+L), 8,600 (H), 8,280 (H+L, complements
-excluded); no executable shorts -> 0 trials, 1,075 label factors. 470 x 88 = 41,360 is **not** an authorized population (individual-equity shorts
+excluded); no executable shorts -> 0 trials, 1,075 label factors.
+**Complement handling arithmetic:** `REGISTER_ALL_TAG_COMPLEMENTS` = 470 configs / 215 conditions / 1,075 factors. `EXCLUDE_COMPLEMENTS_BEFORE_FREEZE` removes
+the 56 SH01–03 + LS01–03 configs **and** the SH01–03 conditions (8+6+14 = 28; LS mints no factor of its own) = 414 configs (402 for tier H) /
+187 conditions / **935** factors; with a 20-ETF scope, 8,280 strategy trials. 470 x 88 = 41,360 is **not** an authorized population (individual-equity shorts
 are never executable).
 
 **Duplicated mirrored candidates (finding).** SH01–SH03 are exact state complements of S01–S03 (proven disjoint and exhaustive:
@@ -74,14 +79,17 @@ identity) and the operator chooses register-all vs exclude-before-freeze. Event/
 ## 4. Short execution, cost, benchmark semantics (structural protocol, no new threshold)
 
 * Decision after completed bar `t` uses bars `<= t`; fill on bar `t+1`: short entry = SELL at `low − slip`, cover = BUY at `high + slip`
-  (`rust_conservative_bar_range_v1`, 5 bps, integer micros); same-bar fill impossible (`h[1:] = d[:-1]`); commission 10 bps/side.
+  (`rust_conservative_bar_range_v1`, 5 bps, integer micros); same-bar fill impossible (`h[1:] = d[:-1]`); commission 10 bps/side. The machine-readable `cost_model` is read from the simulator constants (commission 10, fill slippage 5 bps,
+  252-day annualization, 10,000 USD entry budget, 100,000 USD capital); a test pins the literals against both the protocol and the executed fills.
 * `qty = sign x floor(10,000 USD / close of the signal bar)`, constant per run, no compounding. P&L marks `q_before x (close_t − close_{t-1})`
   (negative q gains when price falls). A long→short flip is one exit leg + one entry leg on the same fill bar, each priced at that bar's fill.
 * Borrow cost: `|q| x prior close x annual_fee_bps/10,000/252` per held-short bar; **no default** — a short with no explicit finite fee raises.
   Rebate zero; availability and recall are disclosed assumptions, never asserted.
-* Benchmarks recorded for a short strategy: same-direction passive **short** hold (same window, same cost model) and cash. Long buy-and-hold is
-  refused as a short benchmark. Warning for the operator: over 2016–2023 a short-hold benchmark is a weak bar in a rising market, so
-  `alpha vs short-hold` alone can reward merely being flat — hence the rule options below.
+* **Side-aware benchmark contract** (proposed, not frozen). `short`: cash + passive **short** hold with identical execution/cost/borrow;
+  proposed qualification net P&L > 0 AND alpha vs the passive short hold > 0. `long_short`: cash is the qualification benchmark (net P&L > 0);
+  passive long and passive short holds are recorded as `DIAGNOSTIC_ONLY` — a switching strategy has no single-direction benchmark, so
+  `benchmark_direction("long_short")` refuses and no LS rule consults a hold. Long buy-and-hold is refused as a short benchmark. Warning for the operator: over 2016–2023 a short-hold benchmark is a weak bar in a rising market, so
+  `alpha vs short-hold` alone can reward merely being flat — hence the net-positive co-requirement.
 * `fwd_ret` / `close_{t+h}/close_t − 1` is a label: `simulate_signed` accepts only int64 micro OHLC with `high >= close >= low > 0`.
 
 ## 5. Feasibility of the other requested forms
@@ -120,7 +128,9 @@ operator-supplied fee.
   registry write — the denominator cannot shrink and winner-only registration is refused.
 * **Freeze mechanism**: `require_freeze` allows real-data access only if `CENSUS02_PREDECLARATION.json` exists, is committed and clean at HEAD,
   has `status=FROZEN_BY_OPERATOR`, `attempts_at_freeze=0`, a structural protocol equal to the code's, complete valid operator decisions and a
-  recomputed `protocol_id`. A proposal file can never satisfy it. Because the frozen decisions enter `protocol_id`, they enter every trial id.
+  recomputed `protocol_id`. It also recomputes the **behavior-source manifest** and refuses real-data access if any bound source differs from the
+  frozen manifest or is uncommitted/dirty (section 12). A proposal file can never satisfy it. Because the frozen decisions and the manifest
+  enter `protocol_id`, they enter every trial id.
 * Multiple testing (proposal): local BH family over the 1,075 Census-02 factors (`factor_fdr_bh_v1`, alpha 0.10) with Census-01 totals
   (38,192 trials, 1,095 factors) disclosed beside every verdict; strategy DSR/PBO stays `DEFERRED_FULL_POPULATION` with the pooled population as
   denominator; complements counted in the registered denominator, excluded from the effective-independent estimate. Pooled-BH is an option.
@@ -144,9 +154,9 @@ or relaxed only by an explicit operator choice; no old Pass-2 candidate is rescu
 1. `borrow_policy` (+ `etf_borrow_assumption`: explicit sorted ETF list and annual fee bps).
 2. `grammar_tiers`: H / H+L (tier X, cross-sectional, is deferred and needs a later amendment).
 3. `complement_handling`: register all and tag / exclude 56 complements before freeze.
-4. `benchmark_rule`: net>0 AND short-hold alpha>0 (conservative) / net>0 only / short-hold alpha only.
+4. `benchmark_rule`: `SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH` / `NET_POSITIVE_ONLY_ALL_SIDES` (the earlier "same-direction hold alpha" options are retired: undefined for long/short).
 5. `multiple_testing_denominator`: local / local with global disclosure / globally pooled.
-6. `conditional_scope`: all 88 seed symbols / equities only (label evidence is borrow-independent).
+6. `conditional_scope`: `ALL_SEED_SYMBOLS` only (label evidence is borrow-independent; an equity-only family would need a separately frozen, complete instrument-class mapping that does not exist).
 7. `ssr_handling`: flag only / defer entry on a known SSR day.
 8. `funnel_thresholds`: the five items above.
 
@@ -157,6 +167,7 @@ or relaxed only by an explicit operator choice; no old Pass-2 candidate is rescu
 | Hidden long-only assumptions | Census-01 `simulate` bool cast = ALREADY CORRECT for its bool contract; Census-02 isolated = FIXED+PROVEN | hazard test + all builders emit signed int8; M15 |
 | Quantity sign / short cash P&L | FIXED+PROVEN | scalar-reference equality incl. flips and borrow; hand arithmetic; M01, M21, M22 |
 | Benchmark sign | FIXED+PROVEN | constant short vs short-hold alpha 0; long-hold would fabricate; M13 |
+| Benchmark direction ambiguity for long/short | FIXED+PROVEN | side-aware roles; LS qualification never consults a hold; M29–M31 |
 | Cover / same-bar chronology | FIXED+PROVEN | fill bar = decision+1; future bars cannot change the cover; all 470 configs causal-prefix invariant at 3 cuts; M01, M02 |
 | `fwd_ret` as P&L | FIXED+PROVEN | float and integer-cast labels refused; M03 |
 | Borrow assumptions | FIXED+PROVEN | no assumption/outside scope => hypothesis-only, no P&L; class B refused; missing fee refused; M08–M10, M14, M23 |
@@ -177,5 +188,36 @@ or relaxed only by an explicit operator choice; no old Pass-2 candidate is rescu
 Census-02 conditional runner (FactorSpec registration with `lower_is_better`, label fence), strategy chunk runner, cross-sectional and
 beta-hedged simulators, population/universe manifests (need data dispositions), `CENSUS02_PREDECLARATION.json` itself. The freeze package (C3)
 is intentionally **not** committed: it requires the operator decisions above.
+The future runner's first statement must be `c2_protocol.require_freeze()`; no Census-02 module currently has a data path to guard (static test), so this
+obligation is recorded here and must be unit-tested when the runner is built.
+
+## 12. Independent-review consolidated correction (D1–D8)
+
+| ID | Defect | Disposition | Proof |
+|---|---|---|---|
+| D1 | Protocol said `slippage_bps_per_side = 0.0` while fills use 5 bps | FIXED+PROVEN: `cost_model` is read from the simulator constants; literals pinned | `test_protocol_cost_truth_*`, `test_executed_fill_economics_*`; M27, M28 |
+| D2 | H+L had no defined benchmark; "same-direction hold" undefined for long/short | FIXED+PROVEN: side-aware roles and `qualifies()` (proposal only) | M29–M31 |
+| D3 | Complement exclusion kept 215 conditions / 1,075 factors | FIXED+PROVEN: exclusion = 414 configs / 187 conditions / 935 factors; stale arithmetic refused | `test_grammar_counts_and_arithmetic`, `test_complement_exclusion_*`; M32 |
+| D4 | Short factor direction not frozen | FIXED+PROVEN: `c2_factors` fixes `lower_is_better` in the FactorSpec identity and the structural protocol; adjusted effect = −raw; flip changes the id and is refused | `test_direction_*`; M33–M35, F05 |
+| D5 | Freeze guard did not bind behavior sources | FIXED+PROVEN: sha256 (LF-normalised) manifest of 14 sources + the seed universe, recomputed by `require_freeze` before any real-data access, bound into `protocol_id`; reachability test proves nothing is omitted without a documented reason | one-byte drift RED for every bound file; M36–M41, F01–F13 |
+| D6 | `EQUITY_SYMBOLS_ONLY` had no authority | FIXED+PROVEN: removed; only `ALL_SEED_SYMBOLS` | M42 |
+| D7 | ETF scope not checked against the seed universe | FIXED+PROVEN: out-of-universe / ticker-text variants refused; unavailable seed file fails closed | M43 |
+| D8 | `low > 0` unproven; malformed cost overrides accepted | FIXED+PROVEN: `low > 0`; commission finite and ≥ 0; slippage a non-negative integer; borrow fee finite and ≥ 0 | M44–M47 |
+
+**Behavior-source manifest coverage.** Bound (14): `c2_protocol/borrow/grammar/factors/signals/simulate.py`; Census-01 `search_space.py`,
+`signals.py`, `simulate.py`, `partitions.py`, `calendar_authority.py`; `mqk_research/indicators/core.py` (RSI, z-score),
+`factors/contracts.py` (FactorSpec identity and direction), `exp_distributed/hashing.py` (factor-id hash). Authority data: the Census seed
+universe. Reviewed and excluded with a stated reason (acquisition/provenance/universe-snapshot paths Census-02 never calls): Census-01
+`data.py`, `data/alpaca_historical.py`, `data/bars_provenance.py`, `data/ca_reviewed_resolutions.py`, `ml/util_hash.py`,
+`universe/snapshot.py`. Generated outputs and result values are never bound. Any later amendment that adds a runner or reuses
+`conditional.py` must extend the manifest first. numpy/pandas versions are not bound (recorded limitation).
+
+**Independent-review recommendations — NOT operator-approved, NOT frozen** (also in the proposal JSON under
+`independent_review_recommendations`): borrow policy `EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION`; the 20-ETF list above at a
+100 bps/year **base research assumption** (not a historical-fact claim; harsher stresses come later); grammar H+L; complements
+`REGISTER_ALL_TAG_COMPLEMENTS`; the side-aware benchmark rule; `LOCAL_WITH_GLOBAL_DISCLOSURE`; `ALL_SEED_SYMBOLS`; SSR `FLAG_ONLY` in Discovery;
+funnel: trade count <5 INSUFFICIENT, 5–14 LOW_SAMPLE, 15–29 MODERATE_SAMPLE, ≥30 STRONG_SAMPLE as classification/confidence only (only <5 may be
+typed insufficient; no blanket ≥30 veto), year stability / regime concentration / parameter neighbourhood REPORT_ONLY_NO_GATE, portfolio MDD /
+worst-5-day deferred to the portfolio-risk-suitability stage under the MAIN risk bar. No freeze file exists; real Census-02 attempts 0.
 
 Full local workspace acceptance: NOT RUN — prohibited by laptop resource-safety rule; broad workspace proof delegated to GitHub CI.

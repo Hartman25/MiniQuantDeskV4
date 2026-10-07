@@ -48,6 +48,7 @@ def build_proposal() -> dict:
         "S1_frozen_etf_scope_20_H+L": gr.candidate_arithmetic(len(PROPOSED_ETF_SCOPE)),
         "S2_frozen_etf_scope_20_H_only": gr.candidate_arithmetic(len(PROPOSED_ETF_SCOPE), "H"),
         "S3_frozen_etf_scope_20_H+L_complements_excluded": gr.candidate_arithmetic(len(PROPOSED_ETF_SCOPE), complements_excluded=True),
+        "S4_frozen_etf_scope_20_H_complements_excluded": gr.candidate_arithmetic(len(PROPOSED_ETF_SCOPE), "H", complements_excluded=True),
     }
     return {
         "schema_version": "alpha_census02_proposal_v1", "status": pr.STATUS_PROPOSED,
@@ -63,6 +64,11 @@ def build_proposal() -> dict:
             "conditional_factors": gr.EXPECTED_CONDITION_TOTAL * len(gr.HORIZONS),
             "complement_tagged_families": list(gr.COMPLEMENT_FAMILIES),
             "complement_tagged_configs": sum(1 for c in cfgs if c["family"] in gr.COMPLEMENT_FAMILIES),
+            "complement_handling_arithmetic": {
+                "REGISTER_ALL_TAG_COMPLEMENTS": {"configs": 470, "conditions": 215, "conditional_factors": 1075},
+                "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE": {
+                    "configs": 414, "conditions": 187, "conditional_factors": 935,
+                    "removed": "SH01-03 and LS01-03 configs (56); SH01-03 conditions (8+6+14=28); LS01-03 mint no factor of their own"}},
             "calendar_family_S14": "NOT_MIRRORED (no coherent short form)",
             "config_root_sha256": pr.sha256_canonical([c["config_id"] for c in cfgs]),
             "condition_root_sha256": pr.sha256_canonical([c["condition_id"] for c in gr.build_conditions(cfgs)])},
@@ -72,6 +78,27 @@ def build_proposal() -> dict:
         "proposed_etf_scope_for_operator_review": {"status": "PROPOSAL_NOT_FROZEN", "symbols": PROPOSED_ETF_SCOPE,
                                                    "note": "the registry carries no instrument-type field; ETF membership "
                                                            "must be an explicit operator-frozen list"},
+        "conditional_factor_semantics": dict(pr.FACTOR_SEMANTICS),
+        "behavior_source_manifest_scope": {
+            "mechanism": "sha256 (LF-normalised) of every behavior-bearing pre-result source, recomputed by require_freeze",
+            "sources": list(pr.BEHAVIOR_SOURCES), "authority_data": list(pr.AUTHORITY_DATA),
+            "reviewed_non_behavior": dict(pr.REVIEWED_NON_BEHAVIOR),
+            "binds": "grammar, signal values, execution chronology, price/cost arithmetic, factor direction/identity, partition fence",
+            "never_binds": "generated outputs and result values"},
+        "benchmark_contract": {"roles": {k: dict(v) for k, v in pr.BENCHMARK_ROLES.items()}, "rules": list(pr.BENCHMARK_RULES),
+                               "note": "a switching long/short strategy has no single-direction benchmark; passive holds are diagnostics"},
+        "independent_review_recommendations": {
+            "status": "RECOMMENDED_AWAITING_EXPLICIT_OPERATOR_APPROVAL_NOT_FROZEN",
+            "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+            "etf_short_scope": PROPOSED_ETF_SCOPE, "annual_borrow_fee_bps": "100 (base research assumption, not a historical-fact claim)",
+            "grammar_tiers": "H+L", "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
+            "benchmark_rule": pr.BENCHMARK_RULES[0], "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
+            "conditional_scope": "ALL_SEED_SYMBOLS", "ssr_handling": "FLAG_ONLY",
+            "funnel": {"trade_count": "<5 INSUFFICIENT; 5-14 LOW_SAMPLE; 15-29 MODERATE_SAMPLE; >=30 STRONG_SAMPLE "
+                                      "(classification/confidence only; only <5 may be typed insufficient; no blanket >=30 veto)",
+                       "year_stability": "REPORT_ONLY_NO_GATE", "regime_concentration": "REPORT_ONLY_NO_GATE",
+                       "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
+                       "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR"}},
         "multiple_testing_proposal": {
             "registered_population": "frozen population root over every (config x scope symbol) trial and every condition x horizon factor",
             "local_family": "Census-02 conditional factors form their own BH family (factor_fdr_bh_v1, alpha 0.10)",

@@ -4,7 +4,11 @@ result. An ETF short is executable only under an operator-frozen, explicitly par
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
+
+SEED_UNIVERSE_FILE = Path(__file__).resolve().parent.parent / "alpha_edge_census_01" / "ALPHA_CENSUS_SEED_UNIVERSE_V2.json"
 
 EVIDENCE_A = "A_INDIVIDUAL_EQUITY_SHORT_HYPOTHESIS_ONLY"
 EVIDENCE_B = "B_EXECUTABLE_SHORT_WITH_POINT_IN_TIME_BORROW_TRUTH"
@@ -24,13 +28,29 @@ class BorrowRefusal(RuntimeError):
     pass
 
 
-def validate_etf_assumption(a) -> dict:
-    """Fail closed unless the frozen assumption is complete: explicit symbol list and a finite non-negative fee."""
+def seed_universe_symbols() -> frozenset:
+    """Symbols of the frozen Census seed universe (the only universe a Census-02 scope may name)."""
+    try:
+        doc = json.loads(SEED_UNIVERSE_FILE.read_text(encoding="utf-8"))
+        symbols = doc["symbols"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise BorrowRefusal(f"frozen seed universe unavailable ({type(exc).__name__}): scope cannot be validated") from None
+    if not symbols or any(not isinstance(s, str) or not s for s in symbols):
+        raise BorrowRefusal("frozen seed universe is empty or malformed")
+    return frozenset(symbols)
+
+
+def validate_etf_assumption(a, seed_symbols=None) -> dict:
+    """Fail closed unless the frozen assumption is complete: explicit symbol list drawn from the frozen seed universe (the
+    list itself is the Class-C scope authority; ETF status is never inferred from ticker text) and a finite fee."""
     if not isinstance(a, dict) or sorted(a) != sorted(ASSUMPTION_KEYS):
         raise BorrowRefusal(f"borrow assumption must have exactly the keys {sorted(ASSUMPTION_KEYS)}")
     scope = a["etf_short_scope"]
     if not isinstance(scope, list) or not scope or scope != sorted(set(scope)) or not all(isinstance(s, str) and s for s in scope):
         raise BorrowRefusal("etf_short_scope must be a non-empty sorted list of unique symbols")
+    outside = sorted(set(scope) - (seed_universe_symbols() if seed_symbols is None else frozenset(seed_symbols)))
+    if outside:
+        raise BorrowRefusal(f"etf_short_scope names symbols outside the frozen seed universe: {outside}")
     fee = a["annual_borrow_fee_bps"]
     if isinstance(fee, bool) or not isinstance(fee, (int, float)) or not math.isfinite(fee) or fee < 0:
         raise BorrowRefusal("annual_borrow_fee_bps must be an explicit finite non-negative number (no default)")
@@ -40,12 +60,12 @@ def validate_etf_assumption(a) -> dict:
     return a
 
 
-def classify_evidence(symbol: str, assumption: dict | None) -> str:
+def classify_evidence(symbol: str, assumption: dict | None, seed_symbols=None) -> str:
     """Evidence class of a short-bearing cell on `symbol`. No frozen assumption, or a symbol outside the frozen ETF scope,
     is hypothesis-only. Class B is unreachable until point-in-time borrow data exists."""
     if assumption is None:
         return EVIDENCE_A
-    validate_etf_assumption(assumption)
+    validate_etf_assumption(assumption, seed_symbols)
     return EVIDENCE_C if symbol in assumption["etf_short_scope"] else EVIDENCE_A
 
 

@@ -119,6 +119,9 @@ EXECUTION_ONLY_KEYS = {"SH04": ("exit",), "SH05": ("exit_below",), "SH06": ("exi
 EXPECTED_CONDITION_COUNTS = {"SH01": 8, "SH02": 6, "SH03": 14, "SH04": 5, "SH05": 36, "SH06": 24, "SH07": 36, "SH08": 12,
                              "SH09": 32, "SH10": 12, "SH11": 6, "SH12": 16, "SH13": 8}
 EXPECTED_CONDITION_TOTAL = 215
+# EXCLUDE_COMPLEMENTS_BEFORE_FREEZE removes the SH01-03 conditions (8+6+14); LS01-03 mint no conditional factor of their own.
+EXPECTED_CONDITION_COUNTS_EXCLUDED = {f: n for f, n in EXPECTED_CONDITION_COUNTS.items() if f not in COMPLEMENT_FAMILIES}
+EXPECTED_CONDITION_TOTAL_EXCLUDED = 187
 
 
 class GrammarRefusal(RuntimeError):
@@ -129,9 +132,9 @@ def config_id(family: str, params: dict) -> str:
     return hashlib.sha256(pr.canonical({"family": family, "side": SIDE[family], "params": params}).encode()).hexdigest()[:24]
 
 
-def build_configs(tiers: str = "H+L") -> list[dict]:
+def build_configs(tiers: str = "H+L", complements_excluded: bool = False) -> list[dict]:
     """Deterministic family/grid order. Duplicates, grammar drift and any id collision (also with Census-01 config ids)
-    are refused."""
+    are refused. complements_excluded drops every COMPLEMENT_FAMILIES config (SH01-03 and LS01-03)."""
     if tiers not in ("H", "H+L"):
         raise GrammarRefusal(f"tier selection {tiers!r} is not implemented (H or H+L)")
     fams = {**H_FAMILIES, **L_FAMILIES}
@@ -139,7 +142,7 @@ def build_configs(tiers: str = "H+L") -> list[dict]:
     out, seen = [], set()
     c1_ids = {c["config_id"] for c in ss1.build_configs()}
     for fam, (_name, gen) in fams.items():
-        if fam in L_FAMILIES and not want_l:
+        if (fam in L_FAMILIES and not want_l) or (complements_excluded and fam in COMPLEMENT_FAMILIES):
             continue
         for params in gen():
             cid = config_id(fam, params)
@@ -147,15 +150,17 @@ def build_configs(tiers: str = "H+L") -> list[dict]:
                 raise GrammarRefusal(f"duplicate or Census-01-colliding coordinate in {fam}: {pr.canonical(params)}")
             seen.add(cid)
             out.append({"config_id": cid, "family": fam, "side": SIDE[fam], "params": params})
-    assert_grammar_authority(out, tiers)
+    assert_grammar_authority(out, tiers, complements_excluded)
     return out
 
 
-def assert_grammar_authority(configs: list[dict], tiers: str = "H+L") -> None:
+def assert_grammar_authority(configs: list[dict], tiers: str = "H+L", complements_excluded: bool = False) -> None:
     counts = {f: sum(1 for c in configs if c["family"] == f) for f in {c["family"] for c in configs}}
     want = dict(EXPECTED_H_COUNTS)
     if tiers == "H+L":
         want.update(EXPECTED_L_COUNTS)
+    if complements_excluded:
+        want = {f: n for f, n in want.items() if f not in COMPLEMENT_FAMILIES}
     if counts != want:
         raise GrammarRefusal(f"per-family counts {counts} differ from the proposed grammar {want}")
     if any(c["side"] != SIDE[c["family"]] for c in configs):
@@ -175,7 +180,7 @@ def condition_id(family: str, cparams: dict) -> str:
                                         "params": cparams}).encode()).hexdigest()[:24]
 
 
-def build_conditions(configs: list[dict]) -> list[dict]:
+def build_conditions(configs: list[dict], complements_excluded: bool = False) -> list[dict]:
     """Distinct short-hypothesis conditions (tier H only; LS legs are covered by their tier-H and Census-01 conditions)."""
     by_id: dict = {}
     for c in configs:
@@ -185,9 +190,10 @@ def build_conditions(configs: list[dict]) -> list[dict]:
         cid = condition_id(c["family"], cp)
         by_id.setdefault(cid, {"condition_id": cid, "family": c["family"], "params": cp})
     out = list(by_id.values())
-    counts = {f: sum(1 for c in out if c["family"] == f) for f in EXPECTED_CONDITION_COUNTS}
-    if counts != EXPECTED_CONDITION_COUNTS or len(out) != EXPECTED_CONDITION_TOTAL:
-        raise GrammarRefusal(f"condition counts {counts} differ from the proposal")
+    want = EXPECTED_CONDITION_COUNTS_EXCLUDED if complements_excluded else EXPECTED_CONDITION_COUNTS
+    counts = {f: sum(1 for c in out if c["family"] == f) for f in want}
+    if counts != want or len(out) != sum(want.values()):
+        raise GrammarRefusal(f"condition counts {counts} differ from the proposal {want}")
     return out
 
 
@@ -211,15 +217,19 @@ def tags(config: dict) -> dict:
     return t
 
 
+def selected_population(tiers: str = "H+L", complements_excluded: bool = False) -> tuple[list[dict], list[dict]]:
+    """The (configs, conditions) population one operator choice of tiers x complement handling would register."""
+    configs = build_configs(tiers, complements_excluded)
+    return configs, build_conditions(configs, complements_excluded)
+
+
 def candidate_arithmetic(n_strategy_symbols: int, tiers: str = "H+L", *, complements_excluded: bool = False) -> dict:
-    """Exact candidate counts for a given executable-scope size. Population = configs x scope symbols; conditional
-    factors are pooled (condition x horizon), independent of the symbol count."""
-    configs = build_configs(tiers)
-    n = len(configs)
-    comp = sum(1 for c in configs if c["family"] in COMPLEMENT_FAMILIES)
-    if complements_excluded:
-        n -= comp
-    return {"tiers": tiers, "configs": n, "complement_tagged_configs": comp, "executable_scope_symbols": n_strategy_symbols,
-            "strategy_trials": n * n_strategy_symbols, "short_conditions": EXPECTED_CONDITION_TOTAL,
-            "conditional_factors": EXPECTED_CONDITION_TOTAL * len(HORIZONS),
+    """Exact candidate counts for a given executable-scope size. Strategy trials = configs x scope symbols; conditional
+    factors = conditions x horizons, pooled and independent of the symbol count."""
+    configs, conditions = selected_population(tiers, complements_excluded)
+    comp_registered = sum(1 for c in configs if c["family"] in COMPLEMENT_FAMILIES)
+    return {"tiers": tiers, "complements_excluded": complements_excluded, "configs": len(configs),
+            "complement_tagged_configs": comp_registered, "executable_scope_symbols": n_strategy_symbols,
+            "strategy_trials": len(configs) * n_strategy_symbols, "short_conditions": len(conditions),
+            "conditional_factors": len(conditions) * len(HORIZONS),
             "census01_strategy_trials": 38_192, "census01_conditional_factors": 1_095}

@@ -23,8 +23,18 @@ def _require_price_micros(hm, lm, cm) -> None:
     for a in (hm, lm, cm):
         if not isinstance(a, np.ndarray) or a.dtype != np.int64:
             raise TypeError("simulate_signed accepts only int64 micro-price bar arrays (labels are never executable P&L)")
-    if len(cm) < 3 or not (np.all(cm > 0) and np.all(hm >= cm) and np.all(cm >= lm)):
+    if len(cm) < 3 or not (np.all(lm > 0) and np.all(cm > 0) and np.all(hm >= cm) and np.all(cm >= lm)):
         raise TypeError("arrays are not a valid OHLC bar shape (high >= close >= low > 0): not executable price bars")
+
+
+def _require_cost_overrides(commission_bps, slippage_bps) -> None:
+    """A malformed override must never produce favorable economics: refuse instead of coercing."""
+    if commission_bps is not None and (isinstance(commission_bps, bool) or not isinstance(commission_bps, (int, float, np.integer, np.floating))
+                                       or not np.isfinite(commission_bps) or commission_bps < 0):
+        raise ValueError("commission_bps must be a finite non-negative number")
+    if slippage_bps is not None and (isinstance(slippage_bps, (bool, np.bool_)) or not isinstance(slippage_bps, (int, np.integer))
+                                     or slippage_bps < 0):
+        raise ValueError("slippage_bps must be a non-negative integer number of bps")
 
 
 def simulate_signed(hm, lm, cm, d: np.ndarray, s: int, *, borrow_fee_bps_annual: float | None = None,
@@ -32,7 +42,9 @@ def simulate_signed(hm, lm, cm, d: np.ndarray, s: int, *, borrow_fee_bps_annual:
     _require_price_micros(hm, lm, cm)
     if d.dtype != np.int8 or np.any(np.abs(d) > 1):
         raise TypeError("signed desired-position series must be int8 in {-1,0,+1}")
-    if np.any(d < 0) and (borrow_fee_bps_annual is None or not np.isfinite(borrow_fee_bps_annual) or borrow_fee_bps_annual < 0):
+    _require_cost_overrides(commission_bps, slippage_bps)
+    fee = borrow_fee_bps_annual
+    if (fee is not None and (isinstance(fee, bool) or not np.isfinite(fee) or fee < 0)) or (np.any(d < 0) and fee is None):
         raise BorrowRefusal("a short position needs an explicit finite non-negative borrow fee (no default, never zero by omission)")
     commission = s1.COMMISSION_BPS if commission_bps is None else commission_bps
     n = len(cm)
@@ -92,14 +104,29 @@ def benchmark_hold(n: int, s: int, direction: int) -> np.ndarray:
     return d
 
 
+BENCHMARK_ROLES, BENCHMARK_RULES = pr.BENCHMARK_ROLES, pr.BENCHMARK_RULES
+_HOLD_DIRECTION = {"passive_long_hold": 1, "passive_short_hold": -1}
+
+
 def benchmark_direction(side: str, d: np.ndarray) -> int:
-    """Same-direction passive benchmark: a short-only strategy is compared with a passive SHORT, never a long hold. A
-    long/short strategy has no single direction: it is compared with BOTH holds by the caller (cash is always recorded)."""
+    """Single-direction passive benchmark of a short-only strategy: a passive SHORT, never a long hold. A long/short
+    strategy has no single direction and is refused here; its holds are diagnostics (see BENCHMARK_ROLES)."""
     if side == "short":
         return -1
-    if side == "long":
-        return 1
     raise ValueError(f"{side!r} has no single-direction passive benchmark")
+
+
+def qualifies(side: str, m: dict, rule: str) -> bool:
+    """Proposed qualification over a cell's recorded benchmark metrics. Fails closed on an unknown side/rule or on a
+    missing record the rule requires. A long/short cell never consults a passive hold."""
+    if side not in BENCHMARK_ROLES:
+        raise ValueError(f"unknown side {side!r}")
+    if rule not in BENCHMARK_RULES:
+        raise ValueError(f"unknown benchmark rule {rule!r}")
+    net_positive = m["cash_zero"]["net_pnl_usd"] > 0
+    if rule == "NET_POSITIVE_ONLY_ALL_SIDES" or side == "long_short":
+        return bool(net_positive)
+    return bool(net_positive and m["passive_short_hold"]["net_alpha_usd"] > 0)
 
 
 def ssr_flag(lm, cm, fill_bar: int) -> bool:
@@ -118,7 +145,7 @@ def _cash_out(so: SimOut) -> SimOut:
 
 def evaluate_short_cell(sd, config: dict, evidence_class: str, *, borrow_fee_bps_annual: float | None) -> dict:
     """One short-bearing cell. A non-executable evidence class NEVER reaches the simulator: it returns a hypothesis-only
-    disposition with no P&L fields. Both benchmark series are recorded; the qualification rule is an operator decision."""
+    disposition with no P&L fields. Benchmarks are recorded per BENCHMARK_ROLES; the qualification rule is an operator decision."""
     import c2_borrow as bw
     import c2_signals as sg
     if evidence_class not in bw.EXECUTABLE_CLASSES:
@@ -134,9 +161,11 @@ def evaluate_short_cell(sd, config: dict, evidence_class: str, *, borrow_fee_bps
     so = simulate_signed(sd.hm, sd.lm, sd.cm, sig.d, sig.s, borrow_fee_bps_annual=borrow_fee_bps_annual)
     kw = dict(capital_usd=s1.CAPITAL_USD, budget_usd=s1.BUDGET_USD, window_start=sig.s + 1)
     recs = {"cash_zero": s1.metrics(so, _cash_out(so), sd.years, sd.regime, **kw)}
-    if config["side"] == "short":
-        hold = simulate_signed(sd.hm, sd.lm, sd.cm, benchmark_hold(sd.n, sig.s, benchmark_direction("short", sig.d)), sig.s,
+    for name in BENCHMARK_ROLES[config["side"]]:
+        if name == "cash_zero":
+            continue
+        hold = simulate_signed(sd.hm, sd.lm, sd.cm, benchmark_hold(sd.n, sig.s, _HOLD_DIRECTION[name]), sig.s,
                                borrow_fee_bps_annual=borrow_fee_bps_annual)
-        recs["same_direction_hold"] = s1.metrics(so, hold, sd.years, sd.regime, **kw)
+        recs[name] = s1.metrics(so, hold, sd.years, sd.regime, **kw)
     return {"d": "EVALUABLE", "m": recs, "evidence_class": evidence_class, "executable_pnl": True,
-            "signal_start_bar": int(sig.s)}
+            "benchmark_roles": dict(BENCHMARK_ROLES[config["side"]]), "signal_start_bar": int(sig.s)}

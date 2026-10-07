@@ -1,4 +1,108 @@
 {
+ "F01": {
+  "description": "grammar: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F02": {
+  "description": "signal: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F03": {
+  "description": "simulator: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F04": {
+  "description": "borrow: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F05": {
+  "description": "factor direction: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F06": {
+  "description": "partition fence: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/partitions.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F07": {
+  "description": "price/cost arithmetic: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/simulate.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F08": {
+  "description": "Census-01 signal helper: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/signals.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F09": {
+  "description": "Census-01 grammar: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/search_space.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F10": {
+  "description": "calendar: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/calendar_authority.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F11": {
+  "description": "indicator (RSI): one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/indicators/core.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F12": {
+  "description": "factor identity contract: one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/factors/contracts.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F13": {
+  "description": "identity hashing: one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/exp_distributed/hashing.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
  "M01": {
   "description": "same-bar fill: position follows the decision on the SAME bar",
   "file": "c2_simulate.py",
@@ -206,5 +310,173 @@
   "red_under_mutation": true,
   "restored_byte_for_byte": true,
   "tests": "test_s13_upside_expansion_fade_is_the_mirror"
+ },
+ "M27": {
+  "description": "D1: protocol cost truth drifts from the simulator slippage constant",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_protocol_cost_truth_equals_the_accepted_constants"
+ },
+ "M28": {
+  "description": "D1: Census-01 simulator slippage constant changes under an unchanged protocol literal",
+  "file": "../alpha_edge_census_01/simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_protocol_cost_truth_equals_the_accepted_constants or test_executed_fill_economics"
+ },
+ "M29": {
+  "description": "D2: a long/short cell is forced to need a passive hold",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_long_short_qualifies_on_net_vs_cash"
+ },
+ "M30": {
+  "description": "D2: short-only qualification ignores the passive-short-hold alpha",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_only_needs_net_positive_and_alpha"
+ },
+ "M31": {
+  "description": "D2: the passive long hold becomes a qualification benchmark for long/short",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_evaluated_cells_record_side_aware_benchmarks"
+ },
+ "M32": {
+  "description": "D3: complement exclusion leaves every short condition registered",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_grammar_counts_and_arithmetic or test_complement_exclusion"
+ },
+ "M33": {
+  "description": "D4: short factors are registered higher_is_better",
+  "file": "c2_factors.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_factors_are_lower_is_better or test_direction_is_identity_bound"
+ },
+ "M34": {
+  "description": "D4: direction no longer reaches the factor identity (a flip is invisible)",
+  "file": "c2_factors.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_direction_is_identity_bound"
+ },
+ "M35": {
+  "description": "D4: direction-adjusted effect is +raw",
+  "file": "c2_factors.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_direction_adjusted_effect_is_minus_the_raw_effect"
+ },
+ "M36": {
+  "description": "D5: freeze guard no longer compares the behavior-source manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_reds_on_one_byte_of_drift or test_freeze_guard_positive_control"
+ },
+ "M37": {
+  "description": "D5: a Census-02 behavior module is omitted from the manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M38": {
+  "description": "D5: the Census-01 partition fence is omitted from the manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M39": {
+  "description": "D5: the RSI/z-score indicator source is omitted from the manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M40": {
+  "description": "D5: the manifest hashes only a source prefix (late drift is invisible)",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_reds_on_one_byte_of_drift"
+ },
+ "M41": {
+  "description": "D5: the manifest is not bound into the protocol id",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_hash_is_line_ending_normalised_and_binds_the_protocol_id"
+ },
+ "M42": {
+  "description": "D6: EQUITY_SYMBOLS_ONLY is accepted as a conditional scope",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_operator_decisions_must_be_complete_and_consistent"
+ },
+ "M43": {
+  "description": "D7: the ETF scope is no longer checked against the frozen seed universe",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_etf_scope_outside_the_frozen_seed_universe"
+ },
+ "M44": {
+  "description": "D8: a zero low price is accepted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_zero_or_negative_low_is_refused"
+ },
+ "M45": {
+  "description": "D8: a negative commission override is accepted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_malformed_cost_overrides_are_refused"
+ },
+ "M46": {
+  "description": "D8: a non-integral slippage override is accepted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_malformed_cost_overrides_are_refused"
+ },
+ "M47": {
+  "description": "D8: a malformed borrow fee is tolerated when no short is held",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_valid_cost_overrides_are_accepted_and_malformed_borrow_fee"
  }
 }
