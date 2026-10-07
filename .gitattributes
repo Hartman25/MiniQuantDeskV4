@@ -38,3 +38,5 @@ core-rs/crates/mqk-db/migrations/0090_option_lifecycle_adjustment_journal.sql te
 core-rs/crates/mqk-db/migrations/0091_strategy_held_sizing_state.sql text eol=lf
 # Vendored third-party Archify skill: preserve upstream bytes; exempt from whitespace checks.
 .claude/skills/archify/** -whitespace
+# Generated Archify HTML (template whitespace is upstream bytes).
+docs/architecture/archify/*.html -whitespace

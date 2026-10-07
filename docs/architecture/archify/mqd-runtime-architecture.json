@@ -1,0 +1,736 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "MQD Runtime Architecture @ c81695d — DESCRIPTIVE / NON-AUTHORITATIVE",
+    "subtitle": "STALE IF VIEWED AGAINST A DIFFERENT REPOSITORY COMMIT. Code, tests, Git and DB win over this diagram. Research has no order-submission authority.",
+    "output": "mqd-runtime-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/Hartman25/MiniQuantDeskV4",
+      "provider": "github",
+      "revision": "c81695de3da1bec7b3b8bc1b951fae8d0e95f307"
+    },
+    "views": [
+      {
+        "id": "order-path",
+        "label": "Order path (Paper)",
+        "focus": [
+          "strategy",
+          "postgres",
+          "orchestrator",
+          "safety",
+          "adapter",
+          "broker",
+          "truth"
+        ],
+        "note": "Strategy decision to broker truth. Orders leave only via outbox claim and the BrokerGateway."
+      },
+      {
+        "id": "research-promotion",
+        "label": "Research to runtime",
+        "focus": [
+          "research",
+          "promotion",
+          "postgres",
+          "strategy"
+        ],
+        "note": "Research output reaches runtime only through the operator-authorized Promotion Gate and a durable active_paper row."
+      },
+      {
+        "id": "operator-plane",
+        "label": "Operator plane",
+        "focus": [
+          "operator",
+          "daemon",
+          "modeconfig",
+          "postgres"
+        ],
+        "note": "GUI talks to the daemon only; privileged routes fail closed without a Bearer token."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "frontend",
+      "label": "Operator GUI / CLI",
+      "sublabel": "Tauri+React · mqk CLI",
+      "pos": [
+        653,
+        30
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/mqk-gui/src/config.ts",
+          "line": 12,
+          "end_line": 14,
+          "label": "GUI targets daemon URL"
+        },
+        {
+          "path": "core-rs/mqk-gui/src/features/system/api.ts",
+          "line": 489,
+          "end_line": 560,
+          "label": "non-active truth_state fails closed"
+        },
+        {
+          "path": "core-rs/mqk-gui/src/features/ingest/api.ts",
+          "line": 693,
+          "label": "Bearer operator token header"
+        }
+      ]
+    },
+    {
+      "id": "research",
+      "type": "backend",
+      "label": "Research & Backtest",
+      "sublabel": "research-py · mqk-backtest",
+      "tag": "NO ORDER AUTHORITY",
+      "pos": [
+        100,
+        220
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "research-py/src/mqk_research/scanner/risk_simulation.py",
+          "line": 20,
+          "end_line": 33,
+          "label": "no order/broker/network/DB writes"
+        },
+        {
+          "path": "research-py/src/mqk_research/data/alpaca_historical.py",
+          "line": 218,
+          "end_line": 220,
+          "label": "data.alpaca.markets GET only"
+        },
+        {
+          "path": "core-rs/crates/mqk-backtest/src/lib.rs",
+          "line": 1,
+          "end_line": 14,
+          "label": "deterministic replay engine"
+        }
+      ]
+    },
+    {
+      "id": "promotion",
+      "type": "security",
+      "label": "Promotion Gate",
+      "sublabel": "operator POST · evidence verified",
+      "tag": "FAIL-CLOSED",
+      "pos": [
+        374,
+        220
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-daemon/src/routes/strategy_promotions.rs",
+          "line": 1,
+          "end_line": 20,
+          "label": "operator auth; tradable_live false"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/promotion_evidence_validation.rs",
+          "line": 702,
+          "label": "review-artifact evidence validation"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/research_evidence_gate.rs",
+          "line": 83,
+          "label": "Research OOS evidence gate"
+        }
+      ]
+    },
+    {
+      "id": "daemon",
+      "type": "backend",
+      "label": "Daemon Control API",
+      "sublabel": "axum · 127.0.0.1:8899",
+      "tag": "TOKEN-GATED",
+      "pos": [
+        653,
+        220
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-daemon/src/routes.rs",
+          "line": 85,
+          "end_line": 135,
+          "label": "fail-closed operator token auth"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/bind.rs",
+          "line": 1,
+          "end_line": 21,
+          "label": "loopback bind by default"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/state/loop_runner.rs",
+          "line": 1,
+          "end_line": 9,
+          "label": "owns execution loop + reconcile tick"
+        }
+      ]
+    },
+    {
+      "id": "modeconfig",
+      "type": "security",
+      "label": "Mode & Config Gate",
+      "sublabel": "Paper only · Live refused",
+      "tag": "LIVE NOT ENABLED",
+      "pos": [
+        947,
+        220
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-daemon/src/state/lifecycle.rs",
+          "line": 1567,
+          "end_line": 1615,
+          "label": "LiveCapital start refused"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/mode_transition.rs",
+          "line": 1,
+          "end_line": 40,
+          "label": "mode transition state machine"
+        },
+        {
+          "path": "core-rs/crates/mqk-config/src/lib.rs",
+          "line": 14,
+          "end_line": 30,
+          "label": "layered config; secret leaves rejected"
+        }
+      ]
+    },
+    {
+      "id": "provider",
+      "type": "external",
+      "label": "Market-Data Provider",
+      "sublabel": "Alpaca data API",
+      "tag": "EXTERNAL",
+      "pos": [
+        100,
+        410
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-md/src/alpaca_provider.rs",
+          "line": 17,
+          "label": "Alpaca data base URL"
+        },
+        {
+          "path": "core-rs/crates/mqk-md/src/provider.rs",
+          "line": 402,
+          "label": "MarketDataProvider trait"
+        }
+      ]
+    },
+    {
+      "id": "ingest",
+      "type": "backend",
+      "label": "Data Ingestion",
+      "sublabel": "md_bars + provenance",
+      "pos": [
+        374,
+        410
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-db/src/md.rs",
+          "line": 478,
+          "label": "ingest to md_bars + provider metadata"
+        },
+        {
+          "path": "core-rs/crates/mqk-db/migrations/0042_md_bars_provider_metadata.sql",
+          "line": 2,
+          "end_line": 3,
+          "label": "provider provenance columns"
+        },
+        {
+          "path": "core-rs/crates/mqk-md/src/lib.rs",
+          "line": 1,
+          "end_line": 6,
+          "label": "md crate itself never writes DB"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Postgres",
+      "sublabel": "runs · outbox/inbox · promotion · arm",
+      "tag": "DURABLE TRUTH",
+      "pos": [
+        653,
+        410
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-db/src/orders.rs",
+          "line": 411,
+          "label": "outbox_enqueue_for_running_run"
+        },
+        {
+          "path": "core-rs/crates/mqk-db/src/inbox.rs",
+          "line": 216,
+          "label": "inbox_insert_deduped"
+        },
+        {
+          "path": "core-rs/crates/mqk-db/src/strategy_promotion.rs",
+          "line": 29,
+          "end_line": 34,
+          "label": "promotion states"
+        }
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "type": "backend",
+      "label": "Execution Orchestrator",
+      "sublabel": "outbox claim → gateway submit",
+      "tag": "SINGLE CHOKE-POINT",
+      "pos": [
+        947,
+        410
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-runtime/src/orchestrator.rs",
+          "line": 1,
+          "end_line": 20,
+          "label": "tick: only submit path"
+        },
+        {
+          "path": "core-rs/crates/mqk-db/src/orders.rs",
+          "line": 588,
+          "label": "outbox_claim_batch (row lock)"
+        }
+      ]
+    },
+    {
+      "id": "adapter",
+      "type": "backend",
+      "label": "Alpaca Broker Adapter",
+      "sublabel": "REST orders · WS inbound",
+      "pos": [
+        1221,
+        410
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-broker-alpaca/src/lib.rs",
+          "line": 1,
+          "end_line": 20,
+          "label": "REST lifecycle; WS lives in daemon"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/state/broker.rs",
+          "line": 167,
+          "end_line": 185,
+          "label": "local paper broker refused as path"
+        }
+      ]
+    },
+    {
+      "id": "broker",
+      "type": "external",
+      "label": "Alpaca Broker",
+      "sublabel": "paper-api.alpaca.markets",
+      "tag": "BROKER-AUTHORITATIVE",
+      "pos": [
+        1505,
+        410
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-daemon/src/state/broker.rs",
+          "line": 144,
+          "end_line": 162,
+          "label": "Paper vs Live endpoint by mode"
+        }
+      ]
+    },
+    {
+      "id": "strategy",
+      "type": "backend",
+      "label": "Strategy & Admission",
+      "sublabel": "on_bar → gated outbox enqueue",
+      "tag": "IDENTITY-BOUND",
+      "pos": [
+        374,
+        600
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-strategy/src/lib.rs",
+          "line": 1,
+          "end_line": 9,
+          "label": "target positions; no DB/broker access"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/decision.rs",
+          "line": 7,
+          "end_line": 24,
+          "label": "admission gate sequence → outbox"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/promotion_gate.rs",
+          "line": 1,
+          "end_line": 20,
+          "label": "registered+enabled is not tradable"
+        }
+      ]
+    },
+    {
+      "id": "truth",
+      "type": "backend",
+      "label": "Inbox → OMS & Portfolio",
+      "sublabel": "broker-truth apply path",
+      "pos": [
+        1221,
+        600
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-runtime/src/alpaca_inbound.rs",
+          "line": 1,
+          "end_line": 30,
+          "label": "only WS ingest path to the inbox"
+        },
+        {
+          "path": "core-rs/crates/mqk-runtime/src/orchestrator.rs",
+          "line": 14,
+          "end_line": 20,
+          "label": "events → oms_inbox → apply"
+        },
+        {
+          "path": "core-rs/crates/mqk-portfolio/src/accounting.rs",
+          "line": 84,
+          "label": "fill-driven ledger apply_entry"
+        }
+      ]
+    },
+    {
+      "id": "safety",
+      "type": "security",
+      "label": "Safety Gates",
+      "sublabel": "integrity · risk · reconcile",
+      "tag": "FAIL-CLOSED",
+      "pos": [
+        947,
+        600
+      ],
+      "size": [
+        184,
+        76
+      ],
+      "sources": [
+        {
+          "path": "core-rs/crates/mqk-execution/src/gateway.rs",
+          "line": 1,
+          "end_line": 30,
+          "label": "three gates before every submit"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/state/orchestrator_build.rs",
+          "line": 493,
+          "end_line": 507,
+          "label": "real gates wired into gateway"
+        },
+        {
+          "path": "core-rs/crates/mqk-daemon/src/state/types.rs",
+          "line": 192,
+          "end_line": 233,
+          "label": "integrity + reconcile gate impls"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "RESEARCH DOMAIN — NO ORDER-SUBMISSION AUTHORITY",
+      "wraps": [
+        "research"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "POSTGRES — durable truth boundary",
+      "wraps": [
+        "postgres"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "op-to-daemon",
+      "from": "operator",
+      "to": "daemon",
+      "label": "commands (Bearer)",
+      "variant": "security"
+    },
+    {
+      "id": "daemon-to-op",
+      "from": "daemon",
+      "to": "operator",
+      "label": "status + truth_state"
+    },
+    {
+      "id": "mode-to-daemon",
+      "from": "modeconfig",
+      "to": "daemon",
+      "label": "start gate",
+      "variant": "security"
+    },
+    {
+      "id": "daemon-to-promotion",
+      "from": "daemon",
+      "to": "promotion",
+      "label": "token POST",
+      "variant": "security"
+    },
+    {
+      "id": "provider-to-research",
+      "from": "provider",
+      "to": "research",
+      "label": "GET bars only",
+      "variant": "dashed"
+    },
+    {
+      "id": "research-to-promotion",
+      "from": "research",
+      "to": "promotion",
+      "label": "artifacts",
+      "variant": "dashed"
+    },
+    {
+      "id": "promotion-to-db",
+      "from": "promotion",
+      "to": "postgres",
+      "label": "durable transition",
+      "variant": "security"
+    },
+    {
+      "id": "provider-to-ingest",
+      "from": "provider",
+      "to": "ingest",
+      "label": "bars",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ingest-to-db",
+      "from": "ingest",
+      "to": "postgres",
+      "label": "md_bars",
+      "variant": "emphasis"
+    },
+    {
+      "id": "db-to-strategy",
+      "from": "postgres",
+      "to": "strategy",
+      "label": "bars · promo · arm"
+    },
+    {
+      "id": "strategy-to-db",
+      "from": "strategy",
+      "to": "postgres",
+      "label": "outbox enqueue",
+      "variant": "emphasis"
+    },
+    {
+      "id": "db-to-orchestrator",
+      "from": "postgres",
+      "to": "orchestrator",
+      "label": "claim outbox",
+      "variant": "emphasis"
+    },
+    {
+      "id": "safety-to-orchestrator",
+      "from": "safety",
+      "to": "orchestrator",
+      "label": "gate verdicts",
+      "variant": "security"
+    },
+    {
+      "id": "orchestrator-to-adapter",
+      "from": "orchestrator",
+      "to": "adapter",
+      "label": "submit",
+      "variant": "emphasis"
+    },
+    {
+      "id": "adapter-to-broker",
+      "from": "adapter",
+      "to": "broker",
+      "label": "REST orders",
+      "variant": "emphasis"
+    },
+    {
+      "id": "broker-to-truth",
+      "from": "broker",
+      "to": "truth",
+      "label": "WS / REST events",
+      "variant": "emphasis"
+    },
+    {
+      "id": "truth-to-safety",
+      "from": "truth",
+      "to": "safety",
+      "label": "reconcile",
+      "variant": "dashed"
+    },
+    {
+      "id": "truth-to-db",
+      "from": "truth",
+      "to": "postgres",
+      "label": "inbox · ledger",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          1313,
+          740
+        ],
+        [
+          745,
+          740
+        ]
+      ]
+    },
+    {
+      "id": "db-to-daemon",
+      "from": "postgres",
+      "to": "daemon",
+      "label": "durable reads"
+    },
+    {
+      "id": "daemon-to-db",
+      "from": "daemon",
+      "to": "postgres",
+      "label": "arm · run state"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Authority & staleness",
+      "items": [
+        "DESCRIPTIVE / NON-AUTHORITATIVE. Observes MQD; does not control it.",
+        "STALE IF VIEWED AGAINST A DIFFERENT REPOSITORY COMMIT. Anchor: c81695de (full 40-char SHA in every SRC link, the README and the provenance file).",
+        "Authority order: code/tests/Git/DB proof, then binding specs and ledgers, then this diagram.",
+        "SRC badges are verified against committed blobs at the anchor. Edges carry no individual source references; see the README evidence table."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Authority boundaries",
+      "items": [
+        "RESEARCH HAS NO ORDER-SUBMISSION AUTHORITY: research-py and mqk-backtest have no broker or outbox path.",
+        "Research reaches runtime only via the Promotion Gate: operator POST, evidence re-validated, durable transition row.",
+        "registered + enabled is never tradable; admission requires an exact (strategy_id, symbol, timeframe) active_paper row bound to the strategy config fingerprint.",
+        "Promotion gate hard-codes tradable_live = false and denies Live and Unknown modes."
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Paper vs Live",
+      "items": [
+        "Paper: the only wired mode that can reach a broker (Alpaca paper endpoint).",
+        "LiveCapital start is refused unless live_trust_complete=true, which the current parity pipeline cannot produce.",
+        "LiveShadow and LiveCapital map to the same Alpaca live base URL in code, but no Live path is claimed enabled here.",
+        "Documented state at the anchor, NOT runtime-verified: Paper INACTIVE, Live DISABLED, no promoted candidate, PROMOTION_AUTHORITY = NONE."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Broker truth",
+      "items": [
+        "Broker events are the only source of acks and fills: events → oms_inbox (deduplicated) → OMS/portfolio apply.",
+        "MQD does not synthesize fills, acknowledgements or cancel confirmations.",
+        "Reconcile compares local OMS/portfolio state to an external REST broker snapshot (Alpaca); the local LockedPaperBroker is refused as an execution path.",
+        "Account-level risk reads the same broker snapshot as its authority."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Durable vs transient",
+      "items": [
+        "Durable (Postgres): runs, outbox, inbox, arm state, promotion transitions, md_bars, audit_events, held-sizing state.",
+        "Transient (process memory): IntegrityState, reconcile status, broker snapshot cache, pending bar input, risk state.",
+        "After restart the DB is authoritative; OMS and portfolio are recovered from it (restart recovery in daemon snapshot code)."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Not shown, conceptual or unknown",
+      "items": [
+        "CONCEPTUAL, not wired: Live trading, non-equity asset classes (V2 scaffold), IBKR adapter (not a daemon dependency).",
+        "UNKNOWN: whether a daemon is running, Paper DB contents and migration level, deployed strategy.",
+        "INFERRED: 'research has no order path' is a repository-search result, not a proof; research-py's only network egress found is GET to data.alpaca.markets.",
+        "Not drawn: CLI direct DB bookkeeping (mqk run/db/ingest), WS transport and gap recovery, Postgres audit_events, crypto and option modules."
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "Where the code and its docs disagree",
+      "items": [
+        "The completed-bar driver module header says it is not started from main.rs; main.rs spawns it for Paper+Alpaca.",
+        "mqk-daemon declares mqk-audit but never uses it; audit rows go to Postgres audit_events via mqk-db.",
+        "README_TECHNICAL.md cites an older accepted baseline than this anchor."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/user/MiniQuantDeskV4/docs/architecture/archify/mqd-runtime-architecture.json",
+    "sha256": "5008fa358460bd16b7a0f7cc41b2a17bfcb84746836987e53aa22c4084e80a51",
+    "bytes": 19761
+  },
+  "artifact": {
+    "path": "/home/user/MiniQuantDeskV4/docs/architecture/archify/mqd-runtime-architecture.html",
+    "sha256": "e434a094b93e59f5802e62c4c504a140ea4059bfefdd76ee45aebe34941218c8",
+    "bytes": 797848
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/user/MiniQuantDeskV4/docs/architecture/archify/mqd-runtime-architecture.finalize.json",
+    "summaryReceipt": "/home/user/MiniQuantDeskV4/docs/architecture/archify/mqd-runtime-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/home/user/MiniQuantDeskV4/docs/architecture/archify/mqd-runtime-architecture.browser-check.json"
+  },
+  "update": {
+    "status": "unavailable",
+    "installedVersion": null,
+    "availableVersion": null,
+    "releaseNotes": null,
+    "checkedAt": null,
+    "source": null,
+    "noticeRequired": false,
+    "noticeText": null,
+    "reason": "disabled"
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2950,
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "routesOverSuggestedBends": 1
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [],
+      "detours": [
+        {
+          "relationship": {
+            "id": "promotion-to-db",
+            "from": "promotion",
+            "to": "postgres",
+            "label": "durable transition",
+            "collectionIndex": 6,
+            "artifactIndex": 7
+          },
+          "bends": 3,
+          "stretch": 1
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "promotion → postgres needs 3 bends: move node promotion or postgres so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}
