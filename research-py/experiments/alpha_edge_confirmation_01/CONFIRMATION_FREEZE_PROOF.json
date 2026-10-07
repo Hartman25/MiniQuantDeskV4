@@ -1,0 +1,43 @@
+{
+ "CONFIRMATION_PROTOCOL_ID": "50d18700c997c477ec1e60de8185c997f7fedfeee6a42dfe5d73e4a627937557",
+ "cohort_manifest_sha256_lf": "aee578c0fcb99de18fc43af006870927fb1e77ef4fa5d422b031040cdefe7ec4",
+ "cohort_root": "ac482f6f45ec3ed797499b6151c54c945b328dbd98df6ca196432c249e84e31f",
+ "confirmation_attempts_at_freeze": 0,
+ "confirmation_data_read_before_freeze": false,
+ "freeze_marker": {
+  "candidate_count": 18,
+  "cohort_root": "ac482f6f45ec3ed797499b6151c54c945b328dbd98df6ca196432c249e84e31f",
+  "confirmation_protocol_id": "50d18700c997c477ec1e60de8185c997f7fedfeee6a42dfe5d73e4a627937557",
+  "data_provenance_identity": "38381b423fd9f50ac0c53f3b4917c4d7d5e60abc2f9f2f221597f0ffb21e0086",
+  "fdr_family_identity": "41f978dd6d0b58c6793d36110f3face602beb6774fc26bde8d2b6922b181f77f"
+ },
+ "predeclaration_sha256_lf": "77b56bbb44e6fb4ec2eb2b7effbb3977e4422e087f53259d131f4e5973d85537",
+ "registered_evaluations": 18,
+ "schema_version": "alpha_edge_confirmation_freeze_proof_v1",
+ "source_sha256_lf": {
+  "core-rs/crates/mqk-integrity/src/sessions.rs": "38435cf547a71f829b551884739758fdf92a757fa5ff1cfe108b417a86efe946",
+  "research-py/experiments/alpha_edge_census_01/ALPHA_CENSUS_UNIVERSE_V2.json": "e0be5e6ce1491947314b133eb93f40b8ce579db78397b0d23cdcbf7d02a47dea",
+  "research-py/experiments/alpha_edge_census_01/calendar_authority.py": "53d87ab16b6184d0b8d155f94552d2125a55c2fc07c22e3748812c93af7d1a43",
+  "research-py/experiments/alpha_edge_census_01/conditional.py": "1866b7e6d3a27672165bae6c3383baeecd61e87da96c6fdcef820854d6bdaf85",
+  "research-py/experiments/alpha_edge_census_01/data.py": "73488c01417efc6e08f918dc04735dc74a1a2635372798f8ebc648222cab2209",
+  "research-py/experiments/alpha_edge_census_01/partitions.py": "211e4a13aaf16e7b5327cc3a8a2f9e2b8a13d6091185230eee3eaa935dd86b43",
+  "research-py/experiments/alpha_edge_census_01/search_space.py": "362babb8ee935c1f9d03f6f177608de2b1f087f5d8a3963f65bfd1677c5efb58",
+  "research-py/experiments/alpha_edge_census_01/signals.py": "c70ca8b5d52782431a3cb666455ba22538a3e81282c6d1713217c94ecbc96520",
+  "research-py/experiments/alpha_edge_confirmation_01/c1_cohort.py": "fdc4b576ab9e706b98fbeaa3ebd60054488ef72546de6302381026438551b53f",
+  "research-py/experiments/alpha_edge_confirmation_01/c1_data.py": "15a60883a6b82d5c1fa4980997aba9a641a6df48b8a380147f08235f00eee07d",
+  "research-py/experiments/alpha_edge_confirmation_01/c1_eval.py": "e656f53d3cf706daa665aafdeb1888f28f44d2090be14bb3c43966b0b045c5c1",
+  "research-py/experiments/alpha_edge_confirmation_01/c1_protocol.py": "6acb1a0bb6e383a75b50472222f5ab9aa4eb9d8345e87e332c77257922ddfd0f",
+  "research-py/experiments/alpha_edge_confirmation_01/c1_runner.py": "9c85f03965b2d01fc200d82b11914a876a0181efe816f471e26ef901de6e3c5a",
+  "research-py/experiments/alpha_edge_pass2_01/results/PASS2_PROCESS_DISPOSITION.json": "a2082944b4af45ea4d2604429c2e90929012631b5aa3aa98d0519ea819b2ef0a",
+  "research-py/experiments/alpha_edge_pass2_01/results/conditional_robustness_ledger.jsonl": "3a786844eea32fa87119ed2a45ea52022131ce80be152a9606a2f231a81b5dc0",
+  "research-py/experiments/alpha_edge_pass2_01/results/pass2_summary.json": "e7c3377c9354885f107d2182b209bead01c9c8e4603760f9ae5ee5a361dacfc9",
+  "research-py/experiments/alpha_edge_pass2_01/results/strategy_robustness_ledger.jsonl": "52c1a2e0389d40814c9988d5602cb0316e8a8a0af9a878cf10aa7003500ed4d6",
+  "research-py/experiments/alpha_edge_pass2_01/results/survivor_rankings_readonly.json": "9fa9de5b6605932c90f36dc0c779ffffab151c7eab8dc2e391f32bf10345a7d0",
+  "research-py/src/mqk_research/data/alpaca_historical.py": "93ba7befba87ab1c8cf2f805135f9c7138d1ed4aa568cc9022c0c4ad06e7578d",
+  "research-py/src/mqk_research/data/bars_provenance.py": "d139988c25307b2fbea7732e9509b228fb1eefd0ff40e0c8b35589e1962ea08f",
+  "research-py/src/mqk_research/factors/diagnostics.py": "e95d4f0455a213be57cc8225bd264e4b8a2c61f9bcc9a8dde3ce6b175210cc83",
+  "research-py/src/mqk_research/factors/fdr.py": "0480d7058fb73381c713e5d5a7c049724a1d90fe579e26c72b528e2f7bcf6349",
+  "research-py/src/mqk_research/factors/null_controls.py": "790a8f82103e3bc87f0b51b614f1cd8b0c780677cff34b990206ce86a5ef73be",
+  "research-py/src/mqk_research/indicators/core.py": "9f04d88e6231ccc7ca0e8c94a091950dfef221f70ecfa3e452215e8341f1354c"
+ }
+}
