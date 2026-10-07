@@ -51,6 +51,56 @@ def sha256_canonical(obj) -> str:
     return hashlib.sha256(canonical(obj).encode("utf-8")).hexdigest()
 
 
+# CURRENT partition-consumption truth for Census-02. Census-01's partitions.py is a historical frozen object (its 2025-2026 window
+# was `RESERVED_UNCONSUMED` when Census-01 froze); that status is no longer true, so it is NEVER copied here. Only its hard
+# discovery-fence implementation is reused (pt.require_discovery_only). No Confirmation RESULT value appears here or anywhere in
+# a Census-02 identity: only the consumption fact does.
+PARTITION_TRUTH = {
+    "schema_version": "census02_partition_truth_v1",
+    "discovery": {"start_inclusive": "2016-01-01", "end_exclusive": "2024-01-01", "role": "CENSUS02_DISCOVERY_REUSE"},
+    "contaminated_2024": {"start_inclusive": "2024-01-01", "end_exclusive": "2025-01-01", "status": "CONTAMINATED_BY_REJECTED_RUN",
+                          "role": "CENSUS02_NEVER_READ"},
+    "confirmation_window": {"start_inclusive": "2025-01-01", "end_exclusive": "2026-03-01",
+                            "status": "CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01", "role": "CENSUS02_NEVER_READ"},
+    "final_holdout": {"start_inclusive": "2026-03-01", "status": "RESERVED_UNCONSUMED", "role": "FINAL_HOLDOUT"},
+    "census02_access": {"discovery": "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01", "contaminated_2024": "NEVER_READ",
+                        "confirmation_window": "NEVER_READ", "final_holdout": "NEVER_READ"},
+    "semantics": "the Confirmation window is consumed globally and never read by Census-02; the Final Holdout stays reserved",
+}
+
+
+class PartitionTruthRefusal(RuntimeError):
+    pass
+
+
+def partition_truth() -> dict:
+    """The current truth object, proven to agree with the reused hard fence (same boundaries) before it is used."""
+    t = copy.deepcopy(PARTITION_TRUTH)
+    edges = [(t["discovery"]["start_inclusive"], pt.DATA_REQUEST_START_UTC), (t["discovery"]["end_exclusive"], pt.DISCOVERY_END_EXCLUSIVE),
+             (t["contaminated_2024"]["start_inclusive"], pt.CONTAMINATED_START), (t["contaminated_2024"]["end_exclusive"], pt.CONTAMINATED_END_EXCLUSIVE),
+             (t["confirmation_window"]["start_inclusive"], pt.RESERVE_START), (t["confirmation_window"]["end_exclusive"], pt.RESERVE_END_EXCLUSIVE),
+             (t["final_holdout"]["start_inclusive"], pt.FINAL_HOLDOUT_START)]
+    for text, ts in edges:
+        if pd.Timestamp(text, tz="UTC") != ts:
+            raise PartitionTruthRefusal(f"partition truth boundary {text} differs from the reused fence boundary {ts}")
+    return t
+
+
+def partition_truth_id() -> str:
+    return sha256_canonical(partition_truth())[:32]
+
+
+def classify_partition(ts) -> str:
+    """Census-02 name of the partition a timestamp falls in (boundaries identical to the reused fence)."""
+    t = pd.Timestamp(ts)
+    t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    if t < pt.DISCOVERY_END_EXCLUSIVE:
+        return "discovery"
+    if t < pt.CONTAMINATED_END_EXCLUSIVE:
+        return "contaminated_2024"
+    return "confirmation_window" if t < pt.RESERVE_END_EXCLUSIVE else "final_holdout"
+
+
 # Side-aware benchmark contract (PROPOSED, not frozen).
 BENCHMARK_ROLES = {
     "short": {"cash_zero": "QUALIFICATION_NET", "passive_short_hold": "QUALIFICATION_ALPHA"},
@@ -114,9 +164,12 @@ def build_structural_protocol() -> dict:
     Census-01 constant or is an explicit operator decision (see DECISIONS)."""
     return {
         "schema_version": SCHEMA, "experiment_id": EXPERIMENT_ID,
-        "partitions": dict(pt.PARTITIONS),
-        "data_contract": {"window": "[2016-01-01, 2024-01-01)", "contaminated_2024": "never scored",
-                          "confirmation": "[2025-01-01, 2026-03-01) never read", "final_holdout": "[2026-03-01, ...) never read"},
+        "partitions": partition_truth(),
+        "partition_authority": "current truth is PARTITION_TRUTH; Census-01 partitions.py is historical and supplies only the hard "
+                               "discovery-fence implementation",
+        "data_contract": {"window": "[2016-01-01, 2024-01-01)", "contaminated_2024": "never read, never scored",
+                          "confirmation": "[2025-01-01, 2026-03-01) consumed by alpha_edge_confirmation_01; never read by Census-02",
+                          "final_holdout": "[2026-03-01, ...) reserved; never read"},
         "execution_contract": {
             "positions": "signed_daily_completed_bars: -1 short, 0 flat, +1 long",
             "signal_knowledge": "signal on bar t uses only bars <= t",
@@ -368,8 +421,17 @@ def build_predeclaration(repo: Path = REPO) -> dict:
 
 # ---------------------------------------------------------------------------------------------------- data fences
 def fence_bars(bars: pd.DataFrame, *, what: str) -> pd.DataFrame:
-    """Refuse any bar at/after 2024-01-01 (contaminated year, Confirmation, Final Holdout) and any empty input."""
-    pt.require_discovery_only(bars["end_ts"], what=what)
+    """Refuse any bar at/after 2024-01-01 (contaminated year, consumed Confirmation window, reserved Final Holdout) and any empty
+    input. The reused hard fence decides; the refusal names the TRUE Census-02 partition."""
+    try:
+        pt.require_discovery_only(bars["end_ts"], what=what)
+    except pt.PartitionBreach as exc:
+        if len(bars) == 0:
+            raise
+        latest = pd.to_datetime(bars["end_ts"], utc=True).max()
+        name = classify_partition(latest)
+        status = PARTITION_TRUTH[name].get("status", PARTITION_TRUTH[name]["role"])
+        raise pt.PartitionBreach(f"{what}: row at {latest.isoformat()} is in {name} ({status}); Census-02 never reads it") from exc
     return bars
 
 

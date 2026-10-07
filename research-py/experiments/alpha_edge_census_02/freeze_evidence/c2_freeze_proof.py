@@ -40,6 +40,17 @@ LOAD_BEARING = {
     "no_hard_30_trade_veto": f"{T}_campaign.py::test_no_hard_30_trade_veto_only_the_typed_minimum_of_5",
     "environment_mismatch_refused": f"{T}_protocol.py::test_numerical_environment_mismatch_is_refused_before_anything_else",
     "operator_policy_exact": f"{T}_campaign.py::test_operator_policy_is_encoded_exactly",
+    "partition_truth_exact": f"{T}_partition_truth.py::test_current_partition_truth_is_exact",
+    "structural_protocol_carries_current_truth": f"{T}_partition_truth.py::test_the_structural_protocol_carries_current_truth_never_the_historical_object",
+    "census01_historical_files_unchanged": f"{T}_partition_truth.py::test_historical_census01_authority_is_unchanged_and_deliberately_not_current",
+    "every_row_ge_2024_refused": f"{T}_partition_truth.py::test_every_row_at_or_after_2024_is_refused_with_the_true_census02_partition",
+    "confirmation_and_holdout_input_refused": f"{T}_partition_truth.py::test_confirmation_input_is_refused_and_discovery_is_accepted",
+    "no_confirmation_outcome_in_identity": f"{T}_partition_truth.py::test_no_confirmation_outcome_participates_in_protocol_factor_or_trial_identity",
+    "identity_builders_open_no_confirmation_file": f"{T}_partition_truth.py::test_building_every_identity_opens_no_confirmation_file",
+    "counts_unchanged_by_correction": f"{T}_partition_truth.py::test_counts_and_complements_are_unchanged_by_the_correction",
+    "old_freeze_stale_and_refused": f"{T}_partition_truth.py::test_the_old_freeze_cannot_pass_require_freeze_after_the_correction",
+    "old_freeze_refused_for_the_right_reason": f"{T}_partition_truth.py::test_the_old_freeze_is_refused_for_the_right_reason_in_a_controlled_repo",
+    "forged_stale_partition_freeze_refused": f"{T}_partition_truth.py::test_a_self_consistent_forged_stale_partition_freeze_is_refused",
 }
 
 
@@ -79,6 +90,34 @@ def main() -> int:
                                         ("QUALIFIED", "INSUFFICIENT_CLOSED_ROUND_TRIPS")),
         "14_environment_identity_complete": (sorted(env.environment_identity()), ["numpy", "pandas", "python"]),
     }
+    fixture = REPO / "research-py" / "tests" / "fixtures" / "census02_superseded_freeze_ab686f1.json"
+    old = json.loads(fixture.read_text(encoding="utf-8"))
+    refusals = {}
+    for name, path in (("superseded_fixture", fixture),):
+        try:
+            pr.require_freeze(REPO, path)
+            refusals[name] = "ACCEPTED (BUG)"
+        except pr.FreezeRefusal as exc:
+            refusals[name] = f"REFUSED: {str(exc)[:160]}"
+    live = REPO / "research-py" / "experiments" / "alpha_edge_census_02" / "CENSUS02_PREDECLARATION.json"
+    live_doc = json.loads(live.read_text(encoding="utf-8")) if live.exists() else None
+    if live_doc is not None and live_doc.get("behavior_head") == old["behavior_head"]:   # the superseded C3B file still in place
+        try:
+            pr.require_freeze(REPO, live)
+            refusals["in_place_c3b_freeze"] = "ACCEPTED (BUG)"
+        except pr.FreezeRefusal as exc:
+            refusals["in_place_c3b_freeze"] = f"REFUSED: {str(exc)[:160]}"
+    truth = pr.partition_truth()
+    facts["15_confirmation_window_consumed_never_read"] = (
+        (truth["confirmation_window"]["status"], truth["confirmation_window"]["role"], truth["census02_access"]["confirmation_window"]),
+        ("CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01", "CENSUS02_NEVER_READ", "NEVER_READ"))
+    facts["16_final_holdout_reserved_never_read"] = (
+        (truth["final_holdout"]["status"], truth["census02_access"]["final_holdout"]), ("RESERVED_UNCONSUMED", "NEVER_READ"))
+    facts["17_discovery_fence"] = ((truth["discovery"]["end_exclusive"], truth["census02_access"]["discovery"]),
+                                   ("2024-01-01", "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01"))
+    facts["18_old_freeze_refused"] = (all(v.startswith("REFUSED") for v in refusals.values()) and bool(refusals), True)
+    facts["19_environment_unchanged_vs_superseded_freeze"] = (env.environment_identity(), old["environment_identity"])
+    facts["20_operator_decisions_unchanged_vs_superseded_freeze"] = (d, old["decisions"])
     checks = [{"id": k, "observed": sorted(v[0]) if isinstance(v[0], set) else v[0], "expected": sorted(v[1]) if isinstance(v[1], set) else v[1],
                "ok": v[0] == v[1]} for k, v in facts.items()]
     run = subprocess.run([sys.executable, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=line", *LOAD_BEARING.values()],
@@ -86,7 +125,7 @@ def main() -> int:
     summary = [ln for ln in run.stdout.splitlines() if ln.strip()][-1]
     proof = {"schema_version": "census02_freeze_proof_v1", "behavior_head": head, "protocol_id_for_this_behavior_state": pid,
              "strategy_population_root": spop["population_root"], "factor_coordinate_root": fpop["coordinate_root"],
-             "environment_identity": env.environment_identity(), "derived_facts": checks,
+             "environment_identity": env.environment_identity(), "derived_facts": checks, "old_freeze_refusals": refusals,
              "load_bearing_tests": {"node_ids": LOAD_BEARING, "pytest_returncode": run.returncode, "summary": summary},
              "real_census02_attempts": 0, "discovery_bars_read": 0, "rows_2024_read": 0, "confirmation_rows_consumed": 0,
              "final_holdout_rows_consumed": 0}

@@ -35,7 +35,8 @@ def seed_symbols() -> list[str]:
 
 
 def partitions_id() -> str:
-    return pr.sha256_canonical(pr.pt.PARTITIONS)[:32]
+    """Identity of the CURRENT partition-consumption truth (never the historical Census-01 object)."""
+    return pr.partition_truth_id()
 
 
 def strategy_universe_id(decisions: dict) -> str:

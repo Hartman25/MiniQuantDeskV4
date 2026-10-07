@@ -1,7 +1,7 @@
 # Alpha Census 02 — Short / Long-Short Predeclaration (capability census + operator-freeze package)
 
 Mission `V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01`. Baseline `c005e56791f34f1fd5d32e559dd594ec8e30d2c4`.
-Status (C3B): `CENSUS02_FROZEN_BY_OPERATOR_BEFORE_RESULT_1` (the freeze commit follows the behavior commit C3A `675549e219b4bb78adc298fde56dd39bae655e45`; section 14). Status at C3A: `CENSUS02_READY_TO_FREEZE` — operator policy is **approved** (section 13, `CENSUS02_OPERATOR_POLICY.json`) and the complete
+Status (C3C): `CENSUS02_READY_TO_REFREEZE` — the C3B freeze (`ab686f15737e3e36ba3c4f34d753f179f9a55bf2`) carried a stale historical partition label and is superseded before result #1 (section 15); the replacement freeze is a later commit (C3D) that changes no bound source — operator policy is **approved** (section 13, `CENSUS02_OPERATOR_POLICY.json`) and the complete
 result-independent campaign (runner, evaluators, populations, environment identity, expanded source manifest) is implemented and proven
 on synthetic data. Sections 1–12 are the historical capability census, proposal and review corrections that led here; where they say
 "operator decision" or "PROPOSED", section 13 supersedes them. The freeze file (`CENSUS02_PREDECLARATION.json`) is created in a separate
@@ -278,7 +278,7 @@ outcomes (result-key scan of the builder output). Remaining in-scope defects: NO
 
 Real Census-02 attempts: 0. Discovery bars read: 0. 2024 / Confirmation / Final Holdout rows: 0.
 
-## 14. Freeze (C3B) and chronology
+## 14. Freeze (C3B) and chronology — SUPERSEDED by section 15 (historical record)
 
 Behavior commit **C3A** `675549e219b4bb78adc298fde56dd39bae655e45` (no bound source has changed since). The freeze commit C3B adds only
 `CENSUS02_PREDECLARATION.json`, the pre-freeze proof `freeze_evidence/CENSUS02_FREEZE_PROOF.json` (+ its generator) and this section. It does not
@@ -299,5 +299,32 @@ differs between `behavior_head` and `HEAD`.
 101 mutations) -> (D) behavior committed (C3A) -> (E) source / environment manifests computed against that commit -> (F) this freeze committed
 (C3B) -> (G) STOP for independent chronology review -> (H) only a future explicit authorization may open attempt #1. Real Census-02 attempts 0;
 Discovery bars read 0; 2024 / Confirmation / Final Holdout rows 0.
+
+## 15. Freeze-truth correction (C3C) — current partition-consumption truth
+
+**Defect.** The C3B structural protocol copied `alpha_edge_census_01/partitions.py::PARTITIONS` verbatim. That object is accepted *historical*
+authority: when Census-01 froze, `[2025-01-01, 2026-03-01)` was `remaining_confirmation_reserve / RESERVED_UNCONSUMED /
+LATER_INDEPENDENT_CONFIRMATION`. It is no longer true: `alpha_edge_confirmation_01` completed over exactly that window, so it is permanently
+consumed as Confirmation evidence. This was a metadata / current-state error, not leakage: Census-02 reads and consumes zero Confirmation rows.
+
+**Correction.** `c2_protocol.PARTITION_TRUTH` is the Census-02 CURRENT truth: `discovery [2016-01-01, 2024-01-01) CENSUS02_DISCOVERY_REUSE`;
+`contaminated_2024 CONTAMINATED_BY_REJECTED_RUN / CENSUS02_NEVER_READ`; `confirmation_window [2025-01-01, 2026-03-01)
+CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01 / CENSUS02_NEVER_READ`; `final_holdout [2026-03-01, ...) RESERVED_UNCONSUMED / FINAL_HOLDOUT`; plus an
+explicit access map (Confirmation and Final Holdout `NEVER_READ`). Confirmation is consumed **globally** and never read **by Census-02**; the
+Final Holdout stays reserved. `partition_truth()` proves the boundaries equal the reused hard fence before the object is used. Census-01's
+`partitions.py` and its frozen JSON are unchanged (byte-pinned by test) and still supply the discovery-fence implementation only; the structural
+protocol and the partition identity (`partitions_id`, an input of every trial / factor identity) now come from the current truth. The fence refusal
+names the TRUE partition (`confirmation_window (CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01)`).
+
+**No result value in identity.** Only the consumption *fact* is protocol truth. No Confirmation outcome (counts, p / q values, dispositions, the
+0-strong / 6-directional result) is read, hashed or bound: the partition object is a closed key set, outcome tokens are scanned out of every
+identity input, building all identities opens no Confirmation file, and no Confirmation / Pass-2 experiment file is in the manifest.
+
+**Consequences (correct and expected).** `c2_protocol.py` and `c2_population.py` changed, so the source-manifest hash, `protocol_id`, Strategy trial
+ids / root and factor identities change; the old C3B freeze fails closed (`differs from the frozen manifest`; fixture
+`tests/fixtures/census02_superseded_freeze_ab686f1.json`, byte-identical to the C3B file). Counts are unchanged: 470 configs, 20 Class-C symbols,
+9,400 trials, 215 conditions, 5 horizons, 1,075 factors, 56 complement-tagged configs. The eight approved operator decisions and the numerical
+environment are unchanged. The replacement freeze (C3D) is generated from the exact C3C behavior and adds only the freeze, a supersession record and
+proof artifacts; the C3B file is superseded *before result #1* (zero attempts, zero data reads, zero result values under it), not amended.
 
 Full local workspace acceptance: NOT RUN — prohibited by laptop resource-safety rule; broad workspace proof delegated to GitHub CI.

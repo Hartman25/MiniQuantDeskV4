@@ -453,9 +453,9 @@
    "window_start_utc": "2016-01-01T00:00:00+00:00"
   },
   "data_contract": {
-   "confirmation": "[2025-01-01, 2026-03-01) never read",
-   "contaminated_2024": "never scored",
-   "final_holdout": "[2026-03-01, ...) never read",
+   "confirmation": "[2025-01-01, 2026-03-01) consumed by alpha_edge_confirmation_01; never read by Census-02",
+   "contaminated_2024": "never read, never scored",
+   "final_holdout": "[2026-03-01, ...) reserved; never read",
    "window": "[2016-01-01, 2024-01-01)"
   },
   "data_request_contract": {
@@ -513,30 +513,38 @@
    "evaluation": "slice/job/window; never mints a trial",
    "trial": "sha256(side,family,params,scope,universe_id,partitions_id,protocol_id); results/attempts never enter"
   },
+  "partition_authority": "current truth is PARTITION_TRUTH; Census-01 partitions.py is historical and supplies only the hard discovery-fence implementation",
   "partitions": {
-   "contaminated_by_rejected_run": {
+   "census02_access": {
+    "confirmation_window": "NEVER_READ",
+    "contaminated_2024": "NEVER_READ",
+    "discovery": "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01",
+    "final_holdout": "NEVER_READ"
+   },
+   "confirmation_window": {
+    "end_exclusive": "2026-03-01",
+    "role": "CENSUS02_NEVER_READ",
+    "start_inclusive": "2025-01-01",
+    "status": "CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01"
+   },
+   "contaminated_2024": {
     "end_exclusive": "2025-01-01",
-    "reason": "read by ALPHA_EDGE_CENSUS_01_REJECTED_EXECUTION_20261005",
-    "role": "NEVER_AN_UNREAD_RESERVE",
+    "role": "CENSUS02_NEVER_READ",
     "start_inclusive": "2024-01-01",
     "status": "CONTAMINATED_BY_REJECTED_RUN"
    },
    "discovery": {
     "end_exclusive": "2024-01-01",
-    "role": "PASS1_CENSUS_DISCOVERY",
+    "role": "CENSUS02_DISCOVERY_REUSE",
     "start_inclusive": "2016-01-01"
    },
    "final_holdout": {
+    "role": "FINAL_HOLDOUT",
     "start_inclusive": "2026-03-01",
     "status": "RESERVED_UNCONSUMED"
    },
-   "remaining_confirmation_reserve": {
-    "end_exclusive": "2026-03-01",
-    "role": "LATER_INDEPENDENT_CONFIRMATION",
-    "start_inclusive": "2025-01-01",
-    "status": "RESERVED_UNCONSUMED"
-   },
-   "schema_version": "alpha_census_partitions_v2"
+   "schema_version": "census02_partition_truth_v1",
+   "semantics": "the Confirmation window is consumed globally and never read by Census-02; the Final Holdout stays reserved"
   },
   "registration_rule": {
    "denominator": "frozen population root; cannot shrink after results",
@@ -569,7 +577,7 @@
    "validation_status": "NOT_VALIDATED"
   }
  },
- "structural_protocol_id": "15b906b8fc35e64150cc821767a58d36",
+ "structural_protocol_id": "c042d521cc31cf833a5ea614f63ecdf9",
  "superseded_by": {
   "freeze": "CENSUS02_PREDECLARATION.json",
   "operator_policy": "CENSUS02_OPERATOR_POLICY.json"

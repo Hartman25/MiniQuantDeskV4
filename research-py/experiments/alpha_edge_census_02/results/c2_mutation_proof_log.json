@@ -806,5 +806,93 @@
   "red_under_mutation": true,
   "restored_byte_for_byte": true,
   "tests": "test_numerical_environment_mismatch_is_refused"
+ },
+ "M72": {
+  "description": "PARTITION: the consumed Confirmation window is labelled RESERVED_UNCONSUMED again",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact or test_the_structural_protocol_carries"
+ },
+ "M73": {
+  "description": "PARTITION: the Confirmation role reverts to LATER_INDEPENDENT_CONFIRMATION",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact or test_the_structural_protocol_carries"
+ },
+ "M74": {
+  "description": "PARTITION: the access map lets Census-02 read the Confirmation window",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact"
+ },
+ "M75": {
+  "description": "PARTITION: the Census-02 bar fence lets Confirmation-window rows through",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_every_row_at_or_after_2024_is_refused or test_confirmation_input_is_refused"
+ },
+ "M76": {
+  "description": "PARTITION: the Final Holdout is marked consumed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact"
+ },
+ "M77": {
+  "description": "PARTITION: Confirmation outcome metrics are injected into the protocol identity",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_no_confirmation_outcome_participates or test_current_partition_truth_is_exact"
+ },
+ "M78": {
+  "description": "PARTITION: a stale (pre-correction) freeze is accepted after the correction",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_a_self_consistent_forged_stale_partition_freeze_is_refused"
+ },
+ "M79": {
+  "description": "PARTITION: the partition identity reverts to the historical Census-01 object",
+  "file": "c2_population.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_historical_census01_authority_is_unchanged or test_the_partition_identity_changes_only or test_current_partition_truth"
+ },
+ "M80": {
+  "description": "PARTITION: the classifier folds the Confirmation window into the Final Holdout",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_classify_partition_table or test_every_row_at_or_after_2024_is_refused"
+ },
+ "M81": {
+  "description": "PARTITION: the truth boundaries are no longer checked against the reused fence",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_truth_boundaries_must_equal_the_reused_hard_fence"
+ },
+ "M82": {
+  "description": "PARTITION: the old (stale) freeze fixture is accepted by the real guard (all identity checks bypassed)",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_the_old_freeze_is_refused_for_the_right_reason_in_a_controlled_repo"
  }
 }
