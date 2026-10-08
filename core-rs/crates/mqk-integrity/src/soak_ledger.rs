@@ -4,8 +4,10 @@
 //! evidence records so that the count is never a manual increment. A record is evidence of
 //! one finalized autonomous Paper daily operation; the ledger decides what counts:
 //!
-//! * the date must be a regular US-equity session per [`crate::sessions`] (weekends, holidays
-//!   and dates outside the calendar coverage never count; there is no weekday fallback);
+//! * the date must be a regular US-equity session per [`crate::calendar`], the Paper-runtime
+//!   table (2023-2028; weekends, holidays and dates outside that coverage never count; there is
+//!   no weekday fallback). The research `sessions` table ends earlier and is not the Paper
+//!   authority;
 //! * the session must have run under exactly the accepted post-repair code SHA (a session under
 //!   any other SHA never counts, so a correctness repair restarts the count);
 //! * the record must carry exactly the policy's [`DeploymentIdentity`] (strategy, symbol,
@@ -23,7 +25,7 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 
-use crate::sessions;
+use crate::calendar;
 
 /// Finalized durable outcome of the day's autonomous operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,7 +145,7 @@ fn classify(policy: &LedgerPolicy, records: &[&SessionRecord]) -> Result<bool, E
         return Err(Exclusion::ConflictingDuplicate);
     }
     let r = records[0];
-    match sessions::is_session(r.market_date) {
+    match calendar::nyse_is_regular_session_date(r.market_date) {
         Err(_) => return Err(Exclusion::OutOfCoverage),
         Ok(false) => return Err(Exclusion::NotARegularSession),
         Ok(true) => {}
@@ -191,7 +193,7 @@ pub fn evaluate(policy: &LedgerPolicy, records: &[SessionRecord]) -> LedgerVerdi
     let regular: Vec<NaiveDate> = by_date
         .keys()
         .copied()
-        .filter(|d| sessions::is_session(*d) == Ok(true))
+        .filter(|d| calendar::nyse_is_regular_session_date(*d) == Ok(true))
         .collect();
     let (mut longest, mut run) = (0u32, 0u32);
     if let (Some(first), Some(last)) = (regular.first().copied(), regular.last().copied()) {
@@ -207,7 +209,7 @@ pub fn evaluate(policy: &LedgerPolicy, records: &[SessionRecord]) -> LedgerVerdi
             if cursor >= last {
                 break;
             }
-            match sessions::next_session_after(cursor) {
+            match calendar::nyse_next_regular_session_after(cursor) {
                 Ok(next) => cursor = next,
                 Err(_) => break,
             }
@@ -260,7 +262,7 @@ mod tests {
     fn run_of(start: NaiveDate, n: usize) -> Vec<NaiveDate> {
         let mut out = vec![start];
         while out.len() < n {
-            out.push(sessions::next_session_after(*out.last().unwrap()).unwrap());
+            out.push(calendar::nyse_next_regular_session_after(*out.last().unwrap()).unwrap());
         }
         out
     }
@@ -311,12 +313,41 @@ mod tests {
 
     #[test]
     fn dates_outside_calendar_coverage_never_count() {
-        let v = eval(&[rec(d(2027, 1, 4)), rec(d(2015, 12, 31))]);
+        let v = eval(&[rec(d(2029, 1, 2)), rec(d(2022, 12, 30))]);
         assert_eq!(v.countable_sessions, 0);
         assert!(v
             .exclusions
             .iter()
             .all(|(_, e)| *e == Exclusion::OutOfCoverage));
+    }
+
+    #[test]
+    fn sessions_after_the_research_calendar_horizon_count_through_the_paper_runtime_calendar() {
+        // 2026-12-30 .. 2027-01-15: the Paper runtime operates across the year boundary
+        // (2026-12-31 and 2027-01-04.. are regular sessions; 2027-01-01 and 2027-01-18 are not).
+        let sessions_2027 = [
+            d(2026, 12, 30),
+            d(2026, 12, 31),
+            d(2027, 1, 4),
+            d(2027, 1, 5),
+            d(2027, 1, 6),
+            d(2027, 1, 7),
+            d(2027, 1, 8),
+            d(2027, 1, 11),
+            d(2027, 1, 12),
+            d(2027, 1, 13),
+        ];
+        let mut r: Vec<SessionRecord> = sessions_2027.into_iter().map(rec).collect();
+        r.push(rec(d(2027, 1, 1))); // New Year's Day: closed
+        r.push(rec(d(2027, 1, 18))); // MLK Day: closed
+        let v = eval(&r);
+        assert_eq!((v.countable_sessions, v.longest_clean_run), (10, 10));
+        assert!(v.passed);
+        for date in [d(2027, 1, 1), d(2027, 1, 18)] {
+            assert!(v
+                .exclusions
+                .contains(&(date, Exclusion::NotARegularSession)));
+        }
     }
 
     #[test]

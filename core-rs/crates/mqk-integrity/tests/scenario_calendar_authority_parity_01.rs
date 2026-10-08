@@ -11,6 +11,9 @@
 
 use chrono::{Datelike, NaiveDate, TimeZone};
 use chrono_tz::America::New_York;
+use mqk_integrity::calendar::{
+    nyse_is_regular_session_date, nyse_next_regular_session_after, DateOutsideTableCoverage,
+};
 use mqk_integrity::{nyse_early_close_et, sessions, CalendarSpec};
 
 fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -177,4 +180,67 @@ fn gap_detection_outside_coverage_still_expects_weekday_bars() {
     let missing =
         CalendarSpec::NyseWeekdays.missing_bars_between(open + 300, open + 300 + 3 * 300, 300);
     assert_eq!(missing, 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Date-level Paper-runtime predicate (the M1.10 soak-ledger session authority)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn date_level_predicate_equals_the_intraday_classifier_on_every_table_date() {
+    // The ledger's session authority must be exactly the Paper-runtime table, 2023-2028.
+    for day in dates(d(2023, 1, 1), d(2028, 12, 31)) {
+        assert_eq!(
+            nyse_is_regular_session_date(day),
+            Ok(exchange_state(day) == "open"),
+            "{day}"
+        );
+    }
+}
+
+#[test]
+fn date_level_predicate_equals_the_research_sessions_on_every_shared_date() {
+    for day in dates(d(2023, 1, 1), d(2026, 12, 31)) {
+        assert_eq!(
+            nyse_is_regular_session_date(day).unwrap(),
+            sessions::is_session(day).unwrap(),
+            "{day}"
+        );
+        if day < d(2026, 12, 31) {
+            assert_eq!(
+                nyse_next_regular_session_after(day).unwrap(),
+                sessions::next_session_after(day).unwrap(),
+                "next after {day}"
+            );
+        }
+    }
+}
+
+#[test]
+fn date_level_predicate_refuses_outside_the_table_and_never_extrapolates() {
+    for day in [d(2022, 12, 30), d(2029, 1, 2), d(2015, 12, 31)] {
+        assert_eq!(
+            nyse_is_regular_session_date(day),
+            Err(DateOutsideTableCoverage(day))
+        );
+        assert_eq!(
+            nyse_next_regular_session_after(day),
+            Err(DateOutsideTableCoverage(day))
+        );
+    }
+    // The last covered date resolves, but nothing after it does.
+    assert_eq!(nyse_is_regular_session_date(d(2028, 12, 29)), Ok(true));
+    assert_eq!(
+        nyse_next_regular_session_after(d(2028, 12, 29)),
+        Err(DateOutsideTableCoverage(d(2029, 1, 1)))
+    );
+    // Across the research-calendar horizon the next session is the published one.
+    assert_eq!(
+        nyse_next_regular_session_after(d(2026, 12, 31)),
+        Ok(d(2027, 1, 4))
+    );
+    assert_eq!(
+        nyse_next_regular_session_after(d(2027, 12, 30)),
+        Ok(d(2027, 12, 31))
+    );
 }

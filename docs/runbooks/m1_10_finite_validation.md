@@ -20,7 +20,7 @@ Verdict fields: `countable_sessions`, `longest_clean_run`, `trailing_clean_run`,
 
 | A record counts only if | Otherwise excluded as |
 |---|---|
-| its date is a regular US-equity session per `us_equity_regular_sessions_v1` (covered through 2026-12-31) | `NotARegularSession` (weekend, holiday, Sunday) / `OutOfCoverage` (extend the calendar under a new identity first; never a weekday fallback) |
+| its date is a regular US-equity session per the Paper-runtime table `mqk_integrity::calendar` (2023-01-01..2028-12-31; parity-pinned to `us_equity_regular_sessions_v1` on every shared date) | `NotARegularSession` (weekend, holiday, Sunday) / `OutOfCoverage` (extend the table first; never a weekday fallback) |
 | it ran under exactly the accepted post-repair SHA | `WrongCodeSha` |
 | its deployment identity equals the policy's (strategy, symbol, timeframe, runtime domain all equal; an incomplete policy identity counts nothing) | `WrongDeployment` |
 | that deployed identity held `active_paper` for the whole session | `NoActivePaperPromotion` |

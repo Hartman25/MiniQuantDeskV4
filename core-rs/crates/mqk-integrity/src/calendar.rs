@@ -19,7 +19,7 @@
 //!   but for CSV/provider bars whose timestamp slot is anchored at 09:30 through
 //!   15:55 ET for 5-minute data.
 
-use chrono::{DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, LocalResult, NaiveDate, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::America::New_York;
 
 /// First and last ET civil dates (inclusive) for which the holiday and
@@ -34,6 +34,44 @@ pub const TABLE_COVERAGE_END: (i64, i64, i64) = (2028, 12, 31);
 
 fn within_table_coverage(year: i64, month: i64, day: i64) -> bool {
     (year, month, day) >= TABLE_COVERAGE_START && (year, month, day) <= TABLE_COVERAGE_END
+}
+
+/// A civil date outside [`TABLE_COVERAGE_START`]..=[`TABLE_COVERAGE_END`]; never resolved by
+/// weekday arithmetic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DateOutsideTableCoverage(pub NaiveDate);
+
+fn ymd(d: NaiveDate) -> (i64, i64, i64) {
+    (d.year() as i64, d.month() as i64, d.day() as i64)
+}
+
+/// Date-level regular-session predicate on the Paper-runtime table: `Ok(true)` iff `d` is a
+/// weekday that is not a NYSE full closure (early-close days ARE sessions);
+/// `Err` outside the table coverage.
+pub fn nyse_is_regular_session_date(d: NaiveDate) -> Result<bool, DateOutsideTableCoverage> {
+    let (y, m, day) = ymd(d);
+    if !within_table_coverage(y, m, day) {
+        return Err(DateOutsideTableCoverage(d));
+    }
+    Ok(!matches!(d.weekday(), Weekday::Sat | Weekday::Sun) && !is_nyse_holiday(y, m, day))
+}
+
+/// The first regular session strictly after `d`. `d` and the answer must both lie inside the
+/// table coverage.
+pub fn nyse_next_regular_session_after(
+    d: NaiveDate,
+) -> Result<NaiveDate, DateOutsideTableCoverage> {
+    let (y, m, day) = ymd(d);
+    if !within_table_coverage(y, m, day) {
+        return Err(DateOutsideTableCoverage(d));
+    }
+    let mut cursor = d;
+    loop {
+        cursor = cursor.succ_opt().ok_or(DateOutsideTableCoverage(cursor))?;
+        if nyse_is_regular_session_date(cursor)? {
+            return Ok(cursor);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
