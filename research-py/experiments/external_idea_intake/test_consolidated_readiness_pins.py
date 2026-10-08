@@ -60,7 +60,7 @@ def test_catalog_hash_in_the_record_is_the_one_the_intake_pins():
 
 
 def test_record_states_its_verdict_and_authorizes_nothing():
-    for phrase in ("CATALOG_FROZEN_AND_DISPOSITIONED", "NO_ELIGIBLE_CANDIDATE_EXISTS", "`M1_BLOCKED`", "NOT_AUTHORIZED",
+    for phrase in ("CATALOG_FROZEN_AND_DISPOSITIONED", "NO_ELIGIBLE_CANDIDATE_EXISTS", "ONE_ESTABLISHED_PROMOTION_CONSTRAINT_EXT_169", "`M1_BLOCKED`", "NOT_AUTHORIZED",
                    "NOT_EXECUTABLE", "`execution_gate.executable = false`", "**not pushed**"):
         assert phrase in DOC, phrase
     assert "EXT-" not in "".join(p.read_text(encoding="utf-8") for p in
@@ -73,17 +73,29 @@ def test_record_counts_tiers_and_structural_numbers_match_the_committed_ledger_a
     ledger = json.loads((ROOT / "docs/research/intake/external_idea_disposition_ledger_v1.json").read_text("utf-8"))
     for name, n in ledger["counts"]["primary_disposition"].items():
         assert f"`{name}` {n}" in DOC, (name, n)
-    para = DOC[DOC.index("**Proposed bounded population"):DOC.index("**Structural reach")]
+    para = DOC[DOC.index("**Proposed bounded population"):DOC.index("**Calendar-only analysis")]
     import re as _re
     assert sorted(_re.findall(r"\*\*(EXT-\d{3})\*\*", para)) == sorted(
         ledger["population"]["A"] + ledger["population"]["B"])
     assert all(eid in para for eid in ledger["population"]["RESERVE_ADJACENT_COMPLETE"])
+    analysis = DOC[DOC.index("**Calendar-only analysis"):]
     s = sr.summary()
     pre, santa, opex = (s["EXT-032 pre-holiday, scheduled holidays only"], s["EXT-169 Santa Claus"],
                         s["EXT-044 opex week (monthly third Friday)"])
-    for row in ((pre, "| 186 |"), (santa, "| 70 |"), (opex, "| 586 |")):
-        assert row[1] in DOC and row[0]["exposed_sessions"] == int(row[1].strip("| "))
-    assert f"{santa['max_profitable_months_fraction'] * 100:.1f}%" in DOC and santa["profitable_months_gate_reachable"] is False
+    for r, row in ((pre, "| 186 | 7.4% | 89 | 96 |"), (santa, "| 70 | 2.8% | 20 | 20 |"), (opex, "| 586 | 23.3% | 120 | 120 |")):
+        assert row in analysis
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        assert (r["exposed_sessions"], r["months_with_exposure"], r["months_with_possible_equity_change"]) == (
+            int(cells[0]), int(cells[2]), int(cells[3]))
+    assert f"{santa['max_profitable_months_fraction'] * 100:.1f}%" in analysis and santa["profitable_months_gate_reachable"] is False
+    assert f"{pre['max_profitable_months_fraction'] * 100:.1f}%" in analysis
+    assert "more than six consecutive months" in analysis and sr.max_reachable_span_months(sr.santa_claus()) == 6
+    for mult in (pre, santa, opex):
+        assert f"{mult['hypothetical_uniform_dilution_multiple']:.1f}x" in analysis
+    # the withdrawn inference must not return: no requirement language attached to the multiples
+    for phrase in ("cannot plausibly clear", "structurally unreachable", "is why 0 of 60"):
+        assert phrase not in DOC, phrase
+    assert "they are not Promotion constraints" in DOC
 
 
 def test_runbook_authorizes_no_mutation():
