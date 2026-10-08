@@ -104,14 +104,19 @@ unconditional mean. This is **label evidence only**; it carries no costs, borrow
 | artifact hashes | `RUN_MANIFEST.json` SHA-256 of every preserved artifact reproduces; outputs byte-identical to the run directory |
 | no Paper/Live/broker action | the runner only calls the historical-bars extraction path; 0 orders |
 
-Local note: two existing guard tests (`test_importing_the_runner_and_cli_performs_no_io_and_creates_no_run_directory`,
-`test_the_real_repo_has_no_run_artifacts_and_no_attempts`) assert that `research-py/runs/alpha_edge_census_02` does not exist.
-They fail only on a machine that holds the run directory (gitignored); a CI checkout has none. They were not edited.
+Post-review correction: two pre-result guard tests asserted that `research-py/runs/alpha_edge_census_02` must not exist, which is
+no longer a valid invariant after an authorized Result #1. They are replaced by state-independent tests (import leaves the run
+directory untouched whether absent or present; the freeze records zero attempts and no results; no raw run artifact is tracked in
+Git). No result value, population or statistic was changed by that correction.
 
 ## 7. Preserved package
 
 `research-py/experiments/alpha_edge_census_02/results/discovery_result_01/` (built by `results/build_result_package.py`):
 `RUN_MANIFEST.json`, `campaign_disclosure.json`, `strategy_edges.json`, `conditional_edges.json`, `factor_fdr_report.json`,
 `strategy_neighborhood_report_only.json`, `strategy_campaign_summary.json`, `factor_campaign_summary.json`,
-`universe_dispositions.json`, `bars_provenance_manifest.json`. Registry SQLite files, per-symbol bars, chunk ledgers and
-per-factor records stay in the gitignored run directory; their SHA-256 values are in `RUN_MANIFEST.json`.
+`universe_dispositions.json`, `bars_provenance_manifest.json`, plus the complete result ledgers so the Discovery result stays
+auditable after the gitignored run directory is gone: `strategy_trial_ledger.jsonl` (all 9,400 Strategy rows, the exact settled
+chunk ledgers concatenated in frozen population order) and `factor_evidence_ledger.jsonl` (all 1,075 settled factor records,
+including the 10 `not_evaluable` records with their typed reason, in frozen factor order). Both are copies of already-settled
+evidence, not recomputations, and are not the registry files. Registry SQLite files, per-symbol bars, raw chunk files and
+per-factor record files stay in the gitignored run directory; their SHA-256 values are in `RUN_MANIFEST.json`.

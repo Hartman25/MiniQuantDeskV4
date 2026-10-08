@@ -24,6 +24,52 @@ from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E4
 
 OUTPUTS = ("campaign_disclosure.json", "strategy_edges.json", "conditional_edges.json", "factor_fdr_report.json",
            "strategy_neighborhood_report_only.json")
+STRATEGY_LEDGER, FACTOR_LEDGER = "strategy_trial_ledger.jsonl", "factor_evidence_ledger.jsonl"
+# Result #1 package settlement (a package-integrity check on THIS preserved run, not an economic threshold).
+RESULT01_COUNTS = {"strategy_trials": 9400, "factors": 1075, "factor_status": {"succeeded": 1065, "not_evaluable": 10}}
+
+
+class PackageRefusal(RuntimeError):
+    pass
+
+
+def strategy_ledger_bytes(chunk_paths: list[Path], population_ids: list[str]) -> bytes:
+    """The settled chunk ledgers, concatenated byte-for-byte in canonical chunk order. Refuses unless the trial ids, in order,
+    are exactly the frozen population (count, duplicates, missing, extra and order are all checked)."""
+    raw = b"".join(Path(p).read_bytes() for p in chunk_paths)
+    lines = raw.split(b"\n")
+    if lines[-1] != b"" or any(not ln for ln in lines[:-1]):
+        raise PackageRefusal("Strategy chunk ledgers are not newline-terminated non-empty JSONL lines")
+    ids = [json.loads(ln)["t"] for ln in lines[:-1]]
+    if len(ids) != len(population_ids):
+        raise PackageRefusal(f"Strategy ledger has {len(ids)} rows, frozen population has {len(population_ids)}")
+    if len(set(ids)) != len(ids):
+        raise PackageRefusal("Strategy ledger contains a duplicated trial id")
+    if set(ids) != set(population_ids):
+        raise PackageRefusal(f"Strategy ledger ids differ from the frozen population: missing={len(set(population_ids) - set(ids))} "
+                             f"extra={len(set(ids) - set(population_ids))}")
+    if ids != list(population_ids):
+        raise PackageRefusal("Strategy ledger is not in frozen population order")
+    return raw
+
+
+def factor_ledger_bytes(records: list[dict], expected_ids: list[str], expected_status: dict | None) -> bytes:
+    """One canonical-JSON line per settled factor record, in frozen population order (the registry-bound records are copied, never
+    re-evaluated). Refuses on count / duplicate / missing / extra / order, and on a status mix other than `expected_status`."""
+    ids = [r["factor_id"] for r in records]
+    if len(ids) != len(expected_ids):
+        raise PackageRefusal(f"factor ledger has {len(ids)} records, frozen population has {len(expected_ids)}")
+    if len(set(ids)) != len(ids):
+        raise PackageRefusal("factor ledger contains a duplicated factor id")
+    if set(ids) != set(expected_ids):
+        raise PackageRefusal(f"factor ledger ids differ from the frozen population: missing={len(set(expected_ids) - set(ids))} "
+                             f"extra={len(set(ids) - set(expected_ids))}")
+    if ids != list(expected_ids):
+        raise PackageRefusal("factor ledger is not in frozen population order")
+    status = dict(Counter(r["status"] for r in records))
+    if expected_status is not None and status != expected_status:
+        raise PackageRefusal(f"factor statuses {status} differ from the expected settlement {expected_status}")
+    return b"".join(json.dumps(r, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n" for r in records)
 
 
 def sha_file(p: Path) -> str:
@@ -91,6 +137,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--result-run-head", default=None, help="recorded result-run HEAD (default: the current HEAD)")
     a = ap.parse_args()
     run, out = a.run_dir.resolve(), a.out.resolve()
     frozen = pr.require_freeze()
@@ -109,6 +156,19 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     for name in OUTPUTS:
         shutil.copyfile(run / name, out / name)
+    chunk_paths = [rn.chunk_path(run, k) for k in range((len(cells) + rn.CHUNK_SIZE - 1) // rn.CHUNK_SIZE)]
+    if len(cells) != RESULT01_COUNTS["strategy_trials"] or len(items) != RESULT01_COUNTS["factors"]:
+        raise PackageRefusal("frozen populations differ from the Result #1 counts")
+    s_bytes = strategy_ledger_bytes(chunk_paths, [c[3] for c in cells])
+    f_bytes = factor_ledger_bytes(records, [s.compute_factor_id() for _c, _h, s in items], RESULT01_COUNTS["factor_status"])
+    (out / STRATEGY_LEDGER).write_bytes(s_bytes)
+    (out / FACTOR_LEDGER).write_bytes(f_bytes)
+    # Written bytes must equal the settled run authority: chunk bytes, and the registry-bound factor records re-read from disk.
+    if (out / STRATEGY_LEDGER).read_bytes() != b"".join(p.read_bytes() for p in chunk_paths):
+        raise PackageRefusal("preserved Strategy ledger differs from the settled chunk ledgers")
+    on_disk = [json.loads(ln) for ln in (out / FACTOR_LEDGER).read_bytes().splitlines()]
+    if on_disk != records or on_disk != [fe.cd1.read_factor_record(run / "factor_records", r["factor_id"]) for r in records]:
+        raise PackageRefusal("preserved factor ledger differs from the settled factor records")
     store = ResearchResultStore(run / "registry_strategy.sqlite")
     digest = store.trial_attempt_digest(pr.EXPERIMENT_ID)
     ledger_ids = sorted(r["t"] for r in rows)
@@ -131,11 +191,12 @@ def main() -> None:
     last = max(r["last_end_ts"] for r in mf["symbols"].values() if "last_end_ts" in r)
     first = min(r["first_end_ts"] for r in mf["symbols"].values() if "first_end_ts" in r)
     chunks = {p.name: sha_file(p) for p in sorted((run / "chunks").glob("chunk_*.jsonl"))}
-    produced = {n: sha_file(out / n) for n in sorted(p.name for p in out.glob("*.json")) if n != "RUN_MANIFEST.json"}
+    produced = {n: sha_file(out / n) for n in sorted(p.name for p in [*out.glob("*.json"), *out.glob("*.jsonl")])
+                if n != "RUN_MANIFEST.json"}
     dump(out / "RUN_MANIFEST.json", {
         "schema_version": "census02_result_package_v1", "status": "DISCOVERY_ONLY", "VALIDATION_STATUS": "NOT_VALIDATED",
         "PROMOTION_AUTHORITY": "NONE", "protocol_id": protocol_id, "behavior_head": doc["behavior_head"],
-        "result_run_head": frozen["head"], "environment_identity": doc["environment_identity"],
+        "result_run_head": a.result_run_head or frozen["head"], "environment_identity": doc["environment_identity"],
         "runtime_python_platform": platform.platform(), "data_request_contract": doc["data_request_contract"],
         "discovery_window": "[2016-01-01, 2024-01-01)", "bars_first_end_ts": first, "bars_last_end_ts": last,
         "bars_manifest_sha256": mf["manifest_sha256"], "universe_id": mf["universe_id"],
@@ -146,6 +207,13 @@ def main() -> None:
         "attempt_registry": attempts, "strategy_ledger_chunk_sha256": chunks,
         "registry_sqlite_not_committed": {"registry_strategy.sqlite": sha_file(run / "registry_strategy.sqlite"),
                                           "registry_factor.sqlite": sha_file(run / "registry_factor.sqlite")},
+        "evidence_ledgers": {
+            STRATEGY_LEDGER: {"records": len(cells), "order": "frozen population order (chunk_00000..chunk_00018, line order)",
+                              "source": "byte concatenation of the 19 settled chunk ledgers; not recomputed"},
+            FACTOR_LEDGER: {"records": len(items), "order": "frozen factor population order",
+                            "source": "registry-bound settled factor records (canonical JSON, one per line); not re-evaluated",
+                            "status_counts": dict(Counter(r["status"] for r in records))},
+            "note": "compact committed copies of the settled evidence; they are NOT the registry SQLite files"},
         "raw_vendor_data": "NOT COMMITTED; per-symbol artifact hashes are in bars_provenance_manifest.json",
         "preserved_artifact_sha256": produced})
     print(json.dumps({"out": str(out), "files": len(produced) + 1}))

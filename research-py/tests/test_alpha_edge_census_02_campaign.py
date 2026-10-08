@@ -713,7 +713,24 @@ def test_the_ledger_rows_are_typed_executable_and_carry_no_equity_cell(campaign)
     assert not _result_keys({"identity": [gr.trial_identity(cells[0][1], cells[0][2], pop.strategy_ids(doc["decisions"], doc["protocol_id"]))]})
 
 
-def test_importing_the_runner_and_cli_performs_no_io_and_creates_no_run_directory():
+REAL_RUN_DIR = ct.REAL_RUN_DIR
+_tree_snapshot = ct.tree_snapshot
+RAW_RUN_SCOPES = ("research-py/runs/", "research-py/experiments/alpha_edge_census_02/")
+RAW_RUN_TRACKED_PATTERNS = ("/chunks/chunk_", "registry_strategy.sqlite", "registry_factor.sqlite", "/factor_records/",
+                            "/factor_eval/", "research_bars", "corporate_actions", "/status.json")
+
+
+def _tracked_raw_run_paths(repo: Path) -> list[str]:
+    """Git-tracked paths that look like raw Census-02 run artifacts (run directory, chunk/registry/vendor-bar/status files).
+    Committed evidence lives under experiments/alpha_edge_census_02/results/ and never matches."""
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=repo, capture_output=True, text=True, check=True).stdout
+    return sorted(p for p in out.split("\0") if p.startswith(RAW_RUN_SCOPES[0]) or (
+        p.startswith(RAW_RUN_SCOPES[1]) and any(t in "/" + p for t in RAW_RUN_TRACKED_PATTERNS)))
+
+
+def test_importing_the_runner_and_cli_performs_no_io_and_leaves_the_run_directory_untouched(census02_run_dir_at_session_start):
+    """State-independent: the real run directory may be absent (fresh checkout) or present (post-Result-#1); importing the Census-02
+    modules (in this process and in a fresh interpreter) must not create it when absent nor modify a single file when present."""
     code = (
         "import socket, builtins, sys\n"
         "def boom(*a, **k): raise AssertionError('import-time network/open of a data path')\n"
@@ -727,14 +744,64 @@ def test_importing_the_runner_and_cli_performs_no_io_and_creates_no_run_director
         f"sys.path.insert(0, {str(EXP2)!r})\n"
         "import c2_runner, c2_data, run_census02, c2_factor_eval, c2_strategy, c2_population\n"
         "print('IMPORT_OK')\n")
+    assert _tree_snapshot(REAL_RUN_DIR) == census02_run_dir_at_session_start   # pytest collection / in-process imports
+    before = _tree_snapshot(REAL_RUN_DIR)
     p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, cwd=EXP2.parents[1])
     assert p.returncode == 0 and "IMPORT_OK" in p.stdout, p.stderr[-600:]
-    assert not (EXP2.parents[1] / "runs" / "alpha_edge_census_02").exists()
+    assert _tree_snapshot(REAL_RUN_DIR) == before
 
 
-def test_the_real_repo_has_no_run_artifacts_and_no_attempts():
-    assert not (EXP2.parents[1] / "runs" / "alpha_edge_census_02").exists()
+def test_the_tree_snapshot_detects_creation_and_modification(tmp_path):
+    """Negative control for the import proof: the snapshot is RED on a created dir and on a modified file."""
+    root = tmp_path / "run"
+    assert _tree_snapshot(root) is None
+    root.mkdir()
+    created = _tree_snapshot(root)
+    assert created == {} and created != None  # noqa: E711 - an empty dir is distinct from an absent one
+    f = root / "chunks" / "chunk_00000.jsonl"
+    f.parent.mkdir()
+    f.write_text("a\n")
+    one = _tree_snapshot(root)
+    f.write_text("ab\n")
+    assert _tree_snapshot(root) != one
+
+
+def test_freeze_chronology_is_recorded_and_no_raw_run_artifact_is_tracked():
+    """State-independent replacement for 'the run directory must not exist': the freeze recorded zero attempts / no results, no
+    raw run artifact is tracked in Git, and any committed Result #1 evidence lives under results/ and binds to this freeze."""
+    doc = json.loads(pr.PREDECLARATION_FILE.read_text(encoding="utf-8"))
+    assert doc["attempts_at_freeze"] == 0 and doc["results_present_at_freeze"] is False and doc["status"] == pr.STATUS_FROZEN
+    assert _tracked_raw_run_paths(pr.REPO) == []
+    manifest = EXP2 / "results" / "discovery_result_01" / "RUN_MANIFEST.json"
+    if manifest.exists():   # Result #1 occurs after the freeze: it binds to the frozen identity, it does not falsify it
+        m = json.loads(manifest.read_text(encoding="utf-8"))
+        assert m["protocol_id"] == doc["protocol_id"] and m["behavior_head"] == doc["behavior_head"]
+        assert m["VALIDATION_STATUS"] == "NOT_VALIDATED" and m["PROMOTION_AUTHORITY"] == "NONE"
     assert not (EXP2 / "results" / "chunks").exists()
+
+
+def test_the_tracked_raw_run_guard_flags_raw_artifacts_in_a_throwaway_repo(tmp_path):
+    """Negative control: a tracked run directory / registry / vendor-bar file is flagged; committed results/ evidence is not."""
+    def git(*a):
+        subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True)
+    git("init", "-q")
+    ok = tmp_path / "research-py" / "experiments" / "alpha_edge_census_02" / "results" / "discovery_result_01"
+    ok.mkdir(parents=True)
+    (ok / "strategy_trial_ledger.jsonl").write_text("{}\n")
+    (ok / "RUN_MANIFEST.json").write_text("{}\n")
+    git("add", "-A")
+    assert _tracked_raw_run_paths(tmp_path) == []
+    for rel in ("research-py/runs/alpha_edge_census_02/registry_strategy.sqlite",
+                "research-py/experiments/alpha_edge_census_02/chunks/chunk_00000.jsonl",
+                "research-py/experiments/alpha_edge_census_02/data/SPY/research_bars.csv",
+                "research-py/experiments/alpha_edge_census_02/data/SPY/status.json"):
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x")
+        git("add", "-f", rel)
+        assert rel in _tracked_raw_run_paths(tmp_path), rel
+        git("rm", "-q", "--cached", rel)
+        assert _tracked_raw_run_paths(tmp_path) == []
 
 
 def test_cli_freeze_is_immutable_policy_checked_and_read_only_on_data(tmp_path, monkeypatch):

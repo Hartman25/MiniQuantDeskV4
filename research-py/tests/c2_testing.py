@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 
 EXP2 = Path(__file__).resolve().parents[1] / "experiments" / "alpha_edge_census_02"
+from census02_run_snapshot import REAL_RUN_DIR, tree_snapshot  # noqa: E402,F401  (re-exported for the Census-02 tests)
+
 sys.path.insert(0, str(EXP2))
 
 import c2_borrow as bw  # noqa: E402
