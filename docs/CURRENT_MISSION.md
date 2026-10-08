@@ -6,6 +6,13 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -36. Candidate supply, OOS design and Paper readiness, consolidated (2026-10-08, `V4-M1-CANDIDATE-SUPPLY-OOS-DESIGN-AND-PAPER-READINESS-CONSOLIDATED-01`)
+
+Local commits on top of `e1fba7ad`, **not pushed**. Record: `docs/research/M1_CANDIDATE_SUPPLY_OOS_PAPER_READINESS_CONSOLIDATED_01.md`; runbook `docs/runbooks/m1_9_paper_deployment_preflight.md`.
+
+- Verdict `CATALOG_INTAKE_BLOCKED_WORKBOOK_NOT_SUPPLIED`: the external catalog workbook was not present in the session, so the 200-row deduplication, eligibility matrix, bounded population and the catalog part of the predeclaration are BLOCKED (nothing fabricated). Completed instead: a hash-first read-only intake freezer (`research-py/experiments/external_idea_intake/`, 9 mutants killed), the pre-frozen deduplication/admission rulebook, the 24-identity native inventory, the OD-1..OD-8 package reduced to OD-1 (+OD-7), OD-2, OD-4, the non-executable predeclaration table, the M1.9 read-only preflight runbook and doc-to-code pin tests. M1.10 evidence producer (E4) stays DEFERRED with evidence (supervision gaps and failed evidence writes are not durably recorded). M1 stays `M1_BLOCKED`.
+- Next: operator places the original workbook and answers OD-1/OD-2/OD-4, then `V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-AND-PREDECLARATION-01`.
+
 ## -35. Post-Discovery candidate authority and OOS readiness (2026-10-08, `V4-M1-POST-DISCOVERY-CANDIDATE-AUTHORITY-AND-OOS-READINESS-01`)
 
 Local commits on top of `a75dbdbe`, **not pushed**. Record: `docs/research/M1_POST_DISCOVERY_CANDIDATE_AUTHORITY.md`; ledger G2.23.
