@@ -1,0 +1,157 @@
+{
+ "attempts_by_status": {
+  "not_evaluable": 10,
+  "succeeded": 1065
+ },
+ "attempts_per_factor_max": 1,
+ "attempts_total": 1075,
+ "bh_q_le_alpha_and_favorable_direction_count": 276,
+ "bh_q_le_alpha_count_any_direction": 443,
+ "classes_by_family": {
+  "SH01": {
+   "DISCOVERED_MODERATE": 1,
+   "DISCOVERED_STRONG": 3,
+   "DISCOVERED_WEAK": 10
+  },
+  "SH02": {
+   "DISCOVERED_MODERATE": 1,
+   "DISCOVERED_STRONG": 4,
+   "DISCOVERED_WEAK": 12
+  },
+  "SH03": {
+   "DISCOVERED_MODERATE": 1,
+   "DISCOVERED_STRONG": 9,
+   "DISCOVERED_WEAK": 4
+  },
+  "SH04": {
+   "DISCOVERED_STRONG": 1,
+   "DISCOVERED_WEAK": 2
+  },
+  "SH05": {
+   "DISCOVERED_MODERATE": 14,
+   "DISCOVERED_STRONG": 15,
+   "DISCOVERED_WEAK": 70
+  },
+  "SH06": {
+   "DISCOVERED_MODERATE": 7,
+   "DISCOVERED_STRONG": 38,
+   "DISCOVERED_WEAK": 13
+  },
+  "SH07": {
+   "DISCOVERED_MODERATE": 25,
+   "DISCOVERED_STRONG": 82,
+   "DISCOVERED_WEAK": 30
+  },
+  "SH08": {
+   "DISCOVERED_MODERATE": 3,
+   "DISCOVERED_STRONG": 49,
+   "DISCOVERED_WEAK": 6
+  },
+  "SH09": {
+   "DISCOVERED_MODERATE": 13,
+   "DISCOVERED_STRONG": 49,
+   "DISCOVERED_WEAK": 32
+  },
+  "SH10": {
+   "DISCOVERED_MODERATE": 1,
+   "DISCOVERED_STRONG": 13,
+   "DISCOVERED_WEAK": 14
+  },
+  "SH11": {
+   "DISCOVERED_MODERATE": 3,
+   "DISCOVERED_WEAK": 18
+  },
+  "SH12": {
+   "DISCOVERED_MODERATE": 4,
+   "DISCOVERED_STRONG": 7,
+   "DISCOVERED_WEAK": 23
+  },
+  "SH13": {
+   "DISCOVERED_MODERATE": 3,
+   "DISCOVERED_STRONG": 6,
+   "DISCOVERED_WEAK": 3
+  }
+ },
+ "classes_highest": {
+  "DISCOVERED_MODERATE": 76,
+  "DISCOVERED_STRONG": 276,
+  "DISCOVERED_WEAK": 237
+ },
+ "complement_related_factors": 140,
+ "edges_by_family": {
+  "SH01": 14,
+  "SH02": 17,
+  "SH03": 14,
+  "SH04": 3,
+  "SH05": 99,
+  "SH06": 58,
+  "SH07": 137,
+  "SH08": 58,
+  "SH09": 94,
+  "SH10": 28,
+  "SH11": 21,
+  "SH12": 34,
+  "SH13": 12
+ },
+ "edges_by_horizon": {
+  "1": 127,
+  "10": 107,
+  "20": 78,
+  "3": 153,
+  "5": 124
+ },
+ "evaluable": 1065,
+ "factors_by_family": {
+  "SH01": 40,
+  "SH02": 30,
+  "SH03": 70,
+  "SH04": 25,
+  "SH05": 180,
+  "SH06": 120,
+  "SH07": 180,
+  "SH08": 60,
+  "SH09": 160,
+  "SH10": 60,
+  "SH11": 30,
+  "SH12": 80,
+  "SH13": 40
+ },
+ "factors_by_horizon": {
+  "1": 215,
+  "10": 215,
+  "20": 215,
+  "3": 215,
+  "5": 215
+ },
+ "fdr_alpha": 0.1,
+ "fdr_declared_population": 1075,
+ "fdr_status": "complete",
+ "fdr_tested_hypotheses": 1065,
+ "min_bh_q": 0.02254684026675135,
+ "min_raw_p": 0.004975124378109453,
+ "non_evaluable": 10,
+ "non_evaluable_by_family_horizon": {
+  "SH13|h1": 2,
+  "SH13|h10": 2,
+  "SH13|h20": 2,
+  "SH13|h3": 2,
+  "SH13|h5": 2
+ },
+ "non_evaluable_factor_ids": [
+  "10e1fa5752ec4109f6bc6ba4b510904b",
+  "2a343ceedcce41872d90ea11a139ceaf",
+  "364fbbf8a7890ec84d8998171d094cca",
+  "769be9b1a642074b4d1c6084a12c10b6",
+  "9e4f54077849dfe9e19c7fb3c42939bf",
+  "acb6a81874870952d54938a6d5b5e565",
+  "b885ef1a46b1a484eb0206b01c62ca9a",
+  "b8fa4f1217bba241d5771a27b4a20882",
+  "f8c51e59c9d757b8ccea826e343bc579",
+  "fa1b87ec110994d7f7073a873c5d281c"
+ ],
+ "non_evaluable_failure_reasons": {
+  "zero_variance_factor": 10
+ },
+ "records": 1075,
+ "registered": 1075
+}

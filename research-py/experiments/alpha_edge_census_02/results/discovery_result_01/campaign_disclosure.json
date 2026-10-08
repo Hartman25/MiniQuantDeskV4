@@ -1,0 +1,29 @@
+{
+ "PROMOTION_AUTHORITY": "NONE",
+ "VALIDATION_STATUS": "NOT_VALIDATED",
+ "complement_dependency": {
+  "effective_independent_factors_estimate": 935,
+  "effective_independent_strategy_trials_estimate": 8280,
+  "factors_complement_related": 140,
+  "factors_registered": 1075,
+  "strategy_trials_complement_tagged": 1120,
+  "strategy_trials_registered": 9400
+ },
+ "conditional_factors": 1075,
+ "dsr_pbo": "DEFERRED_FULL_POPULATION",
+ "fdr_status": "complete",
+ "global_disclosure": {
+  "census01_conditional_factors": 1095,
+  "census01_strategy_trials": 38192,
+  "statement": "Census-02 is its own complete predeclared local factor family; Census-01 was frozen and evaluated earlier and is NOT part of one contemporaneous BH family. Strategy DSR/PBO stays DEFERRED_FULL_POPULATION."
+ },
+ "protocol_id": "d7a68edde045b46ff830b8f35fce571e",
+ "strategy_outcomes": {
+  "INSUFFICIENT_CLOSED_ROUND_TRIPS": 1712,
+  "NON_EVALUABLE": 0,
+  "NOT_EXECUTABLE_HYPOTHESIS_ONLY": 0,
+  "NOT_QUALIFIED": 7409,
+  "QUALIFIED": 279
+ },
+ "strategy_trials": 9400
+}

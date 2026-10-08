@@ -1,0 +1,4277 @@
+[
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "220cf3248964a565d062262577633400",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S01"
+  },
+  "trial_id": "ac02-d018d1ea1ef5bddf338ed4031d9f1513"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "6afabf7edc3a367b2b5b7e7f1f74e3f4",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-24f410f3c8a20a6ca40e6a3280ec1791"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "cf01035fc2fac3594cd691682327edfe",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-99968bde283fb1b458bf2a986d4217d7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c7c9742a99b21915aef201123654e667",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-22c0009f79051be83b388b75d3692006"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "86e944e08804034a0af13ced420edf33",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-f382ff264270d5fcabf54396c1305a0c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b396c448d19839c0120ecfb417ed286b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-a6daf781bf01c76970537db854e102ce"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "10120b1da4601d8cb7479374804ae30f",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-02628d0541ae9d149f2b15fc2420f950"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "9432c1f7267ceea82b520c74b37518cc",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-3dfc0b8220dfdc3c4b47d31d199c1b6d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4deeb024c406d2083b79d499649132a2",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-9df0bf9006340aab58509bd21d03af74"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "985d5dbf3154c085232dc04c513a5770",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-db20c9bc64a8abc86093707437b980ee"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "de7c3366b29d809f9972577a37f34816",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-f3294afe7e9143d1e953e90ad23d6ac2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "aa42af8454eaf634d7d2227163d3e139",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-e89fc5a54cf313319812c87cdfc2e0a3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2ce599ad24959ae3dbd47ef0ed24f394",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-570f66a0cb709a5d2116221991e54382"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d4c1308b6976e27c285b2b8ce995861e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-7105ca8bddedd4840b952759add5a670"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ef1d2d06b6afe6370e58d636fa131f06",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-86a5042fa027639de1adcdb525ca79c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "dba11805b463f5280c6d067dc0546bee",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": true,
+   "mirror_of": "S03"
+  },
+  "trial_id": "ac02-0d5b863e2846eae1b8e7e5db5824aee9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "42c841e22b791a05e94f84b4dbb407fe",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-a1f335a05ab4862e8dd7463ed53be3ee"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b8a417301c586186ae63a783081dec6c",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-ee0464da63b9ed7711ae1445942aef2b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b99753e72aa4b4b400c0bb6e47f4a09e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-b9034063d2c2a50e9833c59d556a080c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "81c11122e82cf82ea862948074e8bc4e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-57edcba2cbdc0b465dd3444edfe68e07"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "f6bd8de43b0ee848d1399f56f5e67e8f",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-30c933259e489e6cb59dfc45e2123bcd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c601a41b28359a828a551402e2c8ee20",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-474dc488dbfa7e4237719aeb2eeb4275"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ec6e6fb5924fd7f9a74482edfd24e140",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-7e5fa6f85b45b75cff915e25690b19c9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "53076c26f6d4ff1522beb0bbee8c9a7f",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-d902a15ea490123969d68c06ba764992"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5caf03c38a5312e05502ac8531a15bf4",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-510123a4ac23bd24571e8b81fc2d1475"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "70a31a177d6d24a565d95fa534083c61",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-55fc1fd3b89729e4585ff74e560a8bfe"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8b0f13280631737f3695c268a7f2420b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-ba989b88e4b9c91c90a594bf9c7e5d5f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4cfd491fb429e5a07cc9eb7d28cc8a8e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-c7d2ef22c24deeec68bd6ecd95fda9ba"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "0ac719b651563945d1bc32816485d383",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-cc2b2448864e4479082e25e79b6ce101"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "fd817238d8bfa3f088d14a8904814b0e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-92f2a19bb788f8f3a7d573eca3c4743f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "9a4cc16b9d6eedb1fdd51458560446b9",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-c587d3bed48f8f15b886ba1ef9179799"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e9d1e367b49e382a0ff8cd1f11e52bd9",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-ff398ba3b6a84865fdf60ad9f335d2a3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4a0baf72ae25fc6053635bd56a7b7692",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S04"
+  },
+  "trial_id": "ac02-adafa7edf5a1f26c680b255983c4b138"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "476414ac8feb3fa2c8e395adc4b52b27",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-f8fe4dc1c8b3f3ad63777491106076ca"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1c5287f4d58dc49ae85052a3237c1454",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-2b70f437e7cd5a09a306eaa72bef2973"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2220e8d873b671ab135000cf39a0d2e0",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-337fbd40f830380eb3032f5c19ce5a76"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d191e73b84b937845df6d62c29d291ad",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-c3b77f3c954b7d6577e17bb72313fdfc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "af0ade027212bcc258ce9457e22eef81",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-6e7f065aa6eeef5494a291437bd04bff"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c501b8a2ca435d2a56d79f769cbffc05",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-a3a47621de867a1d3fd3d4b6cdfe0be9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "51df548a501700bde76c8f46cdd1fe1a",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-95ac0a65c31013e4413db970f99b8be3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7ba57b6aae8264214efe42c83efe7c63",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-cc7171d5deb40ae445d7b1085961cab4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ec320b8cedb5b15c616c1366ae15ca7e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-79ba567aa60967b4d4ae2110419f73d7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c3ea8ef839de43bd4a40ad75e556b7f0",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S05"
+  },
+  "trial_id": "ac02-5ed893771a4e1eb8eb90c36b29b442e2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5d5256424a36897f6d73a040bdf97cde",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S06"
+  },
+  "trial_id": "ac02-74dd2514fbd9224f68326d2ef82c48f7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7f70f74667dc836e2aee458e4c2434e2",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S06"
+  },
+  "trial_id": "ac02-eddefdce52be2fef101f733b3643c1c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "46dd620d3c0d97edb62c073346316505",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S06"
+  },
+  "trial_id": "ac02-67f1ad9c45309f655d098f0bc25c3ee2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c7d0ca4a7c8aacc451772480d4704525",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S06"
+  },
+  "trial_id": "ac02-62dcdc2a068e7f0327de4b58b4b38a0a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a9cdc6533466b46ba623271dfa302a44",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S06"
+  },
+  "trial_id": "ac02-7d643f9486bb99690bb9778b6d2d104f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c509a0e8d53776afcf529278aff5509a",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S06"
+  },
+  "trial_id": "ac02-c1fae68eb332676ee155ae1955fdd4ef"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "143fda1d0a9c87bc2f3149493c041b21",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S07"
+  },
+  "trial_id": "ac02-b52580272689fe097696c366a09fb7e1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ebd900f7aa1acfce16eddada44839507",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S07"
+  },
+  "trial_id": "ac02-791cefb26fcc430bf04031678c0ea382"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a0a27de8756f2e7dac78c691a86ec5bf",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S07"
+  },
+  "trial_id": "ac02-2abd9a4ae7fe0dff6b213f36620aab95"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3211863fe7b44f48709720c4e87442bf",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S07"
+  },
+  "trial_id": "ac02-d8954e366674f46180f18150dda918f9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ed9a9c4b3b92476d05d8f96fc9ad3f0c",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S07"
+  },
+  "trial_id": "ac02-477704ea65cb59c2baed49f8a4e89bb1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "0203ea196d20183f35efb9be1578bba3",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S07"
+  },
+  "trial_id": "ac02-40a956e0f5c48c88d71167ffc1258288"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c854af3ce2b2a5fed77e228c2f11b4d0",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-00421bc9ce82b99c1e3a8edb6217044d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1abdf81c5d1b70b13d164180f13cd72b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-3c43090c9abf78d3847e85ff97111aa9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "fb91a8acf0bac4ae7d689a91b3afa427",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-3d97738458684a541a82d7a1ee94e5c0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "6cf94f86b5179111e12d958a11342adf",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-2d1372f26565b2b5397812d0d70e214b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "0ce914c91b925459da08cde658aeb90e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-857392e2c9a1afb6f0aecd223cf27708"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "68b8c8b4259a9284e57053f7323dd134",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-201e9c1e0eb3fe8dfedbcb89900dcca4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "742c3eacb6d0b208507f9526ef8495b5",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-64237d800bd6b8668520649173c19bd1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "23469810005f8a6705eb812dc2995dd0",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-7bba9993b890bfa8c85007241b730cc2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "250f7a9d497712bbe3cc798514755c98",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-d212f58b8e6a7d0cdb77e1f396e3cb7b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "dc1478294e61de85e6e0b46ccd6f913f",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-d2242d860b9c8101603669fbf7813a5f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c9cb62de2a24b6870afe7a88e964142d",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-5b03394673d55952a993440ea8eeee18"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a204c2241a39addc9b12e1d8183b64f3",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S08"
+  },
+  "trial_id": "ac02-2f6f0fca64459578e6617082e95592bf"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3501fe5e438dd9d207dfaced8fba4d8a",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-aafeec5293b382256b74bc5feb941098"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "96029f5775fdf767ac405ab8d0479879",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-2a6add7fcef2c0bf30722a94e2131f7e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d1163b58b8f2b7b00c2ba2f4d86b2e4c",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-4bc76f61d26eca7ec8263b21497773d2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "af45151457dd7716cbc2c414270a926a",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-0993a8a1bee9e4ffb637d0d004f77d1d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c6bbf220c1e9518571efa2bdae86a192",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-e80fde7e701991df8391110cba49f204"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d7b92f9baef58a03fb943b86b936cc98",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-404dd29bfca809725620c26ee3c6941a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1d1a2cceb2eb97cd6ab2cb9c323c2601",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-73fc270ee5d318fb735c8aef23ec7ac8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a68ff7515ae2af147cdde85cf5742bd2",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-075d7894cc90ff94ed3b511ffd381691"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b79ab56ee475fa15154a5238889313f5",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-cd700264692e862ceae25083427171d4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c196e85891c4fafa784103b50c8461cf",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-04d58f171d2f2cc285f838eaf6c437f1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d0f5bd8f18ad0499cd674dd24fd1c859",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-cd6866702e11ae167e6cc016ab9a96a1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "721a0abf99fe49f9699c71a2c5d9fb89",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-c5b693711702e5f5889b16b3e06332b0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8432540249117f17241a591efaae227e",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-57062d7772dd3c44937da35d2cffaf7f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e03a394360f6af8cf648eb682b33f402",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-612db3e49d0ac694dfdb810c8e8c4914"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e6f722923d8fe9da43f0275469461fc9",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-b46cb2762d9f3afaf9d0fd61c6fc2b8c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a317894bacb5661786c31832606a2a1d",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-bd7142aa3cc0cd21d47bc66cfb0b4448"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b8a966d52fab9cc87008494a4631914c",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-d89d83c267d2d21c0d7f58f394d7391c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d48689c915d6d0b6fe02228bf21ba767",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-71f41cb7447ecb23d632ba351832c91b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e9020b5bdf18ee9360897582cffc2f77",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-fe43f5f9e78d5c69c3146d30475acb7a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b4e188b8a49b3f1563bc461ee9d8cd13",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-678d7ee09ed2f460c10dcb3ec2f06d2d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "f23cb95ae799d689d541023a6cf9338c",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-8176601c0fb68d677599339de933f1a4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "96d8d8d8a2a262ed8d8e84498cb9e74b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-10cd06c9cc0ccea023771cbeca5601c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "593ca794a96983b09efcb77f182b8167",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-9dfaaf7bbc111071deafbfdf0e59acb7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ae1ef34bde88bd45a13c094fc590febc",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-d66e43e2b91caf4b1190711145d4f576"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d6d4025aa39f81c4ba0acd07ed41981b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-94f232e00e5f3ebb04c836dec0235de0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "34a64e279c49acc470deeae54441e5f2",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-e7d6fefbffe4ce4add603b82f078f532"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "6c0351ff21683379927ec501d9572064",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-774c2b9cfbc4afa7143cd90a5189ab95"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e1f1de4ca9fd0b71ae4b3ee7b34dfd4f",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-c5bcc084b998ec3904338b3d35229300"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5d378057e7913631079204020364a438",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-dac64a720344a7fea2232c1b3288eefe"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7c30b8fa0cdd78edea79c119c3d0e45b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-f20482542ba946004d10538d502eb8d2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "233d665d9ec7d6663659b490c3320a4f",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-ed5f69836e9076730fe64b5df2919e11"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4f45fd0a976030cf70877f6aac697868",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-7639be5f333321cbc8b5f64287f616b7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5d02f90556edf1d43058811568dc3996",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-65f9e7575b693c2c523775cec00358c5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d8df8a12f6bda35edea6c32a0fb68ad9",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S09"
+  },
+  "trial_id": "ac02-73ea98714c59ce3ac6fe4fc8a15cd83f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c73b9355c6ed34ba2fb267cbe8a9d66f",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-4b6085e9bc75f14a247487587fcc128b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "417d213574d567b3c703e03cc4eb32ea",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-bf07e4572d9004a1188839548f26e242"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c0b442e0635761e4d854b74e7c5fdeaf",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-c0e093b5894e6f1fc745578cd91700cc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "cabaa8ecd8a7b25e49e47539631c1f3b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-6e55f218004cf14b62e78a6ce7929501"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d36fb2869280fe09a83936f42268e223",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-bf81ad8b8fbddeed47be875deef5d6b5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e603caf16a4c03e9d28389cd84ae8b0b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-5b26ca331763f5aa637fcc93c8a20ba6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "27b7c551324b6d98450b5bbab166fe23",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-ec4338a5b5fd905b27d4399b97fe663b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "f97bc2fd494248513269bc014c92f7ff",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-79efa7d586337a1437c7b9c9065cedb9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "01b76a41aaf9e259069e0953dde8d949",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-b96890d8625c1504ed532cc557218f3e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d6995ac1c293e6157f2dbba037fb7e3d",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-7d1989cbec6c78534d0fa17426c8c188"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "df95bc0fe219168a7503bcb1e8378cc7",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-b671c15fb2bc327f94a94eb93bce8bb7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "f1bd8521d1dd476d8f48fdbaa6a9ab68",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-8077f5ec836b60272f8e854b4f150dc9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "33f04662718275188bf4713bbaca939d",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S10"
+  },
+  "trial_id": "ac02-afd9cdf66dd34f9585fe3299ec980063"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "92e8494807fbcddbb4a65d4ed5c35974",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S13"
+  },
+  "trial_id": "ac02-ea714db4e8b9a1143f98217725f2b9d9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e663d047b8aafa445494a3401ee629f4",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S13"
+  },
+  "trial_id": "ac02-97020c14dc89f1fa242405862840bfbb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2983b0987c2b9a3793a791d14025be3b",
+  "side": "short",
+  "tags": {
+   "complement_of_census01": false,
+   "mirror_of": "S13"
+  },
+  "trial_id": "ac02-c03361f6467d44324ab1c58cfac6f698"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "04ffc2b82b096d59b963d0149dce7c31",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-15cc8fe7ef1280dd1230d9b8bccfc275"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e3d63e742b2badf3c043709fa52b9968",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-b4da6340560330a42f9670f624f0c121"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "85baa8adb1e64c1386572b0b50aef3f4",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-36480fc5da112f4a61230a4119ce3200"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d3c9f078449c55f061a10de436edd80a",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-8cd39e5656f881e87011cda64235bc7e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "849df30728d63046de087234117751bc",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-7f18cd83802c4de86ece3adc2d52f7a5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3d9258b151638feddc4d288a93100690",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-d9ec577e69c492f8f6aed593f1df03fb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "08895f81f39b492204305446e515dd4b",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-bdd199f3ba30f8c6a0878c2d453aeedd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ffb9007aef5273afe9f9ef833bcda078",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-b2938595797c0cc39d4b9ebff128d870"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "59f8e2a86f2457d7b0f81aa7af251269",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-1acb4f41cea972998ae1592882fe82ca"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4bff8aa2bc42cad6099c3fe27bab85ea",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-da55be01a6f6d00880f8d50454431cd3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "0ce78edd773bf421b69c3bec9ffdd2cc",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9563346e70efc36d6131ac0c664665b3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3e0119a8589049e87264fda60a6645b6",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-fd97e92cc83dffd6fe993c7f3325e985"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "14379465ae20001a37aef64765c914b9",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-33fcb053b6c4d8fcf8262300927def2a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5e89ce1a70ec8022be589fbef8ad1b3c",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-e914638e14783a8b55c34bfca61a4b2a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "bbb93a8c51144c336f48dee09ef30301",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-ba5accc45e3eb6b711476b43568f8d5c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7d199188d090668ced979bb35a9f3546",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-d2a1f71553fa4fbc77805bb7089a4af3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3043b3f5c7bae71e9d34f3178399958d",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-a94e7d468d2562a456556316a5f6a2ee"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c8fcf4bb18d4b4b21e41d74b9099bd3b",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-0b529c8b6084504bcc75942e1173f0a2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "fae376e494c5e3afac12febd2bc840b1",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-405cfb39b7fbe11e0d7da134d06e6c5d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7e919babdcb5314913f0d14f729c5789",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-fb6fecaffe5ad2917e7eb5e6f70dd9f4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "6f70ceb8c225e1e8128f0816018ef29e",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S01",
+    "SH01"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-21011327a1d9ce41a7e2ef38458d2f8b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b96560168a740b53e9d0b5f2a351e374",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S02",
+    "SH02"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5dcec57d6d71b33ef84192f34c961557"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e0e3ae7ba0de8278f5dff6a79c640eca",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S02",
+    "SH02"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-b6942ff57562d0c1b08cfc4e314819fa"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "6c1efeb861ef1b00c948cc3e61f758fd",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S02",
+    "SH02"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-504fb45c9ca946d3e384d850592ab12a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "f927af27115656496cce4ae303cefab9",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S02",
+    "SH02"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c35488734c2977fba2c696b390242940"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8133e3f979a464cf74d477af89e058c9",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S02",
+    "SH02"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-7652be263b52ee8e286721afba98bc99"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "66d9c9c95062d5a3700c705b9ce2eb46",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2b108af4124238b7c791ae9edf9847e8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "61107c8bc455c2c6173e56e18710db8a",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-685722a3eb1ff7a5766210dda8c4b3cc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d0666639c5050138474f888455900562",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-fa2307f7acca51d74cd10b62a8b09a18"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "20afec960cfd005bac02a6a9b279b628",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-44e46b42aa95bcf2d37232d4e3a822f6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "9c0a637211a17ab80862c875b61741d8",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9391200203a18848bc30a3626d1ede48"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "0c44482877bfbf912a5051c8a8dcb78e",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-dfed03ac5b50788928b1544dfe81f3c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "67f8f269198a97b3a6a3c59914676c86",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2e4acde2143f251d445fb95d4ee59ddc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1e61df6c14fd0e91f6059f5abc0fb91a",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-09731120ff1f43841a2d26cba1d54a42"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b8af5d8ae0fd7ac9868245687f23c0ac",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-f08f773e0baa5e289d9abdd272c7c92b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "60837b87e15e4306339d5d0c34a56356",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-4ef9feeb6c98597e6ff9945337060386"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "17438bba17e8e237b61a212206027e95",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-d85a27fd9231e88774cda98644db1121"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "0512c73637a9509117a31e3ddc32bd54",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-7798670470f5c2ddaae74d80efc994f6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "92a67e1ab23ed554b52437019fcd5173",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-8067221880e87467bbcb7ed2fe31a096"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "22fb04ad605f58d7f54d5b1e400dbb6a",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-0975c4a8cfe96048009ed6db776c6dd7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b45f13df023ea4daae876f2aa4d34d19",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-a16652a287ffc14c5f961cb3aef55751"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "6e922ae943eb87d04dffa180f77c8da5",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-104f6a86c27b23e91fc72f5a5db4e3a8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2c6d3c4092490b0e9b9641374206913b",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-a283c5dd65b10bb789da18a76c08040f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2a25eeda0437e5d4dcbeec73e2e4a781",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9a1a19345ebf0616fd741db59f287098"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "bbbc6b950c42de535b46680ce0f8403b",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-7a85bed69db19d079edde183285bfa42"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "6757fec70c948ca22fbbe458236e4ff2",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9b5cb5255cdc86b4995ecb13ba5de406"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7f6b7c6d6b26d5064fd5bbc845d8c016",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-ac330b2457ab6edd277c3c1bc167c457"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8326d4c4c05607f4982fe2bb0ad2ac3a",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-79192efbb6758558e85533c404528768"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c3a7befc32346f9d77c17f5250ddcd01",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-cdaef8b78a86b1a8e061f3d5d200fa16"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7d9117fe455d20345ed3b5a25cee39be",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-8a92510dfdaaa7380d18ec3be09d751e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b06a7d7a32332b0c21c2cb0dd7114f2b",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-6140d6501293136637ec2bd571abf98c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "db582b9ae627a29031ba2502e426fee9",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-4f58a88bd3208edee8d7714c4e9ae633"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a1937c671f6484816f2f6c7deb0a5fdf",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-02e4b16046fd224ad497e79dfe5b5ea9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5094f9f9bf6d6d78dae0d6357fcd0430",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-3c77ec8a087e0895b2e85ae172adc1e6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "42797e3e691a94efef6f8d393f1afa26",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9721e8a581a742a4a55da4d2802828fd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e19d2561a1b9965086f8ed10e20a1435",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5b7e28a8895ef1a57a9080684e91f624"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1a14ed691c16512913620626bcf44354",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-6d6f11f08da905eebe1a3577ffc185d6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e4cb1a11388329618fb1107d667aca32",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-557eb601d9a27164c9654641d1a8c14b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "992d488d61e9b5102f62ce2e2a5c6dda",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-4055102bcb85cc9f8ccb9d130e4b0026"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "94772843e5d0c328e6c07dbf559896e3",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-3c78b5c9cf5b92ee07567c3d69e388fc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8ab12dfb0f1bcdb2287a770bb7cb6f14",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2699eeaae8aa22f4ce6775d2d6a926ec"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "81c49c2b3054c2da4a59a1b51461dd4d",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-80b62820415573ebe96cbaf5bdd5f0b9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "658f22861d9a8a22264c89e821a09d27",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9db5a3c312ef42d6e322a6c104d3e918"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2b983600cca177dc4152300ff3771d57",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-465d71d7d34fdcea49a1dbb2d048ff0c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4967cf13c0950640fa205b2bc61039bf",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-117e966e742b28d0050b8cfa0e5a42da"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "36575e02627480c18fc2be1f0793c997",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-391ff7ad89f9e3ae109ce69a2d6da376"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4804df3e7ef9c09b8d981a443618c38d",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-44349345d678fbe6bfc02aba9f15aad3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c3440fe48d14d73011937cc68bfac020",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-da47a141e6422d652ab61e1e14c228ae"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8a8a8317a8b9a4a652d3557016bb4354",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-98865840fcbabe58d1db12a9b76df6f1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4af7d157d08fc9f71f204e842eef66ea",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-a31d26ff94d19406a7c14d72fc991220"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3ca34c8965aa68aca13738e06ac414a4",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-a31dc8d237144e1ba2fe7cbd9879ae62"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2020f7f38a52fc6207d9b3b7b68891c0",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-43c5f01ea2eca6a23fa09af70d9a2d1c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "74fafe6fa6ab7007e41aaa4e6266f041",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-e352cd76feddb3bc227db1138f8f2e90"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "cbc1b05f032d784c6586486b09294c2d",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-88161b4630d59ef00922bb8089755bfe"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "11c7347468bacd6aa5e4cc294d0df4ab",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-f43c6747906b958355fe7661c184cb9f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "35aff95477984a5d69984ca0d6d31f39",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c9a72d86da55124674146df724c2d95a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c6640091d233003863dd00a421c38eba",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-eee425e8f4b2efcde469e517dec75623"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "22239660573d8841528003d413959dfc",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-49225962c0c1ba6b8a61e441ffc368b3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2af06c4580056078225c07fcd0fa2fd6",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9dcb653cf4e57904ba0f31c2e812e4a5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ab9ca55f91003d874761f79653a7290f",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-0f4a923c708aa1f30cd7345a1d21fb0e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7890845382dcb93f3892c491552c40f6",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c42e1c04a0a5e67023edabefcd9176d5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "f806876cd2bf6388ed1cb84d4be10065",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-f5887c7c178844045c419c85373cdc82"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7629d722cfe21f9bd3d04d446445387f",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-93994d656915031d35f22df5187a1b0d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "35f26c6ecd7035c1420fa388e34ff6e6",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-6d4cd462a106a984b2d481ef1d9ff625"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ec871abe989e5622ad42e4a9d63860f1",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-ba5ca9becfe6443ecabd31869fedfd78"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "291362152ac785fa872db822ff438549",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2d532f877edc247c9c38fc99b2e69a86"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c3d0a6dbf85a5ef6959364df97bcabc7",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-b454373c7ce80d9fd0379c4e7de6bc1f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a2ac1d3a934c25eca3c8228f5c0ba6ec",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5dc1777a83722a10e8aa69bd063d62fe"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4f09801a09c648b6075a0baeed143e84",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2a56923e6ddb5db9132fc777dd254be0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "09fbae3b21190a4dd6b1661e59686238",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-f6585d97fbac9820458ecd0c8ec2dcbb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c2fa90b7eb1ea47ed4ac55ad04c6f914",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5a7407ac68b5ee54d89b9663fdd54722"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b8c8f86d34514603b0116933ffd9e1fa",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-cc00796fffbcb10c9dc9b7f7bc879921"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5ecbecfa38072af3d2afde19df1b2c6a",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-b766fa00ca77419fe6813818f6b07417"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "743de39b6b2190aa79c835ffda07bc46",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c8c0e83243d3675b8dba9fabd69dba88"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c6b6cacf51b3813f5ad01e043aa14272",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-1fd55adadd73041856d519605b03c24b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c3f93a7ebb2c617e5e9756b00e5a6ed8",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-92e253a0dd2df509bfdf4ea4d4ebb51b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d3312c48c9ca459b678531d81d556eff",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-cf810cd18c222598662cb9a2ea681d57"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7bc437ed53935cbf8a1c042b8b1bc28d",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c0986e1e3775fe071ef2a785db672d38"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "7db0b508bdc848129308a53661a8ab8f",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-8caabfdea4734d7b950c6521a5bc85d5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3d0071ae043c7908de2a58b321ef3e1e",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-0f802b1bcdb889a7aea49afc1d901ace"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "dea1ddda51f5e93f0fb44cd595fb7b53",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c591a5809befe2116776058156f12b7f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3c715f763bde83fdd131ec63f223544c",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-a06d5c52277b9473b85900c0634164d4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "fc7313b681b9e1f3a18faaf5d9037f58",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-081987cd810ce0236424db7d78080770"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a7520aae4626ba170cc8d2f398cc9ad3",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-d8cb627ea45b638b623b9fcc097fb7cd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4d904af7e3efcac2feb0e920cf52ce0a",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-14aebcc514971bdfbe9c964ad82f28cb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8a194f4237834b9011b51ebb990f1101",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-f229857b406c9384284fae954478dd42"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "dfeee2d78b472e6d3aaa0a091e9bc4d8",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5ff1cfe679cf85c829e839703b39fa3c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "e313b68ad488f535a54a7b9730a015ab",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-87e1b13d8cbda433209abfe3d0fcf091"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "82172ef5901cc04a9aa1ed13fb905a72",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-54e3b834c9c7732c8df099026458f252"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c3e02884843c6610ebbcfeb1d1e350f2",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-4ef0fbc5b3bf948975b62b227b3da570"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "928dfd43f5f8bc8815ff1a85924a6260",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-0c1afcb98117b51d37d803788e35ad82"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c9e455933228b4d8baa2164ed5227552",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-8efb81da7b3cc1b4886564d303ae758b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b641f4bce682ba2933d9b1fc72ae149e",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-8d85f3b547076440c17a677f0fe22ac7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "591c93a7771ecfa3e82fddde59512683",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-df19c0a81af69eb0dda1e87420383d0c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c896396996348e3407ee184c8fde27e8",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": true,
+   "legs": [
+    "S03",
+    "SH03"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-128371096035124fe81b74ba45d104b4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c5de3a16fa17aa13a061862b1b5b64bc",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-61008e60ad6d9d98f840a81e272a0062"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1193826086bd9ed5ac820f80c6d80270",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-657058f9c47d62d53aad277394aa6754"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "14c07aca52472dfda32474be352cc4bc",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5f2e73726fc7f1d90015fcffd1769ec0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "eb0559d47303b1f95f5b741836a3bbd3",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-7b8aaf8a563cd1a241c1fd59792e5cf7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4c0dfc43197ae404900057db7f111a2b",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9a514c23b4178ab30210b0b887fc94fc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b90cb9b901bd43492ef748229fd620d8",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-30fcb1bc555bd934f2c548d911074730"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "9a271dfae0226d72d7ca2eab516a42c6",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5402f2b568d14f43c75db6be35590bc0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "469593ea813f42431a977794aea2e2cb",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-43adcda6c1b1a6c6e05a6b88280eb0c9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1e79c06316385abac76791851eb2bd83",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-6abbf0fe225520e07a5880ee3e7a48e6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3d4c3bf28706ab4433f28e7098b119e7",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-6869e00b35799347ffd69e1a16f99179"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "63d322f0110fbe7cbb08166e908edbfb",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9bd58e2066053e8f915fddb560953fa8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "45b018d0b1a649dc53cad2b36c11fbec",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-7a1491f0f7289bcd7d0236a85cdedab2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "875944aecdc6a6a63236aa30ccd5acdb",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-57847e187e49e709078f588b34b4a120"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ae312a6ee6c7ec44b61a13c6eee39dce",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-434a7bcc2e58206b967845381c8a0f83"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5a4e18dd4486d4c1d4879b5395cbcbab",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-f28e31a8c907e4386a83a3d5a0272329"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d0521a190a74367eda5d5c796fb9a8c0",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-1819b18fbb8f8c29eeffa83a1f422479"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "428f93672ed1ea1a1093dde312d85aba",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-448f32b9ef48b9495fba6ebc6a6a2889"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "98234d65690d92e4bea7df207a17b72c",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9790b3a46e5c3a944010788fbf01fc95"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "702380853ae8e07645c000290e07d567",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-585c519ecafd73165f0e9289cc350131"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ff2c73d327bff41a5afb0399f084e2e5",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c23775ba758d6952d8df8db528ddc830"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4b039fe88d528e9f8e6deba09349370c",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2c07fcef3ff268de701a5dc349d60cdc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "MODERATE_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5db0b6cdf2b28559687deb163e25689d",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-4172b2f6908240440a87739033516444"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "c3a7e13c58ed0f60fbf5d2978ab22988",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-3598f232a6ee86f7aec136e36a597cc8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "003f096969fb1e2e7c7fe1b38ffcec78",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-7638c64fd9ba2b8ba20d1227694e22d0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "9c49178313954521dfe7dd7058a4a3b6",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2f27e07047fe9c9272eb5a60c547245a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "dbf23d92a50928e673916004ddae99ec",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-8843e2c4dbb5e49550b64585eb2c3b17"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "f985c384687b2a9705d46a1a0ac6fb01",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-f323998d3532242364edad3a85cf78cd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "494457a7de1d04aab3a7eecaca64c117",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-637a560791aa6c4081b081399c89c1e7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "497966b0a5654c5f3282f653fff1b36b",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-b2523156f626d54c812aa067be8701e2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "590e2732a8fbb80b72369eb09035881f",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-33dacac80194e3ee35a0c6bbd9e33ac7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "03f7d573880f485d0e088ed454b0d7a7",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-2f767b0acd8791a9f62e66c05a4bc205"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a3a817135d361052fb8397e04a9db077",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5176d52ba3e095e56724505369f4aa99"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "STRONG_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "0bfe0556c174eadbbed89c92a5378472",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-fd8c76e9cbd771c50927b36031dc7660"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "1cc762dbdaa07d73aadc96bd982047e5",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-5321f3e2471a0da2d2d4e2bb29d7c24c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "709b7d6dbb5915338ecb5204f694524e",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-0a9f41a7d8d09292c50b6e216177dd46"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "449a07c1246e617ae00b3dee84e63df2",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-df6e4ee29e5a4755ac605fdf7caaca79"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "ddf8701ea712892991a7e5a278e0f1e2",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-9fa11bb864ed7f2754f8e7577c2147eb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "2d00ca25a07d0cf20d13ff33abeb0510",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-67e7991e6bacfeffcf5a8510c1c85e76"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "5446733ef439b0d78d7b6c8c3464ec9d",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c7e8b4f13c66816748175ece8bb8bc24"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "79d14c42e866527e87f67dd51c014716",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-fb76fd7f835e382b83322f87adf85590"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "3e7a5c4720d587d2149e42edce680c14",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-bb368171a984b543796d429a4b435e9e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "a31d08195c4bd3ff7b68aee22a2ced36",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-918f48b154dd4869015d8d24ee7d5a05"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "b1f275950cdba3f2e4384bdc6d7d0bc2",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-43a4ffc4b2155f19a6e7c0765f229493"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "d0a527ab109c7ed5d6aa75a338ad3822",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-323039f256d11d47f0f5abc6c92e6e77"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "8379c7a6408815e184758e0119c48c51",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-a5401550c2d697cfa9e2e0daf6efde77"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "4b537ae4baf922af337604da557c5918",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c761e5a29d7d652b01d4c1fe82db104e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "band": "LOW_SAMPLE",
+  "class": "DISCOVERED_QUALIFIED",
+  "edge_id": "620af973119e96fa97b6a21f0791a170",
+  "side": "long_short",
+  "tags": {
+   "complement_of_census01": false,
+   "legs": [
+    "S10",
+    "SH10"
+   ],
+   "mirror_of": null
+  },
+  "trial_id": "ac02-c8e480d2e9df0e62e226b6af8909c390"
+ }
+]

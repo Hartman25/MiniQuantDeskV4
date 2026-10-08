@@ -1,0 +1,240 @@
+{
+ "attempts": {
+  "attempts": 9400,
+  "blocked": 0,
+  "failed": 0,
+  "interrupted_or_retried_trials": 0,
+  "ledger_trial_ids_sha256": "b36af980e36695a9fdde94aa5a70aa63da32c50bec8633496fc83fb4fc84c8fc",
+  "max_attempts_per_trial": 1,
+  "registered_equals_frozen_population": true,
+  "registered_trials": 9400,
+  "started_unfinalized": 0,
+  "succeeded": 9400,
+  "trial_attempt_digest_sha256": "2ed88193e82e1a277c31b43a5cbd803d633f3040edc9a4cb98e010e323a3a909"
+ },
+ "band_by_outcome": {
+  "INSUFFICIENT|INSUFFICIENT_CLOSED_ROUND_TRIPS": 1712,
+  "LOW_SAMPLE|NOT_QUALIFIED": 1938,
+  "LOW_SAMPLE|QUALIFIED": 198,
+  "MODERATE_SAMPLE|NOT_QUALIFIED": 1688,
+  "MODERATE_SAMPLE|QUALIFIED": 70,
+  "STRONG_SAMPLE|NOT_QUALIFIED": 3783,
+  "STRONG_SAMPLE|QUALIFIED": 11
+ },
+ "by_family": {
+  "LS01": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 4,
+   "NOT_QUALIFIED": 135,
+   "QUALIFIED": 21
+  },
+  "LS02": {
+   "NOT_QUALIFIED": 115,
+   "QUALIFIED": 5
+  },
+  "LS03": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 2,
+   "NOT_QUALIFIED": 189,
+   "QUALIFIED": 89
+  },
+  "LS04": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 1,
+   "NOT_QUALIFIED": 192,
+   "QUALIFIED": 47
+  },
+  "SH01": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 11,
+   "NOT_QUALIFIED": 148,
+   "QUALIFIED": 1
+  },
+  "SH02": {
+   "NOT_QUALIFIED": 120
+  },
+  "SH03": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 39,
+   "NOT_QUALIFIED": 226,
+   "QUALIFIED": 15
+  },
+  "SH04": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 34,
+   "NOT_QUALIFIED": 189,
+   "QUALIFIED": 17
+  },
+  "SH05": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 173,
+   "NOT_QUALIFIED": 1257,
+   "QUALIFIED": 10
+  },
+  "SH06": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 178,
+   "NOT_QUALIFIED": 296,
+   "QUALIFIED": 6
+  },
+  "SH07": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 133,
+   "NOT_QUALIFIED": 2021,
+   "QUALIFIED": 6
+  },
+  "SH08": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 393,
+   "NOT_QUALIFIED": 315,
+   "QUALIFIED": 12
+  },
+  "SH09": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 451,
+   "NOT_QUALIFIED": 795,
+   "QUALIFIED": 34
+  },
+  "SH10": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 37,
+   "NOT_QUALIFIED": 190,
+   "QUALIFIED": 13
+  },
+  "SH11": {
+   "NOT_QUALIFIED": 360
+  },
+  "SH12": {
+   "NOT_QUALIFIED": 640
+  },
+  "SH13": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 256,
+   "NOT_QUALIFIED": 221,
+   "QUALIFIED": 3
+  }
+ },
+ "by_side": {
+  "long_short": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 7,
+   "NOT_QUALIFIED": 631,
+   "QUALIFIED": 162
+  },
+  "short": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 1705,
+   "NOT_QUALIFIED": 6778,
+   "QUALIFIED": 117
+  }
+ },
+ "by_symbol": {
+  "DIA": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 102,
+   "NOT_QUALIFIED": 361,
+   "QUALIFIED": 7
+  },
+  "EEM": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 71,
+   "NOT_QUALIFIED": 381,
+   "QUALIFIED": 18
+  },
+  "EFA": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 69,
+   "NOT_QUALIFIED": 383,
+   "QUALIFIED": 18
+  },
+  "GLD": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 51,
+   "NOT_QUALIFIED": 412,
+   "QUALIFIED": 7
+  },
+  "IEF": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 56,
+   "NOT_QUALIFIED": 388,
+   "QUALIFIED": 26
+  },
+  "IWM": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 97,
+   "NOT_QUALIFIED": 373
+  },
+  "QQQ": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 106,
+   "NOT_QUALIFIED": 340,
+   "QUALIFIED": 24
+  },
+  "SLV": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 37,
+   "NOT_QUALIFIED": 430,
+   "QUALIFIED": 3
+  },
+  "SPY": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 113,
+   "NOT_QUALIFIED": 342,
+   "QUALIFIED": 15
+  },
+  "TLT": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 47,
+   "NOT_QUALIFIED": 355,
+   "QUALIFIED": 68
+  },
+  "VTI": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 111,
+   "NOT_QUALIFIED": 341,
+   "QUALIFIED": 18
+  },
+  "XLB": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 94,
+   "NOT_QUALIFIED": 371,
+   "QUALIFIED": 5
+  },
+  "XLE": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 80,
+   "NOT_QUALIFIED": 369,
+   "QUALIFIED": 21
+  },
+  "XLF": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 71,
+   "NOT_QUALIFIED": 396,
+   "QUALIFIED": 3
+  },
+  "XLI": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 91,
+   "NOT_QUALIFIED": 376,
+   "QUALIFIED": 3
+  },
+  "XLK": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 111,
+   "NOT_QUALIFIED": 336,
+   "QUALIFIED": 23
+  },
+  "XLP": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 93,
+   "NOT_QUALIFIED": 377
+  },
+  "XLU": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 103,
+   "NOT_QUALIFIED": 362,
+   "QUALIFIED": 5
+  },
+  "XLV": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 108,
+   "NOT_QUALIFIED": 359,
+   "QUALIFIED": 3
+  },
+  "XLY": {
+   "INSUFFICIENT_CLOSED_ROUND_TRIPS": 101,
+   "NOT_QUALIFIED": 357,
+   "QUALIFIED": 12
+  }
+ },
+ "complement_tagged_qualified": 131,
+ "complement_tagged_trials": 1120,
+ "dispositions": {
+  "EVALUABLE": 9400
+ },
+ "executable_pnl_true_all": 9400,
+ "outcomes": {
+  "INSUFFICIENT_CLOSED_ROUND_TRIPS": 1712,
+  "NOT_QUALIFIED": 7409,
+  "QUALIFIED": 279
+ },
+ "qualified_executable_pnl_true": 279,
+ "trade_count_bands_all": {
+  "INSUFFICIENT": 1712,
+  "LOW_SAMPLE": 2136,
+  "MODERATE_SAMPLE": 1758,
+  "STRONG_SAMPLE": 3794
+ },
+ "trade_count_bands_qualified": {
+  "LOW_SAMPLE": 198,
+  "MODERATE_SAMPLE": 70,
+  "STRONG_SAMPLE": 11
+ },
+ "trials": 9400
+}

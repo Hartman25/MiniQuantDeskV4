@@ -1,0 +1,5303 @@
+[
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "83b62b571edda39c0a4f4378b58f050f",
+  "executable_pnl": false,
+  "factor_id": "0045836a5f93b84cf7adc5e7ef1a6a9a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "934920f712bac59f2c8c43c51d5480b7",
+  "executable_pnl": false,
+  "factor_id": "0124587dcf60e3d9d45d1a7224d6b2d3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "959778f37ef5e84a272d3c6aa759eb50",
+  "executable_pnl": false,
+  "factor_id": "01ef4d30f3cb2a172f9afe7f41101619"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9afa502c37bba1d4b3ce32bc0d5209cc",
+  "executable_pnl": false,
+  "factor_id": "022ed4a75a7cdf874100690ba32a963c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "2e9bae5451129524f0e56039f7b5ae9c",
+  "executable_pnl": false,
+  "factor_id": "0247ef3590452ab90c0a8ec82da22efb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "18d2475077a46ac18a1eb51f5dd03688",
+  "executable_pnl": false,
+  "factor_id": "024fc83fe00ab16fad0f2433e84ee167"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "4d0beeca4bb34e3eceda9818a333cb19",
+  "executable_pnl": false,
+  "factor_id": "029b90892d2d47d6dddf75a53095dbb9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "edd539408823d71145db1f3a9a826bcc",
+  "executable_pnl": false,
+  "factor_id": "0312dfd38c82559a61024ba9f33dd7da"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c1547da4fb87123b57d605dbd5432f43",
+  "executable_pnl": false,
+  "factor_id": "031c6cb8ec5824cd69c58bbb1e1efbe8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5653e696fd6063426bd8cb4f8b50129b",
+  "executable_pnl": false,
+  "factor_id": "035553a5c2811d0db634b175d2099d87"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b2184f75621c40d1e55ccc6c26666428",
+  "executable_pnl": false,
+  "factor_id": "0423fdb077077ae0dc2c3f887a5ef4bf"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "329e04c5bc20cadc9a77d04fec7be4b7",
+  "executable_pnl": false,
+  "factor_id": "04302cd37ed6b869a695d78b6c0f9eba"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "bd71aeafbe3747ead2b1e453df9ede98",
+  "executable_pnl": false,
+  "factor_id": "052e41f1f855d26035626fdb0080ae4f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "372bfba701a535938810921e1e7a9349",
+  "executable_pnl": false,
+  "factor_id": "05c1cf8b02db426d48c5e48ebbf72852"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "64ceb1759408137d102ebb27e8867e52",
+  "executable_pnl": false,
+  "factor_id": "07f7e3f5761e1fe0bafd85cb2ddf9401"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "78a54ba4bb0f69dc6370e30c6d4d7ced",
+  "executable_pnl": false,
+  "factor_id": "085741cba42d272a69e230830c291e1a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "61975eb9b18a67529e63bfd93702f766",
+  "executable_pnl": false,
+  "factor_id": "089872c2e44c5cc40cbf75221a2959f0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "262eada3546309ed1c86921f524d5699",
+  "executable_pnl": false,
+  "factor_id": "08a29c22640b014594e4d05588deba89"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "63bd085e0ad8e66a4b7bb3abe637e94e",
+  "executable_pnl": false,
+  "factor_id": "08b7da4ce93ac803979462b534c01615"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "02ddf4557ff5ea6bb74fb5752c23fd72",
+  "executable_pnl": false,
+  "factor_id": "08c3589a68c21c0709c7c0b62900a46a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8a8717eeb482777f25311cc02c39eea8",
+  "executable_pnl": false,
+  "factor_id": "09563b596177a6508ba93b2c6fa3890a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "93b618fc477c303ff5ce0798d99d9423",
+  "executable_pnl": false,
+  "factor_id": "09f736c21c0462f4d5757f4e814bb66b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d5f571a02e9d430cbc32f9a12053a24a",
+  "executable_pnl": false,
+  "factor_id": "0b29d20c3e9548932214bb3ef35cf22e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8be7cb08e624e9e26642575686879ea6",
+  "executable_pnl": false,
+  "factor_id": "0b8d9f7bdce1d892b839f7ded034a5f9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d686d806a015636b99cae5a421a81509",
+  "executable_pnl": false,
+  "factor_id": "0c59238b094e97bcb05431c887ad5dd7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "865ca7389ce4beba5a4ff47bd907050f",
+  "executable_pnl": false,
+  "factor_id": "0c765e88a8074509e0956460de7f68fd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "99d14d7acec208562c21cdc2025cd4f5",
+  "executable_pnl": false,
+  "factor_id": "0cd6c62da4c75b62dcf68390fc726392"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b69ba4d52dcbf276414acd05f2b6585a",
+  "executable_pnl": false,
+  "factor_id": "0cf1ce3931ab954b01c7e4ec3fdb8576"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "b49716e54924561af6c082b030409697",
+  "executable_pnl": false,
+  "factor_id": "0d16dfdf31bd1dca8ac305125a16b5da"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3e29902fe650dd7f102a5aa6cc247b19",
+  "executable_pnl": false,
+  "factor_id": "0d26a910102b2479b05916a4f21c332f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "2a63b4fac77f98353a839985d874abeb",
+  "executable_pnl": false,
+  "factor_id": "0d86186e54b9d496f811acf319eeef11"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "256b2e4d47ef4704683892ac1d2c1c44",
+  "executable_pnl": false,
+  "factor_id": "0dca1e7c9c85ce655a731e13afff205f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e24fccd0b4ab079e0819cc741beba031",
+  "executable_pnl": false,
+  "factor_id": "0e511cf1335e46587280150d541e9ce2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "7175f949058d51bfdf6ffcb7b09de8b5",
+  "executable_pnl": false,
+  "factor_id": "0e6343e564a17cc2ca5bbcadb8c201ea"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b4ca6aad41d831c3e466009677d76eb1",
+  "executable_pnl": false,
+  "factor_id": "0ebdbbad833e3693a7e68b16438b775e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ea823d67426d9779f184776679ec32d8",
+  "executable_pnl": false,
+  "factor_id": "0efa7557d094daf6f4ef801da0a431a5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "525f594928637a98d2e8aaafa7f713a3",
+  "executable_pnl": false,
+  "factor_id": "0f1b75a3fe25f94b450021ed6921bb64"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "54bbf00b4432313838db3c93ec731784",
+  "executable_pnl": false,
+  "factor_id": "0f63c00180faac148af7d449ad768cf9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3bb1e603cb63ec886f07909700286318",
+  "executable_pnl": false,
+  "factor_id": "0f877fc9b7a18c6e78cacafec8b5dcc8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e6b2aa9e173ccaf9728886d6f45ee10b",
+  "executable_pnl": false,
+  "factor_id": "1135da1545b47de4e4b1bb2641405174"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "b42f92700e2f8b78068906483f38e52b",
+  "executable_pnl": false,
+  "factor_id": "116359752a5fdd91076233f400116843"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3c13464a8835beb754484d2193cc7083",
+  "executable_pnl": false,
+  "factor_id": "120f4fbe7284662ab57359f5a71ef8f0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "01de492141c15674b0899a18452ff5e4",
+  "executable_pnl": false,
+  "factor_id": "12295cbd8638458b9db35bdd282d4d77"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e398f755f6b94bc112190e051fd76737",
+  "executable_pnl": false,
+  "factor_id": "127daef0bd6bdaf61690cfa6e5db8298"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "93ba46990220a64c4d2d491a018413da",
+  "executable_pnl": false,
+  "factor_id": "12c15be23bb2af836e90b4caa8f761d4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d385fecc6c7ecc218fb91c11608db61b",
+  "executable_pnl": false,
+  "factor_id": "141ff9c72365f98b61ad99dc76a5ba24"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "f8879cfee858299b29993f81e373426e",
+  "executable_pnl": false,
+  "factor_id": "151214dac6cf40153858beeb44bc15dc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "fceb9c39823a32fb3d1b9aa87a86ff14",
+  "executable_pnl": false,
+  "factor_id": "1653064de73c656a98b2455d3f69cb41"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "bd93935e16099ba63457b2953fa6664f",
+  "executable_pnl": false,
+  "factor_id": "16d058a4e5a55ebaec2c7114b1006cdb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c001270f0d0add49f043f117c4232c40",
+  "executable_pnl": false,
+  "factor_id": "176a7603a2713ac72a97348e94b65871"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ff59a29b5ff3d233bee885933ffd0f03",
+  "executable_pnl": false,
+  "factor_id": "17fb2412f2a9df5e9a35518129d97f4d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "04462aa6603417f25c47c571f0f2e43b",
+  "executable_pnl": false,
+  "factor_id": "18498851ee0967e989b7587bcabab943"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "37f3f9a19afbd03c82071cd373c0363c",
+  "executable_pnl": false,
+  "factor_id": "18bcf522302759510e2b69a991f1d8b7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "cb847bc658ec1abf445b83976e398f7d",
+  "executable_pnl": false,
+  "factor_id": "18d4e4a7ed8ebd493cf2bea3683189dc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "3642524fd73e381382fad4de482d43ae",
+  "executable_pnl": false,
+  "factor_id": "18dc086c0cab2b32b1b53b3990967b8f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "2c24419a49664e0fcb1778ba754d916f",
+  "executable_pnl": false,
+  "factor_id": "18f15c16479d33493764d029d901201c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "24d4e45557d8d4291774d80166cfcac7",
+  "executable_pnl": false,
+  "factor_id": "190fa92d6639f42184a93e723e3863c9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "0dbdcffe74ca70911702b2235785ddc7",
+  "executable_pnl": false,
+  "factor_id": "194147597e2c022db44862fb0139252d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "f361106cdd04bbe8c322ed8b442e8026",
+  "executable_pnl": false,
+  "factor_id": "198829cc1b620ea24ea3cd6cd4b14686"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "71856f04793f6b57ee99eaaf2c998048",
+  "executable_pnl": false,
+  "factor_id": "19aa5244a1632e0af86a6ae58b35fefd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "976700a4cccfc9ae55eaf1dc8a441f5e",
+  "executable_pnl": false,
+  "factor_id": "19b7dc3ba1c445cb354685e4cc4fe53a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8352bd4cb09cb85fa3f77d094ca24d5a",
+  "executable_pnl": false,
+  "factor_id": "19da782f4348a890b593495b0f9e0a0b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e2d424f3024982ecf1671d64b4c356c8",
+  "executable_pnl": false,
+  "factor_id": "19ef691c9c6eac88a228d3229f408853"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "942add9c33972f6cabca62aab2d4aa95",
+  "executable_pnl": false,
+  "factor_id": "1a34646e6d07813fefc22fbdf0b63e61"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8683ce99025ebc8d6b9f88a7ec734ab1",
+  "executable_pnl": false,
+  "factor_id": "1aa4d7af08347eb14d0b5ac82b3ef2db"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b8208a8cebf141063a180d20c87884ae",
+  "executable_pnl": false,
+  "factor_id": "1b4c4bce32a06a131f3da203d66f00dd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7d6d630e7d878ae947332b837bb2e86b",
+  "executable_pnl": false,
+  "factor_id": "1bfdf149e18ed696b917692744ca29cd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ac219f4e8fd1dca2d39c156cb6754de1",
+  "executable_pnl": false,
+  "factor_id": "1ccdb860ebcdcd18dd894fc7330702d8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "603c8c3c2ec51d9c59f40d1613be0333",
+  "executable_pnl": false,
+  "factor_id": "1ce20e0d6e840ff0103ec1dcaf539433"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a3443613fcd2434b7b8fa0686e13048b",
+  "executable_pnl": false,
+  "factor_id": "1dcfd4129557a6b1b171b82a26826f79"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "975595416afd58b4278878d6b2d6c3d3",
+  "executable_pnl": false,
+  "factor_id": "1de27aabdf80d62eeb477afc8d22a252"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9ffc2e195d470a679ed8da66c1c242ed",
+  "executable_pnl": false,
+  "factor_id": "1de472fcf50bfceaad867fc1f1591a41"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9caf43fd7848684d5290ad55e7e466f2",
+  "executable_pnl": false,
+  "factor_id": "1e55cd902f1f74a9ef9f3595ec51435b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "d9a4576194199d1941d5c133bd4a04dd",
+  "executable_pnl": false,
+  "factor_id": "1ec4858ff443fa71f094e09ee5e8dd64"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "42389fe2a8955b7f9ddc6ec2ed95465c",
+  "executable_pnl": false,
+  "factor_id": "1ec710bb1a8c3582179e3c62dc43b8d2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "520526b6e28e0f68c6f6354c0a640064",
+  "executable_pnl": false,
+  "factor_id": "1f3d0a4a220634d84347d925ffac71fa"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "da0ef8484bbd55369c2b737a72854eb7",
+  "executable_pnl": false,
+  "factor_id": "1f8d6166dcf12c82b4380c2568f3dc34"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "22cbb865489bc83ec12a2f48cf157e02",
+  "executable_pnl": false,
+  "factor_id": "2013807d26f20e4b3e5bc779e3a27098"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8327d883c3b1a666374c59b890ef5df6",
+  "executable_pnl": false,
+  "factor_id": "20d4b84bf128d0f693bd7bc77741e7be"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "bbcb657e2be12a0f307c3fb0513108ee",
+  "executable_pnl": false,
+  "factor_id": "2142255fa786c41ca38b6e815a98dc78"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "33a40e2f13cbd875b0ccc9c827b5cc87",
+  "executable_pnl": false,
+  "factor_id": "2154d7711aea79d53c9197c35f956afc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e4f69267ec200116568028237714a3cc",
+  "executable_pnl": false,
+  "factor_id": "218ebe6354f0002f9f158fb8e098ff33"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "dd6c6f08f842ed34862f526717d438b7",
+  "executable_pnl": false,
+  "factor_id": "21a2607e72cc592e35e27deaa0dbcda7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "f2abea1753754665bc257b016bcf923a",
+  "executable_pnl": false,
+  "factor_id": "2226fb289aa4f3e3a5b19954089cbc6b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7671cceeea12a7abe9082d97c7067efa",
+  "executable_pnl": false,
+  "factor_id": "22982daf04caf9280b3d2f2ab4df3745"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "41c8bd4515e6075c96d2cb163fd97165",
+  "executable_pnl": false,
+  "factor_id": "23d39b569936cc85dfd0924045ba3e08"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "50096f8fdddde536fd68b4736503ea93",
+  "executable_pnl": false,
+  "factor_id": "250cd567d826ce1a010d980f2d1df7bb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "67f91fe598dde8d9c9100d40c47c6543",
+  "executable_pnl": false,
+  "factor_id": "272447f11f22b6723dff57f4e3f5297e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "338c7a36b09c5f43f42c9ee4c237c918",
+  "executable_pnl": false,
+  "factor_id": "277c4f419e0053c4e2f0204cf5cea363"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "635d6f0f6409e6423ca5d267319143d9",
+  "executable_pnl": false,
+  "factor_id": "288d1f5bc544f86736ad294e7591e3fc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "1421c10f9f99ea48d38cca123539e55c",
+  "executable_pnl": false,
+  "factor_id": "29127759fec28d2a505967d48294fa3c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "59da81f41546b5f3b78ebb76e8a41447",
+  "executable_pnl": false,
+  "factor_id": "29960504d5795172372a923791b79199"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9903ae47ae87cd04aa201bf01b36e5b9",
+  "executable_pnl": false,
+  "factor_id": "29ff0150957b5ff09daa4b46cb3911bd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a35e0aaeab79ac297bd0ce322fae64e3",
+  "executable_pnl": false,
+  "factor_id": "2aa069c0ac56a020c45bcad0c6d249d7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f7ea78ebf23568c2eb10dbcc9757baba",
+  "executable_pnl": false,
+  "factor_id": "2aa755298a925db3e09277f50b867422"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "16053766bb93ad5750086af7d2b1accb",
+  "executable_pnl": false,
+  "factor_id": "2b22349372d9e38398b28a0161262dfc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "0490b7bbbb0850671c1b14feec6278c5",
+  "executable_pnl": false,
+  "factor_id": "2bad6982a0648e73c8c4997cdf72553d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "36c9831318f02babb993e9cdac0e2303",
+  "executable_pnl": false,
+  "factor_id": "2bed169776c4361f6965576de51aa27b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "907b5a5399b347be00143c41eff120c8",
+  "executable_pnl": false,
+  "factor_id": "2c0eb682ea1a7047f097d254a13566b9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "cf268d4c53d04b30eb607a10c1b3e372",
+  "executable_pnl": false,
+  "factor_id": "2c8a05ea047c262630cbc92983b78f67"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "226d7ccb95047926109a55815f427f3e",
+  "executable_pnl": false,
+  "factor_id": "2c906cbb1e229b6f19bbdf32badeae91"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "75637488c627068e2d36de7295e1fe6e",
+  "executable_pnl": false,
+  "factor_id": "2d2775adebfab85a9cef7ee1710a3d67"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "4304c421f5acdaea03720c7a52f1b4e1",
+  "executable_pnl": false,
+  "factor_id": "2d4ae84741d0bd089f7989c45018e3a6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7ddace0de51ce0b0340f98c694505e8f",
+  "executable_pnl": false,
+  "factor_id": "2da6f4cb466350d791c93de185e075d4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9bf38831ce9e0d9b5b86de518ddaeadf",
+  "executable_pnl": false,
+  "factor_id": "2df6299507eac1006492f4a291f60d76"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "84e3c0bca2d6bafde3fec9b9ea4a29bd",
+  "executable_pnl": false,
+  "factor_id": "2e1bd2a9e0a286324a3961250a0ef796"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9bc2dc9b2569310257324e8fa8de5a7d",
+  "executable_pnl": false,
+  "factor_id": "2e4c668ff1522e084a0c86cfc1a47366"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9041ece58955a187f841c615d25b5547",
+  "executable_pnl": false,
+  "factor_id": "2f40eca598db2b829706cc8ee61cc888"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "4e3a71da7986b87676523a6a91e994a0",
+  "executable_pnl": false,
+  "factor_id": "2f4455b7e71441dd49600665c810d1d7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "ce89b7e5cfc34fd51428eb726c42da08",
+  "executable_pnl": false,
+  "factor_id": "2f9164d4e885bf6abf6bb555456fc7c2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7c013144c12fb3022d6ea383e40115bd",
+  "executable_pnl": false,
+  "factor_id": "30b32f4f59b0a4c6ac856445f7c4acb1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "cbd988f04fac2176c32d27b002e7efa3",
+  "executable_pnl": false,
+  "factor_id": "30e6d7d63d8a80edb2ec88175f933e7c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "86a59a51ccdce4dfbc6fb0eb4b745651",
+  "executable_pnl": false,
+  "factor_id": "3151cf4f2c600d04904c72a4106607f3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7206973c69ce2652f45271f02509e81a",
+  "executable_pnl": false,
+  "factor_id": "3176daa2c1fd3d8fc1e3916bd1b2b740"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7962cc7b4b79d928f21db8da273fb3a9",
+  "executable_pnl": false,
+  "factor_id": "3213e0d6678c95cf30d17c58c3ba18fc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ed25f79551604668f82cfc6b73c06c3c",
+  "executable_pnl": false,
+  "factor_id": "32484e42a92a124a9c271c80ac286a08"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e8893b84f405b174a2cc05e5958936b4",
+  "executable_pnl": false,
+  "factor_id": "32ec85591d7113b9e92d7e63cb77e284"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "6421d827b922d883a271cb90bebc40ab",
+  "executable_pnl": false,
+  "factor_id": "33242f23296559891b70ec4255f9e1af"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "91ee4555e73bcd7f3c837d7a209603eb",
+  "executable_pnl": false,
+  "factor_id": "3499f8353487f38617f9acc92e84fb44"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "765e2b18cb7ff9c377f13be5aad38a58",
+  "executable_pnl": false,
+  "factor_id": "34bcaeac88b80f8c1e04c0e3759727dd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a51edebc67ca74c2e9821a4cf14be660",
+  "executable_pnl": false,
+  "factor_id": "358c9e0b48f3c2de00cc112b3cbf3769"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8a7587ca18ac1b4eb31d0b87692a1bb8",
+  "executable_pnl": false,
+  "factor_id": "360a4be589fd3f9b1c60ce518062f375"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "551487b27f8503f54d760f9968bcddae",
+  "executable_pnl": false,
+  "factor_id": "3657d8b838cd097411106dd1cf445aea"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "013e5e5814bae415ba22dfb87986e82a",
+  "executable_pnl": false,
+  "factor_id": "36fc3d212f4f29af9e0df420b4e805cd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "219d350d1d7708af59f926059b57682b",
+  "executable_pnl": false,
+  "factor_id": "37428acf97190c0025f42528ad38c4f3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b5c2413fcb9ebe39fabb46491328e041",
+  "executable_pnl": false,
+  "factor_id": "378052a77db338c190e2271aee071684"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5e19e4c5104dbc8ab02461369e9a51f0",
+  "executable_pnl": false,
+  "factor_id": "37f39b9151b73db005fdc1b222feeeca"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "83c57598754cfae24d39c37125c34a79",
+  "executable_pnl": false,
+  "factor_id": "37fbc23c2c0c4c676c7d985b0ef231a5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7bc843f8f63f603e8670bddccf292d6a",
+  "executable_pnl": false,
+  "factor_id": "382f27446867486ae32480772b956762"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d1823c6a53090a6613e9305b58c8fde9",
+  "executable_pnl": false,
+  "factor_id": "3878f98e001040c2276132bf81fb7c5f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a7fac204df7810b923dc0362aff8469f",
+  "executable_pnl": false,
+  "factor_id": "3890c92a2b264aa20b19f8ad24422320"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "6b4efcbcc8e09dee974365038f4935ca",
+  "executable_pnl": false,
+  "factor_id": "3971a6a3445c22c3e67d4f11697a8c83"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "688e7713786f7896f5904c70e36864a5",
+  "executable_pnl": false,
+  "factor_id": "39752f994eae8819265971a2b2ca7d57"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "170c42d1b0b40f9da873ec920e2bd736",
+  "executable_pnl": false,
+  "factor_id": "3a6dc191b3f777dc91f1a0876ee49295"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "0633b2137117961f345c2135f33c9da7",
+  "executable_pnl": false,
+  "factor_id": "3bc3564301813ad8d064e6fc0d2bba67"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a7f768610fc37aeab26ec647b77fe853",
+  "executable_pnl": false,
+  "factor_id": "3c25800842b91484cdd87086fa634dbd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "40652888f3b0b764bef71e799e9dfe75",
+  "executable_pnl": false,
+  "factor_id": "3c9ab77945a391ebf86d525990e03212"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8798514cb61041165f040ef912522652",
+  "executable_pnl": false,
+  "factor_id": "3d2af4243770d9628ac3ffcd1da8e2e8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9d70e882c104c546b4416112a4a93af8",
+  "executable_pnl": false,
+  "factor_id": "3d386e5b4211d7e14b407f85f9244a9c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "32ca997154dd9c2d6cd712b52159a766",
+  "executable_pnl": false,
+  "factor_id": "3d5cf7de090dc30c4b1ec3b46772f17a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b5599da249ce39dc8b8522118b127c73",
+  "executable_pnl": false,
+  "factor_id": "3dad7c709876b9d4767de7a698e5ac40"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9c0d64b174420ae595f75fcd13bba8b3",
+  "executable_pnl": false,
+  "factor_id": "3e484baffac09f39e9dd1945f9ca0c39"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e0560e73e4e7f775c405c6c399a8648a",
+  "executable_pnl": false,
+  "factor_id": "3e7b8f8a16e86f74155b7e0ef05b3ea5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8db639c9b43dadc8da26622da1d32126",
+  "executable_pnl": false,
+  "factor_id": "3e937872a41f19127f3debad9853faba"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ec35a1544412653dae9ae6cadb20912b",
+  "executable_pnl": false,
+  "factor_id": "3e99562a8a40d268c8dba67801944f10"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "970a2f1ee2581eb51e9b5f9fc76efa42",
+  "executable_pnl": false,
+  "factor_id": "3ee724c070bf48d08fa768f6d608180a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c179b623983b73dd6a31e5cae4e1d1be",
+  "executable_pnl": false,
+  "factor_id": "3f02361423d40d50cf7b096bdd4ae7d2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "06b331652534fb7b667c35f437bd26e2",
+  "executable_pnl": false,
+  "factor_id": "3fee655c49a6033f7820bd7aff5a3a64"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "739057e2e238d323c4dfd000b57ec79a",
+  "executable_pnl": false,
+  "factor_id": "436aeda20246c6c41e46afc05ceb86fa"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "035ab10667d04f9d1439f9f037694cdb",
+  "executable_pnl": false,
+  "factor_id": "4389c08c21179d52a06f70f9392dd6f8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "dbf92178bd61c8af3f720ed7da045825",
+  "executable_pnl": false,
+  "factor_id": "440bb577155887a0db1713782796701a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "30307152c5a35f9ebc635102271d2aa1",
+  "executable_pnl": false,
+  "factor_id": "446ae6ab6bda174c0ce68931af4fd09c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "58b5633f2ca3c45c4d02e0cdfeb03ada",
+  "executable_pnl": false,
+  "factor_id": "4492564eea228dcf906a88055574295a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "bdfbfacda3f48db8d75a52735e2ecb13",
+  "executable_pnl": false,
+  "factor_id": "451708d0d5f146a3f983f3f37db7cc88"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ab26676a0bc130fdaa9a3221c398b889",
+  "executable_pnl": false,
+  "factor_id": "455db334c0e690e6f81a68fcb888fc9a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "646f1b82635e40c2d758ab81ddcc7fdf",
+  "executable_pnl": false,
+  "factor_id": "45ca923a8faa39db1e8b4f4037cde561"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "25125a024d5cc5c19dfe1a2726b49547",
+  "executable_pnl": false,
+  "factor_id": "45d068adda9b7086d1443c28bfad94c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8e31f98d7a278edf6473805ce1a7a99f",
+  "executable_pnl": false,
+  "factor_id": "45d4e70f2e2a09e0f7788ad827798572"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "653662b55c334d9bd91ecfd42ecae470",
+  "executable_pnl": false,
+  "factor_id": "45eec31c188a912e22ae48cbf9699fa7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c5117c1ac2b0cbc4eb939d26133b6848",
+  "executable_pnl": false,
+  "factor_id": "46df7b6e8efe595084a1216fb4b513f3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "588617aa070b83db61ac8c1564e80dad",
+  "executable_pnl": false,
+  "factor_id": "470451f4ab7c5f1c44317576c468c3b5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "6890552898474329328b75b0968c0f30",
+  "executable_pnl": false,
+  "factor_id": "4789389d655e8323c4e6403f52f11e02"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7a80e955cf93ef36a75b0dfaee2b8554",
+  "executable_pnl": false,
+  "factor_id": "4938200315c41ffdb1cf9cca28650016"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d970a4854a24260a233aa5d803dce042",
+  "executable_pnl": false,
+  "factor_id": "49764b5d8b96f0af5f502287b34d222c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1a9864833f64cc0c6db17b1a37ee13d8",
+  "executable_pnl": false,
+  "factor_id": "4a8a57cf06d6af7cb3f23d3a0a613ad7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7818a6d200c854fcba7baa189c361c96",
+  "executable_pnl": false,
+  "factor_id": "4aab35426a7b29d7e9d0c89dc1dfc9fa"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "737c090671a97fface0f76d6632d64b3",
+  "executable_pnl": false,
+  "factor_id": "4b25ac46befcae3d5f832c1c249e12a0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "32119a16f198c9a1d9248ee0db43cff4",
+  "executable_pnl": false,
+  "factor_id": "4ba7680e65e679e18f7a5063fd8a754e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "457ad0cc7e07c386a89f96011d5fdf2d",
+  "executable_pnl": false,
+  "factor_id": "4c5e0510335ef4be8411254a3a90290e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "90466b7922b7b2c96d11b8b0a14c3c39",
+  "executable_pnl": false,
+  "factor_id": "4d7b36cd480e774b8a52333ed0e58cf0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7bb33b142c0a2a79dbea81fce1a088e1",
+  "executable_pnl": false,
+  "factor_id": "4d9e3dfcf5b14d562c3f1e01065e1e51"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8631921a562050473d7e24f741b85adc",
+  "executable_pnl": false,
+  "factor_id": "4dfcdce774d818ac85205e02003708be"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7d31267d6e74bd36fed8737c8c9b8fa2",
+  "executable_pnl": false,
+  "factor_id": "4e24ef961a9ba69fd381528651ae8212"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d941b6a3cdcd2c56ef42a681bc798e3b",
+  "executable_pnl": false,
+  "factor_id": "4eebe342c60f1bd9bdeb1e117be77611"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "41ebd038d37efc84929bace2c38c5f2e",
+  "executable_pnl": false,
+  "factor_id": "4f0c290f12b01915245da671df1dc9c9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "93c467d7c1486ffb1165b3f1893baa94",
+  "executable_pnl": false,
+  "factor_id": "4fb08356ac93d49c2119f6c4a275679c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "eb69a407840a9ac555c998440f3b3aa4",
+  "executable_pnl": false,
+  "factor_id": "507d8b9395e464f148d6358573e7f86e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "695234a524c920a30d6e5002d095d8ab",
+  "executable_pnl": false,
+  "factor_id": "511942be207b0eeb9b500c127918fa6b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ac9123a22f7124432fdf35e4f27406d3",
+  "executable_pnl": false,
+  "factor_id": "521d2a849d39208115a6aee8bef009e1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d08475bf30906d36380cf2664f025228",
+  "executable_pnl": false,
+  "factor_id": "52f1412179cf5a53ed9ee8659f46e3ad"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "328a3ed2d4bdad7a0ffc8c4bee44f0a2",
+  "executable_pnl": false,
+  "factor_id": "535843c5c48b0a21d6cbe34cb8983c86"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "1b2ff8c7034cf68c7d0ebae02646e0ca",
+  "executable_pnl": false,
+  "factor_id": "53abf275b79d83089f8feb60a37bc350"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "a6269d653509c4af0b9c011aa995f279",
+  "executable_pnl": false,
+  "factor_id": "562f364356532490a8c9feb4894a8332"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b1a205d72d8ab42e0017477fe57f0e01",
+  "executable_pnl": false,
+  "factor_id": "565807dee47129b10d6055bf9837b837"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b711e9a46b00c036cf48da2bb7c1def3",
+  "executable_pnl": false,
+  "factor_id": "568054cf8b0e2669025d6f7882308cf6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "4417af0b68a216f1348b6b54ea23b034",
+  "executable_pnl": false,
+  "factor_id": "56ad9a40699e249678b681c923c72889"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "de65e3c47b89bfa636d8bc571149db5f",
+  "executable_pnl": false,
+  "factor_id": "571b42b160da794c433a3768a7bac7e5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3ef95afb94b101b0f7a1c32ceb956f39",
+  "executable_pnl": false,
+  "factor_id": "572157932a3d6f41b56ea2927cadd788"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "19b069ede3aed840dda2be72da0c9ec7",
+  "executable_pnl": false,
+  "factor_id": "57fbcbbed884fef3efe3cb13338e786f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "1fc3aa4d5540c98b0975b4e0ff9181de",
+  "executable_pnl": false,
+  "factor_id": "58d4b8829d12b2e3fa096bc6cebfe626"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b9b774260d8c8084761fa65efb19ef3b",
+  "executable_pnl": false,
+  "factor_id": "58f0707ad70d14485084404fd0959260"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3ab822830e3bdbe4ee6082fcb5f3354b",
+  "executable_pnl": false,
+  "factor_id": "58fb857946036ebb314922097498c182"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "222c8c7b7d29e266b9643514be19a0f9",
+  "executable_pnl": false,
+  "factor_id": "5935c6afe5b8afdd61397e996714ff74"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b3a5b22b222f77bfbf1b2fb4b8a4ef6b",
+  "executable_pnl": false,
+  "factor_id": "598dec6473da07b8ca8e7ac522b545c0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d312fcd3cc1a0428e195a71d07ae2951",
+  "executable_pnl": false,
+  "factor_id": "59a64e0df1902a3c651ba39a81f3aa17"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "cbac162a56905bab6e0d23c65276fdcf",
+  "executable_pnl": false,
+  "factor_id": "59aecc14096a4202887e03ae84aa5193"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8ff75a2d0ad5875f96891b0c7f971da2",
+  "executable_pnl": false,
+  "factor_id": "5a1add6cdddf5e6883dcf749c0dfdc26"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "2bac0dc5964e7abe1cd39dee76cd7abb",
+  "executable_pnl": false,
+  "factor_id": "5ac1d944af218af8ef8df8b34fa90b40"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "71d74139d47c5c1d0cf9156dfe4adbbf",
+  "executable_pnl": false,
+  "factor_id": "5b129607ac05707ed5a0a7a7f765943a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "50d2bcf7b9ae4604578ebf685085b155",
+  "executable_pnl": false,
+  "factor_id": "5bb06d915b88136957f1415db4a0712d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "2314250ac8f4466c2be87f01d5de99a7",
+  "executable_pnl": false,
+  "factor_id": "5c12f6e941a11057a1eb4c70273badd9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "2f6a822c739dcc6b1768d162da9bf9d6",
+  "executable_pnl": false,
+  "factor_id": "5c4be04e42c3c1e364f0e718db94cb79"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "a5083fba765d240f8da60e1db8a3cb8a",
+  "executable_pnl": false,
+  "factor_id": "5c4e69b7b4a7b77b118c7ea46d055cc3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "f0da87e0aeb31a552ece00652229c443",
+  "executable_pnl": false,
+  "factor_id": "5d71712ec71e3abc0053ad965b174e15"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "3dccf229b7a22c4ad2b3afcb984b2c4e",
+  "executable_pnl": false,
+  "factor_id": "5f62e69267e47576cbade1c8d8895bc1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "c559c728d6c6077e9e19647887104521",
+  "executable_pnl": false,
+  "factor_id": "5f68a23852d82eae2d139a4ceddc37cc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a4ff027d9b838f13d6808e3b95cca6b4",
+  "executable_pnl": false,
+  "factor_id": "5f9ab27ea5fb0870613aba838f96ac6d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9ebf1a53637bd68578514f9a604a6e92",
+  "executable_pnl": false,
+  "factor_id": "5fa8292fe80208bd8fa53d0f55f1efcc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "edfffd88857149225596fa3359cf5a61",
+  "executable_pnl": false,
+  "factor_id": "5fc5da9b4214e8e76fff8b174fa7a109"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "0680515ddf84ecb958ca3d786995ced7",
+  "executable_pnl": false,
+  "factor_id": "5fee3e1e975097c70d8774b45fb49617"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "b360f50c713998062f08e34474a14b17",
+  "executable_pnl": false,
+  "factor_id": "6014832c159fee13e43a58b1811c6e5f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "65d8f6ab5d7a06a03932124697605f84",
+  "executable_pnl": false,
+  "factor_id": "604f99226003cb63933d400c2bbb85b2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "99ae9ca19fe3bef379aaaa2aa6a3c818",
+  "executable_pnl": false,
+  "factor_id": "608593dc62453862ee6650b61eb556de"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "653c2e4645ae714edfe1cf10ef0f54ca",
+  "executable_pnl": false,
+  "factor_id": "60e93f59ea608b40b0f24e750b55088e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "d498e524fa43be9441e90c5b1cc64f9c",
+  "executable_pnl": false,
+  "factor_id": "61d3dd2e2a7e30c9e38b64b1cd7126ca"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "04a371d88503cd900bacf141077c3fa2",
+  "executable_pnl": false,
+  "factor_id": "61fe090901ee37c30e0f2b964e84dcd4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "685ed8dc73fc2a246580f2d1d81efa79",
+  "executable_pnl": false,
+  "factor_id": "62d29f887170ec179a531af2f4e409aa"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "685ee271b4d189f2ab6d49cc0e3d79f9",
+  "executable_pnl": false,
+  "factor_id": "632e9892a76986b70ff30b1e8af43ca6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e145411fbef1c302321970caffbdb022",
+  "executable_pnl": false,
+  "factor_id": "63aee4b93c1ed4d6b39cf9bda0a4eba7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3ff2cd18dd4d98b76c364acadf7ba47c",
+  "executable_pnl": false,
+  "factor_id": "63f29990ca7611000c010b25eeb1ab2a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "04508d90636e0c228a88234aa10f6201",
+  "executable_pnl": false,
+  "factor_id": "6481c8600c015f5e2fe41879d2f9fbb4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "58951b29671a8e2daddb14760ce3e351",
+  "executable_pnl": false,
+  "factor_id": "65b08653a7ea31edbe93d9204147e40d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "d826531a2e17bd24444ab849b95621d2",
+  "executable_pnl": false,
+  "factor_id": "65d0493f3582fc26115cfa6e18caf538"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "93af0cb5148057a301482584a743199e",
+  "executable_pnl": false,
+  "factor_id": "660a267f87c2c2d597bf84702fc30878"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e6399b191556c054f298c83bc7d7bfd2",
+  "executable_pnl": false,
+  "factor_id": "6616d068d46ebba4addf9b4091da1710"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "59b725350d89dc6c69cfd10a95fc3d00",
+  "executable_pnl": false,
+  "factor_id": "663e778f9238a2117393e6050fed91af"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "862fe660467e1e34d06b73352c6c5fb5",
+  "executable_pnl": false,
+  "factor_id": "66a4a3a00cfee1e8e58bdd8105fb441e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e43ea35ba8524c799b629780ab3faac5",
+  "executable_pnl": false,
+  "factor_id": "66d3ceb81a610fa81dac2654f32b4765"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "994dd71a1f55f52b1af146cbe640b427",
+  "executable_pnl": false,
+  "factor_id": "67421b104872fc3b07eb93a8ac5a10ac"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1e4e3956e4b4fda910005caa02707246",
+  "executable_pnl": false,
+  "factor_id": "674989b07c44427fd904bb7e6b0946fe"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7c809f63979e71613d8cd81db8202d22",
+  "executable_pnl": false,
+  "factor_id": "6789d06a1b8ce8606437f89dcdb936ad"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "652cbaa270662afb4fa1ac55176eef20",
+  "executable_pnl": false,
+  "factor_id": "6810c58fc921ad36e7bee8e7be0b540d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8f0f013abd37586eee9d6f7f64bd64c1",
+  "executable_pnl": false,
+  "factor_id": "68171c2f4bc00f0d0d54c071214ff527"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b48b2f84ba7b1ff92070869f8d635e32",
+  "executable_pnl": false,
+  "factor_id": "681cd69053c116f37c69d5e895844699"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "95a867a080e134252549338baa330c3a",
+  "executable_pnl": false,
+  "factor_id": "6831fe1ed3e11dd1772bea657c0352bd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "48593f2bfefa1e631bad3a1fb5fd7289",
+  "executable_pnl": false,
+  "factor_id": "685748e04c0503a5ca1b2a54548fa0c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a5c1d9cb48f65a09acb53122411b5a99",
+  "executable_pnl": false,
+  "factor_id": "685bfdf19cec1ecba691d1ce19201351"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "cec0eb97e1aa25442ba01a84ff7d5e63",
+  "executable_pnl": false,
+  "factor_id": "68898315f17729147c2b9e1ac21486c2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "2b3f99e69fe1936d7179967bf57685ac",
+  "executable_pnl": false,
+  "factor_id": "68925ff31f7e1fca8a3ba9835b2f3e6d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "839a065a2d3a633ddd604111b7df15bb",
+  "executable_pnl": false,
+  "factor_id": "6998dfa8919003ddb79274e86171e472"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "2c6b92a806803a730e4a7c50b9716872",
+  "executable_pnl": false,
+  "factor_id": "69994ba399e9147b91b02044585450cb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fcae69491d892eddfe5b8b3b51321534",
+  "executable_pnl": false,
+  "factor_id": "6a76951b85ad4fdd6f317c5fa054df02"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "59fa81868b67be4ce48a9cc564ff51a6",
+  "executable_pnl": false,
+  "factor_id": "6ad41fd44925be2baa5a453b00b6a3b8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "68151a0a8cd4e2e90c523bb0dbf4e47f",
+  "executable_pnl": false,
+  "factor_id": "6af329970711c648e6beae88e920f499"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "65687179606304c4f1ccd8048e01ed0e",
+  "executable_pnl": false,
+  "factor_id": "6bb77410a4a6873548afd2dbf15abaf4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8710a43e9f9b5171080c1febfc407d9e",
+  "executable_pnl": false,
+  "factor_id": "6c8333c30491afb8070a0d647fcf14fb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "17d25f2affee840dc1c1450267404c55",
+  "executable_pnl": false,
+  "factor_id": "6daf351e923057dc8df5396b0bd13f9d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "824e42b5239a50a64325d1470b5dc558",
+  "executable_pnl": false,
+  "factor_id": "6ddc8077dcbce4e7084474e8084f6f24"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "921c6d558c47358c4c420b04f27a057c",
+  "executable_pnl": false,
+  "factor_id": "6e2b1c2c479f7ea83fac280201c603e2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "14be45b53432ffe47a8493d134104d5a",
+  "executable_pnl": false,
+  "factor_id": "6e39080e074215dc33c6e6799bfa85a8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9c0d243b083893548e1d32f354ce38e4",
+  "executable_pnl": false,
+  "factor_id": "6ef571fe0fc7dec6b9b6fc9a582ac9b5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "cbebf228d423ad7cc42b89146b84d030",
+  "executable_pnl": false,
+  "factor_id": "6ff9cd312d508c1306376a765636e9cf"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "ffaa3b2a9f520c511826984c0b6d79ce",
+  "executable_pnl": false,
+  "factor_id": "7009b448f23ca5d94db16a01f7d7859f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3ea4036c430ba1763eccd539db7fd316",
+  "executable_pnl": false,
+  "factor_id": "70b4f3067235b05b865d713830b99c3b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "aeeddc98443793c5cab8109925b8788d",
+  "executable_pnl": false,
+  "factor_id": "70f3081842248108ab4bb621e6eca9f6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8dd6be2e9a7009f81044f7c4a18912a2",
+  "executable_pnl": false,
+  "factor_id": "715e8eeca1cdb3a911579706335ba744"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1070b5b2a068f9403145ef1c318c83f4",
+  "executable_pnl": false,
+  "factor_id": "71bbd7df175759b25423711bcc308676"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "95fa37bcdb574da632d96d071f8b0099",
+  "executable_pnl": false,
+  "factor_id": "7227bdabdb65c65425c9cb279caf78ca"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "50b3dd23f12c47bc2bb7e6a7ed598ceb",
+  "executable_pnl": false,
+  "factor_id": "72684ceba0010938c5a064adac9112fe"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "15e27ce6315b5fd0539dfe5e214facbd",
+  "executable_pnl": false,
+  "factor_id": "72c85060a6dc035e84cd7ce819236539"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "39b7d702d024eb05ad68b7af693c8f1d",
+  "executable_pnl": false,
+  "factor_id": "7367d0d374cd6ac56895999295281c50"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "6aef8684bcb41461ce56d12dbf8c3f8c",
+  "executable_pnl": false,
+  "factor_id": "73835629060852e48973233211b2848a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "581b70fc266d912f50c7f977bc75856c",
+  "executable_pnl": false,
+  "factor_id": "739d8af9d9ac078e7e2a0fe7308e62ef"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "16ad6a020f7d803c6463692b15a70e17",
+  "executable_pnl": false,
+  "factor_id": "73b311bb0bc73f0b3aa3bb917e89e6cb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "4fa5fe4987a92cd41a95985e9043ded7",
+  "executable_pnl": false,
+  "factor_id": "73bdf28ea87b01d6d87cc60a9d57f17a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "293efc9c1c3574f9a04968c79a633fac",
+  "executable_pnl": false,
+  "factor_id": "74206ec7f20a2ba97fbe655c617d977b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "5309f40641b6dca4dc33b95c6e65d6c7",
+  "executable_pnl": false,
+  "factor_id": "74636f234890980194a6f21f0aaf7239"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9dd50fd59e668c0e3b6d11cb72fcbd7c",
+  "executable_pnl": false,
+  "factor_id": "75b827374adfe89c4b43f341e31e6dbc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e2f0007ad3cf42a14aaf66143600f56a",
+  "executable_pnl": false,
+  "factor_id": "75c57731b9613721a16afa4aa8933764"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "ac55c550794102026fb9fce3dfcc1a24",
+  "executable_pnl": false,
+  "factor_id": "76b7397a290db176635cfd3e6694afbc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "b727f564eab8fcdb8effd40f0455de48",
+  "executable_pnl": false,
+  "factor_id": "76b8fe229da66179269be47229ee2af9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "3af67556eea2a5702ce5a673a0938b20",
+  "executable_pnl": false,
+  "factor_id": "76f2a680f7c45189363ba5df4175434b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "01e42e71b15a8ba4f91aca72f3f73bde",
+  "executable_pnl": false,
+  "factor_id": "77398468282a6b222e7af4980769e485"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "77a914fdd01b191995e74bb5b4ff0562",
+  "executable_pnl": false,
+  "factor_id": "7776c38cdac6a6e32637ae9525250086"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "1419f224c45cd698a296764b03c20407",
+  "executable_pnl": false,
+  "factor_id": "7915a4fbc27fe44222c14010a61d3e4b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "33b981406d29da792bf7d7c69cdc01c7",
+  "executable_pnl": false,
+  "factor_id": "79871418e6cfb77ed4ce76c2e977ae3f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "01b9b3479cbf2ba2add8be52f8aae4e7",
+  "executable_pnl": false,
+  "factor_id": "79e24a3e21f18c06374131fb5871b0a5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1d83ada574c8adb358a2fa5777dbb0a3",
+  "executable_pnl": false,
+  "factor_id": "7a3e57fd054ebcb752dd62e5d5ffa8ed"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "f5b39d141e15b4f405ea154560464b6c",
+  "executable_pnl": false,
+  "factor_id": "7aa92b2b726f44e67db618527cfa90ca"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "6a508917b9e8a139d09b1450fadd5e27",
+  "executable_pnl": false,
+  "factor_id": "7b127464dbb288eda90d05b10e67cb68"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "4b8b94fc3e0b619ff41dcffd6238cdfa",
+  "executable_pnl": false,
+  "factor_id": "7b4bad2f7d200dbe59bd41b369cee62a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d35987f51706373efbdb7dd91ea2fb47",
+  "executable_pnl": false,
+  "factor_id": "7b59ba7479ccc09a186ca0ee8fa46aff"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c32b4e99a17ab73f708af38804b0a859",
+  "executable_pnl": false,
+  "factor_id": "7d638454e0e06128bbbdf62ce1af0432"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "636e769af59d29cbeb3ee54a40a29b76",
+  "executable_pnl": false,
+  "factor_id": "7dfc884c48a59202da50c5531fd91f07"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "1f29e3e98d10f64363ca9f9fce150a4d",
+  "executable_pnl": false,
+  "factor_id": "7eb3c3833c5ee31a258f867f58db047b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "77edd771a7ac46bdcd91ee2eec8e27a0",
+  "executable_pnl": false,
+  "factor_id": "7ef45381c75c52ec6c2d81b73b0964ac"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "58773cd130b23047079eb63edfcb7037",
+  "executable_pnl": false,
+  "factor_id": "7f07937e39c7601614a2ec7e63055b8d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fc7aafa2c24f88b31560231f7d242fbf",
+  "executable_pnl": false,
+  "factor_id": "7f0aaa8db470fcab014ec9d948cafb1b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5f6271bda5e8ae3db2f4f274707245fb",
+  "executable_pnl": false,
+  "factor_id": "7f3c6d62a37214b2ed73675688e85ee2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "cfa563a924f27d896bae8b22f3f676f5",
+  "executable_pnl": false,
+  "factor_id": "7fcd031df8bc4ec3305deaabe955231d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8af603e9312f49abc02b23e0cc92dedd",
+  "executable_pnl": false,
+  "factor_id": "7fcfac6d2f4d73c4bd1981400b727cc1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "66487beeb3c0bea6ecad9267d83f4ad7",
+  "executable_pnl": false,
+  "factor_id": "7fda231159af26c98d3132fd7121327b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "57ef8f724bc99118c8e1f7b8890a626f",
+  "executable_pnl": false,
+  "factor_id": "80f95ea2f58edf2b5ee8c948596bc099"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5fdc6b5e499f3633c8291cadae59bd49",
+  "executable_pnl": false,
+  "factor_id": "80fe9d5a4327815361a617d4edeb131c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "84c8071cf0404de497e6455ada24cf02",
+  "executable_pnl": false,
+  "factor_id": "81076ddb74a5b7d75f7a3473f445c75f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "c1e4d58f02e283f723861ff3b94cbff5",
+  "executable_pnl": false,
+  "factor_id": "81350ceb94c418af130686d5d46a7543"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "701784cfcf90e99043a38e5e8b24d4e3",
+  "executable_pnl": false,
+  "factor_id": "81418bc9efbe36d522f29ec88ff493d1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7d9a6b0c0facbaebbe76e8acd62552eb",
+  "executable_pnl": false,
+  "factor_id": "81a951e570d664554f7bc74b4e636be7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "a6d08d9aa190ec5c0ef318aa04d96833",
+  "executable_pnl": false,
+  "factor_id": "81d37781807b55761b55c8abb8d7f779"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d8930849968d75441521d94ab8c36500",
+  "executable_pnl": false,
+  "factor_id": "81e18087bfaf49ed97a67ae79ab0627b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "4cf131187f0c572e7fc07303d1d22b77",
+  "executable_pnl": false,
+  "factor_id": "829e0c6a417397019bee8979861edf7d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fb9d1585132e21ddca14d258a1449502",
+  "executable_pnl": false,
+  "factor_id": "83555a6fb778c43a1452c06f3655d1fb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1d7076f37a6ea2fd260faaa7d5ac2ffb",
+  "executable_pnl": false,
+  "factor_id": "8364686219fc9010ddaaab8a76424e6f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "2f29b8feb5840bcc7faafe890fb5ede5",
+  "executable_pnl": false,
+  "factor_id": "8364af183cec20ffeb3f7daf8a5c7945"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f1f22c19f199bf58310ae0c02b0b4197",
+  "executable_pnl": false,
+  "factor_id": "84f73b67379e579686e0571327270846"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ee6bcbc4b5bbe503f1b0ce4d28312ccc",
+  "executable_pnl": false,
+  "factor_id": "8544301c7253a70edc6605d646c58e71"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "1ce933f4e9bc8e530f655aa49f674d03",
+  "executable_pnl": false,
+  "factor_id": "855c47bc7571032b30465f6fb983fa26"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1667f88a51ddb897a86b3ac73f282f47",
+  "executable_pnl": false,
+  "factor_id": "8579778ea52f29e7ca6773c365787bff"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "410a873c83e22212afbab842890cc2bb",
+  "executable_pnl": false,
+  "factor_id": "8594fa9aca9023e9e16f88f646135dda"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "1a8021e21abab07c50f2676f15f56c81",
+  "executable_pnl": false,
+  "factor_id": "85fc366b29b1149b5c8293e85d6196b0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ce180174cdcb248ed570f8b842d6a3fc",
+  "executable_pnl": false,
+  "factor_id": "860cc39961d390be21c14ebfdfd7ed72"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e11354de0562ac23cab18ca54d33becf",
+  "executable_pnl": false,
+  "factor_id": "866b295705c32d26e156918ad51e153b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "dd6a3096418a761c6afe099f9f32e433",
+  "executable_pnl": false,
+  "factor_id": "870c7538a3b5469fa87f816fb2a9d4ff"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c96a5501cee69c6eb480b8b29e91cbbb",
+  "executable_pnl": false,
+  "factor_id": "87368652c4c90823627bcae9afc7cb0a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b9d36492f3184498012b8aaf0e41aff0",
+  "executable_pnl": false,
+  "factor_id": "877d602b6f5bd8201241dff5361c407b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5cffb5b3f0d99a874551481eea4d4495",
+  "executable_pnl": false,
+  "factor_id": "879498fc941e901bdc7c56937b51b385"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ab0423bed23d74a77cc9ae76cab70a24",
+  "executable_pnl": false,
+  "factor_id": "87c335d4a594f2ac1345baded6a846a1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "4986e2aea71143113b2a86a7a1ef9cfb",
+  "executable_pnl": false,
+  "factor_id": "8818113bbc281ad64d6905a44527278e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "f9861a558b79bf65bcdee2efdceca34f",
+  "executable_pnl": false,
+  "factor_id": "88d1aa484e9a660f7635b40d4caf1405"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "9d4f52127680e63af35249015664b252",
+  "executable_pnl": false,
+  "factor_id": "89de2aee3609b14dcae0ea4d6d874ba6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "33ff0d7168a327006fdb1622dc866cae",
+  "executable_pnl": false,
+  "factor_id": "8a44a2e30a4bd506b96ee71df1b2a797"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "bc476cd612ca59b974707cc4219b6bc2",
+  "executable_pnl": false,
+  "factor_id": "8a6d286d910ef724140c88d93e7413ea"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "57baba6f7ee09b368bf70d0716d49379",
+  "executable_pnl": false,
+  "factor_id": "8ab2166b32ad6aa0ef50a5dea3d2c451"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "6e97be23eae7f4879b7a1e900d26bf28",
+  "executable_pnl": false,
+  "factor_id": "8ab3ee63c802fde31871c98f1b76fc3a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8b50145ee631a889892f2abbf07ceec0",
+  "executable_pnl": false,
+  "factor_id": "8ac8ae2696af257adb58a18f7e91d0f6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "77e9b45c5e79b120cf46eff5991f0a96",
+  "executable_pnl": false,
+  "factor_id": "8adc5e4989df3bd55619137aceb703ed"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "4196316dfa5272f126249dd689beadd3",
+  "executable_pnl": false,
+  "factor_id": "8c16bc2f505388ff0b9901eb25eebbb3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "137254d9ad2e7050bda93f840d27db77",
+  "executable_pnl": false,
+  "factor_id": "8d31eb469381862be8bb92e472567e85"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "32f3d52001128fceb98c519d2193b8df",
+  "executable_pnl": false,
+  "factor_id": "8d5d03635c123f6901456c0326823514"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "61d4fef7441da83f9f68157356f0b7ea",
+  "executable_pnl": false,
+  "factor_id": "8dc13435ba5e95de1fd4f43bcc818f45"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "ce7ce034cf246181979e007939d9556b",
+  "executable_pnl": false,
+  "factor_id": "8e05a74457ab0bdec3324edf2414094c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c717a0ffd0deb55fc53ce230eb4afffe",
+  "executable_pnl": false,
+  "factor_id": "8e06457b85ae7e2e549608473f5a7f5a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7cfc364ba02d9f8041705de35f07bd7b",
+  "executable_pnl": false,
+  "factor_id": "8e8520464e8571ccf866a0f0be1e8c6b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "877227a9378a218fd2ec51d93895fdd1",
+  "executable_pnl": false,
+  "factor_id": "8ef33e26422acbf564b8e383e2f1f928"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ec5121a91c2ecae381cdef80abd04b69",
+  "executable_pnl": false,
+  "factor_id": "8f2b83130dd64c93cd6ced0548e9c635"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a8c6306ac957c8d1b504bab1f700fdb3",
+  "executable_pnl": false,
+  "factor_id": "8f3763b87ba18604d6a5cf2ea150f2e2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "274f4cf1f4c7ea684f972d09f5544484",
+  "executable_pnl": false,
+  "factor_id": "8f5c72d1d5c82f630b6d5f0e096d007b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c6da86427159d4e137d5ce59693aec2b",
+  "executable_pnl": false,
+  "factor_id": "8f636a45b5c23dd6340d53e220e113f2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "a137b2149a1a7a13ce330380c18ca1fd",
+  "executable_pnl": false,
+  "factor_id": "9003e3e9694175783ccdb12f4f84c2f9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fd3e718364a579467bd068d4c34c56b9",
+  "executable_pnl": false,
+  "factor_id": "90752954f4f1992953754f545786dc1d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "dd9e25fbe97d44139fba85387fa8d1f3",
+  "executable_pnl": false,
+  "factor_id": "91067a8ca05c5363c139b94fa74c39b2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "881236b2eb245b41e83b8ab757de60f8",
+  "executable_pnl": false,
+  "factor_id": "912c665ac750e699e07900c45ce65d34"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e2b81aa607477f0f6b07ebc6d03c77f2",
+  "executable_pnl": false,
+  "factor_id": "91a388fb68e2227322e319e66e0d198e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "7bdb1bae2872774b4a31a495dec75c5f",
+  "executable_pnl": false,
+  "factor_id": "928c78adb0dd5c2b81c3ee785ce68bd6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b6c31b3ac51812c2bc7a88edc658f9e3",
+  "executable_pnl": false,
+  "factor_id": "930f4ba3ec500509c5f397edce3db77a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7a5abe70f72900497b2acd07e0206529",
+  "executable_pnl": false,
+  "factor_id": "938671b620662197ec498a51f9727f07"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "33d1e4dde20543b1215351cf2d33ee29",
+  "executable_pnl": false,
+  "factor_id": "93a68989acbe7a059c139b726a103c6c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "43c876b9cf0705d4c9fd1ef6834d3ef8",
+  "executable_pnl": false,
+  "factor_id": "94835805f8127056d2f0388da1d6cfa0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f661f7d4d2d02874134e795e4a3e2fea",
+  "executable_pnl": false,
+  "factor_id": "94ac5d4023e5aa8d213bea2a5a4ff7f2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f30226467a21c20bd41e288d5bc16790",
+  "executable_pnl": false,
+  "factor_id": "9539bc8bf16ce87878583f0c04ecddc8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "560ed4918979e6f42cac9215532a2c86",
+  "executable_pnl": false,
+  "factor_id": "959b4cbb8a13b72c830ae0cc2899389a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "bf41809e9fdecf644f4532315f42fb78",
+  "executable_pnl": false,
+  "factor_id": "95e7904d7d3a129d2dfc9ce528926514"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ce6e77860e1a0ad3d7559517913b3727",
+  "executable_pnl": false,
+  "factor_id": "967f12aacd15336553625f5e762da41a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c331557a24ff7eaf779c577833a6b528",
+  "executable_pnl": false,
+  "factor_id": "969e268efa8666c3e5f6fd754c95c4d7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e905cfc69289026f9171b52722eb62e7",
+  "executable_pnl": false,
+  "factor_id": "970be6b370a467d926869320aa306bcc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8dc2cc6c34e7b7e73e84be1ca58a00cf",
+  "executable_pnl": false,
+  "factor_id": "974d672050d290ce1b7ad47b166e8b5b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "f4a04158faa90caf6108b5d346f128cf",
+  "executable_pnl": false,
+  "factor_id": "97fcc89c24d50be9b99f1771c4b9c9d9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7f8779f884ed7b612d7f3f04d04acdd0",
+  "executable_pnl": false,
+  "factor_id": "98a8e69d6a93b724895a7972374a6c7d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "dc1ef54593774df35e77df5b22687440",
+  "executable_pnl": false,
+  "factor_id": "9b1de39bc6eb714bdcf8b755b7e05d6e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "5e9cde4e36c0e13b89a9756264b25e81",
+  "executable_pnl": false,
+  "factor_id": "9ba2ca350c37c24742ca937bb33b48de"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "f8a4202792c6f66970ce8bc63d3a3a3a",
+  "executable_pnl": false,
+  "factor_id": "9bd3a74daa0d9e3c828b1268b425eb03"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "731e8a168bc64aa0a843f275948e7a0d",
+  "executable_pnl": false,
+  "factor_id": "9c6b22de929b4b8627d410a1a632be8c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "aabd0267edaea27a8c0a3764aed80cc0",
+  "executable_pnl": false,
+  "factor_id": "9c9901eecd4c0f48d1235ce5ce1a6d05"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "e681cd38d0ea6199f7495feb1602a9b6",
+  "executable_pnl": false,
+  "factor_id": "9d29e70829885b28b1950602dbba63ea"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d352204e0eb2faa8042a0466af20686a",
+  "executable_pnl": false,
+  "factor_id": "9dfd7c832cbf73153881fa42a2fba849"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "bd6f28144673175d28ef7842e6b86022",
+  "executable_pnl": false,
+  "factor_id": "9e07c0e1e4726925c1de367d980a3b9b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c59aa9e7293929d3d94ebcf514566164",
+  "executable_pnl": false,
+  "factor_id": "9f11b639bf4a8b68a98e7269bb84fdbb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "814a6a9dc40bf0e6f579a999a98aed1e",
+  "executable_pnl": false,
+  "factor_id": "9f5d0f438ad379c1bf1bc4f6b6d3f0ed"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5a9d89d3952c6de2efd97813f166bc47",
+  "executable_pnl": false,
+  "factor_id": "9fa3436e970741432177839a5f7519c4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a6f25c3c383f5fa832b117d74e46f6d8",
+  "executable_pnl": false,
+  "factor_id": "9ff1d7233f953921249fdd4821a220c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "4d8d69eb6f6300cc075b2f18ec059179",
+  "executable_pnl": false,
+  "factor_id": "a0586d9a88294de627074ad36a0c8a1b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b054b91d4619f5dc3cce28b973bab96a",
+  "executable_pnl": false,
+  "factor_id": "a0c820914e7d6747cfc375ffd8dc934a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "57b8a24cbd0579c69538b21bc81b815a",
+  "executable_pnl": false,
+  "factor_id": "a0ce5a4d97c63db5bc6f046ab96f995d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "22455b3c551c948b00ce8ac2f51611e2",
+  "executable_pnl": false,
+  "factor_id": "a1c11c673b014431499f00d5e5e9014b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "aa3e26d49e95d0ba5f1131fed6267649",
+  "executable_pnl": false,
+  "factor_id": "a2b500e874367d75bcffa3e7f8400a8e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "a56337e9fbf060e975d0760559a6e30d",
+  "executable_pnl": false,
+  "factor_id": "a2d44b7af300035be7823996587be7e3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fef9c713a8afc3c400355426c398480d",
+  "executable_pnl": false,
+  "factor_id": "a3136829e71c0cc310094328c5ae429a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "feaf2016e94d060b117d77ec699aa5bf",
+  "executable_pnl": false,
+  "factor_id": "a45374ef4e5246e9d72201719a3c4744"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "90331d295cf2a9322d99904764553715",
+  "executable_pnl": false,
+  "factor_id": "a4b942265cb9a576ebc23c9fa75e24a5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "83b617ba2f680f168c6e2f484dd0a16e",
+  "executable_pnl": false,
+  "factor_id": "a514787615df33cc66516fade273f3a1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "6ff6cdb607295e0de6c50cfa85ea37f6",
+  "executable_pnl": false,
+  "factor_id": "a60581944544c95424caf3ef3aab43e2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b6e12f5d82ccaafcadd248d03ae54ac3",
+  "executable_pnl": false,
+  "factor_id": "a694a927ed6c7648dcc00b94f5360ed0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1cc6350f27107f320cf40a17fff9fc77",
+  "executable_pnl": false,
+  "factor_id": "a6cc6c7083227d55db0cf2b74168a49d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "476f45667d3f26a74d478efbde269657",
+  "executable_pnl": false,
+  "factor_id": "a78d22dccd093ce6a0e8f2bf0d038392"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d89bbd6e6a5f98777700486515c4a6c6",
+  "executable_pnl": false,
+  "factor_id": "a7f95d0dce84b6c02859927f7baa9eb9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ee8d26d340a5ce71ae356d4cf8e9c171",
+  "executable_pnl": false,
+  "factor_id": "a812580c2b4099d07f64de77954eb72a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "83ac6533b673d35d02b92e3d8b3ce1c2",
+  "executable_pnl": false,
+  "factor_id": "a8f3453e937c97e0c1183c331f960c73"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b764a35fa04e1d08a4f5cfe32ce4e968",
+  "executable_pnl": false,
+  "factor_id": "aa7062e9958f5e78e48d6d712d2cb7f9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8818dca117e3448c20679f4d5e523408",
+  "executable_pnl": false,
+  "factor_id": "ab9e713c364e6577cdb670c81a790093"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "83ad699ba22ef3b23916ddb94c14b858",
+  "executable_pnl": false,
+  "factor_id": "ac647ec3412b253b74090b79102961f0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "89d79ff32617f94bc937a8936949bdfb",
+  "executable_pnl": false,
+  "factor_id": "ac65f7a418c47c031a5635c46b1d19fc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "446bf0fc7ec90603ff9053dd3bfad209",
+  "executable_pnl": false,
+  "factor_id": "acaf9d8c72e5bd248fa7e6b9baa74963"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "6bfeaddde3f7b9d8b1cb69a8e8f5833a",
+  "executable_pnl": false,
+  "factor_id": "acf3f3be045bc123678331e462498948"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "92e564c06d51d025eee8383ddc8c3418",
+  "executable_pnl": false,
+  "factor_id": "acf5cb762638cd71621efa79095b1aab"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "036859aa8110063b00c3446b1ef7a3ba",
+  "executable_pnl": false,
+  "factor_id": "ad1a403c8e2a608b6c8e918b5128b838"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "5884d3f36107b61b938bdb16291b2ecf",
+  "executable_pnl": false,
+  "factor_id": "ad22956e715f11f64dfb73f212045178"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b1a7c2964e988f9c68c2500284fc84cc",
+  "executable_pnl": false,
+  "factor_id": "ad3c0fc284e551b6696cd3e8af8e8ed8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "cb135b4a9ff6675160ceb6f4e27e1ae1",
+  "executable_pnl": false,
+  "factor_id": "adcf080023608d479b537704973671f1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "0916e95afc8800b4cbfc7c68a322e59c",
+  "executable_pnl": false,
+  "factor_id": "adefe3b0adcd7c026b4f4a8cb24a9fbb"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "450eecf40bbfcae2fa82471616629d1d",
+  "executable_pnl": false,
+  "factor_id": "ae047031e6fb919772659faabb10daf6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d3beb395d1c26b3fde64ac6192250461",
+  "executable_pnl": false,
+  "factor_id": "aeed3aa45ed2392117b2bed9f3907be1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fde060fafa04f6d6af8fcc220519cc95",
+  "executable_pnl": false,
+  "factor_id": "af7a7c33f4421b2dc42a836b5c239909"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ba9af1bda73d4f0a1112d0e47af042c4",
+  "executable_pnl": false,
+  "factor_id": "afe17a311bf93863b22a0fbef4d19261"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "96b808ae064a6f80532ce7543626e063",
+  "executable_pnl": false,
+  "factor_id": "b005315f7a231bbeccbe0060648cff31"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e0b7f1c622bc924a148f7b5b6cf43cfa",
+  "executable_pnl": false,
+  "factor_id": "b16fbd79a0dc91b77afb68e8f2f847a9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "65d36cfb2bf487f352f8aa553acb181c",
+  "executable_pnl": false,
+  "factor_id": "b2ada87d459f83e3b94d2ab003688be9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ee167240f7014ba3460703434e3366ec",
+  "executable_pnl": false,
+  "factor_id": "b30f0278bfe6108c242b652210d2887f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f92b7341808d49d5ef9a5bc0d7ab80db",
+  "executable_pnl": false,
+  "factor_id": "b3260db136491a9282c66b5786b56f7e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d5f8ec40f1f968e3f804eaf1dbf04aef",
+  "executable_pnl": false,
+  "factor_id": "b3dd5d48429b26c273e4d173cac11483"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "95e2bb8bd3a025316217efa7073c5126",
+  "executable_pnl": false,
+  "factor_id": "b5433652d4497133e76e2fb324f51784"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b3774656ed577a69f0f0401b3d403643",
+  "executable_pnl": false,
+  "factor_id": "b695786aa49dbba54aecd095704fe179"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f395fc86f738aaf77de4ce119cbe5a17",
+  "executable_pnl": false,
+  "factor_id": "b6dc38a6cbe90bc384e3e164d12eca58"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5686440ebb52b894f8fae58640ec728d",
+  "executable_pnl": false,
+  "factor_id": "b703b2e824f6a490beb2b50fb4b914d0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "bb8015d7fff31c40c2084f7e298bd7d8",
+  "executable_pnl": false,
+  "factor_id": "b7ee4c8d48109c3f86f3f0c47dcb3e9d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b4839cfdcdda50687debeaa7fc151055",
+  "executable_pnl": false,
+  "factor_id": "b80127339b1cef4c3b8d9ded9dbf2b66"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "118da1b0cb2a328f0e207b1d5da2cd93",
+  "executable_pnl": false,
+  "factor_id": "b862e98ce0c7b01c69bdebe7730dc0a3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "594693566fee771e3fc23a793c1b7663",
+  "executable_pnl": false,
+  "factor_id": "b88a06ffabaaa5488f6055639967b5f9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "77eecdadea345eb061b4a3423824c209",
+  "executable_pnl": false,
+  "factor_id": "b8dedead629e4ed1c11485e3ced8d824"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5891f54a4742d0a77dba7c33d3fd0292",
+  "executable_pnl": false,
+  "factor_id": "b946bb09e8af103763f6203e5e2bf403"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "0b89ce1b0eb598aebf90a3ae427a10af",
+  "executable_pnl": false,
+  "factor_id": "b975cbc6bd82fb679e3d8cc2fa22a4b8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9b15de5cde4324f386b7d35d4215bbf8",
+  "executable_pnl": false,
+  "factor_id": "ba26c48dbcd6211df50cd7bf7f28157f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "6be936b187654f1a96eaf6985e2c41b3",
+  "executable_pnl": false,
+  "factor_id": "bae07c2b43c51101beb48935baebb2f4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "0fabf8ea50e5dfdcdc6efd1d13d71bc0",
+  "executable_pnl": false,
+  "factor_id": "bb4927cdf805300916943643377c8dcf"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d8534617ca06c7b4ce841d9ade2d0244",
+  "executable_pnl": false,
+  "factor_id": "bb66c6ac9032d5a4f67135edc7a57800"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "222c03dd79ec01079486c74c49e8c859",
+  "executable_pnl": false,
+  "factor_id": "bcac23da1294e9206f830f0f2b01475e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d361bb0b35e2404e9fdfc7dc408f86cb",
+  "executable_pnl": false,
+  "factor_id": "bd338e855fce3b7bd0c89455f83de4db"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "df3de0a181682142a9aac71451e0c53a",
+  "executable_pnl": false,
+  "factor_id": "bd57f27a660587135207cfbd6a13e5d0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8a2f5e9a5c0adab3e3de7ba3d1eeb6ec",
+  "executable_pnl": false,
+  "factor_id": "be11ee86455ae5eb60fa905815585242"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "05079d7154634cce116e475b20a35643",
+  "executable_pnl": false,
+  "factor_id": "bed4d08b4e6b77fe5c34d4494d833e44"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c0bbb737a7381cce5397131a73e8f525",
+  "executable_pnl": false,
+  "factor_id": "bfd0b6a18704bd9c5efac44c2e5e2073"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1c7c7f9669bbc90337e12d92e8a8a8a1",
+  "executable_pnl": false,
+  "factor_id": "c055daec524e3bf6d6da9cc96a15bafd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "67873b80ef019554cb9e49aa0056763a",
+  "executable_pnl": false,
+  "factor_id": "c09dc86115c0fd9b3cb3d35603d61d9e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ca624d53d7f0c902777a3c2c4fd4e9d0",
+  "executable_pnl": false,
+  "factor_id": "c0fa580c1bfccd535a046e39b1bb7d13"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "1fa4b9c76a1c580b65d376875066324a",
+  "executable_pnl": false,
+  "factor_id": "c18e40df76e25d61b5f273f039738b0e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "25b4ca12d71a5d82ef579cf63b26a8df",
+  "executable_pnl": false,
+  "factor_id": "c2821d599490c47a39598525f731b140"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "718ba088e2a9b3184b01914ba12c5f40",
+  "executable_pnl": false,
+  "factor_id": "c3e7a959b50737a1278448cb11d526bd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e1405b444bb148403a7eeb4c10e3f556",
+  "executable_pnl": false,
+  "factor_id": "c4ad2a5681d476a999bdf61e1b3a1a8e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "4dc836178d5adea26ebdc23aff192624",
+  "executable_pnl": false,
+  "factor_id": "c4af037a247a82c1776f4c95db13e900"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "5c6ad85fce707e9d3eb39e72c155c75d",
+  "executable_pnl": false,
+  "factor_id": "c4bdcf6c0280848972158935b56e0f4d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "96784611f3e76fbbd2fc90b408f8aeae",
+  "executable_pnl": false,
+  "factor_id": "c4fbf28620ccaaf2102723c97d0243b9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d1772ada845f4e3eef24ea0f958ed78e",
+  "executable_pnl": false,
+  "factor_id": "c5e4f93e8880e6047ca23614567e8b24"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9725444816f913eb198126d9383c2133",
+  "executable_pnl": false,
+  "factor_id": "c617c6d02c6cdb7c3e936c62c8fecf87"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fed00cdcb93ec95103e3ba3a26da4a60",
+  "executable_pnl": false,
+  "factor_id": "c66c36f69cdbef023401d2456f2f3b37"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "504026832d361ea4b1ba023d435bde3b",
+  "executable_pnl": false,
+  "factor_id": "c694f5546aca6217796f69cb2f8f425a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e9870c69e7722c7e8f7ff9a553586da5",
+  "executable_pnl": false,
+  "factor_id": "c6f573c6ca95d3d2195f9b72145281c1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "161c6f75adc6ccff4254a24ad5ff1474",
+  "executable_pnl": false,
+  "factor_id": "c8912f506d23a152ec60e763a057742b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c586a22ca7fb2ac03cd3d5e2e4f93422",
+  "executable_pnl": false,
+  "factor_id": "c90398311347d68951396320b7101d0a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "25f7051372147507ada5af86e23374a1",
+  "executable_pnl": false,
+  "factor_id": "c963f7f874108d0544670f4491ebfb77"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d25dc7dff93ad2e75e181df7b36e881c",
+  "executable_pnl": false,
+  "factor_id": "ca137815f88ba186a47eab6f052c36c1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "d90cbc0cade8c451257ae02451ed477b",
+  "executable_pnl": false,
+  "factor_id": "ca4d79bb0d320fcedba5e29146d773e8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "5a978ecaf4d42be90c3ebe449770ab58",
+  "executable_pnl": false,
+  "factor_id": "ca516d11a53fd1df72dd0716a206fed1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "1d4465889446c018b18df61aeea69fe9",
+  "executable_pnl": false,
+  "factor_id": "caff2e6d62b042b3f78350c7f404e51b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e883a482f131e53da6e428701fa077a2",
+  "executable_pnl": false,
+  "factor_id": "cb15b7aba6dbad2667c88fa53e7cee11"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "839d54c43363fc493283e60d34b91976",
+  "executable_pnl": false,
+  "factor_id": "cb849798085e9cb1799be302b75e00c6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fb6ff874c5b73b9a301b0b92eaa7fc0e",
+  "executable_pnl": false,
+  "factor_id": "cc38cf71d2b8d573ee3d57fb4a0712cf"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "4b39d310cae4e2aeb6b1f302f7793f9a",
+  "executable_pnl": false,
+  "factor_id": "cc4ec323b161a013e458c1cc8b01a5f4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "263917493e7d5478c1f760df31e7f29b",
+  "executable_pnl": false,
+  "factor_id": "ccc27e1ec86e92c6d799ea6ac82700d8"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ee3b27dfa65da0c4814f591037add26e",
+  "executable_pnl": false,
+  "factor_id": "cceca4b46884ec4f3be4bc34aecbf591"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "d4f011f6a63efd344f8629632f54c2bf",
+  "executable_pnl": false,
+  "factor_id": "cd2b213ca7c27bb2b5b41046107e900b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "191ec1969524defda02d57dd8081d4c6",
+  "executable_pnl": false,
+  "factor_id": "cd6a2a1b52da235a0ab6f1f5528471e2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "6e660856b7acc0268651b0c76333d2fd",
+  "executable_pnl": false,
+  "factor_id": "cda9aec33c7a50bdf602eedabf336b07"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "d3a461902856e94179bbeaf7be5d9d06",
+  "executable_pnl": false,
+  "factor_id": "ce4fc8d2572eee8ab1540c4086987e0e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b87f6e6f9bfa6502dc97d25defc2c5a2",
+  "executable_pnl": false,
+  "factor_id": "ce5678b3cb4c794676a194954cd17b51"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "82de172ef12f8b3a813a55beecffd88a",
+  "executable_pnl": false,
+  "factor_id": "ce62b6a4ec2b97406065ab6073618a3a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "7603b01306abe76e35c210108bcca01c",
+  "executable_pnl": false,
+  "factor_id": "ce9608f05cc5dc167772f5db0bc6c9d6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d35a6b07df7aefab047b098d7065a3cd",
+  "executable_pnl": false,
+  "factor_id": "ce9dcd361d9696bc9d067d64af946c6b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "789d51bb7e9bb99c2b14ad8533f31ff9",
+  "executable_pnl": false,
+  "factor_id": "cebb9ba457ada6a8e4c96b5061b0e994"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "03d25aae1b528fa34df593a73adb8ca0",
+  "executable_pnl": false,
+  "factor_id": "cfab0fc6f644825c318aeec06592f0c2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "4bc99d831aba43fb83c82b9ca113cf94",
+  "executable_pnl": false,
+  "factor_id": "d0a17310c7fd46d80a37e69ba5699dd0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "5b2548f13d734261e6847203973d2678",
+  "executable_pnl": false,
+  "factor_id": "d0d487ddfb2e13fd8702dde1dcdad7b6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "2ea9fecf42ddca30da9fcc8c3e8159e9",
+  "executable_pnl": false,
+  "factor_id": "d19d4d710185840a6e606f21f7aa2d6c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "aae29ad8f8598547bf7debe067e64c5f",
+  "executable_pnl": false,
+  "factor_id": "d1a86d82d14b23851589a171028a9556"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "4a3ea4e3d428f6a41ff2ea3aa5538d67",
+  "executable_pnl": false,
+  "factor_id": "d1d0480ebdef17ef0b0b6c0e813328c7"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c8a701534fe4d0855468d28b48c8a0da",
+  "executable_pnl": false,
+  "factor_id": "d1f7ec4780155112c25d1522e87de5bc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "287cff54046f5c9573451ddf8c485584",
+  "executable_pnl": false,
+  "factor_id": "d2a8d090ee6a2591e766fbd368ad3804"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f33f49fecb273c57ea8e151ecc086dc1",
+  "executable_pnl": false,
+  "factor_id": "d305a00ebd410c00232bc1af9a146ee2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b956330ee1047dc0545d1dcfe644e88c",
+  "executable_pnl": false,
+  "factor_id": "d45b1bbcbd0d12e6905a6a3c5d59e39d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f3a556b3c3a92e93e7c5936fe13fe4d6",
+  "executable_pnl": false,
+  "factor_id": "d4699c41b5d25616024c22a1360cf7db"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "37ee97e3fe21c1914dd4d31606028783",
+  "executable_pnl": false,
+  "factor_id": "d4b9c1ebc7defa803b56478c2d2ccc0d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "f1b2f9cf3ee91cf3b944be2d3484ba7f",
+  "executable_pnl": false,
+  "factor_id": "d52c8082587b49a242e7392a6cb92b0d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fc0a4e6921122ebb4bfe3d7744e457f4",
+  "executable_pnl": false,
+  "factor_id": "d638aedd141a5246a2b3985cbcb2366f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "4a1b28d42ae9412d22ec0d82f763198b",
+  "executable_pnl": false,
+  "factor_id": "d69e440f6ea7f37eef26dfd60c055c0a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "894fc340ccc2cea120e77d9d64d7cf85",
+  "executable_pnl": false,
+  "factor_id": "d6c1718271de489b9b8fba26b3437233"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "883fdd8b9797ee81a498a78fe4b96a7b",
+  "executable_pnl": false,
+  "factor_id": "d797fe173deccb97c61754bf9ee5b6c3"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b71558df60c8ea4d287d79b52f1c9b8a",
+  "executable_pnl": false,
+  "factor_id": "d8229d22e344c51336baeb995fc42e56"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a1eb7c5a2daf7a2015177d48ce6614ce",
+  "executable_pnl": false,
+  "factor_id": "d841c9c0ca6211797977c3d88767ca37"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ac46128bb019d03273a6103e065253df",
+  "executable_pnl": false,
+  "factor_id": "d865e44e4dc9cf251cc6686ab0c8f17b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "714ddfc8a901615eb65adccae8278907",
+  "executable_pnl": false,
+  "factor_id": "d87c89a569d69f652f8939bec8275381"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f853ebc416dbd14afa141e985e45dab2",
+  "executable_pnl": false,
+  "factor_id": "d8cc8ba303ab5bcf8d612258be53485d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "2891ced92c5dca49b2bcd528733c33b5",
+  "executable_pnl": false,
+  "factor_id": "d8d973ee2dd7e5105cf4714b5e507ed0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e3ce0de126d82fe39d60bc24f226920a",
+  "executable_pnl": false,
+  "factor_id": "d8e51198d8e665dcb94e6a1bbab8c34a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c98c124ce90e1fe0627bb6723ee9d7cc",
+  "executable_pnl": false,
+  "factor_id": "d9504e52d25ff06cd16def4c1e703a1c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3e44705496396c73d48f362936726e70",
+  "executable_pnl": false,
+  "factor_id": "d989081e8a1b39271c6a817352491f59"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c3706005f5b8dfdd091636a33ddef2cf",
+  "executable_pnl": false,
+  "factor_id": "d9cb71a0ccf29f01d5dcf2f1076d947e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "fe73dfdc9f3d3645afd8952b79f6b539",
+  "executable_pnl": false,
+  "factor_id": "d9eab72e32ee1edbb676e606b4999ab2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "dded6e6a1e426aa91880d46402e5050c",
+  "executable_pnl": false,
+  "factor_id": "da828f4fb2afc498d0dba7c2e5020eee"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "0188a5dce245d722a8fd7be1cfe467c7",
+  "executable_pnl": false,
+  "factor_id": "db57d7e0ff23e44533e1625e2add5abc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e9c65e357ad4f548875475d2a5b16170",
+  "executable_pnl": false,
+  "factor_id": "dc4f7705119461622e00a136e6be215a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "a493f13b2afeeea66ad6fd5e9ab8d017",
+  "executable_pnl": false,
+  "factor_id": "dc61627cf3fb56fb74b3b2c815b5a4a4"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "17024c370ddb7f7f37c7de34e414eb7a",
+  "executable_pnl": false,
+  "factor_id": "dcae5becf269f09b296dac71c303c3ed"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "576f2664cfdad8d5908aa998d716e0d7",
+  "executable_pnl": false,
+  "factor_id": "dcd8c05e0c0a9f986da654db60f6abb2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "f35a30fb2d6f32343921b6ae57d09ead",
+  "executable_pnl": false,
+  "factor_id": "dd5aa4ead6b1613e89c02468ae5786ee"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8e9b4280c3140a587c8f2326d70291f3",
+  "executable_pnl": false,
+  "factor_id": "dd74dab3411d31a82606e6ef390bd2d6"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "d138ea7e6470d17c3cc3cf8c4a5bf736",
+  "executable_pnl": false,
+  "factor_id": "ddceb393728a06b69ea31d95753a99e5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "fbcd1fcf7c25794f46ed0d316574aeed",
+  "executable_pnl": false,
+  "factor_id": "de726bc32fd3cb177cb963c539bcf805"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8f88d4989e3adb607aab5de2e883105b",
+  "executable_pnl": false,
+  "factor_id": "dfbc03efe774279e9326e811ced82436"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "4bd696a4375fd8f0dda262925cbf15b6",
+  "executable_pnl": false,
+  "factor_id": "dfe6b584839d017b9e6c6e3cb6f7c734"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "045e191f146adae20ef9ef1305b85824",
+  "executable_pnl": false,
+  "factor_id": "e0cc020e3e3a5d560f6ce77a11b93765"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "3d4d35f52a1fda0b1012a87f6f8a89f5",
+  "executable_pnl": false,
+  "factor_id": "e1dbde1b34ac0f3d4184e6b05f1c41cc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5aefe9286da99ba0f009a20818387f68",
+  "executable_pnl": false,
+  "factor_id": "e32102a296264d317597fb899160a19a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c91e254d57c88f3473cfa080eabcf620",
+  "executable_pnl": false,
+  "factor_id": "e329975893018792e13c2179d3d0f2a9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c1aebae1e3e3b89dcbbe7e57d2a0c6e4",
+  "executable_pnl": false,
+  "factor_id": "e3399f49911bb61a188faba34f87f728"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c29b714bf77cace2bb50d3685929b3ce",
+  "executable_pnl": false,
+  "factor_id": "e3e7745b602067af0f5e0027f539caff"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "14344ee0e8679b1c531753dc162f1d8d",
+  "executable_pnl": false,
+  "factor_id": "e3ecce9f736e9201a53b2683ba6b5072"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "475e4e0dce08cdd34224e454b2c41e71",
+  "executable_pnl": false,
+  "factor_id": "e505bf57ef6afb3de59c829863bd7bff"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "07f1833655eb3fd3398599baa4b2707e",
+  "executable_pnl": false,
+  "factor_id": "e5fcc8f75f88b0a6dc6893753632b537"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "957f9a715a0d74e0bd6a81d254a21b88",
+  "executable_pnl": false,
+  "factor_id": "e61ce2743493cefa264de9d42e7cfcec"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8aad76eab940e6fd297a495b449febe1",
+  "executable_pnl": false,
+  "factor_id": "e66870e852102dd7a3036f7691d65771"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "15868c7148e0189a79394269b8f1f337",
+  "executable_pnl": false,
+  "factor_id": "e68e79dcc31f78f7508c785c12808625"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9487011b77927906d4fa632fb7776e76",
+  "executable_pnl": false,
+  "factor_id": "e70ff03df03aa5e2566eb5a344ee9bff"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "cec28aeea7a967c18c0e9f6abc5f9dbe",
+  "executable_pnl": false,
+  "factor_id": "e87103bc6beaf28619dadaf15e3c43cf"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "e510bf06a853268557667a1910353b2e",
+  "executable_pnl": false,
+  "factor_id": "e8ac6d6cafb4bf2fa6765f1ae2fb0fc0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "aea2b690cdfa6cba942f15c02ecc9d2d",
+  "executable_pnl": false,
+  "factor_id": "e91a8d6c6784fe5c9e65f3aab3f7a423"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8f96adec230941612efab2f4100ffee5",
+  "executable_pnl": false,
+  "factor_id": "e9282fc62f216d011a745257656c585b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "a8171fbc9014e2a7d973974590cf2314",
+  "executable_pnl": false,
+  "factor_id": "ea10ded78ee66cd86f246e7eff9b11b9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8d9290ffb2b7364a9b74c1e6f68184d6",
+  "executable_pnl": false,
+  "factor_id": "ea2fa3be01ae5561c865c74133fa93be"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5426c53e000fe356c9db49bac229d9b3",
+  "executable_pnl": false,
+  "factor_id": "ea560eb6b46d9375c18f2602498d2130"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "12e370199f605131450fcc6d93a25a05",
+  "executable_pnl": false,
+  "factor_id": "ea64fa1abc4d15a304dae3cf0641a379"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "609b0fb22be417687e087f7455893b7a",
+  "executable_pnl": false,
+  "factor_id": "eb196bf6c8a950f397f3d73f134d25ce"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "980bc275cc0f3ae787f01abf2aae425c",
+  "executable_pnl": false,
+  "factor_id": "eb57c6ffae853fd75f79ac26ec4d4788"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "c658ef9fc03bf43e2d6fc1d239af2ccd",
+  "executable_pnl": false,
+  "factor_id": "eb69f301523aec19d6fa7e071dc547d1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "c0ff768c923efc1e0d084f25e01a2347",
+  "executable_pnl": false,
+  "factor_id": "ebe6d5c106976fbcab565c1a4a7d0f4e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "65191374f7e60b5b7fa06205ff74e30a",
+  "executable_pnl": false,
+  "factor_id": "ecd80767e4c04386f74ed58d74bf645c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "6289f463b8be4ccbc0baefd2ac92d875",
+  "executable_pnl": false,
+  "factor_id": "ed50f62da82c31be6abaa0d9a9ae2389"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "4a894f057999efdb5e35820ecef1c664",
+  "executable_pnl": false,
+  "factor_id": "ee4efcd77dce30d2a834fa8fecf7eb33"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "1fdd4c15e8591d53805b584f5f203cf2",
+  "executable_pnl": false,
+  "factor_id": "eed9cc0b475aee15f269c655ba9ed953"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8c9259e6cf9292d9956468782d7a3e46",
+  "executable_pnl": false,
+  "factor_id": "eefd29b4442ad39f92900110788c7f10"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5d012eb388d32cc61dc3c07311794f30",
+  "executable_pnl": false,
+  "factor_id": "ef11b19bfe27b11ebc64f80f9d48669d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "883fed0a2ff7bc803f5cc68ce297e4fc",
+  "executable_pnl": false,
+  "factor_id": "ef937832941276a14b0819add46d302e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "b1f1fb5fe54d460418fe1f8744ec3ed2",
+  "executable_pnl": false,
+  "factor_id": "efc47293e0bb56f4aa8818ee45613274"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "72eb811e980f70def7cc6f680ea2f016",
+  "executable_pnl": false,
+  "factor_id": "efe5e3ec34a2ae9f4d2008be962fe13a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "614e0b98d285e6edaa3f65d6e8621144",
+  "executable_pnl": false,
+  "factor_id": "f10a0442ea2a8ced09341265d1efb121"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "b465dbe435cf1395ce04a0383ef9fbee",
+  "executable_pnl": false,
+  "factor_id": "f119fe4ff96b5eeebac07c575f7c4a8f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "9f6cced4b72caf720275f3a958dc3689",
+  "executable_pnl": false,
+  "factor_id": "f1e88c1a588a187c20148569ce5f248b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "897182567da8d480fc81517426756202",
+  "executable_pnl": false,
+  "factor_id": "f1f5514a953449e8ef3b5eb78d18059a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "fdfa726cd1d3dcf19e8e0984ba774157",
+  "executable_pnl": false,
+  "factor_id": "f310e09b5f8606a17def0852d7b99a00"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "31823b99b679f90cdcf5c8e888a0fe59",
+  "executable_pnl": false,
+  "factor_id": "f36d7f0650dfab178e4d52220d891f88"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "05d44aa1ba58f4291443b8474e4906f5",
+  "executable_pnl": false,
+  "factor_id": "f3c03e436935c3d62d080c80f660f934"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "43138821fc481542fcb4c7713b0a4f76",
+  "executable_pnl": false,
+  "factor_id": "f3c8fa3bc0e03a2fdb0c03c7021a9df0"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "65ed22029ecb92df168fe30fc11ef776",
+  "executable_pnl": false,
+  "factor_id": "f41df5cebfbc486aca3d1475a0f7e88c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "ad17c2caf2a0a990f15f9d3be182ae23",
+  "executable_pnl": false,
+  "factor_id": "f4223d1a1088009acf4db550b1d9301a"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "25a76e7cd80d7bff538a8810eef4e3ac",
+  "executable_pnl": false,
+  "factor_id": "f46726ea01344d68e0c8c8cacd1d43de"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "8baf678a0c1d392607297705d627f301",
+  "executable_pnl": false,
+  "factor_id": "f540a1764a8090dd6ed1ba611e817465"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3cc433e5119359fed4976bae46c6c6a6",
+  "executable_pnl": false,
+  "factor_id": "f5447366c66ad7c6689f52fefe45feae"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "be6951950e97ea4a459c8855c16b0809",
+  "executable_pnl": false,
+  "factor_id": "f55f2f8e940b2fddb0820d04670f808b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "802876b91f683b260fa267049a9ff56c",
+  "executable_pnl": false,
+  "factor_id": "f58fd99de308870947cb890c8fd61533"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "94c2d27b0995934bf78f8ab9a0e4a1ea",
+  "executable_pnl": false,
+  "factor_id": "f64ea83b53d8e2ab43192270bb3e7a33"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "2b1909abfa189acea1fb1f9e46a6f8a2",
+  "executable_pnl": false,
+  "factor_id": "f661b88e0ef81d20ee48f86e1f7ab4d2"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "25221e01856131a3f460959aae285e38",
+  "executable_pnl": false,
+  "factor_id": "f6f0bc8088417a4f948e01e199c2a943"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "9a10898e1f9820dfbe28be9e0cd2c065",
+  "executable_pnl": false,
+  "factor_id": "f70e9c6482e2b5fdf183fa237430b61d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "db602e203f8ac2f29b5565795e294dbe",
+  "executable_pnl": false,
+  "factor_id": "f71e5540e27a4809547c9db159e2a12b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "b66ed532b385bfe3d5cb65063f30e292",
+  "executable_pnl": false,
+  "factor_id": "f7278ce9cafe09766d9f4af9b8ac814b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "02d953cd7c7715e358d7da436e17396a",
+  "executable_pnl": false,
+  "factor_id": "f7a2154955763ca62fde639d7db0d514"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "2b1ae2f9c950a2fff9efcc4875dd9803",
+  "executable_pnl": false,
+  "factor_id": "f7c54e9c0ef64603f5ed18247d412819"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "2747e0490c70ce3f24c6a2e9c0280233",
+  "executable_pnl": false,
+  "factor_id": "f812c11e48ac1665f22b12dc46ca7c79"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "09f4e6cea948bf134a579752e71bfa4e",
+  "executable_pnl": false,
+  "factor_id": "f877fc7844260ed919d9b5cd42f1341c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "7fdea24acad1ea0277dec8c44d53efd5",
+  "executable_pnl": false,
+  "factor_id": "f8bd950645950ef520036946fcdbacbc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "529d07d015fa058afb3842765b50c90e",
+  "executable_pnl": false,
+  "factor_id": "f96f030d51ecfaba85b5f847aeeb515d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "54ed69448af4d756ebaed8fc23b62e2f",
+  "executable_pnl": false,
+  "factor_id": "f9e1bdb267d4055fb02b362bb486b17b"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e18d474ec198959dee15442dbd775cdd",
+  "executable_pnl": false,
+  "factor_id": "f9eeb75c3d28fcca1d761a83e29f517e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "ac5aa5e4f530be11f370b5e95b906403",
+  "executable_pnl": false,
+  "factor_id": "fa2d6b8c018db994dbd0bcfaf3573c8c"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "409c978871f2d772ca15d58074a1d94f",
+  "executable_pnl": false,
+  "factor_id": "fa8c76e3be1e4e24547d4dd3cb3012be"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_MODERATE",
+  "direction": "lower_is_better",
+  "edge_id": "bf3767b9fd6ba9400b3b55554142bf7e",
+  "executable_pnl": false,
+  "factor_id": "fa9c719155d56200dbf2ca3cd22251dc"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "e3e30150d7e4ea26a3b3a45f1e98dbb9",
+  "executable_pnl": false,
+  "factor_id": "fac81db0e2a8c6bf9d20de95d372af97"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "3bed9d46e1949766a8a8ea334bbae0f4",
+  "executable_pnl": false,
+  "factor_id": "fb05bb6e8c96d7751bbc32cc8f571455"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "dc4fefd6a5f53a0171a7f8651e7aad76",
+  "executable_pnl": false,
+  "factor_id": "fb898b2c7a8066738c95ab18ea66fe77"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "df91e83e2b83cc2e9e6e6e56a1d31f1d",
+  "executable_pnl": false,
+  "factor_id": "fbb966525033a32588ba79e2327a434d"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "a7a2ad5f98526704d66548d962571dcb",
+  "executable_pnl": false,
+  "factor_id": "fbeb028c1c77bed3e19c89f215455257"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "5acaa5d4732299afcc795e1c8db64a9a",
+  "executable_pnl": false,
+  "factor_id": "fd188bd3de2f5d95b30cad65b33409fa"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "942cf1e779a9e19381860184e658b855",
+  "executable_pnl": false,
+  "factor_id": "fda0779c5efaa099003c26a96b927c51"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "8255c4f88d353dd6ae5c40cb01dae6ef",
+  "executable_pnl": false,
+  "factor_id": "fe24d6356993b4395716011e05fabdd1"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "89c17b25b8eb8a3c96f82e7693f562ea",
+  "executable_pnl": false,
+  "factor_id": "fe37c8bc004a38b4aa18aee635476eba"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "5f551d65d64a4da1aad2b0ced7b56234",
+  "executable_pnl": false,
+  "factor_id": "fe4bac719f02f19d7a58ae99199db3fd"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "54b4ddfc39e927f0f109a452d9c24dff",
+  "executable_pnl": false,
+  "factor_id": "feaa29556a2e0f32200b4502d53108f9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "6b80b026092322f623215a51eb7a1cab",
+  "executable_pnl": false,
+  "factor_id": "fec701ccdf1ff906866549e4d1d206d9"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "850c9f26368d318a2303aa1f66f80c76",
+  "executable_pnl": false,
+  "factor_id": "ff13d4b6792114fb127e779e0f570d2f"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "390f3a47c4492b636a06f173c279e71a",
+  "executable_pnl": false,
+  "factor_id": "ff77c4b27e8553a59c9fd27370cc53b5"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_WEAK",
+  "direction": "lower_is_better",
+  "edge_id": "fc0e765554328500a86d016d41d1198a",
+  "executable_pnl": false,
+  "factor_id": "ff95abd5ee05d570ca2664c1f0b5fa6e"
+ },
+ {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED",
+  "class": "DISCOVERED_STRONG",
+  "direction": "lower_is_better",
+  "edge_id": "4274fa4fe67d5b094d1a018a4ab4eefb",
+  "executable_pnl": false,
+  "factor_id": "ff9f3119ba6a457f734ff61d00727b33"
+ }
+]

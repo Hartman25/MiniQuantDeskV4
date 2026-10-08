@@ -1,0 +1,89 @@
+{
+ "PROMOTION_AUTHORITY": "NONE",
+ "VALIDATION_STATUS": "NOT_VALIDATED",
+ "attempt_registry": {
+  "attempts": 9400,
+  "blocked": 0,
+  "failed": 0,
+  "interrupted_or_retried_trials": 0,
+  "ledger_trial_ids_sha256": "b36af980e36695a9fdde94aa5a70aa63da32c50bec8633496fc83fb4fc84c8fc",
+  "max_attempts_per_trial": 1,
+  "registered_equals_frozen_population": true,
+  "registered_trials": 9400,
+  "started_unfinalized": 0,
+  "succeeded": 9400,
+  "trial_attempt_digest_sha256": "2ed88193e82e1a277c31b43a5cbd803d633f3040edc9a4cb98e010e323a3a909"
+ },
+ "bars_first_end_ts": "2016-01-04 05:00:00+00:00",
+ "bars_last_end_ts": "2023-12-29 05:00:00+00:00",
+ "bars_manifest_sha256": "5f3c75697fc2c31943274e09bde45a8f735999088a283a688ad299e3760ee2d2",
+ "behavior_head": "1badd9c9eec3257ac6eb7f9def9d00a0deffda54",
+ "data_request_contract": {
+  "adjustment": "all",
+  "asof": "2026-10-05",
+  "end_utc_exclusive": "2024-01-01T00:00:00+00:00",
+  "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+  "feed": "sip",
+  "min_eligible_observations": 252,
+  "no_iex_fallback": true,
+  "provider": "alpaca",
+  "start_utc": "2016-01-01T00:00:00+00:00",
+  "symbol_failure_policy": "typed_EXCLUDED_disposition",
+  "timeframe": "1Day"
+ },
+ "discovery_window": "[2016-01-01, 2024-01-01)",
+ "environment_identity": {
+  "numpy": "2.5.3",
+  "pandas": "3.0.5",
+  "python": "3.13.16"
+ },
+ "factor_coordinate_root": "095af73d36a5a255df5d06e8e1ae9b59ec1bb8e163d0f05b9165f0da28c774bb",
+ "preserved_artifact_sha256": {
+  "bars_provenance_manifest.json": "6e62b194320121eaf386d6a4b9e87456d3fe0e0a5b11b641fd528cf4e34a376d",
+  "campaign_disclosure.json": "ffd831361a8feaef234d6b5d280e63ab88826b5cc3d2382ae07f0f080a1f697f",
+  "conditional_edges.json": "6db546dd992d29033979d1edc70db6a51b8beb26d734c8ad17e54e9ec45d0673",
+  "factor_campaign_summary.json": "a5dd0ac3d1ff9913505310b8d692b05324fa08ce57ddbfc02136badb8a93b6c3",
+  "factor_fdr_report.json": "4dbcfb610cbe29ac90ae7dbda9ec878c06fa25da3a456950d98e2deaecb7fbfc",
+  "strategy_campaign_summary.json": "e737181c63f30f8db161e54544256d544eb77a0755c943daeb64e456de6b53c3",
+  "strategy_edges.json": "a76f20f6cf94907ac3f92b4516605734c2b7aa0ff1a9b6a24fd090a0993409ee",
+  "strategy_neighborhood_report_only.json": "9a015b678b34ed40f20491580eb46a2b7b3ecb6f98e2ec9911d13f0654fc0900",
+  "universe_dispositions.json": "e744453c5d9dc4dcd9b5c1de9097e07d29e12b4c9bdcc45b01cadde990ffd8aa"
+ },
+ "protocol_id": "d7a68edde045b46ff830b8f35fce571e",
+ "raw_vendor_data": "NOT COMMITTED; per-symbol artifact hashes are in bars_provenance_manifest.json",
+ "reads_2024_confirmation_holdout": {
+  "bars_with_end_ts_ge_2024_01_01": 0,
+  "fence": "c2_data.load_discovery_universe + fence_bars; request end exclusive 2024-01-01"
+ },
+ "registry_sqlite_not_committed": {
+  "registry_factor.sqlite": "af4b300558d9161da5eb6ed795b93028d0674aac7c8022d9de3d154cad33d1f5",
+  "registry_strategy.sqlite": "750eb6fae985226cd6e589b3f96cbfa26a3e916fad74efa6309cdf87f6633a94"
+ },
+ "result_run_head": "778099c6e96d9395b6cfb5e0eee27f2b8186a00e",
+ "runtime_python_platform": "Linux-6.18.44-fc-v80-x86_64-with-glibc2.39",
+ "schema_version": "census02_result_package_v1",
+ "status": "DISCOVERY_ONLY",
+ "strategy_ledger_chunk_sha256": {
+  "chunk_00000.jsonl": "9c227cfa241c41ffffcbffaab1c25b65c589d99e0a6210b8c7d8ec319c866f12",
+  "chunk_00001.jsonl": "04cc7b352350ed6a365fdd2a2ab468673d4f112e80baee8c13667b108432f1b5",
+  "chunk_00002.jsonl": "6c025aacc8124b140d3b626d26ee10186841259a3d65810b9a80d0aae8cb2708",
+  "chunk_00003.jsonl": "ed21272bbb378cd748cf957a867b01dbebde9fae9631a61f0a6540a0be7f818c",
+  "chunk_00004.jsonl": "dbaddc98c1e4ce73d185dbd3cb22064e0116e3db1f861c6ac10c615d56a541fb",
+  "chunk_00005.jsonl": "9fce0e4b6dc9159732ece077025cf084580c13410b0ba9bc3869846aeaaebabe",
+  "chunk_00006.jsonl": "c89d58b461bf6286db329142215ca8ed317aad040a9cdab668cc92296e4e2814",
+  "chunk_00007.jsonl": "cff77abbec9811ba756213800cce48b2a88233bca3de3c7064b7e8e140a3ccf7",
+  "chunk_00008.jsonl": "dc04962b6cd32a67b2b279ed68082a380c3fa7338292f5c9566dce1e997589e7",
+  "chunk_00009.jsonl": "0f497cc2cb7898446e052ceb56cc0665fad119c2ba3feb57b246c66b95e65ebe",
+  "chunk_00010.jsonl": "54ca3aa3ed04f0aff3e109e3f0d2a590d83b84d968e4b3c15265fddb1b5bd49b",
+  "chunk_00011.jsonl": "3acfe1ec7c044ecf4552cf9816e725c484895050efafdad739351dd67fbbde21",
+  "chunk_00012.jsonl": "3e22c073ad6cf932854b2dfd147993b85d7f336ef0ae716e1034ae9f2b8e2f99",
+  "chunk_00013.jsonl": "7e6fa0a357a86c6884462e55f33d7541041bcbb50ac00390ce321e754ccc5852",
+  "chunk_00014.jsonl": "a0a52b82138e487b9af58788942fbbaeb523bd3d48bae693b3be8b5b38ad23b9",
+  "chunk_00015.jsonl": "be631f9969a2891edb5392c2fa1a237b1ebad75e419657652fa69fe721aebd80",
+  "chunk_00016.jsonl": "ee4b9efe10c165781baabcf7ae56ea5a125cf76d75e3654ed281a983bbcbe8fd",
+  "chunk_00017.jsonl": "1ca61e674087a41b51f875452f03ff429d906dcf28a68d820cee6adc5901d94d",
+  "chunk_00018.jsonl": "4c3663b15f0ee5460b22874cc43a074616b7285aa94c4133288753b0466603d6"
+ },
+ "strategy_population_root": "e5c4173f9a2395b7cbb4b9960aac90c03a4c043cc94d2531497949be9ad45fda",
+ "universe_id": "a32b4de2b515d93c4042e6b8368bf4a5"
+}
