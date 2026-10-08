@@ -68,7 +68,13 @@ def _text(si: ET.Element) -> str:
 
 
 def read_workbook(data: bytes) -> dict[str, list[list[str]]]:
-    """Return {sheet name: rows of cell strings} in workbook order. Formula cells are refused."""
+    """Return {sheet name: rows of cell strings} in workbook order."""
+    return _read_all(data)[0]
+
+
+def _read_all(data: bytes):
+    """(sheets, formulas). A formula cell is never evaluated: its cached value is the cell text and the formula
+    text is recorded separately; a formula in the catalog sheet is refused."""
     import io
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -89,6 +95,7 @@ def read_workbook(data: bytes) -> dict[str, list[list[str]]]:
                 for r in ET.fromstring(_read_member(zf, "xl/_rels/workbook.xml.rels")).findall("pr:Relationship", _NS)}
         wb = ET.fromstring(_read_member(zf, "xl/workbook.xml"))
         out: dict[str, list[list[str]]] = {}
+        formulas: dict[str, dict[str, str]] = {}
         for sheet in wb.findall("m:sheets/m:sheet", _NS):
             name = sheet.get("name")
             target = rels.get(sheet.get(f"{{{_NS['r']}}}id"))
@@ -97,18 +104,24 @@ def read_workbook(data: bytes) -> dict[str, list[list[str]]]:
             part = target.lstrip("/") if target.startswith("/") else f"xl/{target}"
             if part not in names:
                 raise IntakeError(f"sheet part {part!r} missing")
-            out[name] = _read_sheet(_read_member(zf, part), shared, name)
-        return out
+            out[name], found = _read_sheet(_read_member(zf, part), shared, name)
+            if found and name == CATALOG_SHEET:
+                raise IntakeError(f"formula cell in sheet {name!r}: refused")
+            if found:
+                formulas[name] = found
+        return out, formulas
 
 
-def _read_sheet(xml: bytes, shared: list[str], sheet: str) -> list[list[str]]:
+def _read_sheet(xml: bytes, shared: list[str], sheet: str):
     root = ET.fromstring(xml)
     rows: list[list[str]] = []
+    formulas: dict[str, str] = {}
     for row in root.findall("m:sheetData/m:row", _NS):
         cells: dict[int, str] = {}
         for c in row.findall("m:c", _NS):
-            if c.find("m:f", _NS) is not None:
-                raise IntakeError(f"formula cell in sheet {sheet!r}: refused")
+            f = c.find("m:f", _NS)
+            if f is not None:
+                formulas[c.get("r") or ""] = f.text or ""
             kind = c.get("t")
             if kind == "s":
                 v = c.find("m:v", _NS)
@@ -126,7 +139,7 @@ def _read_sheet(xml: bytes, shared: list[str], sheet: str) -> list[list[str]]:
             cells[_col_index(c.get("r") or "")] = text
         width = max(cells) + 1 if cells else 0
         rows.append([cells.get(i, "") for i in range(width)])
-    return rows
+    return rows, formulas
 
 
 def _catalog_table(rows: list[list[str]], expected_rows: int, expected_columns: int):
@@ -155,7 +168,7 @@ def freeze(data: bytes, *, expected_sha256: str = EXPECTED_SHA256, expected_shee
     digest = sha256_hex(data)
     if digest != expected_sha256:
         raise IntakeError(f"sha256 mismatch: expected {expected_sha256}, got {digest}")
-    sheets = read_workbook(data)
+    sheets, formulas = _read_all(data)
     if tuple(sheets) != tuple(expected_sheets):
         raise IntakeError(f"sheet set/order mismatch: {list(sheets)}")
     header, body, id_col = _catalog_table(sheets[CATALOG_SHEET], expected_rows, expected_columns)
@@ -170,6 +183,7 @@ def freeze(data: bytes, *, expected_sha256: str = EXPECTED_SHA256, expected_shee
         "columns": header,
         "rows": [{"ext_id": r[id_col], "original": dict(zip(header, r))} for r in body],
         "other_sheets": {n: sheets[n] for n in expected_sheets if n != CATALOG_SHEET},
+        "formula_cells": formulas,
     }
 
 
