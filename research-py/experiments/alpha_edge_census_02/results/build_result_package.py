@@ -1,6 +1,8 @@
 """Census-02 Discovery result packager. Read-only on the settled run directory; copies the exact output artifacts and derives
 settlement statistics, universe dispositions, the bars/provenance manifest and a SHA-256 run manifest. No raw vendor bars are
-copied. Result values are never altered. Usage: python build_result_package.py --run-dir <runs/alpha_edge_census_02> --out <dir>"""
+copied. Result values are never altered. STRICTLY OFFLINE: it reads only settled local artifacts, never acquires data, reads no
+credential, opens no network endpoint, and proves the run directory byte-identical before and after.
+Usage: python build_result_package.py --run-dir <runs/alpha_edge_census_02> --out <dir> --result-run-head <Result #1 head>"""
 
 from __future__ import annotations
 
@@ -11,26 +13,86 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+import c2_borrow as bw  # noqa: E402
+import c2_data  # noqa: E402  (import performs no I/O; only its pure contract check and LoadedUniverse type are used)
 import c2_factor_eval as fe  # noqa: E402
 import c2_population as pop  # noqa: E402
 import c2_protocol as pr  # noqa: E402
 import c2_runner as rn  # noqa: E402
+import census as ce  # noqa: E402  (Census-01 read-only manifest / bar loading)
+import data as dt  # noqa: E402  (Census-01 read-only eligibility / bar validation; its acquisition functions are never called)
+import search_space as ss1  # noqa: E402
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 
 OUTPUTS = ("campaign_disclosure.json", "strategy_edges.json", "conditional_edges.json", "factor_fdr_report.json",
            "strategy_neighborhood_report_only.json")
 STRATEGY_LEDGER, FACTOR_LEDGER = "strategy_trial_ledger.jsonl", "factor_evidence_ledger.jsonl"
 # Result #1 package settlement (a package-integrity check on THIS preserved run, not an economic threshold).
-RESULT01_COUNTS = {"strategy_trials": 9400, "factors": 1075, "factor_status": {"succeeded": 1065, "not_evaluable": 10}}
+RESULT01_COUNTS = {"strategy_trials": 9400, "factors": 1075, "factor_status": {"succeeded": 1065, "not_evaluable": 10},
+                   "dispositions": {"ELIGIBLE": 88}}
+# The commit Result #1 actually executed at (== origin/main when the run started). Historical provenance: never inferred from the
+# current HEAD and never overridable.
+RESULT01_RUN_HEAD = "778099c6e96d9395b6cfb5e0eee27f2b8186a00e"
 
 
 class PackageRefusal(RuntimeError):
     pass
+
+
+def require_result01_run_head(value) -> str:
+    """The recorded result-run head of THIS package is the fixed Result #1 execution head; anything else is refused."""
+    if value != RESULT01_RUN_HEAD:
+        raise PackageRefusal(f"result-run head {value!r} is not the Result #1 execution head {RESULT01_RUN_HEAD}")
+    return value
+
+
+def run_dir_content_digest(root: Path) -> str:
+    """SHA-256 over (relative path, file SHA-256) for every file under `root`: a content-strong read-only proof."""
+    h = hashlib.sha256()
+    for p in sorted(Path(root).rglob("*")):
+        if p.is_file():
+            h.update(f"{p.relative_to(root).as_posix()}\0{sha_file(p)}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def load_settled_universe_offline(data_dir: Path, request_contract: dict, protocol_id: str) -> "c2_data.LoadedUniverse":
+    """Rebuild the eligible universe, bars/provenance manifest and verified bars from SETTLED local artifacts only. A missing,
+    malformed or contract-mismatched artifact is a PackageRefusal; nothing is acquired, repaired, written or read from credentials.
+    Reuses only read-only Census-01 validation (classify_eligibility / build_bars_manifest / load_bars); never an acquire_* entrance."""
+    pr.assert_freeze_gate_passed(protocol_id)
+    c2_data.require_request_contract(request_contract)
+    data_dir = Path(data_dir)
+    seed = json.loads(bw.SEED_UNIVERSE_FILE.read_text(encoding="utf-8"))
+    symbols = sorted(seed["symbols"])
+    statuses = {}
+    for sym in symbols:
+        sdir = data_dir / sym
+        status_path = sdir / "status.json"
+        if not status_path.is_file():
+            raise PackageRefusal(f"{sym}: settled status.json is absent; packaging never acquires data")
+        try:
+            st = json.loads(status_path.read_text(encoding="utf-8"))
+        except ValueError:
+            raise PackageRefusal(f"{sym}: settled status.json is malformed") from None
+        if not isinstance(st, dict) or st.get("request_contract") != dt.REQUEST_CONTRACT:
+            raise PackageRefusal(f"{sym}: settled status.json was not acquired under the frozen request contract")
+        if st.get("disposition") == "DATA_PRESENT":
+            need = {"research_bars.csv", "research_bars_provenance.json", "corporate_actions_provenance.json",
+                    *(st.get("artifact_names") or [])}
+            missing = sorted(n for n in need if not (sdir / n).is_file())
+            if missing:
+                raise PackageRefusal(f"{sym}: settled artifact(s) absent: {missing}; packaging never acquires data")
+        statuses[sym] = st
+    dispositions = {s: dt.classify_eligibility(s, statuses[s], data_dir / s) for s in symbols}
+    universe = ss1.build_universe(seed, dispositions)
+    manifest = ce.build_bars_manifest(universe, data_dir)
+    return c2_data.LoadedUniverse(universe, ce.load_bars(universe, data_dir, manifest), manifest)
 
 
 def strategy_ledger_bytes(chunk_paths: list[Path], population_ids: list[str]) -> bytes:
@@ -133,24 +195,47 @@ def factor_summary(items, records, fdr, cedges, factor_db: Path) -> dict:
             "attempts_per_factor_max": max(Counter(a["factor_id"] for a in atts).values())}
 
 
-def main() -> None:
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--result-run-head", default=None, help="recorded result-run HEAD (default: the current HEAD)")
-    a = ap.parse_args()
+    ap.add_argument("--result-run-head", required=True, help="must equal the fixed Result #1 execution head")
+    return ap.parse_args(argv)
+
+
+def main(argv=None) -> None:
+    a = parse_args(argv)
     run, out = a.run_dir.resolve(), a.out.resolve()
+    require_result01_run_head(a.result_run_head)
+    manifest_path = out / "RUN_MANIFEST.json"
+    if manifest_path.is_file() and json.loads(manifest_path.read_text(encoding="utf-8")).get("result_run_head") != RESULT01_RUN_HEAD:
+        raise PackageRefusal("the existing RUN_MANIFEST records a different result-run head; historical provenance is immutable")
+    for needed in ("registry_strategy.sqlite", "registry_factor.sqlite"):
+        if not (run / needed).is_file():
+            raise PackageRefusal(f"settled {needed} is absent; packaging never creates a registry")
+    before = run_dir_content_digest(run)
+    with tempfile.TemporaryDirectory() as td:   # the registry stores run DDL on open: they get private copies, never the run dir
+        regs = {n: Path(shutil.copyfile(run / n, Path(td) / n)) for n in ("registry_strategy.sqlite", "registry_factor.sqlite")}
+        package(run, out, regs)
+    if run_dir_content_digest(run) != before:
+        raise PackageRefusal("the settled run directory changed during packaging (read-only invariant violated)")
+    print(json.dumps({"out": str(out), "run_dir_unchanged": True}))
+
+
+def package(run: Path, out: Path, regs: dict) -> None:
     frozen = pr.require_freeze()
     doc = frozen["predeclaration"]
     protocol_id, decisions = doc["protocol_id"], doc["decisions"]
-    import c2_data
-    loaded = c2_data.load_discovery_universe(run / "data", doc["data_request_contract"], protocol_id)  # cached-only: no network
+    loaded = load_settled_universe_offline(run / "data", doc["data_request_contract"], protocol_id)
+    got = dict(Counter(d["disposition"] for d in loaded.universe["dispositions"].values()))
+    if got != RESULT01_COUNTS["dispositions"]:
+        raise PackageRefusal(f"universe dispositions {got} differ from the settled Result #1 universe")
     cells = pop.strategy_cells(decisions, protocol_id)
     rows = rn.load_ledger(run, cells)
     pr.assert_complete_ledger([c[3] for c in cells], [r["t"] for r in rows])
     ctx = fe.population_context(loaded.universe, loaded.bars_manifest, protocol_id)
     items = fe.materialize_specs(decisions, ctx, doc["factor_population"])
-    records = fe.load_factor_records(run / "registry_factor.sqlite", run / "factor_records", items)
+    records = fe.load_factor_records(regs["registry_factor.sqlite"], run / "factor_records", items)
     fdr = json.loads((run / "factor_fdr_report.json").read_text(encoding="utf-8"))
     cedges = json.loads((run / "conditional_edges.json").read_text(encoding="utf-8"))
     out.mkdir(parents=True, exist_ok=True)
@@ -169,7 +254,7 @@ def main() -> None:
     on_disk = [json.loads(ln) for ln in (out / FACTOR_LEDGER).read_bytes().splitlines()]
     if on_disk != records or on_disk != [fe.cd1.read_factor_record(run / "factor_records", r["factor_id"]) for r in records]:
         raise PackageRefusal("preserved factor ledger differs from the settled factor records")
-    store = ResearchResultStore(run / "registry_strategy.sqlite")
+    store = ResearchResultStore(regs["registry_strategy.sqlite"])
     digest = store.trial_attempt_digest(pr.EXPERIMENT_ID)
     ledger_ids = sorted(r["t"] for r in rows)
     attempts = {"registered_trials": len(digest), "attempts": sum(d["attempts"] for d in digest.values()),
@@ -181,7 +266,7 @@ def main() -> None:
                 "ledger_trial_ids_sha256": hashlib.sha256("\n".join(ledger_ids).encode()).hexdigest(),
                 "trial_attempt_digest_sha256": pr.sha256_canonical(digest)}
     dump(out / "strategy_campaign_summary.json", {"attempts": attempts, **strategy_summary(rows)})
-    dump(out / "factor_campaign_summary.json", factor_summary(items, records, fdr, cedges, run / "registry_factor.sqlite"))
+    dump(out / "factor_campaign_summary.json", factor_summary(items, records, fdr, cedges, regs["registry_factor.sqlite"]))
     dump(out / "universe_dispositions.json", {"universe_id": loaded.bars_manifest["universe_id"],
          "seed_symbols": len(loaded.universe["dispositions"]), "eligible": len(loaded.universe["symbols"]),
          "disposition_counts": dict(sorted(Counter(d["disposition"] for d in loaded.universe["dispositions"].values()).items())),
@@ -196,7 +281,7 @@ def main() -> None:
     dump(out / "RUN_MANIFEST.json", {
         "schema_version": "census02_result_package_v1", "status": "DISCOVERY_ONLY", "VALIDATION_STATUS": "NOT_VALIDATED",
         "PROMOTION_AUTHORITY": "NONE", "protocol_id": protocol_id, "behavior_head": doc["behavior_head"],
-        "result_run_head": a.result_run_head or frozen["head"], "environment_identity": doc["environment_identity"],
+        "result_run_head": RESULT01_RUN_HEAD, "environment_identity": doc["environment_identity"],
         "runtime_python_platform": platform.platform(), "data_request_contract": doc["data_request_contract"],
         "discovery_window": "[2016-01-01, 2024-01-01)", "bars_first_end_ts": first, "bars_last_end_ts": last,
         "bars_manifest_sha256": mf["manifest_sha256"], "universe_id": mf["universe_id"],
@@ -216,7 +301,6 @@ def main() -> None:
             "note": "compact committed copies of the settled evidence; they are NOT the registry SQLite files"},
         "raw_vendor_data": "NOT COMMITTED; per-symbol artifact hashes are in bars_provenance_manifest.json",
         "preserved_artifact_sha256": produced})
-    print(json.dumps({"out": str(out), "files": len(produced) + 1}))
 
 
 if __name__ == "__main__":

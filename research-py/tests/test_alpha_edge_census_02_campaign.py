@@ -7,6 +7,7 @@ import builtins
 import copy
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -752,7 +753,7 @@ def test_importing_the_runner_and_cli_performs_no_io_and_leaves_the_run_director
 
 
 def test_the_tree_snapshot_detects_creation_and_modification(tmp_path):
-    """Negative control for the import proof: the snapshot is RED on a created dir and on a modified file."""
+    """Negative control for the import proof: RED on a created dir, a size change, and a SAME-SIZE rewrite with the mtime restored."""
     root = tmp_path / "run"
     assert _tree_snapshot(root) is None
     root.mkdir()
@@ -760,10 +761,20 @@ def test_the_tree_snapshot_detects_creation_and_modification(tmp_path):
     assert created == {} and created != None  # noqa: E711 - an empty dir is distinct from an absent one
     f = root / "chunks" / "chunk_00000.jsonl"
     f.parent.mkdir()
-    f.write_text("a\n")
+    f.write_bytes(b"aaaa\n")
+    stat = f.stat()
     one = _tree_snapshot(root)
-    f.write_text("ab\n")
-    assert _tree_snapshot(root) != one
+    f.write_bytes(b"aaaaa\n")
+    assert _tree_snapshot(root) != one                                        # size change
+    f.write_bytes(b"aaaa\n")
+    os.utime(f, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert _tree_snapshot(root) == one                                        # restored byte-for-byte => identical
+    f.write_bytes(b"aaab\n")                                                  # same length, different content ...
+    os.utime(f, ns=(stat.st_atime_ns, stat.st_mtime_ns))                      # ... and the original mtime restored
+    after = _tree_snapshot(root)
+    k = "chunks/chunk_00000.jsonl"
+    assert after[k]["size"] == one[k]["size"] and after[k]["mtime_ns"] == one[k]["mtime_ns"]   # size+mtime alone cannot see it
+    assert after != one and after[k]["sha256"] != one[k]["sha256"]            # the content hash does
 
 
 def test_freeze_chronology_is_recorded_and_no_raw_run_artifact_is_tracked():
