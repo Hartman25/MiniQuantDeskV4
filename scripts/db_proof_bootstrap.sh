@@ -211,10 +211,19 @@ cargo test -p mqk-daemon --test scenario_durable_arm_after_baseline_adoption_01 
 cargo test -p mqk-daemon --test scenario_broker_position_baseline_adoption_01 -- --test-threads=1
 cargo test -p mqk-daemon --test scenario_deadman_after_start_01 -- --include-ignored --test-threads=1
 
+# M1-CF-DBPROOF-01: capital-fraction durable held-sizing store and the restart-safe runtime host.
+# Both files are #[ignore] DB-backed proofs of the M1.9 candidate-independent dispatch contract
+# (held Q survives restart; persist-before-act; foreign/tampered state refused). The daemon
+# dispatch tests (capital_fraction_dispatch_tests) run in the workspace job against the :5434 DB.
+echo "== M1-CF-DBPROOF-01: capital-fraction held-sizing store + restart-safe runtime host =="
+cargo test -p mqk-db --test scenario_held_sizing_state_01 -- --include-ignored --test-threads=1
+cargo test -p mqk-runtime --test scenario_capital_fraction_restart_01 -- --include-ignored --test-threads=1
+
 echo ""
 echo "All proof lanes passed:"
 echo "  AP series (pure in-memory): Alpaca adapter normalization, event mapping, inbound, snapshot."
 echo "  AP series (DB-backed):      runtime inbound ingest, cursor persistence (BRK-08R RT)."
 echo "  RUNTIME-LONGRUN-01 (DB-backed): repeated-cycle ingest idempotency + cursor monotonicity."
 echo "  CI-DBPROOF-NEWSCENARIOS-01: signal-to-outbox, durable-arm, broker-baseline, deadman (daemon)."
+echo "  M1-CF-DBPROOF-01: capital-fraction held-sizing store + restart-safe runtime host."
 echo "  DB proof (CI-10):           full mandatory proof matrix."

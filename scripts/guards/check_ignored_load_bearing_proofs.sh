@@ -50,7 +50,18 @@ PROMOTED_FILES=(
   "crates/mqk-daemon/tests/scenario_signal_to_outbox_unit_proof_01.rs"
   # DEADMAN-EXPIRED-AFTER-START-01: DB-backed deadman halt-after-start scenarios.
   "crates/mqk-daemon/tests/scenario_deadman_after_start_01.rs"
+  # M1-CF-DBPROOF-01: capital-fraction held-sizing store and restart-safe runtime host.
+  "crates/mqk-db/tests/scenario_held_sizing_state_01.rs"
+  "crates/mqk-runtime/tests/scenario_capital_fraction_restart_01.rs"
 )
+
+# Proofs that are #[ignore] and therefore run ONLY if the DB proof lane invokes them with
+# --include-ignored. Each must appear on a non-comment cargo test line of the bootstrap script.
+LANE_REQUIRED_PROOFS=(
+  "scenario_held_sizing_state_01"
+  "scenario_capital_fraction_restart_01"
+)
+BOOTSTRAP="$ROOT_DIR/scripts/db_proof_bootstrap.sh"
 
 violations=0
 
@@ -69,6 +80,13 @@ for rel_path in "${PROMOTED_FILES[@]}"; do
   if grep -n '^[[:space:]]*#\[ignore\]' "$full_path" >/dev/null 2>&1; then
     echo "[CI-11] BARE #[ignore] found in $rel_path:" >&2
     grep -n '^[[:space:]]*#\[ignore\]' "$full_path" >&2
+    violations=$((violations + 1))
+  fi
+done
+
+for proof in "${LANE_REQUIRED_PROOFS[@]}"; do
+  if ! grep -E '^[[:space:]]*cargo[[:space:]]+test[[:space:]].*--test[[:space:]]+'"$proof"'[[:space:]].*--include-ignored' "$BOOTSTRAP" >/dev/null 2>&1; then
+    echo "[CI-11] ignored proof '$proof' is not run with --include-ignored by scripts/db_proof_bootstrap.sh" >&2
     violations=$((violations + 1))
   fi
 done
