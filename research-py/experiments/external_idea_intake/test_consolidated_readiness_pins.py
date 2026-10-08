@@ -59,12 +59,31 @@ def test_catalog_hash_in_the_record_is_the_one_the_intake_pins():
     assert intake.EXPECTED_SHA256 in DOC
 
 
-def test_record_states_the_blocked_catalog_and_authorizes_nothing():
-    for phrase in ("CATALOG_INTAKE_BLOCKED_WORKBOOK_NOT_SUPPLIED", "`M1_BLOCKED`", "NOT_AUTHORIZED", "NOT_EXECUTABLE",
-                   "`execution_gate.executable = false`", "not pushed"):
+def test_record_states_its_verdict_and_authorizes_nothing():
+    for phrase in ("CATALOG_FROZEN_AND_DISPOSITIONED", "NO_ELIGIBLE_CANDIDATE_EXISTS", "`M1_BLOCKED`", "NOT_AUTHORIZED",
+                   "NOT_EXECUTABLE", "`execution_gate.executable = false`", "**not pushed**"):
         assert phrase in DOC, phrase
     assert "EXT-" not in "".join(p.read_text(encoding="utf-8") for p in
                                  (ROOT / "research-py/experiments").glob("**/PREDECLARED_*.json"))
+
+
+def test_record_counts_tiers_and_structural_numbers_match_the_committed_ledger_and_the_calendar_analysis():
+    import json
+    import structural_reach as sr
+    ledger = json.loads((ROOT / "docs/research/intake/external_idea_disposition_ledger_v1.json").read_text("utf-8"))
+    for name, n in ledger["counts"]["primary_disposition"].items():
+        assert f"`{name}` {n}" in DOC, (name, n)
+    para = DOC[DOC.index("**Proposed bounded population"):DOC.index("**Structural reach")]
+    import re as _re
+    assert sorted(_re.findall(r"\*\*(EXT-\d{3})\*\*", para)) == sorted(
+        ledger["population"]["A"] + ledger["population"]["B"])
+    assert all(eid in para for eid in ledger["population"]["RESERVE_ADJACENT_COMPLETE"])
+    s = sr.summary()
+    pre, santa, opex = (s["EXT-032 pre-holiday, scheduled holidays only"], s["EXT-169 Santa Claus"],
+                        s["EXT-044 opex week (monthly third Friday)"])
+    for row in ((pre, "| 186 |"), (santa, "| 70 |"), (opex, "| 586 |")):
+        assert row[1] in DOC and row[0]["exposed_sessions"] == int(row[1].strip("| "))
+    assert f"{santa['max_profitable_months_fraction'] * 100:.1f}%" in DOC and santa["profitable_months_gate_reachable"] is False
 
 
 def test_runbook_authorizes_no_mutation():
