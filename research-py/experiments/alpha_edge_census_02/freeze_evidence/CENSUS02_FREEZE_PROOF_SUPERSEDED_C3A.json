@@ -1,0 +1,157 @@
+{
+ "all_ok": true,
+ "behavior_head": "675549e219b4bb78adc298fde56dd39bae655e45",
+ "confirmation_rows_consumed": 0,
+ "derived_facts": [
+  {
+   "expected": 470,
+   "id": "1_strategy_configs",
+   "observed": 470,
+   "ok": true
+  },
+  {
+   "expected": 20,
+   "id": "2_class_c_scope_symbols",
+   "observed": 20,
+   "ok": true
+  },
+  {
+   "expected": 9400,
+   "id": "3_strategy_trial_coordinates",
+   "observed": 9400,
+   "ok": true
+  },
+  {
+   "expected": 215,
+   "id": "4_short_conditions",
+   "observed": 215,
+   "ok": true
+  },
+  {
+   "expected": 5,
+   "id": "5_horizons",
+   "observed": 5,
+   "ok": true
+  },
+  {
+   "expected": 1075,
+   "id": "6_factor_semantic_coordinates",
+   "observed": 1075,
+   "ok": true
+  },
+  {
+   "expected": [
+    56,
+    1120
+   ],
+   "id": "7_complement_tags_preserved",
+   "observed": [
+    56,
+    1120
+   ],
+   "ok": true
+  },
+  {
+   "expected": [
+    "lower_is_better"
+   ],
+   "id": "8_all_short_factors_lower_is_better",
+   "observed": [
+    "lower_is_better"
+   ],
+   "ok": true
+  },
+  {
+   "expected": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+   "id": "9_benchmark_rule",
+   "observed": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+   "ok": true
+  },
+  {
+   "expected": 100.0,
+   "id": "10_annual_borrow_fee_bps",
+   "observed": 100.0,
+   "ok": true
+  },
+  {
+   "expected": [
+    "ALL_SEED_SYMBOLS",
+    88
+   ],
+   "id": "11_conditional_scope_all_seed_symbols",
+   "observed": [
+    "ALL_SEED_SYMBOLS",
+    88
+   ],
+   "ok": true
+  },
+  {
+   "expected": "FLAG_ONLY",
+   "id": "12_ssr_flag_only",
+   "observed": "FLAG_ONLY",
+   "ok": true
+  },
+  {
+   "expected": [
+    "QUALIFIED",
+    "INSUFFICIENT_CLOSED_ROUND_TRIPS"
+   ],
+   "id": "13_trade_band_no_hard_veto",
+   "observed": [
+    "QUALIFIED",
+    "INSUFFICIENT_CLOSED_ROUND_TRIPS"
+   ],
+   "ok": true
+  },
+  {
+   "expected": [
+    "numpy",
+    "pandas",
+    "python"
+   ],
+   "id": "14_environment_identity_complete",
+   "observed": [
+    "numpy",
+    "pandas",
+    "python"
+   ],
+   "ok": true
+  }
+ ],
+ "discovery_bars_read": 0,
+ "environment_identity": {
+  "numpy": "2.5.3",
+  "pandas": "3.0.5",
+  "python": "3.13.16"
+ },
+ "factor_coordinate_root": "095af73d36a5a255df5d06e8e1ae9b59ec1bb8e163d0f05b9165f0da28c774bb",
+ "final_holdout_rows_consumed": 0,
+ "load_bearing_tests": {
+  "node_ids": {
+   "census02_bar_loader_fence": "research-py/tests/test_alpha_edge_census_02.py::test_symbol_data_builder_is_fenced_before_any_array_is_built",
+   "complete_registration_precedes_evaluation": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_complete_population_registration_precedes_any_evaluation",
+   "default_loader_is_the_guarded_entrance": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_default_loader_is_the_guarded_entrance_and_receives_the_frozen_protocol_id",
+   "direct_data_entrance_refused_without_gate": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_direct_data_entrance_without_the_freeze_gate_is_refused_before_any_io",
+   "environment_mismatch_refused": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_numerical_environment_mismatch_is_refused_before_anything_else",
+   "freeze_first_missing_or_invalid_never_reaches_loader": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_a_missing_or_invalid_freeze_never_reaches_the_loader",
+   "freeze_first_uncommitted_never_reaches_loader": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_uncommitted_freeze_never_reaches_the_loader",
+   "gate_executes_before_loader_then_synthetic_run": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_freeze_gate_executes_before_the_loader_and_the_run_proceeds_on_synthetic_bars",
+   "import_time_no_io": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_importing_the_runner_and_cli_performs_no_io_and_creates_no_run_directory",
+   "manifest_covers_reachable_sources": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_manifest_covers_every_reachable_behavior_source_or_documents_why_not",
+   "no_dynamic_imports": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_no_dynamic_import_in_any_bound_source_beyond_the_reviewed_stdlib_one",
+   "no_hard_30_trade_veto": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_no_hard_30_trade_veto_only_the_typed_minimum_of_5",
+   "operator_policy_exact": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_operator_policy_is_encoded_exactly",
+   "partial_or_lazy_registration_refused": "research-py/tests/test_alpha_edge_census_02_campaign.py::test_partial_lazy_or_winner_only_factor_registration_cannot_be_evaluated",
+   "reserve_fences": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_confirmation_contaminated_and_holdout_rows_are_fenced",
+   "result_independent_identity": "research-py/tests/test_alpha_edge_census_02.py::test_trial_identity_is_result_independent_and_side_bound",
+   "single_guarded_entrance_ast": "research-py/tests/test_alpha_edge_census_02_protocol.py::test_only_the_single_guarded_entrance_can_reach_data_acquisition"
+  },
+  "pytest_returncode": 0,
+  "summary": "33 passed in 34.93s"
+ },
+ "protocol_id_for_this_behavior_state": "573d299c08e0849f715ed322f7e139ea",
+ "real_census02_attempts": 0,
+ "rows_2024_read": 0,
+ "schema_version": "census02_freeze_proof_v1",
+ "strategy_population_root": "8ad383d43f3929e0753a1f31a4de9543e86cbcfe070bee227cdf23ecaae746dc"
+}

@@ -1,0 +1,898 @@
+{
+ "F01": {
+  "description": "grammar: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F02": {
+  "description": "signal: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F03": {
+  "description": "simulator: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F04": {
+  "description": "borrow: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F05": {
+  "description": "factor direction: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F06": {
+  "description": "partition fence: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/partitions.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F07": {
+  "description": "price/cost arithmetic: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/simulate.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F08": {
+  "description": "Census-01 signal helper: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/signals.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F09": {
+  "description": "Census-01 grammar: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/search_space.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F10": {
+  "description": "calendar: one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/calendar_authority.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F11": {
+  "description": "indicator (RSI): one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/indicators/core.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F12": {
+  "description": "factor identity contract: one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/factors/contracts.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F13": {
+  "description": "identity hashing: one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/exp_distributed/hashing.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F14": {
+  "description": "campaign runner: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_runner.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F15": {
+  "description": "factor evaluator: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_factor_eval.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F16": {
+  "description": "population authority: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_population.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F17": {
+  "description": "strategy qualification: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_strategy.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F18": {
+  "description": "environment identity code: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_environment.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F19": {
+  "description": "operator policy: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_policy.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F20": {
+  "description": "dependency declaration (pyproject): one semantic edit on the real source must move the freeze manifest",
+  "file": "../../pyproject.toml",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F21": {
+  "description": "empirical-null / FDR (fdr.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/factors/fdr.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F22": {
+  "description": "attempt ledger (storage.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/exp_distributed/storage.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F23": {
+  "description": "acquisition contract (Census-01 data.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/data.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F24": {
+  "description": "provider extractor (alpaca_historical.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/data/alpaca_historical.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F25": {
+  "description": "accepted conditional estimator (conditional.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/conditional.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F26": {
+  "description": "conditional classification (edge_registry.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/edge_registry.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F27": {
+  "description": "Census-01 provenance manifest / loader (census.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../alpha_edge_census_01/census.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F28": {
+  "description": "factor diagnostics (diagnostics.py): one semantic edit on the real source must move the freeze manifest",
+  "file": "../../src/mqk_research/factors/diagnostics.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F29": {
+  "description": "CLI entrance: one semantic edit on the real source must move the freeze manifest",
+  "file": "run_census02.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "F30": {
+  "description": "single data entrance: one semantic edit on the real source must move the freeze manifest",
+  "file": "c2_data.py",
+  "green_after_restore": true,
+  "manifest_changed_exactly_this_file": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true
+ },
+ "M01": {
+  "description": "same-bar fill: position follows the decision on the SAME bar",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_same_bar_short_fill_rejected or test_vector_simulator_matches_scalar"
+ },
+ "M02": {
+  "description": "P&L marks against the NEXT bar's close (future data in the cover/mark)",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_cover_chronology or test_vector_simulator_matches_scalar or test_same_bar_short_fill"
+ },
+ "M03": {
+  "description": "price-bar guard removed: a fwd_ret label becomes executable P&L",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_fwd_ret_labels_are_never_executable_pnl"
+ },
+ "M04": {
+  "description": "a result value enters the trial identity",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_trial_identity_is_result_independent"
+ },
+ "M05": {
+  "description": "an attempt id enters the trial identity (a retry mints a trial)",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_trial_identity_is_result_independent or test_retry_is_a_new_attempt"
+ },
+ "M06": {
+  "description": "ledger tolerates a duplicated trial id",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_retry_is_a_new_attempt or test_denominator_cannot_shrink"
+ },
+ "M07": {
+  "description": "discovery fence removed from the bar loader",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_confirmation_contaminated_and_holdout_rows_are_fenced or test_fence_accepts"
+ },
+ "M08": {
+  "description": "any symbol is treated as a frozen ETF (borrow-unavailable equity becomes executable)",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_borrow_classification_and_individual_equity_never_executable"
+ },
+ "M09": {
+  "description": "evidence-class gate removed from the cell evaluator",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_borrow_classification_and_individual_equity_never_executable"
+ },
+ "M10": {
+  "description": "class B reachable without point-in-time borrow data",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_borrow_classification_and_individual_equity_never_executable"
+ },
+ "M11": {
+  "description": "denominator may shrink: missing trials tolerated",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_denominator_cannot_shrink"
+ },
+ "M12": {
+  "description": "winner-only registration allowed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_denominator_cannot_shrink"
+ },
+ "M13": {
+  "description": "benchmark of a short strategy is a LONG hold",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_benchmark_is_same_direction_hold or test_borrow_classification"
+ },
+ "M14": {
+  "description": "short borrow fee defaults to zero when omitted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_without_explicit_borrow_fee"
+ },
+ "M15": {
+  "description": "short mirror emits LONG positions",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_families_never_go_long or test_mirror_semantics or test_s13_upside"
+ },
+ "M16": {
+  "description": "freeze guard accepts a PROPOSED status",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control"
+ },
+ "M17": {
+  "description": "freeze guard does not require a committed file",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control"
+ },
+ "M18": {
+  "description": "freeze guard accepts a protocol id that does not match the decisions",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control"
+ },
+ "M19": {
+  "description": "operator decision completeness check removed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_operator_decisions_must_be_complete"
+ },
+ "M20": {
+  "description": "grammar drift: a parameter value added to SH05",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_grammar_counts_and_arithmetic or test_grammar_drift"
+ },
+ "M21": {
+  "description": "stop-and-reverse leg costs dropped on a flip",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_vector_simulator_matches_scalar_reference"
+ },
+ "M22": {
+  "description": "short borrow accrual removed",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_pnl_sign_and_borrow_fee_arithmetic or test_vector_simulator_matches_scalar"
+ },
+ "M23": {
+  "description": "ETF assumption accepts a missing fee",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_etf_assumption_is_fail_closed"
+ },
+ "M24": {
+  "description": "Census-01 config ids may collide with Census-02 ids",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_forced_census01_id_collision_is_refused"
+ },
+ "M25": {
+  "description": "SH08 gap reads the NEXT bar's open (lookahead in a signal builder)",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_every_config_is_causal_prefix_invariant"
+ },
+ "M26": {
+  "description": "SH13 reversal fades the DOWN day instead of the up day",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_s13_upside_expansion_fade_is_the_mirror"
+ },
+ "M27": {
+  "description": "D1: protocol cost truth drifts from the simulator slippage constant",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_protocol_cost_truth_equals_the_accepted_constants"
+ },
+ "M28": {
+  "description": "D1: Census-01 simulator slippage constant changes under an unchanged protocol literal",
+  "file": "../alpha_edge_census_01/simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_protocol_cost_truth_equals_the_accepted_constants or test_executed_fill_economics"
+ },
+ "M29": {
+  "description": "D2: a long/short cell is forced to need a passive hold",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_long_short_qualifies_on_net_vs_cash"
+ },
+ "M30": {
+  "description": "D2: short-only qualification ignores the passive-short-hold alpha",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_only_needs_net_positive_and_alpha"
+ },
+ "M31": {
+  "description": "D2: the passive long hold becomes a qualification benchmark for long/short",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_evaluated_cells_record_side_aware_benchmarks"
+ },
+ "M32": {
+  "description": "D3: complement exclusion leaves every short condition registered",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_grammar_counts_and_arithmetic or test_complement_exclusion"
+ },
+ "M33": {
+  "description": "D4: short factors are registered higher_is_better",
+  "file": "c2_factors.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_factors_are_lower_is_better or test_direction_is_identity_bound"
+ },
+ "M34": {
+  "description": "D4: direction no longer reaches the factor identity (a flip is invisible)",
+  "file": "c2_factors.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_direction_is_identity_bound"
+ },
+ "M35": {
+  "description": "D4: direction-adjusted effect is +raw",
+  "file": "c2_factors.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_direction_adjusted_effect_is_minus_the_raw_effect"
+ },
+ "M36": {
+  "description": "D5: freeze guard no longer compares the behavior-source manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_reds_on_one_byte_of_drift or test_freeze_guard_positive_control"
+ },
+ "M37": {
+  "description": "D5: a Census-02 behavior module is omitted from the manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M38": {
+  "description": "D5: the Census-01 partition fence is omitted from the manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M39": {
+  "description": "D5: the RSI/z-score indicator source is omitted from the manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M40": {
+  "description": "D5: the manifest hashes only a source prefix (late drift is invisible)",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_reds_on_one_byte_of_drift"
+ },
+ "M41": {
+  "description": "D5: the manifest is not bound into the protocol id",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_hash_is_line_ending_normalised_and_binds_the_protocol_id"
+ },
+ "M42": {
+  "description": "D6: EQUITY_SYMBOLS_ONLY is accepted as a conditional scope",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_operator_decisions_must_be_complete_and_consistent"
+ },
+ "M43": {
+  "description": "D7: the ETF scope is no longer checked against the frozen seed universe",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_etf_scope_outside_the_frozen_seed_universe"
+ },
+ "M44": {
+  "description": "D8: a zero low price is accepted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_zero_or_negative_low_is_refused"
+ },
+ "M45": {
+  "description": "D8: a negative commission override is accepted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_malformed_cost_overrides_are_refused"
+ },
+ "M46": {
+  "description": "D8: a non-integral slippage override is accepted",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_malformed_cost_overrides_are_refused"
+ },
+ "M47": {
+  "description": "D8: a malformed borrow fee is tolerated when no short is held",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_valid_cost_overrides_are_accepted_and_malformed_borrow_fee"
+ },
+ "M48": {
+  "description": "CAMPAIGN: the runner calls the loader BEFORE the freeze gate",
+  "file": "c2_runner.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_a_missing_or_invalid_freeze_never_reaches_the_loader or test_freeze_gate_executes_before_the_loader"
+ },
+ "M49": {
+  "description": "CAMPAIGN: a numerical-environment mismatch is accepted",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_numerical_environment_mismatch_is_refused or test_a_missing_or_invalid_freeze_never_reaches_the_loader"
+ },
+ "M50": {
+  "description": "CAMPAIGN: the runner is omitted from the behavior-source manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M51": {
+  "description": "CAMPAIGN: the factor evaluator is omitted from the behavior-source manifest",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_manifest_covers_every_reachable_behavior_source"
+ },
+ "M52": {
+  "description": "CAMPAIGN: the 9,400 Strategy denominator is shrunk by one Class-C symbol",
+  "file": "c2_population.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_strategy_population_is_exactly_470_by_20 or test_a_missing_or_invalid_freeze or test_population_authority"
+ },
+ "M53": {
+  "description": "CAMPAIGN: the 1,075 factor denominator is shrunk by one horizon",
+  "file": "c2_population.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_factor_population_is_215_by_5 or test_materialised_factor_population"
+ },
+ "M54": {
+  "description": "CAMPAIGN: the complement dependency tag is removed",
+  "file": "c2_grammar.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_complement_tags_survive or test_trial_identity_is_result_independent"
+ },
+ "M55": {
+  "description": "CAMPAIGN: short factors default to higher_is_better",
+  "file": "c2_factors.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_short_factors_are_lower_is_better or test_materialised_factor_population or test_flipped_direction"
+ },
+ "M56": {
+  "description": "CAMPAIGN: the approved benchmark rule is changed",
+  "file": "c2_policy.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_operator_policy_is_encoded_exactly"
+ },
+ "M57": {
+  "description": "CAMPAIGN: the approved borrow fee is changed",
+  "file": "c2_policy.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_operator_policy_is_encoded_exactly"
+ },
+ "M58": {
+  "description": "CAMPAIGN: the Class-C scope loses an instrument",
+  "file": "c2_policy.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_operator_policy_is_encoded_exactly or test_strategy_population_is_exactly_470_by_20"
+ },
+ "M59": {
+  "description": "CAMPAIGN: SSR becomes an execution gate (flagged fills are dropped)",
+  "file": "c2_simulate.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_ssr_is_flag_only"
+ },
+ "M60": {
+  "description": "CAMPAIGN: >=30 closed round trips becomes a hard Strategy gate",
+  "file": "c2_strategy.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_no_hard_30_trade_veto or test_fewer_than_5_closed or test_trade_count_band"
+ },
+ "M61": {
+  "description": "CAMPAIGN: the discovery fence is removed from the Census-02 bar loader",
+  "file": "c2_signals.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_symbol_data_builder_is_fenced"
+ },
+ "M62": {
+  "description": "CAMPAIGN: factors may be evaluated without a complete frozen registration",
+  "file": "c2_factor_eval.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_partial_lazy_or_winner_only_factor_registration"
+ },
+ "M63": {
+  "description": "CAMPAIGN: Strategy chunks may run without a complete frozen registration",
+  "file": "c2_runner.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_partial_or_extra_strategy_registration_cannot_be_evaluated"
+ },
+ "M64": {
+  "description": "CAMPAIGN: a retry forks a new trial instead of a new attempt",
+  "file": "c2_runner.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_strategy_chunk_crash_and_rerun_is_new_attempts_of_the_same_trials"
+ },
+ "M65": {
+  "description": "CAMPAIGN: the single data entrance no longer demands the freeze latch",
+  "file": "c2_data.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_direct_data_entrance_without_the_freeze_gate"
+ },
+ "M66": {
+  "description": "CAMPAIGN: the latch is set even when the freeze check has not completed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_direct_data_entrance_without_the_freeze_gate"
+ },
+ "M67": {
+  "description": "CAMPAIGN: the freeze no longer checks the bound-source chronology against the behavior head",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_behavior_head_chronology_is_enforced"
+ },
+ "M68": {
+  "description": "CAMPAIGN: the frozen decisions need not equal the approved policy",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control_then_every_refusal or test_a_missing_or_invalid_freeze_never_reaches_the_loader"
+ },
+ "M69": {
+  "description": "CAMPAIGN: the frozen population authority is not recomputed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_freeze_guard_positive_control_then_every_refusal"
+ },
+ "M70": {
+  "description": "CAMPAIGN: an individual-equity cell becomes executable (Class-A gate removed)",
+  "file": "c2_borrow.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_class_a_equity_is_hypothesis_only"
+ },
+ "M71": {
+  "description": "CAMPAIGN: the numerical-environment identity is not bound into the protocol id",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_numerical_environment_mismatch_is_refused"
+ },
+ "M72": {
+  "description": "PARTITION: the consumed Confirmation window is labelled RESERVED_UNCONSUMED again",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact or test_the_structural_protocol_carries"
+ },
+ "M73": {
+  "description": "PARTITION: the Confirmation role reverts to LATER_INDEPENDENT_CONFIRMATION",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact or test_the_structural_protocol_carries"
+ },
+ "M74": {
+  "description": "PARTITION: the access map lets Census-02 read the Confirmation window",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact"
+ },
+ "M75": {
+  "description": "PARTITION: the Census-02 bar fence lets Confirmation-window rows through",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_every_row_at_or_after_2024_is_refused or test_confirmation_input_is_refused"
+ },
+ "M76": {
+  "description": "PARTITION: the Final Holdout is marked consumed",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_current_partition_truth_is_exact"
+ },
+ "M77": {
+  "description": "PARTITION: Confirmation outcome metrics are injected into the protocol identity",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_no_confirmation_outcome_participates or test_current_partition_truth_is_exact"
+ },
+ "M78": {
+  "description": "PARTITION: a stale (pre-correction) freeze is accepted after the correction",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_a_self_consistent_forged_stale_partition_freeze_is_refused"
+ },
+ "M79": {
+  "description": "PARTITION: the partition identity reverts to the historical Census-01 object",
+  "file": "c2_population.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_historical_census01_authority_is_unchanged or test_the_partition_identity_changes_only or test_current_partition_truth"
+ },
+ "M80": {
+  "description": "PARTITION: the classifier folds the Confirmation window into the Final Holdout",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_classify_partition_table or test_every_row_at_or_after_2024_is_refused"
+ },
+ "M81": {
+  "description": "PARTITION: the truth boundaries are no longer checked against the reused fence",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_truth_boundaries_must_equal_the_reused_hard_fence"
+ },
+ "M82": {
+  "description": "PARTITION: the old (stale) freeze fixture is accepted by the real guard (all identity checks bypassed)",
+  "file": "c2_protocol.py",
+  "green_after_restore": true,
+  "red_under_mutation": true,
+  "restored_byte_for_byte": true,
+  "tests": "test_the_old_freeze_is_refused_for_the_right_reason_in_a_controlled_repo"
+ }
+}

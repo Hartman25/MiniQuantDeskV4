@@ -1,0 +1,388 @@
+{
+ "approval": {
+  "annual_borrow_fee_bps_meaning": "FROZEN BASE RESEARCH ASSUMPTION, not historical borrow truth",
+  "approved_before_result_1": true,
+  "contains_results": false,
+  "individual_equity_shorts": "HYPOTHESIS / LABEL EVIDENCE ONLY; no executable-P&L claim without point-in-time borrow truth",
+  "status": "APPROVED_BY_OPERATOR"
+ },
+ "attempts_at_freeze": 0,
+ "behavior_head": "1badd9c9eec3257ac6eb7f9def9d00a0deffda54",
+ "behavior_source_manifest": {
+  "authority_data": {
+   "research-py/experiments/alpha_edge_census_01/ALPHA_CENSUS_SEED_UNIVERSE_V2.json": "ff9a3eff44d688ca092fc4e297fd87d216efcc0433dd34f4c33e545bab0698a7",
+   "research-py/experiments/alpha_edge_census_02/CENSUS02_OPERATOR_POLICY.json": "b42ce74a829a59506bd305b8ba0579c383053f712e9270cf007417ca2e34cffe"
+  },
+  "hash": "sha256_lf",
+  "schema_version": "census02_behavior_source_manifest_v1",
+  "sources": {
+   "research-py/experiments/alpha_edge_census_01/calendar_authority.py": "53d87ab16b6184d0b8d155f94552d2125a55c2fc07c22e3748812c93af7d1a43",
+   "research-py/experiments/alpha_edge_census_01/census.py": "4226d7dc84d5689d35240f57a2b36692d640428f036745c1cd13442e85fd8fef",
+   "research-py/experiments/alpha_edge_census_01/conditional.py": "1866b7e6d3a27672165bae6c3383baeecd61e87da96c6fdcef820854d6bdaf85",
+   "research-py/experiments/alpha_edge_census_01/data.py": "73488c01417efc6e08f918dc04735dc74a1a2635372798f8ebc648222cab2209",
+   "research-py/experiments/alpha_edge_census_01/edge_registry.py": "1724e7ec80a47b0075269f71ab5529c8a1efacc2985bb32c4854443f230be5b4",
+   "research-py/experiments/alpha_edge_census_01/partitions.py": "211e4a13aaf16e7b5327cc3a8a2f9e2b8a13d6091185230eee3eaa935dd86b43",
+   "research-py/experiments/alpha_edge_census_01/search_space.py": "362babb8ee935c1f9d03f6f177608de2b1f087f5d8a3963f65bfd1677c5efb58",
+   "research-py/experiments/alpha_edge_census_01/signals.py": "c70ca8b5d52782431a3cb666455ba22538a3e81282c6d1713217c94ecbc96520",
+   "research-py/experiments/alpha_edge_census_01/simulate.py": "6eea6a77687330d8d6209cf97c66bc5477afc04c3f24da1070217d8a9fcc9e1b",
+   "research-py/experiments/alpha_edge_census_02/c2_borrow.py": "7374a0aca21ba6081b50f63c90a80a4eece74d6c1e625715dec35575e3d6fb39",
+   "research-py/experiments/alpha_edge_census_02/c2_data.py": "515ed160428f9e56c4369ffa25c448ca164b6b6dd1c8b3567cf13d391f4b16f3",
+   "research-py/experiments/alpha_edge_census_02/c2_environment.py": "2459b7c6d8c9875de83fed17821c31348ed1cee0090c7234fb05ee87b750addc",
+   "research-py/experiments/alpha_edge_census_02/c2_factor_eval.py": "8e4d1d57d24841a5c4d41d0c05f2c602770329744b007d867fbc29c27b52e0e9",
+   "research-py/experiments/alpha_edge_census_02/c2_factors.py": "6e07be8f933df435ff7a87433c4b808fd1267c6015d56e12eda65c96345d61ff",
+   "research-py/experiments/alpha_edge_census_02/c2_grammar.py": "d224352937c9df4cdec7f6ca08631dd9529eb691a6cc5deb75e235edaf51ea29",
+   "research-py/experiments/alpha_edge_census_02/c2_policy.py": "cce29f616766c206811765a15a537862e8f35dcac413e7309314f00f2f815e5c",
+   "research-py/experiments/alpha_edge_census_02/c2_population.py": "19606e06d9d2b74d8b1a9eb24d34f956961bbf38892c7c2e75b2790bd314a56c",
+   "research-py/experiments/alpha_edge_census_02/c2_protocol.py": "e69aac99f8f4af3ada059f0ffc315a1778fee07081777d57d70c1584bc1b28a4",
+   "research-py/experiments/alpha_edge_census_02/c2_runner.py": "d7a507792425e98127ab8367dd095159e6345d1fb43fa70223f7d7eeef9f5d40",
+   "research-py/experiments/alpha_edge_census_02/c2_signals.py": "f0739978b14f1e31944dff027049ad4a0a5800e2f9f201c4097f66fde816fde2",
+   "research-py/experiments/alpha_edge_census_02/c2_simulate.py": "082e33def85c90f995ae3183b4b7971e26db2a9436518db9bb627378b908632d",
+   "research-py/experiments/alpha_edge_census_02/c2_strategy.py": "9ecf062c963ac0cb4a50615824555c058f36a64bc8dad0762830012cb13326bb",
+   "research-py/experiments/alpha_edge_census_02/run_census02.py": "381f9fea79443d2e0b83ee61a33a344f67f66dc6c68c027804ed48e139d2a615",
+   "research-py/pyproject.toml": "fa3b13359329dba69be5a3e5f7b1d0ae5ea35f57705713b92f98a0954b272b4f",
+   "research-py/src/mqk_research/__init__.py": "a757a6ea3e0c7793a7691bdf349fd3b8a7e5011d49ba01f139f01360c91cbfe4",
+   "research-py/src/mqk_research/data/__init__.py": "558537d50236c0d5472c618c47f27d742205f6553d20d22e17fd623ac63a44f9",
+   "research-py/src/mqk_research/data/alpaca_historical.py": "93ba7befba87ab1c8cf2f805135f9c7138d1ed4aa568cc9022c0c4ad06e7578d",
+   "research-py/src/mqk_research/data/bars_provenance.py": "d139988c25307b2fbea7732e9509b228fb1eefd0ff40e0c8b35589e1962ea08f",
+   "research-py/src/mqk_research/data/ca_reviewed_resolutions.py": "bb94538aa3fba515aab1c1f27b0f88b0e2d5e185d42ced738d3d1d4e4e4fc51a",
+   "research-py/src/mqk_research/exp_distributed/__init__.py": "b64aa95821e363323aca58dcfcb26f3283f87f8e501559c42d34f5695973b495",
+   "research-py/src/mqk_research/exp_distributed/hashing.py": "ecb3db8c5e6057d1ae1ade4470b053cb831ac0353af1c0b65315498a8affe87f",
+   "research-py/src/mqk_research/exp_distributed/models.py": "1d2d625c762867f7cb744be2c982af08385b4cfb92ae2a94d5fa6fd66fd2cb1d",
+   "research-py/src/mqk_research/exp_distributed/storage.py": "2f346d275736bfdd908c8b06d8ff1f92866d76cebbfa522090565b40a8eb7360",
+   "research-py/src/mqk_research/factors/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "research-py/src/mqk_research/factors/contracts.py": "569b4aca1ec397b2a04c194c6ce16e6366cc8c1f6b7ba1468d614c11d2bde1a3",
+   "research-py/src/mqk_research/factors/diagnostics.py": "e95d4f0455a213be57cc8225bd264e4b8a2c61f9bcc9a8dde3ce6b175210cc83",
+   "research-py/src/mqk_research/factors/fdr.py": "0480d7058fb73381c713e5d5a7c049724a1d90fe579e26c72b528e2f7bcf6349",
+   "research-py/src/mqk_research/factors/null_controls.py": "790a8f82103e3bc87f0b51b614f1cd8b0c780677cff34b990206ce86a5ef73be",
+   "research-py/src/mqk_research/factors/registry.py": "eb557a0e6d213af016ba144a11fc991be2d4ee001e9c4ce2ab72fd1bf542897f",
+   "research-py/src/mqk_research/factors/runner.py": "7514564006fd4a28551c75b5d05f6dddac24f671814af9ac0ea6a8901680cc28",
+   "research-py/src/mqk_research/factors/universe.py": "090ea31575945cf6df915d57abd2468ee838ae80bf2737c9fde6e8002aeb9773",
+   "research-py/src/mqk_research/indicators/__init__.py": "1b2a75550502c860e87da8cc482f623e05a7bf8e5e3a68279012bac7684643b9",
+   "research-py/src/mqk_research/indicators/core.py": "9f04d88e6231ccc7ca0e8c94a091950dfef221f70ecfa3e452215e8341f1354c",
+   "research-py/src/mqk_research/ml/__init__.py": "3764a240927ed22eb7730b460e48ebffc74ff714976c488c4507604ef71b02a5",
+   "research-py/src/mqk_research/ml/util_hash.py": "72aee379e4f2896740b64863217d23b8c2f838c4f40b85c4196e3313946913b3"
+  }
+ },
+ "chronology": "behavior sources committed at behavior_head; this file is committed afterwards and changes no bound source",
+ "data_request_contract": {
+  "adjustment": "all",
+  "asof": "2026-10-05",
+  "end_utc_exclusive": "2024-01-01T00:00:00+00:00",
+  "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+  "feed": "sip",
+  "min_eligible_observations": 252,
+  "no_iex_fallback": true,
+  "provider": "alpaca",
+  "start_utc": "2016-01-01T00:00:00+00:00",
+  "symbol_failure_policy": "typed_EXCLUDED_disposition",
+  "timeframe": "1Day"
+ },
+ "decisions": {
+  "benchmark_rule": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+  "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+  "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
+  "conditional_scope": "ALL_SEED_SYMBOLS",
+  "etf_borrow_assumption": {
+   "annual_borrow_fee_bps": 100.0,
+   "availability": "ALWAYS_AVAILABLE_FOR_SCOPE_ASSUMED",
+   "etf_short_scope": [
+    "DIA",
+    "EEM",
+    "EFA",
+    "GLD",
+    "IEF",
+    "IWM",
+    "QQQ",
+    "SLV",
+    "SPY",
+    "TLT",
+    "VTI",
+    "XLB",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLP",
+    "XLU",
+    "XLV",
+    "XLY"
+   ],
+   "recall": "NONE_ASSUMED",
+   "short_rebate": "ZERO"
+  },
+  "funnel_thresholds": {
+   "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
+   "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+   "regime_concentration": "REPORT_ONLY_NO_GATE",
+   "trade_count_confidence_band": {
+    "15_to_29": "MODERATE_SAMPLE",
+    "30_plus": "STRONG_SAMPLE",
+    "5_to_14": "LOW_SAMPLE",
+    "hard_gate": "closed_round_trips >= 5 only",
+    "kind": "CLASSIFICATION_WITH_TYPED_MINIMUM",
+    "under_5": "INSUFFICIENT"
+   },
+   "year_stability": "REPORT_ONLY_NO_GATE"
+  },
+  "grammar_tiers": "H+L",
+  "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
+  "ssr_handling": "FLAG_ONLY"
+ },
+ "environment_identity": {
+  "numpy": "2.5.3",
+  "pandas": "3.0.5",
+  "python": "3.13.16"
+ },
+ "factor_population": {
+  "condition_count": 215,
+  "coordinate_root": "095af73d36a5a255df5d06e8e1ae9b59ec1bb8e163d0f05b9165f0da28c774bb",
+  "direction": "lower_is_better",
+  "factor_count": 1075,
+  "family": "alpha_census02_short_conditional_v1",
+  "horizons": [
+   1,
+   3,
+   5,
+   10,
+   20
+  ],
+  "scope": "ALL_SEED_SYMBOLS",
+  "scope_symbol_count": 88
+ },
+ "fences": {
+  "2024": "never scored",
+  "confirmation": "never read",
+  "discovery": "[2016-01-01, 2024-01-01)",
+  "final_holdout": "never read"
+ },
+ "global_disclosure": {
+  "census01_conditional_factors": 1095,
+  "census01_strategy_trials": 38192,
+  "statement": "Census-02 is its own complete predeclared local factor family; Census-01 was frozen and evaluated earlier and is NOT part of one contemporaneous BH family. Strategy DSR/PBO stays DEFERRED_FULL_POPULATION."
+ },
+ "operator_policy_sha256": "b42ce74a829a59506bd305b8ba0579c383053f712e9270cf007417ca2e34cffe",
+ "protocol_id": "d7a68edde045b46ff830b8f35fce571e",
+ "results_present_at_freeze": false,
+ "schema_version": "census02_predeclaration_v1",
+ "status": "FROZEN_BY_OPERATOR",
+ "strategy_population": {
+  "class_c_scope": [
+   "DIA",
+   "EEM",
+   "EFA",
+   "GLD",
+   "IEF",
+   "IWM",
+   "QQQ",
+   "SLV",
+   "SPY",
+   "TLT",
+   "VTI",
+   "XLB",
+   "XLE",
+   "XLF",
+   "XLI",
+   "XLK",
+   "XLP",
+   "XLU",
+   "XLV",
+   "XLY"
+  ],
+  "class_c_symbol_count": 20,
+  "complement_tagged_configs": 56,
+  "complement_tagged_trials": 1120,
+  "config_count": 470,
+  "manifest_order_root": "5034301d002953d7a12d71f14f76a636102302586d87dd708fabb5d4efc77f98",
+  "partitions_id": "f197e5f1511bcd655090b0f55b706582",
+  "population_root": "e5c4173f9a2395b7cbb4b9960aac90c03a4c043cc94d2531497949be9ad45fda",
+  "trial_count": 9400,
+  "universe_id": "e657af053406fbb31e20c3d7c7968f42"
+ },
+ "structural_protocol": {
+  "authority": {
+   "PROMOTION_AUTHORITY": "NONE",
+   "VALIDATION_STATUS": "NOT_VALIDATED"
+  },
+  "benchmark_semantics": {
+   "never": "long buy-and-hold as the benchmark of a short-only strategy (double-counts the market); a switching long/short strategy has no single-direction benchmark",
+   "passive_holds": "same window, same execution/cost/borrow assumptions as the strategy",
+   "qualification_rule": "OPERATOR_DECISION benchmark_rule",
+   "roles": {
+    "long_short": {
+     "cash_zero": "QUALIFICATION_NET",
+     "passive_long_hold": "DIAGNOSTIC_ONLY",
+     "passive_short_hold": "DIAGNOSTIC_ONLY"
+    },
+    "short": {
+     "cash_zero": "QUALIFICATION_NET",
+     "passive_short_hold": "QUALIFICATION_ALPHA"
+    }
+   },
+   "rules": [
+    "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+    "NET_POSITIVE_ONLY_ALL_SIDES"
+   ]
+  },
+  "conditional_factor_semantics": {
+   "direction": "lower_is_better",
+   "direction_adjusted_effect": "-raw_effect (positive = favorable evidence for the short hypothesis)",
+   "executable_pnl": false,
+   "family": "alpha_census02_short_conditional_v1",
+   "label": "fwd_close_return_minus_same_symbol_same_horizon_unconditional_mean",
+   "post_result_direction_flip": "forbidden",
+   "protocol_version": "alpha_census02_short_conditional_factor_v1",
+   "raw_effect": "conditional_mean_fwd_ret - same_symbol_same_horizon_unconditional_mean"
+  },
+  "conditional_statistics": {
+   "classes": {
+    "MODERATE": "WEAK and p<=conditional_p_alpha",
+    "STRONG": "MODERATE and complete-family BH q<=fdr.alpha",
+    "WEAK": ">=min_events and direction_adjusted_effect>0"
+   },
+   "conditional_p_alpha": 0.1,
+   "empirical_null": {
+    "base_seed": 0,
+    "n_permutations": 200,
+    "source": "mqk_research.factors.fdr.compute_empirical_pvalue (accepted repo defaults)",
+    "tail": "two_sided_abs_mean_ic"
+   },
+   "fdr": {
+    "alpha": 0.1,
+    "population": "all registered Census-02 factors; failed/non-evaluable stay accounted; local family",
+    "protocol": "factor_fdr_bh_v1"
+   },
+   "label_protocol_version": "alpha_census_fwd_close_return_minus_symbol_baseline_v1",
+   "min_cross_section": 10,
+   "min_events": 30,
+   "min_periods": 30,
+   "multiple_testing": "LOCAL_WITH_GLOBAL_DISCLOSURE: own complete local factor family; Census-01 populations disclosed, not pooled; Strategy DSR/PBO DEFERRED_FULL_POPULATION",
+   "n_quantiles": 2,
+   "window_end_utc": "2024-01-01T00:00:00+00:00",
+   "window_start_utc": "2016-01-01T00:00:00+00:00"
+  },
+  "data_contract": {
+   "confirmation": "[2025-01-01, 2026-03-01) consumed by alpha_edge_confirmation_01; never read by Census-02",
+   "contaminated_2024": "never read, never scored",
+   "final_holdout": "[2026-03-01, ...) reserved; never read",
+   "window": "[2016-01-01, 2024-01-01)"
+  },
+  "data_request_contract": {
+   "adjustment": "all",
+   "asof": "2026-10-05",
+   "end_utc_exclusive": "2024-01-01T00:00:00+00:00",
+   "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+   "feed": "sip",
+   "min_eligible_observations": 252,
+   "no_iex_fallback": true,
+   "provider": "alpaca",
+   "start_utc": "2016-01-01T00:00:00+00:00",
+   "symbol_failure_policy": "typed_EXCLUDED_disposition",
+   "timeframe": "1Day"
+  },
+  "execution_contract": {
+   "borrow_cost": "short holding bars accrue |qty|*prior_close*annual_fee_bps/10000/252; fee has NO default; short rebate ZERO; availability/recall assumptions are disclosed, not asserted",
+   "corporate_actions": "adjustment=all total-return series: a short bears dividends through the adjusted series; unsupported corporate actions stay typed EXCLUDED (fail closed)",
+   "cost_model": {
+    "additional_slippage_bps": 0.0,
+    "annualization_days": 252,
+    "commission_bps_per_side": 10.0,
+    "entry_budget_usd": 10000.0,
+    "fill_slippage_bps_per_side": 5,
+    "initial_capital_usd": 100000.0,
+    "pricing_model_id": "rust_conservative_bar_range_v1",
+    "volatility_mult_bps": 0
+   },
+   "fill": "first bar strictly after t; BUY at high+slip, SELL at low-slip (rust_conservative_bar_range_v1, slippage 5 bps, integer micros); short entry = SELL, cover = BUY; same-bar fill forbidden",
+   "labels": "fwd_ret/close_{t+h}/close_t-1 is a LABEL: EXECUTABLE_PNL=false, never an input to simulate_signed",
+   "open_position_at_end": "marked_to_last_close_no_liquidation (unchanged from Census-01)",
+   "pnl_marking": "signed_qty_held_before_bar*(close_t-close_{t-1}); fill cost = |delta_qty|*adverse(fill vs close)+commission",
+   "positions": "signed_daily_completed_bars: -1 short, 0 flat, +1 long",
+   "signal_knowledge": "signal on bar t uses only bars <= t",
+   "sizing": "qty = sign*floor(10000 USD / completed-signal-bar close); constant per run; no compounding; sign flip = exit leg + entry leg on one fill bar",
+   "ssr": "Rule 201 not represented; a possible-hazard flag is derived from daily bars (no intraday sequence is claimed) and recorded per short entry only"
+  },
+  "experiment_id": "alpha_edge_census_02",
+  "funnel": [
+   "DISCOVERY",
+   "STATISTICAL_ROBUSTNESS",
+   "ECONOMIC_ROBUSTNESS",
+   "INDEPENDENT_CONFIRMATION",
+   "PORTFOLIO_RISK_SUITABILITY",
+   "PROMOTION",
+   "PAPER"
+  ],
+  "global_disclosure": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "statement": "Census-02 is its own complete predeclared local factor family; Census-01 was frozen and evaluated earlier and is NOT part of one contemporaneous BH family. Strategy DSR/PBO stays DEFERRED_FULL_POPULATION."
+  },
+  "identity": {
+   "attempt": "infrastructure retry = new attempt of the SAME trial; outcome-based retry forbidden",
+   "evaluation": "slice/job/window; never mints a trial",
+   "trial": "sha256(side,family,params,scope,universe_id,partitions_id,protocol_id); results/attempts never enter"
+  },
+  "partition_authority": "current truth is PARTITION_TRUTH; Census-01 partitions.py is historical and supplies only the hard discovery-fence implementation",
+  "partitions": {
+   "census02_access": {
+    "confirmation_window": "NEVER_READ",
+    "contaminated_2024": "NEVER_READ",
+    "discovery": "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01",
+    "final_holdout": "NEVER_READ"
+   },
+   "confirmation_window": {
+    "end_exclusive": "2026-03-01",
+    "role": "CENSUS02_NEVER_READ",
+    "start_inclusive": "2025-01-01",
+    "status": "CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01"
+   },
+   "contaminated_2024": {
+    "end_exclusive": "2025-01-01",
+    "role": "CENSUS02_NEVER_READ",
+    "start_inclusive": "2024-01-01",
+    "status": "CONTAMINATED_BY_REJECTED_RUN"
+   },
+   "discovery": {
+    "end_exclusive": "2024-01-01",
+    "role": "CENSUS02_DISCOVERY_REUSE",
+    "start_inclusive": "2016-01-01"
+   },
+   "final_holdout": {
+    "role": "FINAL_HOLDOUT",
+    "start_inclusive": "2026-03-01",
+    "status": "RESERVED_UNCONSUMED"
+   },
+   "schema_version": "census02_partition_truth_v1",
+   "semantics": "the Confirmation window is consumed globally and never read by Census-02; the Final Holdout stays reserved"
+  },
+  "registration_rule": {
+   "denominator": "frozen population root; cannot shrink after results",
+   "winner_only_registration": "forbidden: the complete ledger precedes any registry record"
+  },
+  "retry_rules": {
+   "infrastructure_retry": "same trial, new attempt, same economics",
+   "outcome_based_retry": "forbidden"
+  },
+  "schema_version": "alpha_census02_v1",
+  "strategy_qualification": {
+   "common_minimum": "closed_round_trips >= 5, otherwise typed INSUFFICIENT_CLOSED_ROUND_TRIPS",
+   "dsr_pbo": "DEFERRED_FULL_POPULATION; never manufactured",
+   "executable_scope": "Class C only; individual-equity cells are never executable Strategy trials",
+   "long_short": "net_pnl > 0 vs cash; passive long and short holds DIAGNOSTIC_ONLY",
+   "report_only": [
+    "year_stability",
+    "regime_concentration",
+    "parameter_neighborhood",
+    "max_drawdown_recorded_no_veto"
+   ],
+   "short": "net_pnl > 0 AND alpha vs passive short hold > 0 (same window/execution/slippage/commission/borrow/sizing)",
+   "ssr": "FLAG_ONLY: a daily-bar POSSIBLE Rule-201 hazard flag per short entry (intraday sequence unknowable from daily bars); never rejects or defers a fill in Discovery",
+   "trade_count_band": {
+    "15_to_29": "MODERATE_SAMPLE",
+    "30_plus": "STRONG_SAMPLE",
+    "5_to_14": "LOW_SAMPLE",
+    "kind": "classification only; no hard gate above 5"
+   },
+   "validation_status": "NOT_VALIDATED"
+  }
+ }
+}

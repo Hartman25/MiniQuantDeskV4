@@ -1,0 +1,585 @@
+{
+ "authority": {
+  "PROMOTION_AUTHORITY": "NONE",
+  "VALIDATION_STATUS": "NOT_VALIDATED"
+ },
+ "behavior_source_manifest_scope": {
+  "authority_data": [
+   "research-py/experiments/alpha_edge_census_01/ALPHA_CENSUS_SEED_UNIVERSE_V2.json",
+   "research-py/experiments/alpha_edge_census_02/CENSUS02_OPERATOR_POLICY.json"
+  ],
+  "binds": "grammar, signal values, execution chronology, price/cost arithmetic, factor direction/identity, partition fence",
+  "mechanism": "sha256 (LF-normalised) of every behavior-bearing pre-result source, recomputed by require_freeze",
+  "never_binds": "generated outputs and result values",
+  "reviewed_non_behavior": {
+   "research-py/src/mqk_research/universe/snapshot.py": "reached only through the lazy import in search_space.build_seed_universe, which Census-02 never calls (the seed universe is a frozen bound data file)"
+  },
+  "sources": [
+   "research-py/experiments/alpha_edge_census_01/calendar_authority.py",
+   "research-py/experiments/alpha_edge_census_01/census.py",
+   "research-py/experiments/alpha_edge_census_01/conditional.py",
+   "research-py/experiments/alpha_edge_census_01/data.py",
+   "research-py/experiments/alpha_edge_census_01/edge_registry.py",
+   "research-py/experiments/alpha_edge_census_01/partitions.py",
+   "research-py/experiments/alpha_edge_census_01/search_space.py",
+   "research-py/experiments/alpha_edge_census_01/signals.py",
+   "research-py/experiments/alpha_edge_census_01/simulate.py",
+   "research-py/experiments/alpha_edge_census_02/c2_borrow.py",
+   "research-py/experiments/alpha_edge_census_02/c2_data.py",
+   "research-py/experiments/alpha_edge_census_02/c2_environment.py",
+   "research-py/experiments/alpha_edge_census_02/c2_factor_eval.py",
+   "research-py/experiments/alpha_edge_census_02/c2_factors.py",
+   "research-py/experiments/alpha_edge_census_02/c2_grammar.py",
+   "research-py/experiments/alpha_edge_census_02/c2_policy.py",
+   "research-py/experiments/alpha_edge_census_02/c2_population.py",
+   "research-py/experiments/alpha_edge_census_02/c2_protocol.py",
+   "research-py/experiments/alpha_edge_census_02/c2_runner.py",
+   "research-py/experiments/alpha_edge_census_02/c2_signals.py",
+   "research-py/experiments/alpha_edge_census_02/c2_simulate.py",
+   "research-py/experiments/alpha_edge_census_02/c2_strategy.py",
+   "research-py/experiments/alpha_edge_census_02/run_census02.py",
+   "research-py/pyproject.toml",
+   "research-py/src/mqk_research/__init__.py",
+   "research-py/src/mqk_research/data/__init__.py",
+   "research-py/src/mqk_research/data/alpaca_historical.py",
+   "research-py/src/mqk_research/data/bars_provenance.py",
+   "research-py/src/mqk_research/data/ca_reviewed_resolutions.py",
+   "research-py/src/mqk_research/exp_distributed/__init__.py",
+   "research-py/src/mqk_research/exp_distributed/hashing.py",
+   "research-py/src/mqk_research/exp_distributed/models.py",
+   "research-py/src/mqk_research/exp_distributed/storage.py",
+   "research-py/src/mqk_research/factors/__init__.py",
+   "research-py/src/mqk_research/factors/contracts.py",
+   "research-py/src/mqk_research/factors/diagnostics.py",
+   "research-py/src/mqk_research/factors/fdr.py",
+   "research-py/src/mqk_research/factors/null_controls.py",
+   "research-py/src/mqk_research/factors/registry.py",
+   "research-py/src/mqk_research/factors/runner.py",
+   "research-py/src/mqk_research/factors/universe.py",
+   "research-py/src/mqk_research/indicators/__init__.py",
+   "research-py/src/mqk_research/indicators/core.py",
+   "research-py/src/mqk_research/ml/__init__.py",
+   "research-py/src/mqk_research/ml/util_hash.py"
+  ]
+ },
+ "benchmark_contract": {
+  "note": "a switching long/short strategy has no single-direction benchmark; passive holds are diagnostics",
+  "roles": {
+   "long_short": {
+    "cash_zero": "QUALIFICATION_NET",
+    "passive_long_hold": "DIAGNOSTIC_ONLY",
+    "passive_short_hold": "DIAGNOSTIC_ONLY"
+   },
+   "short": {
+    "cash_zero": "QUALIFICATION_NET",
+    "passive_short_hold": "QUALIFICATION_ALPHA"
+   }
+  },
+  "rules": [
+   "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+   "NET_POSITIVE_ONLY_ALL_SIDES"
+  ]
+ },
+ "candidate_count_scenarios": {
+  "S0_no_executable_shorts_hypothesis_only": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 56,
+   "complements_excluded": false,
+   "conditional_factors": 1075,
+   "configs": 470,
+   "executable_scope_symbols": 0,
+   "note": "strategy_trials=0; labels only",
+   "short_conditions": 215,
+   "strategy_trials": 0,
+   "tiers": "H+L"
+  },
+  "S1_frozen_etf_scope_20_H+L": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 56,
+   "complements_excluded": false,
+   "conditional_factors": 1075,
+   "configs": 470,
+   "executable_scope_symbols": 20,
+   "short_conditions": 215,
+   "strategy_trials": 9400,
+   "tiers": "H+L"
+  },
+  "S2_frozen_etf_scope_20_H_only": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 28,
+   "complements_excluded": false,
+   "conditional_factors": 1075,
+   "configs": 430,
+   "executable_scope_symbols": 20,
+   "short_conditions": 215,
+   "strategy_trials": 8600,
+   "tiers": "H"
+  },
+  "S3_frozen_etf_scope_20_H+L_complements_excluded": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 0,
+   "complements_excluded": true,
+   "conditional_factors": 935,
+   "configs": 414,
+   "executable_scope_symbols": 20,
+   "short_conditions": 187,
+   "strategy_trials": 8280,
+   "tiers": "H+L"
+  },
+  "S4_frozen_etf_scope_20_H_complements_excluded": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "complement_tagged_configs": 0,
+   "complements_excluded": true,
+   "conditional_factors": 935,
+   "configs": 402,
+   "executable_scope_symbols": 20,
+   "short_conditions": 187,
+   "strategy_trials": 8040,
+   "tiers": "H"
+  }
+ },
+ "candidate_grammar": {
+  "calendar_family_S14": "NOT_MIRRORED (no coherent short form)",
+  "complement_handling_arithmetic": {
+   "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE": {
+    "conditional_factors": 935,
+    "conditions": 187,
+    "configs": 414,
+    "removed": "SH01-03 and LS01-03 configs (56); SH01-03 conditions (8+6+14=28); LS01-03 mint no factor of their own"
+   },
+   "REGISTER_ALL_TAG_COMPLEMENTS": {
+    "conditional_factors": 1075,
+    "conditions": 215,
+    "configs": 470
+   }
+  },
+  "complement_tagged_configs": 56,
+  "complement_tagged_families": [
+   "SH01",
+   "SH02",
+   "SH03",
+   "LS01",
+   "LS02",
+   "LS03"
+  ],
+  "condition_root_sha256": "4a7e947b1d62d4022869c3cea1ec2981fb797dad3c2fd4fc9abb118f145f8a8b",
+  "conditional_factors": 1075,
+  "config_root_sha256": "572be8991369ee35bcfaaf57cf7e1d486177084e0a601b75ece15821c1ec7708",
+  "horizons": [
+   1,
+   3,
+   5,
+   10,
+   20
+  ],
+  "short_conditions": 215,
+  "tier_H_configs": 430,
+  "tier_H_short_only": {
+   "SH01": 8,
+   "SH02": 6,
+   "SH03": 14,
+   "SH04": 12,
+   "SH05": 72,
+   "SH06": 24,
+   "SH07": 108,
+   "SH08": 36,
+   "SH09": 64,
+   "SH10": 12,
+   "SH11": 18,
+   "SH12": 32,
+   "SH13": 24
+  },
+  "tier_L_configs": 40,
+  "tier_L_long_short_state_pairs": {
+   "LS01": 8,
+   "LS02": 6,
+   "LS03": 14,
+   "LS04": 12
+  },
+  "total_configs": 470
+ },
+ "conditional_factor_semantics": {
+  "direction": "lower_is_better",
+  "direction_adjusted_effect": "-raw_effect (positive = favorable evidence for the short hypothesis)",
+  "executable_pnl": false,
+  "family": "alpha_census02_short_conditional_v1",
+  "label": "fwd_close_return_minus_same_symbol_same_horizon_unconditional_mean",
+  "post_result_direction_flip": "forbidden",
+  "protocol_version": "alpha_census02_short_conditional_factor_v1",
+  "raw_effect": "conditional_mean_fwd_ret - same_symbol_same_horizon_unconditional_mean"
+ },
+ "confirmation_rows_consumed": 0,
+ "contaminated_2024_rows_scored": 0,
+ "evidence_classes": {
+  "A": "A_INDIVIDUAL_EQUITY_SHORT_HYPOTHESIS_ONLY",
+  "B": "B_EXECUTABLE_SHORT_WITH_POINT_IN_TIME_BORROW_TRUTH",
+  "C": "C_LIQUID_ETF_SHORT_FROZEN_CONSERVATIVE_BORROW_ASSUMPTION",
+  "borrow_truth": "UNAVAILABLE_NO_POINT_IN_TIME_BORROW_DATA",
+  "class_B_reachable": false
+ },
+ "feasibility": {
+  "beta_hedged_market_neutral_spreads": "NOT_IMPLEMENTED_DEFERRED: long-name/short-SPY needs only a liquid-ETF short leg but requires a causal rolling-beta contract and a hedge-ratio identity; applying it to existing long candidates would be retroactive rescue of consumed results",
+  "cross_sectional_top_vs_bottom_momentum": "NOT_IMPLEMENTED_DEFERRED: needs a portfolio-level simulator and universe-scope identity; accepted min_cross_section=20 makes a liquid-ETF-only short leg marginal; equity short leg is hypothesis-only without borrow truth. Proposed grammar if included: lookback {21,63,126,252} x month_end x quintile = 4",
+  "sector_relative_residual_mean_reversion": "NOT_FEASIBLE: no sector/industry authority in repo or provider contract; inferring it from symbols is forbidden",
+  "short_only_mirrors_SH01_SH13": "IMPLEMENTED_INFRASTRUCTURE; execution borrow-gated",
+  "symmetric_long_short_state_pairs_LS01_LS04": "IMPLEMENTED_INFRASTRUCTURE; stop-and-reverse flip priced as exit leg + entry leg"
+ },
+ "final_holdout_rows_consumed": 0,
+ "funnel": [
+  "DISCOVERY",
+  "STATISTICAL_ROBUSTNESS",
+  "ECONOMIC_ROBUSTNESS",
+  "INDEPENDENT_CONFIRMATION",
+  "PORTFOLIO_RISK_SUITABILITY",
+  "PROMOTION",
+  "PAPER"
+ ],
+ "funnel_threshold_options": {
+  "parameter_neighborhood": [
+   "REUSE_PASS2_ADJACENT_NEIGHBOUR_SHARE_0_25",
+   "REPORT_ONLY_NO_GATE",
+   "OPERATOR_VALUE"
+  ],
+  "portfolio_mdd_worst5day": [
+   "DEFER_TO_PORTFOLIO_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+   "REUSE_PASS2_MDD_20PCT_WORST5_6PCT",
+   "OPERATOR_VALUE"
+  ],
+  "regime_concentration": [
+   "REUSE_PASS2_MAX_SHARE_0_80",
+   "REPORT_ONLY_NO_GATE",
+   "OPERATOR_VALUE"
+  ],
+  "trade_count_confidence_band": [
+   "REUSE_PASS2_MIN_30_TRADES",
+   "OPERATOR_BAND_REPORTED_AS_CONFIDENCE_INTERVAL_NOT_GATE",
+   "REPORT_ONLY_NO_GATE"
+  ],
+  "year_stability": [
+   "REUSE_PASS2_6_OF_8_POSITIVE_YEARS_AND_LEAVE_BEST_YEAR_OUT",
+   "REPORT_ONLY_NO_GATE",
+   "OPERATOR_VALUE"
+  ]
+ },
+ "mission": "V4-ALPHA-CENSUS-02-SHORT-LONGSHORT-PREDECLARATION-01",
+ "multiple_testing_proposal": {
+  "complements": "tagged, counted in the registered denominator, excluded from the effective-independent estimate",
+  "global_disclosure": "Census-01 totals (38,192 strategy trials, 1,095 factors) are reported beside every Census-02 verdict",
+  "local_family": "Census-02 conditional factors form their own BH family (factor_fdr_bh_v1, alpha 0.10)",
+  "registered_population": "frozen population root over every (config x scope symbol) trial and every condition x horizon factor",
+  "strategy_judge": "DEFERRED_FULL_POPULATION; any later DSR/PBO denominator is the pooled Census-01 + Census-02 population"
+ },
+ "operator_decisions_required": {
+  "benchmark_rule": [
+   "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+   "NET_POSITIVE_ONLY_ALL_SIDES"
+  ],
+  "borrow_policy": [
+   "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+   "NO_EXECUTABLE_SHORTS_HYPOTHESIS_ONLY"
+  ],
+  "complement_handling": [
+   "REGISTER_ALL_TAG_COMPLEMENTS",
+   "EXCLUDE_COMPLEMENTS_BEFORE_FREEZE"
+  ],
+  "conditional_scope": [
+   "ALL_SEED_SYMBOLS"
+  ],
+  "etf_borrow_assumption": "explicit list + annual fee bps (see c2_borrow)",
+  "funnel_thresholds": "five-part block, see c2 doc",
+  "grammar_tiers": [
+   "H",
+   "H+L"
+  ],
+  "multiple_testing_denominator": [
+   "LOCAL_CENSUS02",
+   "LOCAL_WITH_GLOBAL_DISCLOSURE",
+   "GLOBAL_POOLED_CENSUS01_CENSUS02"
+  ],
+  "ssr_handling": [
+   "FLAG_ONLY",
+   "DEFER_ENTRY_ON_KNOWN_SSR_DAY"
+  ]
+ },
+ "operator_policy": {
+  "artifact": "CENSUS02_OPERATOR_POLICY.json",
+  "decisions": {
+   "benchmark_rule": "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+   "borrow_policy": "EQUITY_HYPOTHESIS_ONLY_ETF_EXECUTABLE_FROZEN_ASSUMPTION",
+   "complement_handling": "REGISTER_ALL_TAG_COMPLEMENTS",
+   "conditional_scope": "ALL_SEED_SYMBOLS",
+   "etf_borrow_assumption": {
+    "annual_borrow_fee_bps": 100.0,
+    "availability": "ALWAYS_AVAILABLE_FOR_SCOPE_ASSUMED",
+    "etf_short_scope": [
+     "DIA",
+     "EEM",
+     "EFA",
+     "GLD",
+     "IEF",
+     "IWM",
+     "QQQ",
+     "SLV",
+     "SPY",
+     "TLT",
+     "VTI",
+     "XLB",
+     "XLE",
+     "XLF",
+     "XLI",
+     "XLK",
+     "XLP",
+     "XLU",
+     "XLV",
+     "XLY"
+    ],
+    "recall": "NONE_ASSUMED",
+    "short_rebate": "ZERO"
+   },
+   "funnel_thresholds": {
+    "parameter_neighborhood": "REPORT_ONLY_NO_GATE",
+    "portfolio_mdd_worst5day": "DEFER_TO_PORTFOLIO_RISK_SUITABILITY_STAGE_USING_MAIN_RISK_BAR",
+    "regime_concentration": "REPORT_ONLY_NO_GATE",
+    "trade_count_confidence_band": {
+     "15_to_29": "MODERATE_SAMPLE",
+     "30_plus": "STRONG_SAMPLE",
+     "5_to_14": "LOW_SAMPLE",
+     "hard_gate": "closed_round_trips >= 5 only",
+     "kind": "CLASSIFICATION_WITH_TYPED_MINIMUM",
+     "under_5": "INSUFFICIENT"
+    },
+    "year_stability": "REPORT_ONLY_NO_GATE"
+   },
+   "grammar_tiers": "H+L",
+   "multiple_testing_denominator": "LOCAL_WITH_GLOBAL_DISCLOSURE",
+   "ssr_handling": "FLAG_ONLY"
+  },
+  "status": "APPROVED_BY_OPERATOR_BEFORE_RESULT_1"
+ },
+ "proposed_etf_scope_for_operator_review": {
+  "note": "the registry carries no instrument-type field; ETF membership must be an explicit operator-frozen list",
+  "status": "PROPOSAL_NOT_FROZEN",
+  "symbols": [
+   "DIA",
+   "EEM",
+   "EFA",
+   "GLD",
+   "IEF",
+   "IWM",
+   "QQQ",
+   "SLV",
+   "SPY",
+   "TLT",
+   "VTI",
+   "XLB",
+   "XLE",
+   "XLF",
+   "XLI",
+   "XLK",
+   "XLP",
+   "XLU",
+   "XLV",
+   "XLY"
+  ]
+ },
+ "real_census02_attempts_executed": 0,
+ "schema_version": "alpha_census02_proposal_v1",
+ "status": "PROPOSAL_SUPERSEDED_BY_OPERATOR_POLICY",
+ "structural_protocol": {
+  "authority": {
+   "PROMOTION_AUTHORITY": "NONE",
+   "VALIDATION_STATUS": "NOT_VALIDATED"
+  },
+  "benchmark_semantics": {
+   "never": "long buy-and-hold as the benchmark of a short-only strategy (double-counts the market); a switching long/short strategy has no single-direction benchmark",
+   "passive_holds": "same window, same execution/cost/borrow assumptions as the strategy",
+   "qualification_rule": "OPERATOR_DECISION benchmark_rule",
+   "roles": {
+    "long_short": {
+     "cash_zero": "QUALIFICATION_NET",
+     "passive_long_hold": "DIAGNOSTIC_ONLY",
+     "passive_short_hold": "DIAGNOSTIC_ONLY"
+    },
+    "short": {
+     "cash_zero": "QUALIFICATION_NET",
+     "passive_short_hold": "QUALIFICATION_ALPHA"
+    }
+   },
+   "rules": [
+    "SIDE_AWARE_SHORT_NET_AND_PASSIVE_SHORT_ALPHA_LONGSHORT_NET_VS_CASH",
+    "NET_POSITIVE_ONLY_ALL_SIDES"
+   ]
+  },
+  "conditional_factor_semantics": {
+   "direction": "lower_is_better",
+   "direction_adjusted_effect": "-raw_effect (positive = favorable evidence for the short hypothesis)",
+   "executable_pnl": false,
+   "family": "alpha_census02_short_conditional_v1",
+   "label": "fwd_close_return_minus_same_symbol_same_horizon_unconditional_mean",
+   "post_result_direction_flip": "forbidden",
+   "protocol_version": "alpha_census02_short_conditional_factor_v1",
+   "raw_effect": "conditional_mean_fwd_ret - same_symbol_same_horizon_unconditional_mean"
+  },
+  "conditional_statistics": {
+   "classes": {
+    "MODERATE": "WEAK and p<=conditional_p_alpha",
+    "STRONG": "MODERATE and complete-family BH q<=fdr.alpha",
+    "WEAK": ">=min_events and direction_adjusted_effect>0"
+   },
+   "conditional_p_alpha": 0.1,
+   "empirical_null": {
+    "base_seed": 0,
+    "n_permutations": 200,
+    "source": "mqk_research.factors.fdr.compute_empirical_pvalue (accepted repo defaults)",
+    "tail": "two_sided_abs_mean_ic"
+   },
+   "fdr": {
+    "alpha": 0.1,
+    "population": "all registered Census-02 factors; failed/non-evaluable stay accounted; local family",
+    "protocol": "factor_fdr_bh_v1"
+   },
+   "label_protocol_version": "alpha_census_fwd_close_return_minus_symbol_baseline_v1",
+   "min_cross_section": 10,
+   "min_events": 30,
+   "min_periods": 30,
+   "multiple_testing": "LOCAL_WITH_GLOBAL_DISCLOSURE: own complete local factor family; Census-01 populations disclosed, not pooled; Strategy DSR/PBO DEFERRED_FULL_POPULATION",
+   "n_quantiles": 2,
+   "window_end_utc": "2024-01-01T00:00:00+00:00",
+   "window_start_utc": "2016-01-01T00:00:00+00:00"
+  },
+  "data_contract": {
+   "confirmation": "[2025-01-01, 2026-03-01) consumed by alpha_edge_confirmation_01; never read by Census-02",
+   "contaminated_2024": "never read, never scored",
+   "final_holdout": "[2026-03-01, ...) reserved; never read",
+   "window": "[2016-01-01, 2024-01-01)"
+  },
+  "data_request_contract": {
+   "adjustment": "all",
+   "asof": "2026-10-05",
+   "end_utc_exclusive": "2024-01-01T00:00:00+00:00",
+   "extractor": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+   "feed": "sip",
+   "min_eligible_observations": 252,
+   "no_iex_fallback": true,
+   "provider": "alpaca",
+   "start_utc": "2016-01-01T00:00:00+00:00",
+   "symbol_failure_policy": "typed_EXCLUDED_disposition",
+   "timeframe": "1Day"
+  },
+  "execution_contract": {
+   "borrow_cost": "short holding bars accrue |qty|*prior_close*annual_fee_bps/10000/252; fee has NO default; short rebate ZERO; availability/recall assumptions are disclosed, not asserted",
+   "corporate_actions": "adjustment=all total-return series: a short bears dividends through the adjusted series; unsupported corporate actions stay typed EXCLUDED (fail closed)",
+   "cost_model": {
+    "additional_slippage_bps": 0.0,
+    "annualization_days": 252,
+    "commission_bps_per_side": 10.0,
+    "entry_budget_usd": 10000.0,
+    "fill_slippage_bps_per_side": 5,
+    "initial_capital_usd": 100000.0,
+    "pricing_model_id": "rust_conservative_bar_range_v1",
+    "volatility_mult_bps": 0
+   },
+   "fill": "first bar strictly after t; BUY at high+slip, SELL at low-slip (rust_conservative_bar_range_v1, slippage 5 bps, integer micros); short entry = SELL, cover = BUY; same-bar fill forbidden",
+   "labels": "fwd_ret/close_{t+h}/close_t-1 is a LABEL: EXECUTABLE_PNL=false, never an input to simulate_signed",
+   "open_position_at_end": "marked_to_last_close_no_liquidation (unchanged from Census-01)",
+   "pnl_marking": "signed_qty_held_before_bar*(close_t-close_{t-1}); fill cost = |delta_qty|*adverse(fill vs close)+commission",
+   "positions": "signed_daily_completed_bars: -1 short, 0 flat, +1 long",
+   "signal_knowledge": "signal on bar t uses only bars <= t",
+   "sizing": "qty = sign*floor(10000 USD / completed-signal-bar close); constant per run; no compounding; sign flip = exit leg + entry leg on one fill bar",
+   "ssr": "Rule 201 not represented; a possible-hazard flag is derived from daily bars (no intraday sequence is claimed) and recorded per short entry only"
+  },
+  "experiment_id": "alpha_edge_census_02",
+  "funnel": [
+   "DISCOVERY",
+   "STATISTICAL_ROBUSTNESS",
+   "ECONOMIC_ROBUSTNESS",
+   "INDEPENDENT_CONFIRMATION",
+   "PORTFOLIO_RISK_SUITABILITY",
+   "PROMOTION",
+   "PAPER"
+  ],
+  "global_disclosure": {
+   "census01_conditional_factors": 1095,
+   "census01_strategy_trials": 38192,
+   "statement": "Census-02 is its own complete predeclared local factor family; Census-01 was frozen and evaluated earlier and is NOT part of one contemporaneous BH family. Strategy DSR/PBO stays DEFERRED_FULL_POPULATION."
+  },
+  "identity": {
+   "attempt": "infrastructure retry = new attempt of the SAME trial; outcome-based retry forbidden",
+   "evaluation": "slice/job/window; never mints a trial",
+   "trial": "sha256(side,family,params,scope,universe_id,partitions_id,protocol_id); results/attempts never enter"
+  },
+  "partition_authority": "current truth is PARTITION_TRUTH; Census-01 partitions.py is historical and supplies only the hard discovery-fence implementation",
+  "partitions": {
+   "census02_access": {
+    "confirmation_window": "NEVER_READ",
+    "contaminated_2024": "NEVER_READ",
+    "discovery": "READ_AND_SCORED_STRICTLY_BEFORE_2024-01-01",
+    "final_holdout": "NEVER_READ"
+   },
+   "confirmation_window": {
+    "end_exclusive": "2026-03-01",
+    "role": "CENSUS02_NEVER_READ",
+    "start_inclusive": "2025-01-01",
+    "status": "CONSUMED_BY_ALPHA_EDGE_CONFIRMATION_01"
+   },
+   "contaminated_2024": {
+    "end_exclusive": "2025-01-01",
+    "role": "CENSUS02_NEVER_READ",
+    "start_inclusive": "2024-01-01",
+    "status": "CONTAMINATED_BY_REJECTED_RUN"
+   },
+   "discovery": {
+    "end_exclusive": "2024-01-01",
+    "role": "CENSUS02_DISCOVERY_REUSE",
+    "start_inclusive": "2016-01-01"
+   },
+   "final_holdout": {
+    "role": "FINAL_HOLDOUT",
+    "start_inclusive": "2026-03-01",
+    "status": "RESERVED_UNCONSUMED"
+   },
+   "schema_version": "census02_partition_truth_v1",
+   "semantics": "the Confirmation window is consumed globally and never read by Census-02; the Final Holdout stays reserved"
+  },
+  "registration_rule": {
+   "denominator": "frozen population root; cannot shrink after results",
+   "winner_only_registration": "forbidden: the complete ledger precedes any registry record"
+  },
+  "retry_rules": {
+   "infrastructure_retry": "same trial, new attempt, same economics",
+   "outcome_based_retry": "forbidden"
+  },
+  "schema_version": "alpha_census02_v1",
+  "strategy_qualification": {
+   "common_minimum": "closed_round_trips >= 5, otherwise typed INSUFFICIENT_CLOSED_ROUND_TRIPS",
+   "dsr_pbo": "DEFERRED_FULL_POPULATION; never manufactured",
+   "executable_scope": "Class C only; individual-equity cells are never executable Strategy trials",
+   "long_short": "net_pnl > 0 vs cash; passive long and short holds DIAGNOSTIC_ONLY",
+   "report_only": [
+    "year_stability",
+    "regime_concentration",
+    "parameter_neighborhood",
+    "max_drawdown_recorded_no_veto"
+   ],
+   "short": "net_pnl > 0 AND alpha vs passive short hold > 0 (same window/execution/slippage/commission/borrow/sizing)",
+   "ssr": "FLAG_ONLY: a daily-bar POSSIBLE Rule-201 hazard flag per short entry (intraday sequence unknowable from daily bars); never rejects or defers a fill in Discovery",
+   "trade_count_band": {
+    "15_to_29": "MODERATE_SAMPLE",
+    "30_plus": "STRONG_SAMPLE",
+    "5_to_14": "LOW_SAMPLE",
+    "kind": "classification only; no hard gate above 5"
+   },
+   "validation_status": "NOT_VALIDATED"
+  }
+ },
+ "structural_protocol_id": "c042d521cc31cf833a5ea614f63ecdf9",
+ "superseded_by": {
+  "freeze": "CENSUS02_PREDECLARATION.json",
+  "operator_policy": "CENSUS02_OPERATOR_POLICY.json"
+ }
+}
