@@ -793,6 +793,10 @@ Local, not pushed. Record: `docs/research/M1_BATCH03_DISCOVERY_RESULT.md`. 60 re
 
 Local, not pushed (`ae93f170`, `fbf2a362`, `6ad76924`). The daemon Paper strategy dispatch routes capital-fraction bindings through the existing `CapitalFractionRuntimeHost` (typed host enum, recover before the start barrier, held sizing persisted before the result, stable per-binding deployment id, strict no-default contract); fixed-quantity bindings and the stateless `DurableStateRequired` refusal are unchanged. Daemon bar windows now carry true OHLCV. Proof: 12 DB-backed tests plus 13/13 required mutations killed. `M1_SYSTEM_CANDIDATE_READY = true`; M1 remains `M1_BLOCKED`; Paper INACTIVE; Live untouched. M1.9 deployment prerequisite: verify migration 0091 on the real Paper DB. Residuals closed by the independent-review correction (local, not pushed): whole-tick atomic durable commit across all selected hosts (one transaction, results released after commit, every host poisoned on failure); runtime position-cap clamp after durable Q classified as a distinct audited executable-only layer (`NATIVE_SIZING_V1_CONTRACT.md`); `build_with_durable_state` tested directly through the process-env path; options-lifecycle residue and synthetic-symbol registry fixtures isolated. Note: the DB-backed daemon scenario binaries are `#[ignore]` and are not run by the CI `--test-threads=1` workspace step.
 
+### G2.22 Roadmap additions: Strategy Factory + Historical Research Data Lake (docs-only, 2026-10-08)
+
+Operator-approved future roadmap items `STRATEGY-FACTORY-AUTONOMOUS-CANDIDATE-PIPELINE-01` (with sub-capability `LOCAL-AI-WEB-STRATEGY-SCOUT-01`) and `HISTORICAL-US-EQUITY-RESEARCH-DATA-LAKE-01` are recorded in §I2C. They are FUTURE / M9-ENABLING and NON-BLOCKING for M1, create no top-level milestone (the frozen ten-milestone count is unchanged; no M11), and neither reopen nor modify Alpha Census-02 (frozen behavior, protocol, request contract, and the recorded Discovery result in `docs/research/ALPHA_CENSUS_02_RESULT.md`). The planned 4 TB SSD + 2 x 28 TB HDD storage is a planned computer-build target, not current runtime storage truth. Implementation requires separate future controller(s).
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).
@@ -1650,6 +1654,61 @@ Its bounded question is:
 
 The mission must perform a defect/architecture census across current feature/data identity, candidate/trial identity, Research evidence, trained-state persistence, replay, strategy semantic identity, Backtest inputs, promotion evidence, persistence schemas, Paper strategy loading, performance/drift surfaces, alerts/metrics, and authority boundaries. It is **read-only by default**; no TensorFlow/model-runtime/LLM implementation is authorized unless a separate controller is issued after review.
 
+### I2C. Strategy Factory, Local AI Web Scout and Historical Research Data Lake (operator-approved roadmap; docs-only record)
+
+**Status:** `FUTURE / M9-ENABLING · NON-BLOCKING FOR CURRENT M1 · OPERATOR-APPROVED ROADMAP ITEMS`\
+**Primary mapping:** M9 Research autonomy + future Research infrastructure. These are **not** a new top-level milestone (the frozen ten-milestone count is unchanged; no M11 exists), **not** an M1 blocker, and they do **not** reopen or modify Alpha Census-02 (its frozen behavior, protocol, request contract and result are untouched).\
+**Implementation:** requires separate future controller(s). Nothing in this section authorizes code, services, dependencies, model choices or hardware purchases.\
+**Permanent authority invariant (§D1):** `AI/ML MAY GENERATE INTELLIGENCE. DETERMINISTIC MQD CODE RETAINS TRADING AUTHORITY.` The AI/LLM is an idea scout; MQD is the judge.
+
+#### Item A — `STRATEGY-FACTORY-AND-AUTONOMOUS-CANDIDATE-PIPELINE-01`
+
+Purpose: a deterministic, auditable supply pipeline that continuously finds, normalizes, deduplicates and proposes strategy ideas for MQD Research.
+
+```text
+PUBLIC/APPROVED SOURCES -> LOCAL WEB SCOUT -> UNTRUSTED RAW-SOURCE QUARANTINE -> SOURCE/PROVENANCE ARCHIVE
+ -> LOCAL LLM STRUCTURED EXTRACTION -> SEMANTIC DEDUPLICATION / CLUSTERING -> MQD StrategyIdea INTAKE
+ -> FORMALIZATION -> PREDECLARATION -> RESEARCH -> CAUSAL BACKTEST / ROBUSTNESS / OOS -> PROMOTION
+ -> NATIVE/RUNTIME STRATEGY IDENTITY BRIDGE -> AUTHORIZED DYNAMIC PER-SYMBOL SELECTION -> PAPER
+ -> DECAY / DRIFT / REVALIDATION -> feedback to Research
+```
+
+**`LOCAL-AI-WEB-STRATEGY-SCOUT-01` (sub-capability).** Approved public source classes (extensible by operator approval): academic papers, arXiv, SSRN/public working papers, public GitHub repositories, QuantConnect/public algorithm material, public strategy blogs, public trading/quant forums, Reddit, public TradingView educational/idea material, broker/public research, market-microstructure/factor literature, other operator-approved public sources. Access must obey source terms, robots/rate limits where applicable, licensing/copyright, authentication boundaries, and no paywall bypass. Collected metadata may include source URL/title/author, retrieval timestamp, content hash, license/usage metadata, the raw artifact or a permissible archival representation, extracted explicit rules, ambiguous/underspecified fields, claimed asset classes/direction/timeframe/data/entry/exit/sizing/cost assumptions, the source's claimed evidence and implementation references. **Source claims are never MQD evidence.**
+
+**Web content security contract.** The web is hostile, untrusted input. Downloaded content must not automatically execute code, run shell commands, install dependencies, invoke scripts from GitHub, access broker/Paper/Live credentials, write trading DB authority, modify deployments, change risk limits, promotion status or strategy authority, or override system prompts/policies. Prompt injection inside web content is DATA, never instruction authority. The local LLM receives the minimum permissions necessary for extraction/classification and no broker credentials. Downloaded code may be archived and statically analyzed but is never executed merely because a source contains it.
+
+**Structured extraction contract.** Every extracted field is typed `EXPLICIT_SOURCE_RULE`, `INFERRED_RULE`, `UNDERSPECIFIED`, or `UNKNOWN`. Missing rules remain missing: "buy when momentum is strong" must not become `RSI > 70` unless the source says so or a later, separately authorized formalization decision does.
+
+**Semantic deduplication / novelty.** Embeddings/ML plus deterministic rule signatures (where practical) classify each proposal against Census-01, Census-02, rejected campaigns, accepted factors, historical MQD experiments, native strategies, promoted strategies and prior Strategy Factory intake. Relationship classes: `EXACT_DUPLICATE`, `PARAMETER_VARIANT`, `SEMANTIC_VARIANT`, `COMPLEMENT`, `MIRROR`, `COMPOSITE_OF_EXISTING`, `GENUINELY_NEW`, `UNKNOWN_NEEDS_REVIEW`. Textual paraphrases must not manufacture independent hypotheses; parameter perturbations must not automatically manufacture a new economic idea; result values never define semantic identity.
+
+**Source prioritization.** A source-quality/reproducibility score may rank *what to formalize next* and must never decide economic validity. Positive triage evidence: explicit reproducible rules, public implementation, cost assumptions, OOS evidence, peer-reviewed/public research, clear universe/timeframe. Negative: missing rules, obvious lookahead, marketing-only claims, unverifiable results, hidden parameters. A low-quality forum idea may still be a valid hypothesis; a peer-reviewed paper may still fail MQD testing. MQD results decide.
+
+**StrategyIdea intake contract (minimum fields).** `intake_id`; canonical source provenance; source hashes; source type; source retrieval time; strategy family; economic hypothesis; supported/proposed asset classes; direction (long/short/both); timeframe; explicit entry and exit rule representations; sizing assumptions; required features/data; parameter coordinates/ranges; unresolved assumptions; semantic signature; duplicate/relationship classification; novelty status; implementation status; research eligibility status. **An intake record is not promotion, Paper or Live authority.**
+
+**Research -> runtime identity bridge (known architectural need).** A Python Research discovery cannot become deployable because its Research metrics are good. A future deterministic seam must map/formalize an accepted Research strategy into an executable native/runtime strategy identity whose semantic fingerprint matches the evidence being promoted. No winner-only implementation, no manual name matching, no Python-result -> Paper bypass.
+
+**Dynamic best-strategy selection contract.** MQD may ultimately select the best *currently authorized* strategy per symbol. Only strategies that already passed deterministic promotion eligibility may enter the selector. "Best" never means merely highest recent P&L. Future selection evidence may incorporate, under a **separately frozen policy (to be frozen before implementation; not decided here)**: OOS evidence, economic return, drawdown/risk, sample size/confidence, execution costs, stability, strategy correlation, regime suitability, evidence age/decay and Paper performance. No per-tick reranking; preferred model: controlled research/revalidation boundary -> durable eligible set -> the next session/start builds a deterministic selection plan (avoids noise-chasing and intra-session thrashing).
+
+#### Item B — `HISTORICAL-US-EQUITY-RESEARCH-DATA-LAKE-01`
+
+Purpose: a large local, provenance-preserving historical research lake for **future** campaigns. It must not alter the frozen Census-02 request contract (alpaca / sip / adjustment=all / 1Day / [2016-01-01, 2024-01-01) / asof 2026-10-05).
+
+**Depth targets (US equities/ETFs).** Daily history approximately 30-50+ years where authoritative history exists; 5-minute at the maximum authoritative depth available per instrument/provider; optional 1-minute where useful, available and economically justified. Historical intraday bars are **never fabricated** to create an artificial uniform 30-50-year history; coverage quality and provenance beat fake completeness.
+
+**Point-in-time instrument/universe truth (higher priority than maximizing years of bars).** Permanent internal `instrument_id`; historical ticker/symbol changes; listing and delisting dates; venue history; security type; equity/ETF classification; mergers/acquisitions where authoritative; splits; dividends; other corporate actions; delisted/bankrupt securities; point-in-time eligible-universe snapshots. The lake must be able to answer "what instruments actually existed and were eligible on date X?" Historical research must not use only current survivors once point-in-time authority is available, and remaining survivorship limitations are always disclosed.
+
+**Logical storage tiers.** RAW VENDOR (immutable, provenance-preserved where licensing permits) -> CANONICAL (normalized bars/instrument records) -> ADJUSTED (explicit adjustment version + provenance) -> POINT-IN-TIME UNIVERSE -> FEATURE/LABEL CACHE (reconstructable acceleration) -> EXPERIMENT ARTIFACTS (predeclarations/manifests/results/models) -> ARCHIVE (completed research packages). Raw source truth is never overwritten by adjusted/normalized derivatives.
+
+**Planned computer-build storage — `PLANNED COMPUTER-BUILD TARGET; NOT CURRENT RUNTIME STORAGE TRUTH` (no such hardware is installed or configured today):** 1 x 4 TB SSD + 2 x 28 TB HDD. Recommended roles: the 4 TB SSD is the HOT RESEARCH TIER (PostgreSQL, recent/current market data, active research datasets, feature matrices, ML/LLM models where appropriate, vector/embedding index, working experiment data, frequently accessed 1m/5m data); the 2 x 28 TB HDD form the BULK RESEARCH DATA LAKE with a *preferred* protection target of a MIRRORED pair (~28 TB nominal protected usable rather than 56 TB unprotected) holding raw provider archives, canonical historical bars, corporate-action history, the point-in-time instrument master, delisted-security history, daily/5m/selected-1m archives, completed research datasets, experiment artifacts, model archives and provenance manifests. This is a design recommendation, not a statement that RAID/mirroring is installed. **A mirror is not a backup;** backup remains a separate future requirement.
+
+**Cross-project hardware boundary.** The computer build may supply compute, GPU, RAM, NVMe/SSD, HDD capacity, networking, cooling and power. The media-server (Jellyfin) project and MQD may coexist physically but keep separate logical storage and authority: planned media storage and MQD research storage are separate roles, media automation never becomes trading authority, and MQD broker/credential/trading authority is never exposed to Jellyfin or media automation merely because hardware is shared.
+
+**Local LLM/ML principle.** Framework-neutral. Possible future components: a local LLM for extraction/formalization assistance, an embedding model, a vector index, clustering, novelty detection, ML ranking for source triage. 7B-30B-class local models may be evaluated later against available hardware; this record **freezes no model or framework choice.**
+
+#### Roadmap non-authority
+
+The Strategy Factory, Web Scout and Data Lake must never: automatically promote a strategy; submit orders; grant Paper or Live authority; increase risk/capital; modify existing evidence after results; define identity from result values; treat a retry as a new trial; hide failed candidates; consume reserved holdouts; or weaken causal/execution/cost assumptions to improve outcomes.
+
 ### I3. Multi-asset backlog disposition
 
 The prior generic “multi-asset expansion” backlog is **`SUPERSEDED_BY_MILESTONE_CONTRACT`**.
@@ -1684,6 +1743,7 @@ The following remain true unless the milestone contract is explicitly changed:
 - complex visualization work does not outrank correctness, safety, Paper/Live isolation, or milestone exit gates;
 - research hypotheses such as time-of-day filters do not become infrastructure requirements merely because they are interesting;
 - multi-asset work proceeds in the frozen M5–M8 order rather than interrupting M1;
+- the Strategy Factory / Local AI Web Scout / Historical Research Data Lake roadmap (§I2C) is future M9-enabling Research infrastructure, creates no top-level milestone, does not reopen Alpha Census-02, and cannot block M1;
 - optional analytics do not delay the current M1 aggressive audit, Paper production-state proof, real Paper lifecycle proof, or finite M1 validation.
 
 ## J. Master Document Operating Rules
