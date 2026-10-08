@@ -168,6 +168,8 @@ jobs:
 
     env:
       MQK_DATABASE_URL: postgres://mqk:mqk@127.0.0.1:5434/mqk_test
+      # IR-M1-PROOF-01: DB-backed daemon dispatch tests fail (never skip) without a usable database.
+      MQK_REQUIRE_DB_PROOF: "1"
       CARGO_INCREMENTAL: 0
       RUSTFLAGS: -C debuginfo=0
 
@@ -225,6 +227,15 @@ jobs:
 
       - name: cargo test --workspace
         run: cargo test --workspace --no-fail-fast -- --test-threads=1
+
+      # IR-M1-PROOF-01: positive execution evidence. The workspace step above cannot show that the
+      # DB-backed dispatch tests did not skip; this step runs them against the :5434 service with
+      # output captured and requires every DB-backed test to report the database path.
+      - name: M1 capital-fraction dispatch DB proof (required database, positive execution)
+        run: |
+          set -o pipefail
+          cargo test -p mqk-daemon --lib capital_fraction_dispatch -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/cfd_proof.log"
+          bash ../scripts/guards/check_cf_dispatch_db_proof.sh "$RUNNER_TEMP/cfd_proof.log"
 
   db-proof:
     name: "DB Proof Lane (Postgres)"
