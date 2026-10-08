@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -35. Post-Discovery candidate authority and OOS readiness (2026-10-08, `V4-M1-POST-DISCOVERY-CANDIDATE-AUTHORITY-AND-OOS-READINESS-01`)
+
+Local commits on top of `a75dbdbe`, **not pushed**. Record: `docs/research/M1_POST_DISCOVERY_CANDIDATE_AUTHORITY.md`; ledger G2.23.
+
+- Verdict `NO_ELIGIBLE_CANDIDATE_EXISTS`, `NO_AUTHORIZED_EXECUTABLE_NEXT_RESEARCH_STEP`, `OPERATOR_DECISIONS_REQUIRED` (OD-1..OD-8). Census-02 and Batch 03 are unchanged and Discovery-only; no run, registration, provider call, OOS/Confirmation/Final-Holdout read, Paper or Live action.
+- Only the Final Holdout `[2026-03-01, ...)` is genuinely OOS (single-use, reserved). Every earlier window is exposed (Census-01/02, Confirmation-01, native Batch 01-03 folds). Five of six prepared Confirmation symbols were in Census-02/Confirmation-01; MDY has no registry identity or history metadata. Do not run Batch 03 Confirmation as prepared.
+- Fixed + proven: M1.10 soak ledger now counts sessions on the Paper-runtime calendar (2023-2028) instead of the research `sessions` horizon (2026-12-31) (`8a9114c`); the capital-fraction held-sizing store and restart proofs now run in the CI DB proof lane (`57fa62f`).
+- BLOCKED (needs OD-6): monthly engines F01/F05/F08/F10 are fail-closed flat for bars on/after 2026-12-31 (`sessions` v1 horizon, bound into their fingerprints). `M1_SYSTEM_CANDIDATE_READY = true` stands for non-monthly candidates. M1 stays `M1_BLOCKED`.
+- Next: one non-executable predeclaration controller after the operator answers OD-1..OD-8. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI.
+
 ## -34. Capital-fraction daemon dispatch closed (2026-10-05, `V4-BATCH03-DISCOVERY-THEN-CAPITAL-FRACTION-DAEMON-CLOSURE-01` Phase B)
 
 Local commits `ae93f170`, `fbf2a362`, `6ad76924`, **not pushed**. Finding E of `docs/M1_SYSTEM_CLOSURE_01.md` is FIXED + PROVEN.

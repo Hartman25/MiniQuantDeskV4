@@ -797,6 +797,18 @@ Local, not pushed (`ae93f170`, `fbf2a362`, `6ad76924`). The daemon Paper strateg
 
 Operator-approved future roadmap items `STRATEGY-FACTORY-AUTONOMOUS-CANDIDATE-PIPELINE-01` (with sub-capability `LOCAL-AI-WEB-STRATEGY-SCOUT-01`) and `HISTORICAL-US-EQUITY-RESEARCH-DATA-LAKE-01` are recorded in §I2C. They are FUTURE / M9-ENABLING and NON-BLOCKING for M1, create no top-level milestone (the frozen ten-milestone count is unchanged; no M11), and neither reopen nor modify Alpha Census-02 (frozen behavior, protocol, request contract, and the recorded Discovery result in `docs/research/ALPHA_CENSUS_02_RESULT.md`). The planned 4 TB SSD + 2 x 28 TB HDD storage is a planned computer-build target, not current runtime storage truth. Implementation requires separate future controller(s).
 
+### G2.23 Post-Discovery candidate authority and OOS readiness (`V4-M1-POST-DISCOVERY-CANDIDATE-AUTHORITY-AND-OOS-READINESS-01`, 2026-10-08) - `NO_ELIGIBLE_CANDIDATE_EXISTS`
+
+Local, not pushed (baseline `a75dbdbe`). Record, matrices, defect census and operator decisions: `docs/research/M1_POST_DISCOVERY_CANDIDATE_AUTHORITY.md`.
+
+| Commit | Invariant |
+|---|---|
+| `8a9114c` | M1.10 soak ledger validates session dates on the Paper-runtime calendar (2023-2028, parity-pinned to `sessions` v1), not the research horizon ending 2026-12-31 |
+| `57fa62f` | `scenario_held_sizing_state_01` and `scenario_capital_fraction_restart_01` run in the DB proof lane; the CI-11 guard enforces it |
+| `e450fe3` | authority document + pinned-fact tests (Confirmation prepared-not-registered, exposure, single holdout authority, Census-02 counts, calendar horizon) |
+
+Open: OD-1..OD-8 (candidate bar and OOS regime, population, holdout use, multiple-testing denominator, stress contract, calendar migration for monthly engines, Confirmation outcome rule, benchmark/no-trade semantics). BLOCKED: monthly-engine calendar horizon (E1, needs OD-6). DEFERRED: M1.10 evaluator operator entrypoint. M1 `M1_BLOCKED`; Paper INACTIVE; Live untouched; holdout RESERVED / UNCONSUMED.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).
