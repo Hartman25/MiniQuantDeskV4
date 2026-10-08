@@ -1,7 +1,10 @@
 //! Durable capital-fraction hosts inside the daemon selected-host dispatch.
 //!
-//! DB-backed tests use the port-5434 disposable test database and skip when
-//! `MQK_DATABASE_URL` is absent (this crate's `db_pool_or_skip` convention).
+//! DB-backed tests use the port-5434 disposable test database. With no
+//! `MQK_DATABASE_URL` they skip (optional local run) unless `MQK_REQUIRE_DB_PROOF=1`
+//! (CI), where a missing database fails. A configured database that is not the
+//! disposable port, cannot be reached, cannot be migrated or lacks the required schema
+//! FAILS the test; it is never a skip (`db_policy`, `connect_and_migrate`).
 //! "Restart" drops the host pool and rebuilds it from the database only.
 //! Nothing here activates Paper, touches a broker, or submits an order.
 
@@ -78,22 +81,110 @@ fn run_id() -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"cfd.test.run")
 }
 
-async fn db_or_skip(label: &str) -> Option<PgPool> {
-    let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
-        eprintln!("{label}: MQK_DATABASE_URL not set; skipped");
-        return None;
+const DISPOSABLE_DB_PORT: u16 = 5434;
+const REQUIRE_DB_ENV: &str = "MQK_REQUIRE_DB_PROOF";
+const REQUIRED_TABLE: &str = "sys_strategy_held_sizing_state";
+
+/// What a DB-backed test must do, decided only from the environment.
+#[derive(Debug, PartialEq, Eq)]
+enum DbPolicy {
+    /// No database configured and none required: documented optional-local skip.
+    Skip,
+    /// A usable disposable database is configured: connect, migrate and run, or fail.
+    Connect(String),
+    /// A configured or required database that cannot count as proof; the test must fail.
+    Refuse(String),
+}
+
+fn db_policy(url: Option<&str>, require: bool) -> DbPolicy {
+    use sqlx::postgres::PgConnectOptions;
+    use std::str::FromStr;
+    let url = url.map(str::trim).filter(|u| !u.is_empty());
+    let Some(url) = url else {
+        return if require {
+            DbPolicy::Refuse(format!(
+                "{REQUIRE_DB_ENV} is set but MQK_DATABASE_URL is not configured"
+            ))
+        } else {
+            DbPolicy::Skip
+        };
     };
-    if !url.contains(":5434") {
-        eprintln!("{label}: MQK_DATABASE_URL must be the port-5434 local test DB; skipped");
-        return None;
+    match PgConnectOptions::from_str(url) {
+        Err(e) => DbPolicy::Refuse(format!("MQK_DATABASE_URL does not parse: {e}")),
+        Ok(o) if o.get_port() != DISPOSABLE_DB_PORT => DbPolicy::Refuse(format!(
+            "MQK_DATABASE_URL port {} is not the disposable test database port {DISPOSABLE_DB_PORT}",
+            o.get_port()
+        )),
+        Ok(_) => DbPolicy::Connect(url.to_string()),
     }
+}
+
+/// Connect, migrate and verify the schema these tests depend on. Every failure is an `Err`.
+async fn connect_and_migrate<F, Fut>(url: &str, migrate: F, table: &str) -> Result<PgPool, String>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(3)
-        .connect(&url)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(url)
         .await
-        .ok()?;
-    mqk_db::migrate(&pool).await.ok()?;
-    Some(pool)
+        .map_err(|e| format!("connect failed: {e}"))?;
+    migrate(pool.clone())
+        .await
+        .map_err(|e| format!("migrate failed: {e:#}"))?;
+    let present: Option<String> = sqlx::query_scalar("select to_regclass($1)::text")
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| format!("schema probe failed: {e}"))?;
+    if present.is_none() {
+        return Err(format!("required table {table} is missing after migrate"));
+    }
+    Ok(pool)
+}
+
+async fn real_migrate(pool: PgPool) -> anyhow::Result<()> {
+    mqk_db::migrate(&pool).await
+}
+
+/// `None` only for the documented optional-local skip. Any configured-database defect panics.
+async fn db_or_skip_with<F, Fut>(
+    label: &str,
+    url: Option<&str>,
+    require: bool,
+    migrate: F,
+) -> Option<PgPool>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    match db_policy(url, require) {
+        DbPolicy::Skip => {
+            eprintln!("{label}: MQK_DATABASE_URL not configured; optional local skip");
+            None
+        }
+        DbPolicy::Refuse(why) => panic!("{label}: database proof refused: {why}"),
+        DbPolicy::Connect(url) => match connect_and_migrate(&url, migrate, REQUIRED_TABLE).await {
+            Ok(pool) => {
+                eprintln!("CFD_DB_PATH_TAKEN:{label}");
+                Some(pool)
+            }
+            Err(why) => panic!("{label}: configured database unusable: {why}"),
+        },
+    }
+}
+
+async fn db_or_skip(label: &str) -> Option<PgPool> {
+    let require = std::env::var(REQUIRE_DB_ENV).is_ok_and(|v| v == "1");
+    db_or_skip_with(
+        label,
+        std::env::var("MQK_DATABASE_URL").ok().as_deref(),
+        require,
+        real_migrate,
+    )
+    .await
 }
 
 fn end_ts(k: i64) -> i64 {
@@ -140,6 +231,36 @@ async fn cleanup(pool: &PgPool, symbols: &[&str]) {
         .execute(pool)
         .await;
     }
+}
+
+/// Installs a trigger that raises for one deployment on `sys_strategy_held_sizing_state`. Residue of a
+/// previously failed run is removed first, so a rerun on the same database starts clean.
+async fn install_held_fault(db: &PgPool, fname: &str, deployment: &str, message: &str) {
+    sqlx::query(&format!(
+        "drop trigger if exists {fname} on sys_strategy_held_sizing_state"
+    ))
+    .execute(db)
+    .await
+    .expect("remove stale fault trigger");
+    sqlx::query(&format!("drop function if exists {fname}()"))
+        .execute(db)
+        .await
+        .expect("remove stale fault fn");
+    sqlx::query(&format!(
+        "create function {fname}() returns trigger language plpgsql as $$ begin \
+         if new.deployment_id = '{deployment}' then raise exception '{message}'; end if; \
+         return new; end $$"
+    ))
+    .execute(db)
+    .await
+    .expect("create fault fn");
+    sqlx::query(&format!(
+        "create trigger {fname} before insert or update on sys_strategy_held_sizing_state \
+         for each row execute function {fname}()"
+    ))
+    .execute(db)
+    .await
+    .expect("create fault trigger");
 }
 
 /// Removes a fixed-identity run row; its outbox rows cascade.
@@ -463,21 +584,7 @@ async fn persistence_failure_returns_no_result_and_poisons_the_host() {
     let b = vec![binding(&sym, TREND)];
     let dep = deployment_id(&sym, TREND);
     let fname = format!("cfd_fail_{}", sym.to_lowercase());
-    sqlx::query(&format!(
-        "create function {fname}() returns trigger language plpgsql as $$ begin \
-         if new.deployment_id = '{dep}' then raise exception 'forced persistence failure'; end if; \
-         return new; end $$"
-    ))
-    .execute(&db)
-    .await
-    .expect("create fault fn");
-    sqlx::query(&format!(
-        "create trigger {fname} before insert or update on sys_strategy_held_sizing_state \
-         for each row execute function {fname}()"
-    ))
-    .execute(&db)
-    .await
-    .expect("create fault trigger");
+    install_held_fault(&db, &fname, &dep, "forced persistence failure").await;
 
     let mut p = build(&sel, &db).await.expect("pool");
     let out = tick(&state, &b, &mut p, 59).await;
@@ -590,21 +697,7 @@ async fn batch_commit_failure_rolls_back_every_binding_and_poisons_all() {
     let bindings = vec![binding(&a, TREND), binding(&b_sym, TREND)];
     let dep_b = deployment_id(&b_sym, TREND);
     let fname = format!("cfd_atom_{}", b_sym.to_lowercase());
-    sqlx::query(&format!(
-        "create function {fname}() returns trigger language plpgsql as $$ begin \
-         if new.deployment_id = '{dep_b}' then raise exception 'forced batch failure'; end if; \
-         return new; end $$"
-    ))
-    .execute(&db)
-    .await
-    .expect("create fault fn");
-    sqlx::query(&format!(
-        "create trigger {fname} before insert or update on sys_strategy_held_sizing_state \
-         for each row execute function {fname}()"
-    ))
-    .execute(&db)
-    .await
-    .expect("create fault trigger");
+    install_held_fault(&db, &fname, &dep_b, "forced batch failure").await;
 
     let mut p = build(&sel, &db).await.expect("pool");
     let out = tick(&state, &bindings, &mut p, 59).await;
@@ -1378,4 +1471,147 @@ fn fixture_tags_are_unique_within_module() {
         }
     }
     assert!(seen.len() >= 20, "tag scan must see the module's fixtures");
+}
+
+// ---------------------------------------------------------------------------------------------
+// IR-M1-PROOF-01: a configured database must never turn failed setup into a passing test.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn db_policy_skips_only_when_nothing_is_configured_and_nothing_is_required() {
+    let ok = "postgres://mqk:mqk@127.0.0.1:5434/mqk_test";
+    let cases: [(Option<&str>, bool, DbPolicy); 12] = [
+        (None, false, DbPolicy::Skip),
+        (Some(""), false, DbPolicy::Skip),
+        (Some("  "), false, DbPolicy::Skip),
+        (None, true, DbPolicy::Refuse(String::new())),
+        (Some(""), true, DbPolicy::Refuse(String::new())),
+        (Some(ok), false, DbPolicy::Connect(ok.to_string())),
+        (Some(ok), true, DbPolicy::Connect(ok.to_string())),
+        // Wrong port is a refusal in both modes, never a skip.
+        (
+            Some("postgres://mqk:mqk@127.0.0.1:5432/mqk_test"),
+            false,
+            DbPolicy::Refuse(String::new()),
+        ),
+        (
+            Some("postgres://mqk:mqk@127.0.0.1:5440/mqk_test"),
+            true,
+            DbPolicy::Refuse(String::new()),
+        ),
+        // ":5434" elsewhere in the URL (password, database name) must not satisfy the port check.
+        (
+            Some("postgres://mqk:p:5434@127.0.0.1:5432/x"),
+            false,
+            DbPolicy::Refuse(String::new()),
+        ),
+        (
+            Some("postgres://mqk:mqk@127.0.0.1/db:5434"),
+            false,
+            DbPolicy::Refuse(String::new()),
+        ),
+        (Some("not a url"), false, DbPolicy::Refuse(String::new())),
+    ];
+    for (url, require, want) in cases {
+        let got = db_policy(url, require);
+        match (&got, &want) {
+            (DbPolicy::Refuse(_), DbPolicy::Refuse(_)) => {}
+            _ => assert_eq!(got, want, "url={url:?} require={require}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_unreachable_configured_database_is_an_error_not_a_skip() {
+    // `.invalid` never resolves, so this is unreachable on every host regardless of local services.
+    let err = connect_and_migrate(
+        "postgres://mqk:mqk@cfd-unreachable.invalid:5434/mqk_test",
+        real_migrate,
+        REQUIRED_TABLE,
+    )
+    .await
+    .expect_err("unreachable database must be an error");
+    assert!(err.starts_with("connect failed"), "{err}");
+}
+
+/// True iff the future panics (a failed test), false if it returns.
+async fn panics<T: Send + 'static>(
+    f: impl std::future::Future<Output = T> + Send + 'static,
+) -> bool {
+    tokio::spawn(f).await.is_err_and(|e| e.is_panic())
+}
+
+#[tokio::test]
+async fn a_configured_but_unusable_database_panics_and_only_absence_skips() {
+    let ok = |_| async { Ok(()) };
+    // Documented optional-local skip.
+    assert!(db_or_skip_with("neg", None, false, ok).await.is_none());
+    // Everything below is a failed test, never a skip.
+    assert!(panics(db_or_skip_with("neg-require", None, true, ok)).await);
+    assert!(
+        panics(db_or_skip_with(
+            "neg-port",
+            Some("postgres://mqk:mqk@127.0.0.1:5432/mqk_test"),
+            false,
+            ok
+        ))
+        .await
+    );
+    assert!(
+        panics(db_or_skip_with(
+            "neg-unreachable",
+            Some("postgres://mqk:mqk@cfd-unreachable.invalid:5434/mqk_test"),
+            false,
+            ok
+        ))
+        .await
+    );
+}
+
+#[tokio::test]
+async fn a_failed_migration_or_missing_schema_on_a_configured_database_is_an_error() {
+    let url = std::env::var("MQK_DATABASE_URL").unwrap_or_default();
+    let DbPolicy::Connect(url) = db_policy(Some(&url), false) else {
+        // Optional-local: no disposable database here. With `MQK_REQUIRE_DB_PROOF=1` (CI) an absent
+        // database is already a failure in `db_or_skip_with`; this guard keeps it one here too.
+        assert!(
+            !std::env::var(REQUIRE_DB_ENV).is_ok_and(|v| v == "1"),
+            "required DB proof ran without a disposable database"
+        );
+        eprintln!("CFD-SETUP-NEG: no disposable database configured; optional local skip");
+        return;
+    };
+    let fail = |_| async { Err(anyhow::anyhow!("injected migration failure")) };
+    let err = connect_and_migrate(&url, fail, REQUIRED_TABLE)
+        .await
+        .expect_err("a failing migration must be an error");
+    assert!(err.starts_with("migrate failed"), "{err}");
+    let err = connect_and_migrate(&url, real_migrate, "cfd_no_such_table_xyz")
+        .await
+        .expect_err("a missing required table must be an error");
+    assert!(err.contains("missing after migrate"), "{err}");
+    // The same defects through the test entry point are failed tests, not skips.
+    assert!(
+        panics(async move { db_or_skip_with("neg-migrate", Some(&url), false, fail).await }).await
+    );
+}
+
+#[tokio::test]
+async fn the_configured_database_executes_a_real_round_trip() {
+    let Some(db) = db_or_skip("CFD-PROOF").await else {
+        return;
+    };
+    let sym = fresh(&db, "PROOF").await;
+    // The migrated schema is present and a row written through the fixture is read back.
+    seed_bar(&db, &sym, 0, 123).await;
+    let close: i64 = sqlx::query_scalar(
+        "select close_micros from md_bars where symbol = $1 and provider_id = 'cfd_test'",
+    )
+    .bind(&sym)
+    .fetch_one(&db)
+    .await
+    .expect("seeded bar must be readable");
+    assert_eq!(close, 123 * USD);
+    assert!(rows(&db, &sym, TREND).await.is_empty());
+    cleanup(&db, &[&sym]).await;
 }
