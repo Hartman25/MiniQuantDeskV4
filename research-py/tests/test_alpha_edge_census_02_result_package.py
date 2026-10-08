@@ -316,3 +316,92 @@ def test_main_refuses_if_the_run_directory_changes_during_packaging(tmp_path, mo
         bp.main(["--run-dir", str(run), "--out", str(tmp_path / "pkg"), "--result-run-head", RESULT01_HEAD])
     monkeypatch.setattr(bp, "package", lambda *a: None)                         # an untouched run dir passes
     bp.main(["--run-dir", str(run), "--out", str(tmp_path / "pkg"), "--result-run-head", RESULT01_HEAD])
+
+
+# ------------------------------------------------------- R5: the output path must be outside the settled run directory
+def _stub_run(tmp_path: Path) -> Path:
+    """A synthetic 'settled run' that satisfies every precondition except the output-path one."""
+    run = tmp_path / "run"
+    (run / "chunks").mkdir(parents=True)
+    for n in ("registry_strategy.sqlite", "registry_factor.sqlite"):
+        (run / n).write_bytes(b"x")
+    (run / "chunks" / "chunk_00000.jsonl").write_bytes(b"aaaa\n")
+    return run
+
+
+def _snap(root: Path):
+    return ct.tree_snapshot(root)
+
+
+def _main(run, out):
+    bp.main(["--run-dir", str(run), "--out", str(out), "--result-run-head", RESULT01_HEAD])
+
+
+def test_output_equal_to_the_run_dir_is_refused_before_any_write(tmp_path, provider_traps):
+    run = _stub_run(tmp_path)
+    before = _snap(run)
+    with pytest.raises(bp.PackageRefusal, match="outside the settled run directory"):
+        _main(run, run)
+    assert _snap(run) == before
+
+
+def test_output_below_the_run_dir_is_refused_before_the_child_is_created(tmp_path, provider_traps):
+    run = _stub_run(tmp_path)
+    before = _snap(run)
+    for child in (run / "package", run / "chunks", run / "a" / "b" / "c"):
+        with pytest.raises(bp.PackageRefusal, match="outside the settled run directory"):
+            _main(run, child)
+    assert _snap(run) == before and not (run / "package").exists() and not (run / "a").exists()
+
+
+def test_relative_and_dotdot_aliases_of_the_run_dir_are_refused(tmp_path, monkeypatch, provider_traps):
+    run = _stub_run(tmp_path)
+    before = _snap(run)
+    monkeypatch.chdir(tmp_path)
+    for run_arg, out_arg in (("run", "run"), ("run", "run/pkg"), ("run", "./run/../run/pkg"), ("./run/", "run/chunks/../pkg"),
+                             ("run/../run", "run/x/..")):
+        with pytest.raises(bp.PackageRefusal, match="outside the settled run directory"):
+            _main(Path(run_arg), Path(out_arg))
+    assert _snap(run) == before and not (run / "pkg").exists()
+
+
+def test_symlink_aliases_of_the_run_dir_are_refused(tmp_path, provider_traps):
+    run = _stub_run(tmp_path)
+    before = _snap(run)
+    alias = tmp_path / "alias"
+    alias.symlink_to(run, target_is_directory=True)
+    (run / "inner").mkdir()
+    inner_alias = tmp_path / "inner_alias"
+    inner_alias.symlink_to(run / "inner", target_is_directory=True)
+    for run_arg, out_arg in ((run, alias), (run, alias / "pkg"), (alias, run / "pkg"), (alias, alias / "pkg"),
+                             (run, inner_alias), (run, inner_alias / "pkg")):
+        with pytest.raises(bp.PackageRefusal, match="outside the settled run directory"):
+            _main(run_arg, out_arg)
+    assert _snap(run) == before and not (run / "pkg").exists() and not (run / "inner" / "pkg").exists()
+
+
+def test_an_ordinary_external_output_path_is_accepted_by_the_preflight(tmp_path, monkeypatch, provider_traps):
+    run = _stub_run(tmp_path)
+    before = _snap(run)
+    seen = []
+    monkeypatch.setattr(bp, "package", lambda r, o, regs: seen.append(o))
+    for out in (tmp_path / "pkg", tmp_path / "run_sibling" / "pkg", tmp_path, tmp_path / "runner"):   # incl. the run's parent / a name prefix
+        _main(run, out)
+    assert [p.resolve() for p in seen] == [(tmp_path / "pkg").resolve(), (tmp_path / "run_sibling" / "pkg").resolve(),
+                                           tmp_path.resolve(), (tmp_path / "runner").resolve()]
+    assert _snap(run) == before
+
+
+def test_a_temporary_registry_location_inside_the_run_dir_is_refused(tmp_path, monkeypatch, provider_traps):
+    run = _stub_run(tmp_path)
+    before = _snap(run)
+
+    class InsideRun:                                   # a TMPDIR that resolves beneath the settled run
+        def __init__(self, *a, **k): ...
+        def __enter__(self): return str(run / "tmpregs")
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(bp.tempfile, "TemporaryDirectory", InsideRun)
+    monkeypatch.setattr(bp, "package", lambda *a: pytest.fail("packaging must not start"))
+    with pytest.raises(bp.PackageRefusal, match="temporary registry copy location"):
+        _main(run, tmp_path / "pkg")
+    assert _snap(run) == before and not (run / "tmpregs").exists()

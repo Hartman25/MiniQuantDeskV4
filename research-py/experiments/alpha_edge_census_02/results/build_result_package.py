@@ -61,6 +61,14 @@ def run_dir_content_digest(root: Path) -> str:
     return h.hexdigest()
 
 
+def require_outside_run_dir(run: Path, out: Path, what: str = "result package output") -> None:
+    """Refuse `out` equal to, or anywhere beneath, the settled run directory (resolved paths: relative, `..` and symlink aliases
+    cannot bypass it). Called before any registry copy, directory creation or output write."""
+    run, out = Path(run).resolve(), Path(out).resolve()
+    if out == run or run in out.parents:
+        raise PackageRefusal(f"{what} {out} must be outside the settled run directory {run}")
+
+
 def load_settled_universe_offline(data_dir: Path, request_contract: dict, protocol_id: str) -> "c2_data.LoadedUniverse":
     """Rebuild the eligible universe, bars/provenance manifest and verified bars from SETTLED local artifacts only. A missing,
     malformed or contract-mismatched artifact is a PackageRefusal; nothing is acquired, repaired, written or read from credentials.
@@ -207,6 +215,7 @@ def main(argv=None) -> None:
     a = parse_args(argv)
     run, out = a.run_dir.resolve(), a.out.resolve()
     require_result01_run_head(a.result_run_head)
+    require_outside_run_dir(run, out)
     manifest_path = out / "RUN_MANIFEST.json"
     if manifest_path.is_file() and json.loads(manifest_path.read_text(encoding="utf-8")).get("result_run_head") != RESULT01_RUN_HEAD:
         raise PackageRefusal("the existing RUN_MANIFEST records a different result-run head; historical provenance is immutable")
@@ -215,6 +224,7 @@ def main(argv=None) -> None:
             raise PackageRefusal(f"settled {needed} is absent; packaging never creates a registry")
     before = run_dir_content_digest(run)
     with tempfile.TemporaryDirectory() as td:   # the registry stores run DDL on open: they get private copies, never the run dir
+        require_outside_run_dir(run, Path(td), "temporary registry copy location")
         regs = {n: Path(shutil.copyfile(run / n, Path(td) / n)) for n in ("registry_strategy.sqlite", "registry_factor.sqlite")}
         package(run, out, regs)
     if run_dir_content_digest(run) != before:
