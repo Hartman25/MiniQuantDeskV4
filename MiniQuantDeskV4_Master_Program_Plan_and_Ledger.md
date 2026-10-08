@@ -807,7 +807,7 @@ Local, not pushed (baseline `a75dbdbe`). Record, matrices, defect census and ope
 | `57fa62f` | `scenario_held_sizing_state_01` and `scenario_capital_fraction_restart_01` run in the DB proof lane; the CI-11 guard enforces it |
 | `e450fe3` | authority document + pinned-fact tests (Confirmation prepared-not-registered, exposure, single holdout authority, Census-02 counts, calendar horizon) |
 
-Future intake: external 200-idea catalog is untrusted intake, not yet in the repo; recommended controller `V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-01` (authority doc §16). Open: OD-1..OD-8 (candidate bar and OOS regime, population, holdout use, multiple-testing denominator, stress contract, calendar migration for monthly engines, Confirmation outcome rule, benchmark/no-trade semantics). BLOCKED: monthly-engine calendar horizon (E1, needs OD-6). DEFERRED: M1.10 evaluator operator entrypoint. M1 `M1_BLOCKED`; Paper INACTIVE; Live untouched; holdout RESERVED / UNCONSUMED.
+Future intake: external 200-idea catalog is untrusted intake (profiled read-only, not committed; SHA-256 `6fc945a8...a37f3`); recommended controller `V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-01` (authority doc §16). Open: OD-1..OD-8 (candidate bar and OOS regime, population, holdout use, multiple-testing denominator, stress contract, calendar migration for monthly engines, Confirmation outcome rule, benchmark/no-trade semantics). BLOCKED: monthly-engine calendar horizon (E1, needs OD-6). DEFERRED: M1.10 evaluator operator entrypoint. M1 `M1_BLOCKED`; Paper INACTIVE; Live untouched; holdout RESERVED / UNCONSUMED.
 
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 

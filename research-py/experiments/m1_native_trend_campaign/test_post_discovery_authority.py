@@ -109,7 +109,7 @@ def test_document_records_the_verdict_and_every_operator_decision() -> None:
 
 def test_external_catalog_is_recorded_as_untrusted_unread_intake() -> None:
     text = DOC.read_text(encoding="utf-8")
-    for needle in ("UNTRUSTED IDEA INTAKE", "V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-01", "not present in this container",
+    for needle in ("UNTRUSTED IDEA INTAKE", "V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-01", "6fc945a873733cda6a1552049923a153ed2f7213c488c6d5f07ffeb8077a37f3", "not yet committed",
                    "EXT-032", "EXT-024", "EXT-045", "EXT-070", "EXT-141", "BACKWARD_TEMPORAL"):
         assert needle in text, needle
     # Intake must not create a trial or declaration: no declaration names an external idea.
