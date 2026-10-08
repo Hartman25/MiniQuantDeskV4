@@ -100,7 +100,7 @@ Every finding is FIXED+PROVEN, ALREADY_CORRECT+PROVEN or BLOCKED.
 | D1 | M1.10 soak ledger validated dates against research `sessions` (ends 2026-12-31) while the Paper runtime calendar covers 2023-2028: every valid session from 2027-01-04 was `OutOfCoverage`, so the gate could never pass | **FIXED+PROVEN** (`8a9114c`) | RED test failed on 2027 sessions; GREEN; parity of the new date-level predicate with the intraday classifier on every table date and with `sessions` on every shared date and next-session; 4 mutants killed (ledger back on `sessions`, holiday check removed, coverage check removed, next-session ignoring closures) |
 | E1 | Monthly engines F01/F05/F08/F10 (and turn-of-month/Halloween) resolve month-ends through `sessions` v1 and bind its content hash into their fingerprint; for any bar on or after 2026-12-31 the target is fail-closed flat (pinned by `monthly.rs` test "uncovered next session") | **BLOCKED** (material change to frozen fingerprints; the Batch 03 predeclaration pins `3249ee51...` and coverage end 2026-12-31) | needs OD-6; fix recipe: new session-calendar contract id covering 2023-2028 from the Paper-runtime table, engines migrated, Batch 03 pins left as historical; registered-before-migration trials become unpromotable (already rejected) |
 | E2 | `scenario_held_sizing_state_01` (mqk-db) and `scenario_capital_fraction_restart_01` (mqk-runtime) are `#[ignore]` DB proofs of the M1.9 dispatch contract that no CI step invoked | **FIXED+PROVEN** (`57fa62f`): added to the DB proof lane with `--include-ignored`; the CI-11 guard now fails if a listed proof is missing, commented out or lacks the flag | proofs green locally (5 + 9 tests, disposable Postgres 16); 3 guard mutants killed |
-| E2b | Daemon `capital_fraction_dispatch_tests` (20 tests) use a skip-when-no-DB convention and require a `:5434` URL: against any other URL they pass vacuously in 0.01 s | ALREADY_CORRECT for CI (workspace job provides the health-checked `:5434` service); caveat recorded | against a real `:5434` database the same 20 tests ran 9.69 s and passed |
+| E2b | Daemon `capital_fraction_dispatch_tests`: `db_or_skip` returned `None` on a failed connection, failed migration or non-`:5434` URL, so a mandatory run could pass with every assertion skipped (20 tests passed in 0.01 s) | **FIXED+PROVEN** by the independent-review correction (§17, IR-M1-PROOF-01) | see §17 |
 | E3 | `config/instruments/equities.json` lacks XBI and MDY (Batch 03 relied on a membership-only per-run supplement) | ALREADY_CORRECT for Batch 03 (supplement pinned membership-only); prerequisite recorded for MDY/Paper | `test_batch03_scan_registry_supplement.py` |
 | E4 | M1.10 evaluator has no operator entrypoint or DB-to-record producer; records are hand-captured per the runbook | **DEFERRED** (not required by the documented gate; implement with the first deployment) | n/a |
 | E5 | Promotion reads the artifact's holdout status, not a live ledger | ALREADY_CORRECT for the current contract (no code path consumes the holdout); recorded for OD-3 | `research_evidence.rs` |
@@ -178,10 +178,10 @@ Operator note 2026-10-08: a 200-idea external catalog (`MQD_External_Strategy_Id
 
 | Id | Catalog rule (as written) | Preliminary structural reading |
 |---|---|---|
-| EXT-032 Pre-Holiday Effect | long a broad equity ETF two sessions before holidays; short is "derived negative control" | single-symbol, long/flat, daily, OHLCV + calendar: shape fits M1; adjacent to the rejected calendar engines `turn_of_month_last1_first3` / `halloween_nov_apr` (Batch 02 H1/H2) but no pre-holiday identity found; holiday dates would come from the session calendar (inherits the calendar-horizon item E1); ~90 events in 10 years (catalog flags small sample); short form is a separate identity |
+| EXT-032 Pre-Holiday Effect | long a broad equity ETF two sessions before holidays; short is "derived negative control" | single-symbol, long/flat, daily, OHLCV + calendar: shape fits M1; adjacent to the rejected calendar engines `turn_of_month_last1_first3` / `halloween_nov_apr` (Batch 02 H1/H2) but no pre-holiday identity found; holiday dates would come from the session calendar (inherits the calendar-horizon item E1); roughly 9-10 holiday events a year (the catalog itself flags small sample); short form is a separate identity |
 | EXT-024 VIX Percentile Predicts Index Returns | long ETF when VIX is in a high 2-year percentile, short when low | requires a VIX series: no VIX data/provenance contract exists in MQD research; short form blocked in Paper (B5); not M1-ready until a data authority exists |
 | EXT-045 Momentum + Style Rotation | long highest 12m-momentum style ETF, short lowest | cross-sectional selection across several ETFs: no multi-symbol native research engine exists (no rotation engine or grammar found); long-only top-1 and short-bottom are distinct identities; style ETFs lack registry rows; adjacent to the rejected 12-1 and absolute-momentum engines |
-| EXT-070 Sector Momentum | equal-weight top-N sector ETFs by momentum | same multi-symbol requirement; sector ETFs (XLB..XLY) are already exposed in Census-02 Class-C and Confirmation-01, so any evidence is exposed-window development only; adjacent to F01/F08 |
+| EXT-070 Sector Momentum | equal-weight top-N sector ETFs by momentum | same multi-symbol requirement; nine of the eleven SPDR sector ETFs (XLB, XLE, XLF, XLI, XLK, XLP, XLU, XLV, XLY) are already in Census-02 Class-C and Confirmation-01, so any evidence is exposed-window development only; adjacent to F01/F08 |
 | EXT-141 Stock N-Bar Breakout + Trend + Volume | close above prior N-bar high with trend and volume filters; ATR target, trailing stop, time exit | single-symbol OHLCV; adjacent to F04 (close channel), F07, `trading_range_breakout_50d_hold10` (Batch 02 H3, rejected) and Census-01 breakout families; the volume filter and ATR/trailing exits are new mechanics (stateful, `DurableStateRequired`) and the source warns of parameter-mining risk; stops/targets make it a different identity from a plain channel breakout |
 
 Any of the five may be excluded as duplicate, adjacent-to-rejected or insufficiently specified; none is selected, ranked or authorized.
@@ -207,3 +207,42 @@ Any of the five may be excluded as duplicate, adjacent-to-rejected or insufficie
 | Forward Paper | accrues after deployment | strongest, but it is M1.9/M1.10 itself | a Promotion-eligible candidate first |
 
 A campaign that predeclares any of the first two may proceed without touching the Final Holdout, but its evidence grade must be declared in the predeclaration and the new window recorded as consumed on first read. Using exposed dates as "development" is allowed only as declared-exposed development, never as independent OOS.
+
+## 17. Independent-review correction 01 (`V4-M1-POST-DISCOVERY-INDEPENDENT-REVIEW-CORRECTION-01`)
+
+Baseline `29da2345`; the original six commits are unchanged and the correction is appended (`8393dc6`, `a1af7d4`, plus the document commit that records this section). No economics, provider call, registration, Confirmation, Final-Holdout read, Promotion, Paper or Live action. Tooling: `mqk_readonly`, Srclight, Graft unavailable (restricted Grep/Read); `mqd-test-proof` applied to the proof claims below; disposable local PostgreSQL 16 clusters only (ports 5432 and 5434); no real Paper/Live database was reachable or touched.
+
+**IR-M1-PROOF-01 (FIXED+PROVEN).** `db_or_skip` in `capital_fraction_dispatch_tests.rs` (`#[cfg(test)]` only; production code unchanged) is now a pure `db_policy` plus `connect_and_migrate`:
+
+| Configuration | Behaviour | Proof |
+|---|---|---|
+| `MQK_DATABASE_URL` unset or blank, `MQK_REQUIRE_DB_PROOF` unset | documented optional-local skip | 25 passed, 0.38 s, markers absent |
+| unset/blank with `MQK_REQUIRE_DB_PROOF=1` | every DB test panics | run: 17 failed |
+| URL port not 5434 (parsed with `PgConnectOptions`, so ":5434" in a password or database name does not count) or URL unparsable | panics, in both modes | run against a live `:5432` database: 16 failed |
+| `:5434` configured, nothing listening / `.invalid` host | panics `connect failed` | unit test + live run with the `:5434` cluster stopped: 17 failed (10 s acquire timeout each) |
+| `:5434` database where the role cannot create schema objects | panics `migrate failed` | live run (no-privilege role on a `:5434` database): 17 failed |
+| migration injected to fail / required table absent | `Err` from `connect_and_migrate`; panic through the entry point | DB-gated test, runs with the database |
+| correct `:5434` database | connects, migrates, verifies `sys_strategy_held_sizing_state`, prints `CFD_DB_PATH_TAKEN:<label>` | 25 passed in ~10 s; 16/16 call sites printed the marker |
+
+Positive execution evidence: `the_configured_database_executes_a_real_round_trip` writes and reads a row; the fault-injection fixtures now remove stale triggers/functions first (a failed earlier run had left `cfd_*` triggers that made reruns fail; the rerun on that dirty database passed 25/25). A production mutant (`held_sizing_apply` made a no-op in `capital_fraction_host.rs`) turned **10** DB tests RED with the database configured and left all 25 green with no database, which is exactly why CI now requires it. CI: the Rust job sets `MQK_REQUIRE_DB_PROOF=1` and runs a dedicated step against the `:5434` service whose output is checked by `scripts/guards/check_cf_dispatch_db_proof.sh` (every `db_or_skip("` call site must print the marker, all-pass result required).
+
+Killed mutants (all RED, byte-identical restore): configured connect/migrate failure returns `None`; migration failure ignored; silent configured-database skip restored (`Refuse` returns `None`); schema probe removed; port check removed; require flag ignored; guard script: skipped run (0/16), one missing marker (15/16), failed result.
+
+Caller/callee coverage: 16 `db_or_skip("...")` callers, all in the one module (15 pre-existing plus the new round-trip test); callees `db_policy`, `connect_and_migrate`, `real_migrate`, `mqk_db::migrate`; helpers `fresh`, `cleanup`, `seed_bar`, `rows`, `install_held_fault`. The other 21 `db_pool_or_skip` helpers in `mqk-daemon` skip only on an unset variable and use `.expect` on connect failure (sampled via source scan), and `lifecycle.rs` already has its own require flag: ALREADY_CORRECT for the connect/migrate class; their wrong-port handling is per-file and outside this controller's changed surface.
+
+**Second adversarial sweep.**
+
+| Item | Disposition |
+|---|---|
+| Session-date coverage and the 2026→2027 transition (`calendar.rs`, ledger) | ALREADY_CORRECT+PROVEN: parity with the intraday classifier and `sessions` on every shared date, 2026-12-31 → 2027-01-04, 2027-12-30 → 2027-12-31, last covered 2028-12-29 resolves and the next date is refused |
+| M1.10 identity, SHA binding, idempotent duplicates, clean-streak breaks (dirty, unrecorded session, conflicting duplicate) | ALREADY_CORRECT+PROVEN (existing tests re-run; 2027 test added in D1). Recorded design limit: `active_paper_promotion` is a caller-supplied boolean captured per the runbook |
+| CI execution versus command presence | ALREADY_CORRECT+PROVEN: `db_proof_bootstrap.sh` driven with a recording `cargo` stub exits 0 and the last two of 34 invocations are the held-sizing and restart commands with `--include-ignored`; commenting a line out removes the invocation; the CI-11 guard still passes and fails on its three mutants |
+| Research/OOS conclusions | documentary only; two imprecise statements corrected (holiday-event count, sector-ETF range now lists the nine ETFs, verified present in Census-02 Class-C and Confirmation-01) |
+| Catalog intake and frozen boundaries | ALREADY_CORRECT: the workbook is not committed, no declaration names an `EXT-` id (pinned), no `PREDECLARED_*` file changed |
+| Engine fingerprints bind the symbol | ALREADY_CORRECT+PROVEN for all ten Batch 03 engines (source scan) |
+| Monthly-engine calendar horizon (E1) | BLOCKED on OD-6, unchanged |
+| M1.10 evaluator operator entrypoint (E4) | DEFERRED, unchanged |
+
+Integrated pass: the whole `mqk-daemon` lib suite under the CI-equivalent environment (`MQK_REQUIRE_DB_PROOF=1`, disposable `:5434` database) passed 1,152, failed 0, ignored 22 (pre-existing `#[ignore]`), 221 s; `clippy -D warnings` on `mqk-daemon --lib --tests` clean; held-sizing store (5) and restart (9) proofs green with `--include-ignored`; research-py 407 passed. Full local workspace acceptance: NOT RUN — prohibited by laptop resource-safety rule; broad workspace proof delegated to GitHub CI.
+
+Remaining in-scope deterministic defects: NONE.

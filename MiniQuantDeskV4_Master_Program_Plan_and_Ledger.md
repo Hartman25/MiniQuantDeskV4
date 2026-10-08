@@ -806,6 +806,7 @@ Local, not pushed (baseline `a75dbdbe`). Record, matrices, defect census and ope
 | `8a9114c` | M1.10 soak ledger validates session dates on the Paper-runtime calendar (2023-2028, parity-pinned to `sessions` v1), not the research horizon ending 2026-12-31 |
 | `57fa62f` | `scenario_held_sizing_state_01` and `scenario_capital_fraction_restart_01` run in the DB proof lane; the CI-11 guard enforces it |
 | `e450fe3` | authority document + pinned-fact tests (Confirmation prepared-not-registered, exposure, single holdout authority, Census-02 counts, calendar horizon) |
+| `8393dc6`, `a1af7d4` | IR-M1-PROOF-01: a configured database can no longer turn failed setup into a passing daemon dispatch proof; CI requires the `:5434` database and checks positive execution (authority doc §17) |
 
 Future intake: external 200-idea catalog is untrusted intake (profiled read-only, not committed; SHA-256 `6fc945a8...a37f3`); recommended controller `V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-01` (authority doc §16). Open: OD-1..OD-8 (candidate bar and OOS regime, population, holdout use, multiple-testing denominator, stress contract, calendar migration for monthly engines, Confirmation outcome rule, benchmark/no-trade semantics). BLOCKED: monthly-engine calendar horizon (E1, needs OD-6). DEFERRED: M1.10 evaluator operator entrypoint. M1 `M1_BLOCKED`; Paper INACTIVE; Live untouched; holdout RESERVED / UNCONSUMED.
 
