@@ -7,7 +7,6 @@
  "row_count": 200,
  "counts": {
   "primary_disposition": {
-   "ADJACENT_TO_REJECTED": 29,
    "DUPLICATE_OF_REGISTERED": 2,
    "DUPLICATE_WITHIN_CATALOG": 2,
    "FUTURE_ML_OR_FACTORY": 9,
@@ -17,16 +16,18 @@
    "NEEDS_MULTI_SYMBOL_ENGINE": 28,
    "NEEDS_NEW_EXECUTION_POLICY": 1,
    "NEEDS_NON_OHLCV_DATA": 62,
+   "NEEDS_SHORT_OR_HEDGE": 29,
    "PARAMETER_VARIANT_OF_TESTED": 4
   },
   "feasibility": {
-   "INSUFFICIENTLY_SPECIFIED": 36,
-   "M1_READY_SINGLE_SYMBOL_LONG_FLAT_DAILY_OHLCV": 5,
+   "INSUFFICIENTLY_SPECIFIED": 5,
+   "M1_READY_SINGLE_SYMBOL_LONG_FLAT_DAILY_OHLCV": 4,
    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA": 64,
    "NEEDS_FUTURE_ASSET_SUPPORT": 57,
    "NEEDS_ML_OR_ALT_DATA_FRAMEWORK": 9,
    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE": 28,
-   "NEEDS_NEW_EXECUTION_POLICY": 1
+   "NEEDS_NEW_EXECUTION_POLICY": 1,
+   "NEEDS_SHORT_OR_BORROW_AUTHORITY": 32
   },
   "novelty": {
    "COMPLEMENT": 2,
@@ -39,11 +40,25 @@
   },
   "native_readiness": {
    "EXISTING_EXACT_ENGINE": 2,
-   "INSUFFICIENT_SPEC": 36,
+   "INSUFFICIENT_SPEC": 5,
    "MISSING_AUTHORITATIVE_DATA": 64,
-   "NEW_ENGINE_NEEDED": 3,
+   "NEW_ENGINE_NEEDED": 2,
    "NOT_EXECUTABLE_IN_M1": 94,
-   "REQUIRES_NEW_POLICY": 1
+   "REQUIRES_NEW_POLICY": 33
+  },
+  "any_applicable_disposition": {
+   "ADJACENT_TO_REJECTED": 88,
+   "DUPLICATE_OF_REGISTERED": 2,
+   "DUPLICATE_WITHIN_CATALOG": 2,
+   "FUTURE_ML_OR_FACTORY": 13,
+   "FUTURE_MULTI_ASSET": 57,
+   "INSUFFICIENTLY_SPECIFIED": 78,
+   "M1_EQUITY_ETF_HYPOTHESIS": 2,
+   "NEEDS_MULTI_SYMBOL_ENGINE": 67,
+   "NEEDS_NEW_EXECUTION_POLICY": 2,
+   "NEEDS_NON_OHLCV_DATA": 102,
+   "NEEDS_SHORT_OR_HEDGE": 152,
+   "PARAMETER_VARIANT_OF_TESTED": 4
   }
  },
  "population": {
@@ -55,9 +70,7 @@
    "EXT-037",
    "EXT-044"
   ],
-  "RESERVE_ADJACENT_COMPLETE": [
-   "EXT-179"
-  ]
+  "RESERVE_ADJACENT_COMPLETE": []
  },
  "rows": [
   {
@@ -71,6 +84,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "LS",
+   "effective_blockers": "LS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -110,10 +125,13 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Intraday",
    "blockers": "LD",
+   "effective_blockers": "LDS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
-    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
+    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -127,7 +145,8 @@
    "reason": "timestamped news plus intraday prices are alternative data",
    "primary_disposition": "FUTURE_ML_OR_FACTORY",
    "secondary_dispositions": [
-    "NEEDS_NON_OHLCV_DATA"
+    "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -144,10 +163,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "FL",
+   "effective_blockers": "FLS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_ML_OR_ALT_DATA_FRAMEWORK"
+    "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -160,7 +182,8 @@
    "reason": "FX instrument and ML model",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
-    "FUTURE_ML_OR_FACTORY"
+    "FUTURE_ML_OR_FACTORY",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -177,6 +200,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "LDS",
+   "effective_blockers": "LDS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -213,6 +238,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Fundamental",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -248,6 +275,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -282,6 +311,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "PSD",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -322,8 +353,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -350,11 +384,12 @@
     "stock universe"
    ],
    "reason": "price-only trend state; periods not stated",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -369,6 +404,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "LS",
+   "effective_blockers": "LS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -403,6 +440,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Daily",
    "blockers": "U",
+   "effective_blockers": "U",
+   "direction_supported": true,
    "feasibility": "INSUFFICIENTLY_SPECIFIED",
    "blocker_labels": [
     "INSUFFICIENTLY_SPECIFIED"
@@ -445,10 +484,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Opening period",
    "blockers": "DP",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
-    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
+    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -461,7 +503,8 @@
    "reason": "intraday opening-return ranking",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
-    "NEEDS_MULTI_SYMBOL_ENGINE"
+    "NEEDS_MULTI_SYMBOL_ENGINE",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
    "population_tier": null,
@@ -478,6 +521,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -530,6 +575,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -575,9 +622,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Weekly",
    "blockers": "F",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
-    "NEEDS_FUTURE_ASSET_SUPPORT"
+    "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -599,6 +649,7 @@
    "reason": "futures time-series trend",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -616,6 +667,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Quarterly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -657,9 +710,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "F",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
-    "NEEDS_FUTURE_ASSET_SUPPORT"
+    "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -678,6 +734,7 @@
    "reason": "futures momentum",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -695,6 +752,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -730,10 +789,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "FD",
+   "effective_blockers": "FDS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
+    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -746,7 +808,8 @@
    "reason": "FX spot/forward/rates",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
-    "NEEDS_NON_OHLCV_DATA"
+    "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -763,6 +826,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Quarterly event",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -798,6 +863,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PSU",
+   "effective_blockers": "PSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -838,6 +905,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -877,6 +946,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -912,6 +983,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Monthly",
    "blockers": "DPU",
+   "effective_blockers": "DPU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -947,9 +1020,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "D",
+   "effective_blockers": "DS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
-    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
+    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -961,7 +1037,9 @@
    ],
    "reason": "requires a VIX series; no VIX data authority exists",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
-   "secondary_dispositions": [],
+   "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE"
+   ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
    "population_tier": null,
    "calendar_bound": false
@@ -977,6 +1055,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Annual/Quarterly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -1012,6 +1092,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1052,6 +1134,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Monthly/Annual",
    "blockers": "DP",
+   "effective_blockers": "DP",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -1085,6 +1169,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1128,6 +1214,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1166,6 +1254,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1206,6 +1296,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "FS",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -1239,6 +1331,8 @@
    "source_test_short": "Derived short control",
    "source_timeframe": "Daily",
    "blockers": "",
+   "effective_blockers": "",
+   "direction_supported": true,
    "feasibility": "M1_READY_SINGLE_SYMBOL_LONG_FLAT_DAILY_OHLCV",
    "blocker_labels": [],
    "novelty": "GENUINELY_NEW",
@@ -1277,10 +1371,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Weekly",
    "blockers": "FP",
+   "effective_blockers": "FPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
+    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -1292,7 +1389,8 @@
    "reason": "futures cross-section",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
-    "NEEDS_MULTI_SYMBOL_ENGINE"
+    "NEEDS_MULTI_SYMBOL_ENGINE",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -1309,6 +1407,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1352,9 +1452,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "D",
+   "effective_blockers": "DS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
-    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
+    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -1365,7 +1468,9 @@
    ],
    "reason": "requires an astronomical calendar authority that MQD does not hold",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
-   "secondary_dispositions": [],
+   "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE"
+   ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
    "population_tier": null,
    "calendar_bound": false
@@ -1381,6 +1486,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Quarterly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -1416,6 +1523,8 @@
    "source_test_short": "Derived short control",
    "source_timeframe": "Monthly",
    "blockers": "U",
+   "effective_blockers": "U",
+   "direction_supported": true,
    "feasibility": "INSUFFICIENTLY_SPECIFIED",
    "blocker_labels": [
     "INSUFFICIENTLY_SPECIFIED"
@@ -1456,6 +1565,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1495,6 +1606,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1528,6 +1641,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Quarterly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -1563,6 +1678,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Unknown",
    "blockers": "FU",
+   "effective_blockers": "FU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -1595,6 +1712,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "FS",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -1627,6 +1746,8 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": true,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1666,6 +1787,8 @@
    "source_test_short": "Derived short control",
    "source_timeframe": "Daily",
    "blockers": "U",
+   "effective_blockers": "U",
+   "direction_supported": true,
    "feasibility": "INSUFFICIENTLY_SPECIFIED",
    "blocker_labels": [
     "INSUFFICIENTLY_SPECIFIED"
@@ -1706,6 +1829,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1753,6 +1878,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1796,6 +1923,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -1829,6 +1958,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Annual",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -1864,6 +1995,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Annual",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -1899,6 +2032,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -1934,6 +2069,8 @@
    "source_test_short": "Derived short control",
    "source_timeframe": "Daily",
    "blockers": "",
+   "effective_blockers": "",
+   "direction_supported": true,
    "feasibility": "M1_READY_SINGLE_SYMBOL_LONG_FLAT_DAILY_OHLCV",
    "blocker_labels": [],
    "novelty": "EXACT_DUPLICATE",
@@ -1968,6 +2105,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -2007,6 +2146,8 @@
    "source_test_short": "Derived short/relative",
    "source_timeframe": "Quarterly",
    "blockers": "P",
+   "effective_blockers": "P",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
@@ -2048,10 +2189,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "FD",
+   "effective_blockers": "FDS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
+    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -2070,6 +2214,7 @@
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
     "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -2087,6 +2232,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Daily/Monthly",
    "blockers": "D",
+   "effective_blockers": "D",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
@@ -2117,6 +2264,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Annual",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -2152,10 +2301,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "FP",
+   "effective_blockers": "FPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
+    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -2167,7 +2319,8 @@
    "reason": "futures curves",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
-    "NEEDS_MULTI_SYMBOL_ENGINE"
+    "NEEDS_MULTI_SYMBOL_ENGINE",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -2184,6 +2337,8 @@
    "source_test_short": "Derived short control",
    "source_timeframe": "Daily",
    "blockers": "X",
+   "effective_blockers": "X",
+   "direction_supported": true,
    "feasibility": "NEEDS_NEW_EXECUTION_POLICY",
    "blocker_labels": [
     "NEEDS_NEW_EXECUTION_POLICY"
@@ -2222,6 +2377,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Annual",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -2256,10 +2413,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "FP",
+   "effective_blockers": "FPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
+    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -2278,6 +2438,7 @@
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
     "NEEDS_MULTI_SYMBOL_ENGINE",
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -2295,6 +2456,8 @@
    "source_test_short": "No",
    "source_timeframe": "Monthly",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -2328,6 +2491,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -2369,6 +2534,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -2402,6 +2569,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -2444,6 +2613,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -2485,10 +2656,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "FD",
+   "effective_blockers": "FDS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
+    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -2500,7 +2674,8 @@
    "reason": "FX",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
-    "NEEDS_NON_OHLCV_DATA"
+    "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -2517,6 +2692,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -2550,6 +2727,8 @@
    "source_test_short": "Derived long-short",
    "source_timeframe": "Monthly",
    "blockers": "P",
+   "effective_blockers": "P",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
@@ -2591,6 +2770,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": true,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -2630,6 +2811,8 @@
    "source_test_short": "Derived long-short",
    "source_timeframe": "Monthly",
    "blockers": "P",
+   "effective_blockers": "P",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
@@ -2675,6 +2858,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Monthly",
    "blockers": "U",
+   "effective_blockers": "U",
+   "direction_supported": true,
    "feasibility": "INSUFFICIENTLY_SPECIFIED",
    "blocker_labels": [
     "INSUFFICIENTLY_SPECIFIED"
@@ -2716,6 +2901,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -2758,9 +2945,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "F",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
-    "NEEDS_FUTURE_ASSET_SUPPORT"
+    "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -2777,6 +2967,7 @@
    "reason": "FX",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -2794,9 +2985,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "FU",
+   "effective_blockers": "FSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -2816,6 +3010,7 @@
    "reason": "FX",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -2834,9 +3029,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "FU",
+   "effective_blockers": "FSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -2859,6 +3057,7 @@
    "reason": "multi-asset including futures and FX",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -2877,6 +3076,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "DS",
+   "effective_blockers": "DS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -2910,10 +3111,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily+Intraday",
    "blockers": "FDU",
+   "effective_blockers": "FDSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "GENUINELY_NEW",
@@ -2929,6 +3133,7 @@
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
     "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -2946,6 +3151,8 @@
    "source_test_short": "Derived short",
    "source_timeframe": "Monthly/Quarterly",
    "blockers": "DPSU",
+   "effective_blockers": "DPSU",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -2982,6 +3189,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -3017,9 +3226,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "FU",
+   "effective_blockers": "FSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3042,6 +3254,7 @@
    "reason": "FX hybrid",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3060,6 +3273,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -3095,6 +3310,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -3130,8 +3347,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3165,11 +3385,12 @@
     "exit rule"
    ],
    "reason": "short-horizon reversal; no numeric rule",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -3184,8 +3405,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3210,11 +3434,12 @@
     "crossover definition"
    ],
    "reason": "range-extreme trend state",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -3229,9 +3454,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3257,6 +3485,7 @@
    "reason": "intraday timeframe variant of EXT-084",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3275,8 +3504,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3303,11 +3535,12 @@
     "exit rule"
    ],
    "reason": "band re-entry reversion",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -3322,9 +3555,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3351,6 +3587,7 @@
    "reason": "intraday timeframe variant of EXT-086",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3369,9 +3606,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3398,6 +3638,7 @@
    "reason": "intraday",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3416,9 +3657,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3438,6 +3682,7 @@
    "reason": "intraday",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3456,9 +3701,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3477,6 +3725,7 @@
    "reason": "intraday",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3495,8 +3744,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3516,11 +3768,12 @@
     "fast and slow EMA periods"
    ],
    "reason": "exponential instead of simple averages",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -3535,9 +3788,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3559,6 +3815,7 @@
    "reason": "intraday timeframe variant of EXT-091",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3577,8 +3834,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "COMPLEMENT",
@@ -3602,11 +3862,12 @@
     "fast and slow EMA periods"
    ],
    "reason": "long when the fast EMA is below the slow: the complement of EXT-091 long state",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -3621,9 +3882,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "COMPLEMENT",
@@ -3649,6 +3913,7 @@
    "reason": "intraday timeframe variant of EXT-093",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3667,8 +3932,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3688,11 +3956,12 @@
     "MACD fast/slow/signal periods"
    ],
    "reason": "moving-average difference crossover",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -3707,9 +3976,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -3731,6 +4003,7 @@
    "reason": "intraday timeframe variant of EXT-095",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -3749,8 +4022,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "EXACT_DUPLICATE",
@@ -3769,9 +4045,10 @@
    "reason": "normalized rule text identical to EXT-086 at the same timeframe; the catalog cannot distinguish them",
    "primary_disposition": "DUPLICATE_WITHIN_CATALOG",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -3786,9 +4063,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "EXACT_DUPLICATE",
@@ -3808,6 +4088,7 @@
    "primary_disposition": "DUPLICATE_WITHIN_CATALOG",
    "secondary_dispositions": [
     "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
@@ -3825,6 +4106,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -3858,6 +4141,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -3891,6 +4176,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -3925,6 +4212,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -3958,6 +4247,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -3992,6 +4283,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4026,6 +4319,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4059,6 +4354,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4097,6 +4394,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4130,6 +4429,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4167,6 +4468,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4199,6 +4502,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4233,6 +4538,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4267,6 +4574,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4300,6 +4609,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4333,10 +4644,13 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FDS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA"
+    "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -4349,7 +4663,8 @@
    "reason": "options sentiment",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
-    "NEEDS_NON_OHLCV_DATA"
+    "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -4366,6 +4681,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4399,6 +4716,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4432,6 +4751,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4465,6 +4786,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4499,6 +4822,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4538,6 +4863,8 @@
    "source_test_short": "No",
    "source_timeframe": "Daily/Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4571,6 +4898,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4604,6 +4933,8 @@
    "source_test_short": "No",
    "source_timeframe": "Intraday",
    "blockers": "FD",
+   "effective_blockers": "FD",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -4637,9 +4968,12 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4661,6 +4995,7 @@
    "reason": "intraday volume-price setup",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -4679,8 +5014,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4701,11 +5039,12 @@
     "thresholds"
    ],
    "reason": "RSI condition not stated",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -4720,9 +5059,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4745,6 +5087,7 @@
    "reason": "intraday timeframe variant of EXT-124",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -4763,8 +5106,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4785,11 +5131,12 @@
     "MACD periods"
    ],
    "reason": "RSI recovery plus MACD cross",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -4804,9 +5151,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4833,6 +5183,7 @@
    "reason": "intraday timeframe variant of EXT-126",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -4851,8 +5202,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4872,11 +5226,12 @@
     "%K and %D lengths"
    ],
    "reason": "range-position oscillator crossover",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -4891,9 +5246,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4915,6 +5273,7 @@
    "reason": "intraday timeframe variant of EXT-128",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -4933,9 +5292,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4954,6 +5316,7 @@
    "reason": "intraday",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -4972,8 +5335,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -4995,11 +5361,12 @@
     "trend rule"
    ],
    "reason": "volatility expansion with trend",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5014,9 +5381,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5039,6 +5409,7 @@
    "reason": "intraday timeframe variant of EXT-131",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5057,9 +5428,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5077,6 +5451,7 @@
    "reason": "intraday",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5095,9 +5470,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5115,6 +5493,7 @@
    "reason": "session VWAP needs intraday bars and an anchor",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5133,9 +5512,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Intraday",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5157,6 +5539,7 @@
    "reason": "intraday timeframe variant of EXT-134",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5175,8 +5558,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5203,11 +5589,12 @@
     "ATR stops"
    ],
    "reason": "adaptive trend/reversion composite with many unstated settings",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5222,9 +5609,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5244,6 +5634,7 @@
    "reason": "intraday",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5262,9 +5653,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5284,6 +5678,7 @@
    "reason": "source optimized on 1-second data",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5302,8 +5697,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5330,11 +5728,12 @@
     "EMA convention"
    ],
    "reason": "numeric thresholds given but input conventions are not",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5349,9 +5748,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "GENUINELY_NEW",
@@ -5366,6 +5768,7 @@
    "reason": "intraday opening range",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
@@ -5383,8 +5786,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "COMPOSITE_OF_EXISTING",
@@ -5425,11 +5831,12 @@
     "stop fill semantics"
    ],
    "reason": "prior-N-bar breakout with trend and volume filters and ATR exits",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5444,9 +5851,12 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5468,6 +5878,7 @@
    "reason": "intraday multi-indicator",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5486,8 +5897,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5509,11 +5923,12 @@
     "exit variant"
    ],
    "reason": "band re-entry with RSI",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5528,8 +5943,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5555,11 +5973,12 @@
     "take-profit"
    ],
    "reason": "rolling high-low channel breakout",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5574,8 +5993,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5597,11 +6019,12 @@
     "cascade filter"
    ],
    "reason": "RSI thresholds near 29/71",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5616,8 +6039,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5636,11 +6062,12 @@
     "TP/SL"
    ],
    "reason": "multi-indicator trend",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5655,9 +6082,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "GENUINELY_NEW",
@@ -5677,6 +6107,7 @@
    "reason": "intraday opening range",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
@@ -5694,8 +6125,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5716,11 +6150,12 @@
     "MACD periods"
    ],
    "reason": "multi-indicator trend",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5735,9 +6170,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "FU",
+   "effective_blockers": "FSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5764,6 +6202,7 @@
    "reason": "crypto instrument; trend pullback",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5782,8 +6221,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5801,11 +6243,12 @@
     "SL/TP"
    ],
    "reason": "multi-indicator trend",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5820,9 +6263,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5847,6 +6293,7 @@
    "reason": "VWAP distance reversion",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -5865,8 +6312,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5883,11 +6333,12 @@
     "Supertrend settings"
    ],
    "reason": "multi-indicator trend",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5902,8 +6353,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5923,11 +6377,12 @@
     "Ichimoku,MACD,CMF,TSI settings"
    ],
    "reason": "multi-indicator trend",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5942,8 +6397,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -5959,11 +6417,12 @@
     "Ichimoku,RSI,MACD settings"
    ],
    "reason": "multi-indicator trend",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -5978,8 +6437,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -6001,11 +6463,12 @@
     "stop/target fill semantics"
    ],
    "reason": "trend pullback to EMA20 with Supertrend stop and 2R target",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -6020,9 +6483,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "F",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
-    "NEEDS_FUTURE_ASSET_SUPPORT"
+    "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -6044,6 +6510,7 @@
    "reason": "futures and FX time-series momentum",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -6061,11 +6528,14 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "FDP",
+   "effective_blockers": "FDPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
-    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
+    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "GENUINELY_NEW",
    "direction": "LONG_SHORT",
@@ -6079,7 +6549,8 @@
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
     "NEEDS_NON_OHLCV_DATA",
-    "NEEDS_MULTI_SYMBOL_ENGINE"
+    "NEEDS_MULTI_SYMBOL_ENGINE",
+    "NEEDS_SHORT_OR_HEDGE"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
    "population_tier": null,
@@ -6096,10 +6567,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "FP",
+   "effective_blockers": "FPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
+    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -6122,6 +6596,7 @@
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
     "NEEDS_MULTI_SYMBOL_ENGINE",
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -6139,6 +6614,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "FDPS",
+   "effective_blockers": "FDPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -6182,6 +6659,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -6216,6 +6695,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "FDPS",
+   "effective_blockers": "FDPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -6252,9 +6733,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "F",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
-    "NEEDS_FUTURE_ASSET_SUPPORT"
+    "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -6280,6 +6764,7 @@
    "reason": "multi-asset trend",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -6297,6 +6782,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -6333,6 +6820,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -6374,6 +6863,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -6414,9 +6905,12 @@
    "source_test_short": "Derived/hedge",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "COMPOSITE_OF_EXISTING",
@@ -6444,6 +6938,7 @@
    "reason": "12-month excess return and 12-month MA combined 50/50",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -6462,6 +6957,8 @@
    "source_test_short": "Derived/hedge",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DPS",
+   "effective_blockers": "DPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -6496,9 +6993,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "GENUINELY_NEW",
@@ -6516,6 +7016,7 @@
    "reason": "needs 10/15/20-year per-date history; MQD research history begins in 2016",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
@@ -6533,6 +7034,8 @@
    "source_test_short": "Derived",
    "source_timeframe": "Daily/Monthly",
    "blockers": "",
+   "effective_blockers": "",
+   "direction_supported": true,
    "feasibility": "M1_READY_SINGLE_SYMBOL_LONG_FLAT_DAILY_OHLCV",
    "blocker_labels": [],
    "novelty": "GENUINELY_NEW",
@@ -6571,6 +7074,8 @@
    "source_test_short": "Derived",
    "source_timeframe": "Daily/Monthly",
    "blockers": "",
+   "effective_blockers": "",
+   "direction_supported": true,
    "feasibility": "M1_READY_SINGLE_SYMBOL_LONG_FLAT_DAILY_OHLCV",
    "blocker_labels": [],
    "novelty": "EXACT_DUPLICATE",
@@ -6605,6 +7110,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -6639,6 +7146,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -6672,10 +7181,13 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "FP",
+   "effective_blockers": "FPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
-    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE"
+    "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
    ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
@@ -6699,6 +7211,7 @@
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
     "NEEDS_MULTI_SYMBOL_ENGINE",
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED"
    ],
    "native_readiness": "NOT_EXECUTABLE_IN_M1",
@@ -6716,6 +7229,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "U",
+   "effective_blockers": "U",
+   "direction_supported": false,
    "feasibility": "INSUFFICIENTLY_SPECIFIED",
    "blocker_labels": [
     "INSUFFICIENTLY_SPECIFIED"
@@ -6752,6 +7267,8 @@
    "source_test_short": "Derived",
    "source_timeframe": "Daily/Monthly",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -6790,9 +7307,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Daily/Monthly",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "GENUINELY_NEW",
@@ -6812,6 +7332,7 @@
    "reason": "needs per-date history and intraday entries",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
@@ -6829,8 +7350,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "PARAMETER_VARIANT",
@@ -6852,9 +7376,10 @@
    "reason": "SMA crossover; periods not stated",
    "primary_disposition": "PARAMETER_VARIANT_OF_TESTED",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -6869,8 +7394,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -6894,11 +7422,12 @@
     "fast and slow EMA periods"
    ],
    "reason": "exponential crossover",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -6913,8 +7442,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "",
-   "feasibility": "M1_READY_SINGLE_SYMBOL_LONG_FLAT_DAILY_OHLCV",
-   "blocker_labels": [],
+   "effective_blockers": "S",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
+   "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY"
+   ],
    "novelty": "SEMANTIC_VARIANT",
    "direction": "LONG_SHORT",
    "mechanism": "TREND_MACD_CROSS",
@@ -6930,10 +7463,12 @@
    ],
    "missing": [],
    "reason": "baseline MACD(12,26,9) line/signal crossover is stated; variants are separate identities",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
-   "secondary_dispositions": [],
-   "native_readiness": "NEW_ENGINE_NEEDED",
-   "population_tier": "RESERVE_ADJACENT_COMPLETE",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
+   "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED"
+   ],
+   "native_readiness": "REQUIRES_NEW_POLICY",
+   "population_tier": null,
    "calendar_bound": false
   },
   {
@@ -6947,8 +7482,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -6970,11 +7508,12 @@
     "exit"
    ],
    "reason": "RSI reversal",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -6989,8 +7528,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "PARAMETER_VARIANT",
@@ -7017,9 +7559,10 @@
    "reason": "N-period new-high breakout",
    "primary_disposition": "PARAMETER_VARIANT_OF_TESTED",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -7034,8 +7577,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -7057,11 +7603,12 @@
     "stop"
    ],
    "reason": "ATR breakout",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -7076,9 +7623,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -7101,6 +7651,7 @@
    "reason": "session VWAP needs intraday bars",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -7119,6 +7670,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "FXS",
+   "effective_blockers": "FSX",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -7155,8 +7708,11 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "U",
-   "feasibility": "INSUFFICIENTLY_SPECIFIED",
+   "effective_blockers": "SU",
+   "direction_supported": false,
+   "feasibility": "NEEDS_SHORT_OR_BORROW_AUTHORITY",
    "blocker_labels": [
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -7177,11 +7733,12 @@
     "confirmation"
    ],
    "reason": "compression breakout",
-   "primary_disposition": "ADJACENT_TO_REJECTED",
+   "primary_disposition": "NEEDS_SHORT_OR_HEDGE",
    "secondary_dispositions": [
+    "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
-   "native_readiness": "INSUFFICIENT_SPEC",
+   "native_readiness": "REQUIRES_NEW_POLICY",
    "population_tier": null,
    "calendar_bound": false
   },
@@ -7196,9 +7753,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "FU",
+   "effective_blockers": "FSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -7216,6 +7776,7 @@
    "reason": "crypto instrument",
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -7234,9 +7795,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -7260,6 +7824,7 @@
    "reason": "intraday",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],
@@ -7278,6 +7843,8 @@
    "source_test_short": "Derived",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DU",
+   "direction_supported": true,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
@@ -7316,9 +7883,12 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "DU",
+   "effective_blockers": "DSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
    "blocker_labels": [
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "GENUINELY_NEW",
@@ -7336,6 +7906,7 @@
    "reason": "intraday opening range",
    "primary_disposition": "NEEDS_NON_OHLCV_DATA",
    "secondary_dispositions": [
+    "NEEDS_SHORT_OR_HEDGE",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "native_readiness": "MISSING_AUTHORITATIVE_DATA",
@@ -7353,6 +7924,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "FS",
+   "effective_blockers": "FS",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -7386,6 +7959,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Source-specific",
    "blockers": "PS",
+   "effective_blockers": "PS",
+   "direction_supported": false,
    "feasibility": "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
    "blocker_labels": [
     "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE",
@@ -7419,6 +7994,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Model-specific",
    "blockers": "FL",
+   "effective_blockers": "FL",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -7452,6 +8029,8 @@
    "source_test_short": "Derived/conditional",
    "source_timeframe": "Model-specific",
    "blockers": "FL",
+   "effective_blockers": "FL",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -7485,6 +8064,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Model-specific",
    "blockers": "FL",
+   "effective_blockers": "FL",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
@@ -7518,6 +8099,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Model-specific",
    "blockers": "LPS",
+   "effective_blockers": "LPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -7553,6 +8136,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Model-specific",
    "blockers": "LD",
+   "effective_blockers": "LD",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -7586,6 +8171,8 @@
    "source_test_short": "Yes",
    "source_timeframe": "Model-specific",
    "blockers": "LD",
+   "effective_blockers": "LD",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -7619,6 +8206,8 @@
    "source_test_short": "Derived/conditional",
    "source_timeframe": "Model-specific",
    "blockers": "LD",
+   "effective_blockers": "LD",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -7652,6 +8241,8 @@
    "source_test_short": "Derived/conditional",
    "source_timeframe": "Model-specific",
    "blockers": "LPS",
+   "effective_blockers": "LPS",
+   "direction_supported": false,
    "feasibility": "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
    "blocker_labels": [
     "NEEDS_ML_OR_ALT_DATA_FRAMEWORK",
@@ -7687,10 +8278,13 @@
    "source_test_short": "Derived mirror",
    "source_timeframe": "15m signals with 1h/4h trend context",
    "blockers": "FDU",
+   "effective_blockers": "FDSU",
+   "direction_supported": false,
    "feasibility": "NEEDS_FUTURE_ASSET_SUPPORT",
    "blocker_labels": [
     "NEEDS_FUTURE_ASSET_SUPPORT",
     "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA",
+    "NEEDS_SHORT_OR_BORROW_AUTHORITY",
     "INSUFFICIENTLY_SPECIFIED"
    ],
    "novelty": "SEMANTIC_VARIANT",
@@ -7715,6 +8309,7 @@
    "primary_disposition": "FUTURE_MULTI_ASSET",
    "secondary_dispositions": [
     "NEEDS_NON_OHLCV_DATA",
+    "NEEDS_SHORT_OR_HEDGE",
     "ADJACENT_TO_REJECTED",
     "INSUFFICIENTLY_SPECIFIED"
    ],

@@ -36,11 +36,13 @@ AUDIT_EXCEPTIONS = {
     "EXT-053": "Cross-Asset label for a two-asset ETF pair; implementable with US-listed ETFs, so not a futures dependency",
 }
 EXPECTED_PRIMARY = {
-    "ADJACENT_TO_REJECTED": 29, "DUPLICATE_OF_REGISTERED": 2, "DUPLICATE_WITHIN_CATALOG": 2,
+    "DUPLICATE_OF_REGISTERED": 2, "DUPLICATE_WITHIN_CATALOG": 2,
     "FUTURE_ML_OR_FACTORY": 9, "FUTURE_MULTI_ASSET": 56, "INSUFFICIENTLY_SPECIFIED": 5,
     "M1_EQUITY_ETF_HYPOTHESIS": 2, "NEEDS_MULTI_SYMBOL_ENGINE": 28, "NEEDS_NEW_EXECUTION_POLICY": 1,
-    "NEEDS_NON_OHLCV_DATA": 62, "PARAMETER_VARIANT_OF_TESTED": 4,
+    "NEEDS_NON_OHLCV_DATA": 62, "NEEDS_SHORT_OR_HEDGE": 29, "PARAMETER_VARIANT_OF_TESTED": 4,
 }
+# Independent statement of the supported-direction policy (kept separate from disposition.DIRECTION_REQUIRES on purpose).
+SUPPORTED = {"LONG_ONLY", "LONG_FLAT"}
 
 
 def crow(**kw):
@@ -105,7 +107,7 @@ def test_the_five_operator_listed_ids_are_dispositioned_by_the_same_rules_as_eve
         "EXT-024": ("NEEDS_NON_OHLCV_DATA", "NEEDS_ADDITIONAL_AUTHORITATIVE_DATA", "GENUINELY_NEW"),
         "EXT-045": ("NEEDS_MULTI_SYMBOL_ENGINE", "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE", "SEMANTIC_VARIANT"),
         "EXT-070": ("NEEDS_MULTI_SYMBOL_ENGINE", "NEEDS_MULTI_SYMBOL_PORTFOLIO_ENGINE", "SEMANTIC_VARIANT"),
-        "EXT-141": ("ADJACENT_TO_REJECTED", "INSUFFICIENTLY_SPECIFIED", "COMPOSITE_OF_EXISTING"),
+        "EXT-141": ("NEEDS_SHORT_OR_HEDGE", "NEEDS_SHORT_OR_BORROW_AUTHORITY", "COMPOSITE_OF_EXISTING"),
     }
     # derive() is a pure function of the classification: re-deriving from the table reproduces every row.
     for c in d.parse_table():
@@ -146,6 +148,84 @@ def test_duplicates_and_variants_keep_their_identity_whatever_the_shape():
 def test_adjacent_to_rejected_is_never_admitted_even_when_fully_specified():
     out = d.derive(crow(novelty_code="SEM", relations=[{"kind": "adj", "target": "S03"}]))
     assert out["primary_disposition"] == "ADJACENT_TO_REJECTED" and out["population_tier"] == "RESERVE_ADJACENT_COMPLETE"
+    both = d.derive(crow(novelty_code="SEM", direction="LONG_SHORT", relations=[{"kind": "adj", "target": "S03"}]))
+    assert both["population_tier"] is None and both["feasibility"] == "NEEDS_SHORT_OR_BORROW_AUTHORITY"
+
+
+# ---- directional feasibility: M1-ready needs a supported long/flat direction as well as no blocker ----------------
+
+UNSUPPORTED = sorted(set(d.DIRECTION_REQUIRES) - SUPPORTED)
+
+
+def test_the_supported_directions_are_exactly_long_only_and_long_flat():
+    assert set(d.SUPPORTED_DIRECTIONS) == SUPPORTED
+    assert {k for k, v in d.DIRECTION_REQUIRES.items() if v is None} == SUPPORTED
+    assert {"LONG_SHORT", "SHORT_ONLY", "HEDGED", "LONG_HEDGE", "MARKET_NEUTRAL"} <= set(UNSUPPORTED)
+
+
+@pytest.mark.parametrize("direction", sorted(SUPPORTED))
+def test_an_unblocked_new_row_with_a_supported_direction_is_m1_ready_and_admitted(direction):
+    out = d.derive(crow(direction=direction))
+    assert out["feasibility"] == d.M1_READY and out["primary_disposition"] == "M1_EQUITY_ETF_HYPOTHESIS"
+    assert out["population_tier"] == "A" and out["effective_blockers"] == ""
+
+
+@pytest.mark.parametrize("direction", UNSUPPORTED)
+def test_an_unblocked_row_with_an_unsupported_direction_is_never_m1_ready_or_admitted(direction):
+    for nov, rel in (("NEW", []), ("SEM", [{"kind": "adj", "target": "S03"}])):
+        out = d.derive(crow(direction=direction, novelty_code=nov, relations=rel))
+        assert out["feasibility"] != d.M1_READY, (direction, nov)
+        assert out["primary_disposition"] != "M1_EQUITY_ETF_HYPOTHESIS", (direction, nov)
+        assert out["population_tier"] in (None, "B") and out["effective_blockers"] != ""
+    # the implied blocker is the one the direction requires
+    assert d.DIRECTION_REQUIRES[direction] in d.derive(crow(direction=direction))["effective_blockers"]
+
+
+@pytest.mark.parametrize("direction,blocker", [("LONG_SHORT", "S"), ("SHORT_ONLY", "S"), ("HEDGED", "S"),
+                                               ("LONG_HEDGE", "S"), ("MARKET_NEUTRAL", "S"), ("LONG_ROTATION", "P"),
+                                               ("MODEL", "L"), ("BEARISH_OPTIONS", "F")])
+def test_named_unsupported_directions_imply_the_documented_blocker(direction, blocker):
+    out = d.derive(crow(direction=direction))
+    assert blocker in out["effective_blockers"] and out["feasibility"] == d.BLOCKERS[blocker]
+
+
+def test_an_unknown_direction_is_refused_by_the_validator():
+    rows = copy.deepcopy(table_rows())
+    rows[30]["direction"] = "SIDEWAYS"
+    with pytest.raises(d.DispositionError):
+        d.validate(rows)
+
+
+def test_ledger_m1_ready_rows_all_have_a_supported_direction_and_match_an_independent_oracle():
+    for c in d.parse_table():
+        r = ROWS[c["ext_id"]]
+        oracle_ready = (c["blockers"] == "") and c["direction"] in SUPPORTED
+        assert (r["feasibility"] == d.M1_READY) == oracle_ready, c["ext_id"]
+        assert r["direction_supported"] == (c["direction"] in SUPPORTED)
+        if r["feasibility"] == d.M1_READY:
+            assert r["direction"] in SUPPORTED and r["effective_blockers"] == ""
+    assert sorted(e for e, r in ROWS.items() if r["feasibility"] == d.M1_READY) == [
+        "EXT-032", "EXT-051", "EXT-169", "EXT-170"]
+    for tier in ("A", "B"):
+        for eid in LEDGER["population"][tier]:
+            assert ROWS[eid]["direction"] in SUPPORTED
+
+
+def test_ext_179_is_long_short_and_is_not_m1_ready_or_in_any_tier():
+    r = ROWS["EXT-179"]
+    assert r["direction"] == "LONG_SHORT" and ORIG["EXT-179"]["Native_Direction"] == "Both"
+    assert r["blockers"] == "" and r["effective_blockers"] == "S" and r["direction_supported"] is False
+    assert r["feasibility"] == "NEEDS_SHORT_OR_BORROW_AUTHORITY" and r["native_readiness"] == "REQUIRES_NEW_POLICY"
+    assert r["primary_disposition"] == "NEEDS_SHORT_OR_HEDGE" and "ADJACENT_TO_REJECTED" in r["secondary_dispositions"]
+    assert r["population_tier"] is None and all("EXT-179" not in t for t in LEDGER["population"].values())
+
+
+def test_adjacent_to_rejected_remains_visible_as_an_applicable_label_after_the_direction_rule():
+    anywhere = LEDGER["counts"]["any_applicable_disposition"]
+    sem_like = sum(1 for r in ROWS.values() if r["novelty"] in ("SEMANTIC_VARIANT", "COMPOSITE_OF_EXISTING", "COMPLEMENT", "MIRROR"))
+    assert anywhere["ADJACENT_TO_REJECTED"] == sem_like == 88
+    assert LEDGER["counts"]["primary_disposition"].get("ADJACENT_TO_REJECTED", 0) == 0
+    assert LEDGER["counts"]["feasibility"][d.M1_READY] == 4
 
 
 def test_overlay_is_not_a_standalone_population_candidate():
@@ -200,27 +280,31 @@ def test_malformed_line_and_wrong_workbook_are_refused():
 
 # ---- independent audit of the reviewer's blockers against the workbook's own fields -----------------------
 
-def audit_findings():
+def audit_row(eid, b):
+    """Findings for one row given a blocker string (authored blockers, so the audit is independent of derivation)."""
+    o = ORIG[eid]
     out = []
-    for eid, o in ORIG.items():
-        b = ROWS[eid]["blockers"]
-        req, tf, fam = o["Required_Data"].lower(), o["Signal_Timeframe"], o["Canonical_Family"]
-        if o["Asset_Class"] in ("Options", "Futures", "FX", "Crypto", "Futures/FX", "Cross-Asset") and "F" not in b:
-            out.append((eid, "asset class implies a future asset"))
-        kws = [k for k in ("fundamental", "earnings", "vix", "yield", "t-bill", "valuation", "factor returns",
-                           "sentiment", "news", "option chain", "funding", "shares outstanding", "open interest",
-                           "rates", "constituent") if k in req]
-        if kws and not (set(b) & set("FLD")):
-            out.append((eid, f"data keywords {kws} need F/L/D"))
-        if tf == "Intraday" and not (set(b) & set("FLD")):
-            out.append((eid, "intraday timeframe needs D/F/L"))
-        if fam.startswith("ML") and "L" not in b:
-            out.append((eid, "ML family needs L"))
-        if o["Native_Direction"].lower().startswith("market-neutral") and not (set(b) & set("PS")):
-            out.append((eid, "market-neutral needs P/S"))
-        if "pair" in fam.lower() and "P" not in b:
-            out.append((eid, "pairs family needs P"))
+    req, tf, fam = o["Required_Data"].lower(), o["Signal_Timeframe"], o["Canonical_Family"]
+    if o["Asset_Class"] in ("Options", "Futures", "FX", "Crypto", "Futures/FX", "Cross-Asset") and "F" not in b:
+        out.append((eid, "asset class implies a future asset"))
+    kws = [k for k in ("fundamental", "earnings", "vix", "yield", "t-bill", "valuation", "factor returns",
+                       "sentiment", "news", "option chain", "funding", "shares outstanding", "open interest",
+                       "rates", "constituent") if k in req]
+    if kws and not (set(b) & set("FLD")):
+        out.append((eid, f"data keywords {kws} need F/L/D"))
+    if tf == "Intraday" and not (set(b) & set("FLD")):
+        out.append((eid, "intraday timeframe needs D/F/L"))
+    if fam.startswith("ML") and "L" not in b:
+        out.append((eid, "ML family needs L"))
+    if o["Native_Direction"].lower().startswith("market-neutral") and not (set(b) & set("PS")):
+        out.append((eid, "market-neutral needs P/S"))
+    if "pair" in fam.lower() and "P" not in b:
+        out.append((eid, "pairs family needs P"))
     return out
+
+
+def audit_findings():
+    return [f for eid in ORIG for f in audit_row(eid, ROWS[eid]["blockers"])]
 
 
 def test_keyword_audit_of_blockers_has_no_unexplained_finding():
@@ -229,12 +313,14 @@ def test_keyword_audit_of_blockers_has_no_unexplained_finding():
     assert {f[0] for f in audit_findings()} == set(AUDIT_EXCEPTIONS), "stale exception: every exception must still fire"
 
 
-def test_audit_would_catch_a_dropped_blocker():
+def test_audit_would_catch_a_dropped_blocker_and_the_direction_rule_is_a_second_line_of_defence():
+    assert audit_row("EXT-024", "D") == []
+    assert [f[1] for f in audit_row("EXT-024", "")] and "vix" in ORIG["EXT-024"]["Required_Data"].lower()
     rows = copy.deepcopy(table_rows())
     i = next(k for k, r in enumerate(rows) if r["ext_id"] == "EXT-024")
-    rows[i]["blockers"] = ""                        # drop the VIX data blocker
-    assert d.derive(rows[i])["primary_disposition"] == "M1_EQUITY_ETF_HYPOTHESIS"
-    assert "vix" in ORIG["EXT-024"]["Required_Data"].lower()   # the audit's keyword rule is what flags this
+    rows[i]["blockers"] = ""                        # drop the VIX data blocker: the LONG_SHORT direction still blocks
+    out = d.derive(rows[i])
+    assert out["primary_disposition"] == "NEEDS_SHORT_OR_HEDGE" and out["feasibility"] != d.M1_READY
 
 
 # ---- within-catalog duplicates and relationship preservation ----------------------------------------------
@@ -267,7 +353,7 @@ def test_every_delivery_intraday_pair_and_mirror_link_resolves_to_a_real_row():
 
 def test_population_is_exactly_the_derived_tiers_and_is_selected_without_any_economic_input():
     assert LEDGER["population"] == {"A": ["EXT-032", "EXT-169"], "B": ["EXT-037", "EXT-044"],
-                                    "RESERVE_ADJACENT_COMPLETE": ["EXT-179"]}
+                                    "RESERVE_ADJACENT_COMPLETE": []}
     for eid in LEDGER["population"]["A"]:
         r = ROWS[eid]
         assert r["feasibility"] == d.M1_READY and r["novelty"] == "GENUINELY_NEW" and not r["missing"]
@@ -277,7 +363,7 @@ def test_population_is_exactly_the_derived_tiers_and_is_selected_without_any_eco
         assert r["blockers"] == "U" and r["missing"] and r["novelty"] == "GENUINELY_NEW"
     # completeness: every GENUINELY_NEW, shape-clean, fully specified row is in tier A (nothing silently dropped)
     shape_clean_new = [e for e, r in ROWS.items()
-                       if r["novelty"] == "GENUINELY_NEW" and not set(r["blockers"]) & set("FLDPSXU")]
+                       if r["novelty"] == "GENUINELY_NEW" and not set(r["effective_blockers"]) & set("FLDPSXU")]
     assert sorted(shape_clean_new) == LEDGER["population"]["A"]
     # no duplicate, variant, adjacent or blocked row is ever in a proposed tier A/B
     for tier in ("A", "B"):

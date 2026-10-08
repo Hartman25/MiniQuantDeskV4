@@ -56,10 +56,18 @@ NATIVE_READINESS = frozenset({
     "EXISTING_EXACT_ENGINE", "EXISTING_ENGINE_BEHAVIOR_IDENTICAL_CONFIG", "NEW_ENGINE_NEEDED",
     "MISSING_AUTHORITATIVE_DATA", "REQUIRES_NEW_POLICY", "NOT_EXECUTABLE_IN_M1", "INSUFFICIENT_SPEC",
 })
-DIRECTIONS = frozenset({
-    "LONG_ONLY", "LONG_FLAT", "LONG_SHORT", "MARKET_NEUTRAL", "SHORT_VOL", "LONG_VOL", "LONG_ROTATION", "LONG_HEDGE",
-    "BEARISH_OPTIONS", "BULLISH_OPTIONS", "LONG_OPTIONS", "OVERLAY", "MODEL", "UNKNOWN",
-})
+# Native direction -> the blocker it implies when no explicit blocker already covers it. Only LONG_ONLY and LONG_FLAT
+# map to None: long or long/flat is the one direction Paper supports (short opens are blocked). A symmetrical rule such
+# as LONG_SHORT is not M1-ready until a separately specified, identity-distinct long/flat form exists; none is specified.
+DIRECTION_REQUIRES = {
+    "LONG_ONLY": None, "LONG_FLAT": None,
+    "LONG_SHORT": "S", "SHORT_ONLY": "S", "MARKET_NEUTRAL": "S", "HEDGED": "S", "LONG_HEDGE": "S",
+    "LONG_ROTATION": "P",
+    "SHORT_VOL": "F", "LONG_VOL": "F", "BEARISH_OPTIONS": "F", "BULLISH_OPTIONS": "F", "LONG_OPTIONS": "F",
+    "MODEL": "L", "OVERLAY": "U", "UNKNOWN": "U",
+}
+DIRECTIONS = frozenset(DIRECTION_REQUIRES)
+SUPPORTED_DIRECTIONS = frozenset(d for d, need in DIRECTION_REQUIRES.items() if need is None)
 RELATION_KINDS = frozenset({"dup", "param", "sem", "adj", "comp", "mirror", "compo", "pair", "neighbor"})
 BASE_FAMILIES = frozenset(
     [f"S{i:02d}" for i in range(1, 15)] + [f"SH{i:02d}" for i in range(1, 14)] + [f"LS{i:02d}" for i in range(1, 5)]
@@ -136,12 +144,19 @@ def validate(rows: list[dict]) -> None:
             raise DispositionError(f"{i}: a row with no blocker must not list missing elements")
 
 
+def effective_blockers(r: dict) -> str:
+    """Authored blockers plus the blocker implied by an unsupported native direction, in precedence order."""
+    implied = DIRECTION_REQUIRES[r["direction"]]
+    have = set(r["blockers"]) | ({implied} if implied else set())
+    return "".join(c for c in PRECEDENCE if c in have)
+
+
 def _is_native_dup(r: dict) -> bool:
     return any(x["kind"] == "dup" and x["target"] in _native_ids() for x in r["relations"])
 
 
 def derive(r: dict) -> dict:
-    blockers = r["blockers"]
+    blockers = effective_blockers(r)
     nov = r["novelty_code"]
     shape = [c for c in PRECEDENCE if c in blockers and c in SHAPE]
     feasibility = BLOCKERS[next((c for c in PRECEDENCE if c in blockers), "")] if blockers else M1_READY
@@ -180,7 +195,7 @@ def derive(r: dict) -> dict:
     else:
         tier = None
     return {
-        "feasibility": feasibility, "novelty": NOVELTY[nov], "primary_disposition": primary,
+        "feasibility": feasibility, "effective_blockers": blockers, "novelty": NOVELTY[nov], "primary_disposition": primary,
         "secondary_dispositions": labels[1:], "native_readiness": readiness, "population_tier": tier,
         "blocker_labels": [BLOCKERS[c] for c in PRECEDENCE if c in blockers],
     }
@@ -204,7 +219,9 @@ def build_ledger(workbook_bytes: bytes, *, expected_sha256: str = intake.EXPECTE
             "source_spec_status": orig["Spec_Status"], "source_row_sha256": row_sha256(orig),
             "source_direction": orig["Native_Direction"], "source_test_long": orig["Test_Long"],
             "source_test_short": orig["Test_Short"], "source_timeframe": orig["Signal_Timeframe"],
-            "blockers": c["blockers"], "feasibility": d["feasibility"], "blocker_labels": d["blocker_labels"],
+            "blockers": c["blockers"], "effective_blockers": d["effective_blockers"],
+            "direction_supported": c["direction"] in SUPPORTED_DIRECTIONS,
+            "feasibility": d["feasibility"], "blocker_labels": d["blocker_labels"],
             "novelty": d["novelty"], "direction": c["direction"], "mechanism": c["mechanism"],
             "relations": c["relations"], "missing": c["missing"], "reason": c["reason"],
             "primary_disposition": d["primary_disposition"], "secondary_dispositions": d["secondary_dispositions"],
@@ -217,6 +234,11 @@ def build_ledger(workbook_bytes: bytes, *, expected_sha256: str = intake.EXPECTE
         for r in out_rows:
             tally[r[key]] = tally.get(r[key], 0) + 1
         counts[key] = dict(sorted(tally.items()))
+    anywhere = {}
+    for r in out_rows:
+        for lab in [r["primary_disposition"], *r["secondary_dispositions"]]:
+            anywhere[lab] = anywhere.get(lab, 0) + 1
+    counts["any_applicable_disposition"] = dict(sorted(anywhere.items()))
     tiers = {t: [r["ext_id"] for r in out_rows if r["population_tier"] == t]
              for t in ("A", "B", "RESERVE_ADJACENT_COMPLETE")}
     return {
@@ -234,12 +256,14 @@ def ledger_csv(ledger: dict) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(["ext_id", "strategy_name", "asset_class", "feasibility", "novelty", "primary_disposition",
-                "secondary_dispositions", "native_readiness", "population_tier", "direction", "mechanism",
+                "secondary_dispositions", "native_readiness", "population_tier", "direction", "direction_supported",
+                "effective_blockers", "mechanism",
                 "relations", "missing", "reason"])
     for r in ledger["rows"]:
         w.writerow([r["ext_id"], r["strategy_name"], r["asset_class"], r["feasibility"], r["novelty"],
                     r["primary_disposition"], ";".join(r["secondary_dispositions"]), r["native_readiness"],
-                    r["population_tier"] or "", r["direction"], r["mechanism"],
+                    r["population_tier"] or "", r["direction"], r["direction_supported"],
+                    r["effective_blockers"], r["mechanism"],
                     ";".join(f"{x['kind']}:{x['target']}" for x in r["relations"]), ";".join(r["missing"]),
                     r["reason"]])
     return buf.getvalue().encode("utf-8")
