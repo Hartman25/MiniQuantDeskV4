@@ -32,6 +32,9 @@ CHILD_SINK_EXIT = 97
 
 _state: dict = {"installed": False, "attempts": [], "expect_depth": 0, "allowed": {}, "sink": None, "sink_stack": [], "ready": False}
 _in_guarded_popen = threading.local()
+_in_sink_io = threading.local()
+SINK_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_TRUNC | os.O_CREAT
+SINK_MUTATING_EVENTS = frozenset({"os.remove", "os.rename", "os.truncate", "os.replace", "shutil.move"})
 
 
 class NetworkDenied(OSError):
@@ -52,20 +55,33 @@ def _write_sink(row: dict, sink: str | None = None) -> bool:
     sink = sink or current_sink()
     if not sink:
         return False
+    _in_sink_io.depth = getattr(_in_sink_io, "depth", 0) + 1
     try:
-        with open(sink, "a", encoding="utf-8") as fh:  # inside the hook: never re-enter via the open check
+        with open(sink, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
         return True
     except OSError:
         return False
+    finally:
+        _in_sink_io.depth -= 1
 
 
 def _sink_usable(sink: str) -> bool:
+    _in_sink_io.depth = getattr(_in_sink_io, "depth", 0) + 1
     try:
         with open(sink, "a", encoding="utf-8"):
             return True
     except OSError:
         return False
+    finally:
+        _in_sink_io.depth -= 1
+
+
+def _is_sink(target) -> bool:
+    if not isinstance(target, (str, bytes, os.PathLike)):
+        return False
+    real = os.path.realpath(os.fsdecode(target))
+    return any(real == os.path.realpath(sk) for sk in [_state["sink"], *_state["sink_stack"]] if sk)
 
 
 def _record(kind: str, detail: str) -> None:
@@ -128,6 +144,11 @@ def _hook(event: str, args: tuple) -> None:
             return
         _record("network", f"{event} {args[1:] if event == 'socket.connect' else args[:1]}")
         raise NetworkDenied(f"offline guard: {event} refused")
+    if event in SINK_MUTATING_EVENTS or (event == "open" and args and len(args) > 2 and isinstance(args[2], int) and args[2] & SINK_WRITE_FLAGS):
+        # The audit sink is the parent's evidence: nothing else may write, truncate, move or delete it.
+        if not getattr(_in_sink_io, "depth", 0) and any(_is_sink(a) for a in args[:2]):
+            _record("sink_tamper", event)
+            raise NetworkDenied(f"offline guard: {event} on the audit sink is refused")
     if event == "open" and args:
         target = args[0]
         if isinstance(target, (str, bytes, os.PathLike)):

@@ -535,3 +535,36 @@ def test_a_child_that_never_initialized_the_guard_fails_its_test_and_the_session
     assert proc.returncode != 0 and "never initialized the guard" in out, out[-800:]
     got = json.loads(summary.read_text(encoding="utf-8"))
     assert got["uninitialized_children"] == 1 and got["unexpected_attempts"] >= 1
+
+
+# ------------------------------------------------ the audit sink cannot be rewritten by the code it is auditing
+
+TAMPER = {
+    "truncate": "open(os.environ['MQK_NETGUARD_LOG'], 'w').close()",
+    "append_forged_ready": "open(os.environ['MQK_NETGUARD_LOG'], 'a').write('{\"kind\": \"guard_ready\", \"pid\": 1}\\n')",
+    "os_open_trunc": "os.close(os.open(os.environ['MQK_NETGUARD_LOG'], os.O_WRONLY | os.O_TRUNC))",
+    "remove": "os.remove(os.environ['MQK_NETGUARD_LOG'])",
+    "rename": "os.rename(os.environ['MQK_NETGUARD_LOG'], os.environ['MQK_NETGUARD_LOG'] + '.moved')",
+    "replace_over": "open(os.environ['MQK_NETGUARD_LOG'] + '.x', 'w').write(''); os.replace(os.environ['MQK_NETGUARD_LOG'] + '.x', os.environ['MQK_NETGUARD_LOG'])",
+}
+
+
+@pytest.mark.parametrize("name", sorted(TAMPER))
+def test_a_child_cannot_erase_or_forge_the_audit_sink(world, tmp_path, name):
+    tmp, secret, sink = world
+    log = tmp_path / "tamper.log"
+    code = ("import os, socket\ntry:\n socket.create_connection(('127.0.0.1', 9), timeout=1)\nexcept Exception:\n pass\n"
+            f"try:\n {TAMPER[name]}\nexcept Exception as e:\n print('REFUSED', type(e).__name__)\n")
+    with _netguard.sink_to(log):
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp)
+    kinds = [r["kind"] for r in log_rows(log)]
+    assert "REFUSED NetworkDenied" in proc.stdout, proc.stdout + proc.stderr[-300:]
+    assert kinds[0] == "network" and "sink_tamper" in kinds, kinds          # the earlier evidence survived
+    assert log.exists() and not Path(str(log) + ".moved").exists()
+
+
+def test_the_parent_can_still_read_the_sink_and_the_guard_still_writes_it(tmp_path):
+    log = tmp_path / "ok.log"
+    with _netguard.sink_to(log):
+        subprocess.run([sys.executable, "-c", "pass"])
+    assert open(log).read() and _netguard.sink_rows(log)
