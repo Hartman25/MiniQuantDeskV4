@@ -39,19 +39,20 @@ MAX_VALIDITY = timedelta(days=7)
 
 READ_ONLY = "read_only_verification"
 DATA_MATERIALIZATION = "data_materialization"
+NATIVE_IDENTITY_RESOLUTION = "native_identity_resolution"
 PROVIDER_FETCH = "provider_fetch"
 REGISTRATION = "registry_registration"
 ATTEMPT = "attempt_execution"
 JUDGE_FINALIZE = "judge_finalize"
 PROMOTION = "promotion"
 PAPER = "paper_deployment"
-CLASSES = (READ_ONLY, DATA_MATERIALIZATION, PROVIDER_FETCH, REGISTRATION, ATTEMPT, JUDGE_FINALIZE, PROMOTION, PAPER)
+CLASSES = (READ_ONLY, DATA_MATERIALIZATION, NATIVE_IDENTITY_RESOLUTION, PROVIDER_FETCH, REGISTRATION, ATTEMPT, JUDGE_FINALIZE, PROMOTION, PAPER)
 # Read-only verification never needs an authorization artifact; every other class does.
 AUTHORIZABLE = tuple(c for c in CLASSES if c != READ_ONLY)
 # Promotion and Paper depend on the holdout being independently clear; a pending or consumed window refuses them.
 INCIDENT_BLOCKED = (PROMOTION, PAPER)
 
-STAGE_CLASS = {"check": READ_ONLY, "gate": READ_ONLY, "summary": READ_ONLY, "reuse_data": DATA_MATERIALIZATION,
+STAGE_CLASS = {"check": READ_ONLY, "gate": NATIVE_IDENTITY_RESOLUTION, "summary": READ_ONLY, "reuse_data": DATA_MATERIALIZATION,
                "fetch": PROVIDER_FETCH, "register": REGISTRATION, "trials": ATTEMPT, "backtest": ATTEMPT,
                "judge": JUDGE_FINALIZE, "finalize": JUDGE_FINALIZE, "review": JUDGE_FINALIZE}
 
@@ -104,7 +105,7 @@ def _signature(auth: dict, key: str) -> str:
 
 def mint(decl: dict, classes: list[str], *, operator: str, approval_ref: str, key: str, now: datetime,
          valid_for: timedelta = timedelta(hours=24), acknowledged_incidents: list[str] | None = None,
-         acknowledged_data_boundaries: list[str] | None = None) -> dict:
+         acknowledged_data_boundaries: list[str] | None = None, cli_sha256: str | None = None) -> dict:
     """Operator tool (needs the secret). The controller never calls this outside tests. Incident
     acknowledgement is explicit: nothing is acknowledged unless the operator names it."""
     if len(key) < MIN_KEY_CHARS:
@@ -119,6 +120,8 @@ def mint(decl: dict, classes: list[str], *, operator: str, approval_ref: str, ke
             "expires_utc": (now + valid_for).astimezone(timezone.utc).isoformat(),
             "acknowledged_incident_ids": sorted(acknowledged_incidents or []),
             "acknowledged_data_boundaries": sorted(acknowledged_data_boundaries or [])}
+    if cli_sha256 is not None:  # binds the exact native binary the stage may execute (a mutable path proves nothing)
+        auth["cli_sha256"] = cli_sha256
     auth["signature"] = _signature(auth, key)
     return auth
 
@@ -169,14 +172,44 @@ def load_auth_file(path: str | os.PathLike | None) -> dict | None:
 
 
 def require_stage(decl: dict, stage: str, *, auth: dict | None = None, key: str | None = None,
-                  now: datetime | None = None, incident_entries: list[dict] | None = None) -> None:
+                  now: datetime | None = None, incident_entries: list[dict] | None = None) -> dict | None:
     """Called at the top of every effectful runner stage, so a directly imported stage function is gated
-    exactly like the CLI dispatcher. A frozen historical declaration and a read-only stage pass through."""
+    exactly like the CLI dispatcher. A frozen historical declaration and a read-only stage pass through (None).
+    Returns the verified authorization, which carries the native-binary pin the stage may execute."""
     auth_class = STAGE_CLASS.get(stage)
     if auth_class is None:
         raise AuthorizationError(f"fail-closed: {stage!r} is not a known runner stage")
     if auth_class == READ_ONLY or is_frozen_historical(decl):
-        return
-    verify(decl, auth_class, auth if auth is not None else load_auth_file(os.environ.get(AUTH_FILE_ENV)),
-           key=key if key is not None else os.environ.get(KEY_ENV),
+        return None
+    auth = auth if auth is not None else load_auth_file(os.environ.get(AUTH_FILE_ENV))
+    verify(decl, auth_class, auth, key=key if key is not None else os.environ.get(KEY_ENV),
            now=now or datetime.now(timezone.utc), incident_entries=incident_entries)
+    return auth
+
+
+def optional_authorization(decl: dict, auth_class: str, *, auth: dict | None = None, key: str | None = None,
+                           now: datetime | None = None, incident_entries: list[dict] | None = None) -> dict | None:
+    """The verified authorization for `auth_class`, or None when there is none. For a read-only stage that has an
+    OPTIONAL authorized extension (running the native binary); it never weakens a mandatory gate."""
+    try:
+        auth = auth if auth is not None else load_auth_file(os.environ.get(AUTH_FILE_ENV))
+        verify(decl, auth_class, auth, key=key if key is not None else os.environ.get(KEY_ENV),
+               now=now or datetime.now(timezone.utc), incident_entries=incident_entries)
+        return auth
+    except AuthorizationError:
+        return None
+
+
+def verified_cli(auth: dict | None, cli: Path) -> Path:
+    """The native binary a stage may execute: a regular file whose sha256 equals the authorization's signed
+    `cli_sha256`. A different path, a swapped binary, an unpinned authorization or no authorization all refuse."""
+    pin = (auth or {}).get("cli_sha256")
+    if not isinstance(pin, str) or len(pin) != 64 or any(c not in "0123456789abcdef" for c in pin):
+        raise AuthorizationError("fail-closed: no authorization pins a native binary (cli_sha256); nothing is executed")
+    path = Path(cli)
+    if not path.is_file():
+        raise AuthorizationError(f"fail-closed: the native binary {path} is not a regular file")
+    resolved = path.resolve()
+    if hashlib.sha256(resolved.read_bytes()).hexdigest() != pin:
+        raise AuthorizationError("fail-closed: the native binary differs from the one the authorization pins")
+    return resolved

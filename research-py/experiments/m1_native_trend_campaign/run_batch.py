@@ -63,7 +63,7 @@ BENCHMARK_CF = "capital_fraction_matched_passive_buy_hold_v1"
 CAPITAL_BASIS = "native_backtest.initial_cash_micros"
 
 
-_ACTIVE = {"stage": None}
+_ACTIVE = {"stage": None, "auth": None}
 
 
 def _require_active_stage() -> None:
@@ -79,12 +79,12 @@ def staged(name: str):
     directories, registry, subprocess), whether it is reached from the CLI dispatcher or called directly."""
     def wrap(fn):
         def run(args):
-            stage_authorization.require_stage(DECL, name)
+            _ACTIVE["auth"] = stage_authorization.require_stage(DECL, name)
             _ACTIVE["stage"] = name
             try:
                 return fn(args)
             finally:
-                _ACTIVE["stage"] = None
+                _ACTIVE["stage"], _ACTIVE["auth"] = None, None
         run.__name__, run.__doc__, run.__wrapped__ = fn.__name__, fn.__doc__, fn
         return run
     return wrap
@@ -115,7 +115,11 @@ def _economic_spec(decl: dict | None = None):
 
 def _run_cli(*argv: str) -> str:
     _require_active_stage()
-    out = subprocess.run([str(CLI), *argv], capture_output=True, text=True)
+    exe = CLI
+    if not stage_authorization.is_frozen_historical(DECL):
+        # The binary path is mutable (MQK_M1_CLI); only the exact binary an authorization pins may run, in any stage.
+        exe = stage_authorization.verified_cli(_ACTIVE["auth"], CLI)
+    out = subprocess.run([str(exe), *argv], capture_output=True, text=True)
     if out.returncode != 0:
         raise SystemExit(f"mqk-cli failed ({argv[:2]}): {out.stderr[-800:]}")
     return out.stdout
@@ -337,13 +341,24 @@ def stage_check(_args) -> None:
     stress_plan(DECL)
     _require_frozen_trial_structure()
     assert len(TRIALS) == DECL["universe"]["max_trials"]
+    cli_check = "NOT_PRESENT"
     if CLI.exists():  # a stale binary that lacks a declared engine or sizing flag fails here, before any work
-        for strategy, sym in TRIALS:
-            _fingerprint, required = _resolve_native_identity(strategy, sym)
-            if required != HYP[strategy]["required_history_bars"]:
-                raise SystemExit(f"fail-closed: {strategy} requires {required} bars in the CLI but "
-                                 f"{HYP[strategy]['required_history_bars']} in the predeclaration")
-    print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()}")
+        # Executing the native binary is not read-only: a graded declaration runs it only under an
+        # authorization that pins the exact binary; otherwise the declaration-only validation above stands.
+        auth = None if stage_authorization.is_frozen_historical(DECL) else stage_authorization.optional_authorization(
+            DECL, stage_authorization.NATIVE_IDENTITY_RESOLUTION)
+        if stage_authorization.is_frozen_historical(DECL) or auth is not None:
+            _ACTIVE["auth"] = auth
+            for strategy, sym in TRIALS:
+                _fingerprint, required = _resolve_native_identity(strategy, sym)
+                if required != HYP[strategy]["required_history_bars"]:
+                    raise SystemExit(f"fail-closed: {strategy} requires {required} bars in the CLI but "
+                                     f"{HYP[strategy]['required_history_bars']} in the predeclaration")
+            cli_check = "PERFORMED"
+        else:
+            cli_check = "SKIPPED_NOT_AUTHORIZED"
+    print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()} "
+          f"cli_identity_check={cli_check}")
 
 
 @staged("reuse_data")

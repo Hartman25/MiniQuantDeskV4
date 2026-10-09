@@ -275,3 +275,149 @@ def test_the_cli_dispatcher_with_the_flag_open_and_credentials_present_is_refuse
         assert proc.returncode != 0 and "fail-closed" in proc.stderr + proc.stdout, stage
         assert attempts == [], f"{stage}: the authorization must refuse before credentials or HTTP"
         assert not (tmp_path / "run").exists()
+
+
+# ------------------------------------------------------------------ F3: a "read-only" stage cannot run an unauthorized binary
+
+STUB_BODY = """#!/bin/sh
+echo executed >> "{marker}"
+echo "semantic_fingerprint={fp}"
+echo "required_history_bars=2"
+echo "timeframe_secs=86400"
+"""
+
+
+def make_stub(path: Path, marker: Path, fp: str = "ab" * 32) -> Path:
+    path.write_text(STUB_BODY.format(marker=marker, fp=fp), encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture
+def stub_world(tmp_path, monkeypatch):
+    """A gate-open graded runner whose MQK_M1_CLI is a harmless stub that records every execution."""
+    rb = _load_runner(_opened_declaration(tmp_path))
+    marker = tmp_path / "marker"
+    stub = make_stub(tmp_path / "cli_a.sh", marker)
+    monkeypatch.setattr(rb, "CLI", stub)
+    monkeypatch.delenv(sa.KEY_ENV, raising=False)
+    monkeypatch.delenv(sa.AUTH_FILE_ENV, raising=False)
+    return rb, stub, marker, tmp_path
+
+
+def grant(monkeypatch, rb, classes, **kw):
+    a = sa.mint(rb.DECL, classes, operator="op", approval_ref="A", key=KEY, now=datetime.now(timezone.utc),
+                acknowledged_incidents=ACK, **kw)
+    monkeypatch.setenv(sa.KEY_ENV, KEY)
+    monkeypatch.setenv(sa.AUTH_FILE_ENV, "synthetic")
+    monkeypatch.setattr(sa, "load_auth_file", lambda _p: a)
+    return a
+
+
+def pin(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_check_without_authorization_validates_offline_and_never_executes_the_binary(stub_world, capsys):
+    rb, stub, marker, _ = stub_world
+    rb.stage_check(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert "cli_present=True" in out and "cli_identity_check=SKIPPED_NOT_AUTHORIZED" in out
+    assert not marker.exists(), "the stub binary was executed by a stage that needs no authorization"
+
+
+def test_check_with_a_pinned_authorization_runs_the_identity_cross_check(stub_world, monkeypatch, capsys):
+    rb, stub, marker, _ = stub_world
+    grant(monkeypatch, rb, [sa.NATIVE_IDENTITY_RESOLUTION], cli_sha256=pin(stub))
+    rb.stage_check(argparse.Namespace())
+    assert "cli_identity_check=PERFORMED" in capsys.readouterr().out
+    assert len(marker.read_text().split()) == len(rb.TRIALS), "one native-fingerprint call per declared trial"
+
+
+def test_an_authorization_without_a_binary_pin_or_with_the_wrong_class_runs_nothing(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    grant(monkeypatch, rb, [sa.NATIVE_IDENTITY_RESOLUTION])  # no cli_sha256
+    with pytest.raises(sa.AuthorizationError, match="pins a native binary"):
+        rb.stage_check(argparse.Namespace())
+    grant(monkeypatch, rb, [sa.REGISTRATION], cli_sha256=pin(stub))  # pinned, but the wrong class for the identity check
+    rb.stage_check(argparse.Namespace())  # falls back to declaration-only validation
+    assert not marker.exists()
+
+
+def test_an_altered_cli_path_or_a_swapped_binary_is_refused(stub_world, monkeypatch):
+    rb, stub, marker, tmp = stub_world
+    grant(monkeypatch, rb, [sa.NATIVE_IDENTITY_RESOLUTION, sa.REGISTRATION], cli_sha256=pin(stub))
+    other_marker = tmp / "other_marker"
+    other = make_stub(tmp / "cli_b.sh", other_marker, fp="cd" * 32)  # different bytes at a different path
+    monkeypatch.setattr(rb, "CLI", other)
+    with pytest.raises(sa.AuthorizationError, match="differs from the one the authorization pins"):
+        rb.stage_check(argparse.Namespace())
+    assert not other_marker.exists() and not marker.exists()
+    monkeypatch.setattr(rb, "CLI", stub)
+    stub.write_text(stub.read_text() + "\n# swapped after authorization\n", encoding="utf-8")  # same path, new bytes
+    with pytest.raises(sa.AuthorizationError, match="differs from the one the authorization pins"):
+        rb.stage_check(argparse.Namespace())
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("kind", ["directory", "missing"])
+def test_a_non_regular_cli_is_refused_even_under_a_valid_pin(stub_world, monkeypatch, kind):
+    rb, stub, marker, tmp = stub_world
+    grant(monkeypatch, rb, [sa.NATIVE_IDENTITY_RESOLUTION], cli_sha256=pin(stub))
+    target = tmp / "not_a_file"
+    if kind == "directory":
+        target.mkdir()
+    monkeypatch.setattr(rb, "CLI", target)
+    with pytest.raises(sa.AuthorizationError, match="regular file"):
+        rb._ACTIVE["stage"], rb._ACTIVE["auth"] = "check", sa.optional_authorization(rb.DECL, sa.NATIVE_IDENTITY_RESOLUTION)
+        try:
+            rb._run_cli("backtest", "native-fingerprint")
+        finally:
+            rb._ACTIVE["stage"], rb._ACTIVE["auth"] = None, None
+    assert not marker.exists()
+
+
+def test_gate_is_no_longer_a_free_read_only_stage_and_runs_no_binary_without_authorization(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    assert sa.STAGE_CLASS["gate"] == sa.NATIVE_IDENTITY_RESOLUTION
+    with pytest.raises(sa.AuthorizationError, match="fail-closed"):
+        rb.stage_gate(argparse.Namespace())
+    grant(monkeypatch, rb, [sa.REGISTRATION], cli_sha256=pin(stub))  # wrong class
+    with pytest.raises(sa.AuthorizationError, match="does not authorize"):
+        rb.stage_gate(argparse.Namespace())
+    assert not marker.exists()
+
+
+def test_the_helper_cannot_execute_the_binary_directly_or_from_a_read_only_stage(stub_world):
+    rb, stub, marker, _ = stub_world
+    with pytest.raises(sa.AuthorizationError, match="outside an authorized runner stage"):
+        rb._run_cli("backtest", "native-fingerprint")
+    with pytest.raises(sa.AuthorizationError, match="pins a native binary"):
+        rb.staged("summary")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
+    with pytest.raises(sa.AuthorizationError, match="pins a native binary"):
+        rb.staged("check")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
+    assert not marker.exists()
+
+
+def test_every_binary_executing_stage_runs_only_the_pinned_binary(stub_world, monkeypatch):
+    rb, stub, marker, tmp = stub_world
+    grant(monkeypatch, rb, [c for c in sa.AUTHORIZABLE if c not in sa.INCIDENT_BLOCKED], cli_sha256=pin(stub))
+    for name in ("register", "trials", "backtest", "finalize", "review", "gate"):
+        probe = rb.staged(name)(lambda _a: rb._run_cli("backtest", "native-fingerprint"))
+        probe(None)  # authorized and pinned: the stub runs
+    assert len(marker.read_text().split()) == 6
+    monkeypatch.setattr(rb, "CLI", make_stub(tmp / "cli_c.sh", tmp / "m3", fp="ef" * 32))
+    for name in ("register", "trials", "backtest", "finalize", "review", "gate"):
+        with pytest.raises(sa.AuthorizationError, match="differs"):
+            rb.staged(name)(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
+    assert not (tmp / "m3").exists()
+
+
+def test_frozen_historical_declarations_still_run_their_binary_as_before(tmp_path, monkeypatch):
+    rb = _load_runner(HERE / "PREDECLARED_BATCH_03.json")
+    marker = tmp_path / "marker"
+    monkeypatch.setattr(rb, "CLI", make_stub(tmp_path / "cli.sh", marker))
+    assert sa.is_frozen_historical(rb.DECL)
+    rb.staged("check")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
+    assert marker.exists()

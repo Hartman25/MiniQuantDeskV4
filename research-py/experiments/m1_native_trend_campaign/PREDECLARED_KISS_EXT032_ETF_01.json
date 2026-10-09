@@ -15,6 +15,7 @@
    "module": "stage_authorization.py",
    "classes": [
     "data_materialization",
+    "native_identity_resolution",
     "provider_fetch",
     "registry_registration",
     "attempt_execution",
@@ -22,8 +23,8 @@
     "promotion",
     "paper_deployment"
    ],
-   "binding": "sha256 of the declaration excluding execution_gate; operator, approval reference, validity window (at most 7 days), acknowledged pending incident ids; HMAC-SHA256 under the operator-held secret MQK_M1_STAGE_AUTH_KEY",
-   "enforcement": "the check runs at the top of every runner stage function and in the effectful helpers, so a directly imported stage is gated like the CLI dispatcher; executable=true alone authorizes nothing",
+   "binding": "sha256 of the declaration excluding execution_gate; operator, approval reference, validity window (at most 7 days), acknowledged pending incident ids; HMAC-SHA256 under the operator-held secret MQK_M1_STAGE_AUTH_KEY; native-binary execution additionally requires the authorization's signed cli_sha256 to equal the sha256 of the binary actually executed (MQK_M1_CLI is a mutable path and proves nothing)",
+   "enforcement": "the check runs at the top of every runner stage function and in the effectful helpers, so a directly imported stage is gated like the CLI dispatcher; executable=true alone authorizes nothing. `check` is declaration-only unless an authorization for native_identity_resolution is present; `gate` is not read-only because it resolves identities through the native binary",
    "active_authorizations": "NONE",
    "limits": "a shared-secret check, not non-repudiation; library functions called outside the runner are protected by credentials, the hermetic provider boundary and the network guard, not by this artifact"
   }
