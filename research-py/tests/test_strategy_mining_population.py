@@ -75,6 +75,30 @@ def test_empty_declaration_fails_closed():
         generate_population(decl)
 
 
+@pytest.mark.parametrize("field_name", [
+    "session_calendar_contract", "execution_model_contract", "sizing_contract",
+    "cost_model_contract", "risk_model_requirement", "universe_requirement",
+    "point_in_time_universe_requirement", "historical_evidence_partition", "timeframe",
+])
+def test_missing_contract_field_fails_closed(field_name):
+    decl = _decl(**{field_name: ""})
+    with pytest.raises(GrammarError, match="missing/empty"):
+        generate_population(decl)
+
+
+def test_missing_data_inputs_fails_closed():
+    decl = _decl(data_inputs=())
+    with pytest.raises(GrammarError, match="data_inputs"):
+        generate_population(decl)
+
+
+def test_risk_model_requirement_none_is_a_valid_explicit_value_not_rejected():
+    # "none" is an explicit declaration ("no risk model is required"), not
+    # a missing/empty value — it must NOT be rejected.
+    manifest = generate_population(_decl(risk_model_requirement="none"))
+    assert manifest.raw_count > 0
+
+
 def test_duplicate_values_in_a_parameter_domain_fail_closed():
     decl = _decl(parameter_grids={
         MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20, 20)},

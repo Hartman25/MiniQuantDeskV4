@@ -59,6 +59,36 @@ class PopulationDeclaration:
     historical_evidence_partition: str
     max_population_size: int = 2_000
 
+    def validate(self) -> None:
+        """Every contract field is mandatory and must be an explicit,
+        non-empty declaration. "none" is a legitimate explicit value (e.g.
+        risk_model_requirement="none"); an empty/missing string is not —
+        that is a caller who forgot to declare the contract, and must fail
+        closed rather than silently produce candidates with an undeclared
+        calendar/execution/sizing/cost/risk/universe/partition model."""
+        required_str_fields = {
+            "timeframe": self.timeframe,
+            "universe_requirement": self.universe_requirement,
+            "session_calendar_contract": self.session_calendar_contract,
+            "sizing_contract": self.sizing_contract,
+            "execution_model_contract": self.execution_model_contract,
+            "cost_model_contract": self.cost_model_contract,
+            "risk_model_requirement": self.risk_model_requirement,
+            "point_in_time_universe_requirement": self.point_in_time_universe_requirement,
+            "historical_evidence_partition": self.historical_evidence_partition,
+        }
+        for name, value in required_str_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                raise GrammarError(f"{name} is missing/empty — every contract field must be explicitly declared")
+        if not self.data_inputs or any(not d.strip() for d in self.data_inputs):
+            raise GrammarError("data_inputs must be a non-empty tuple of non-empty strings")
+        if not self.mechanism_families:
+            raise GrammarError("mechanism_families must be non-empty")
+        if not self.directions:
+            raise GrammarError("directions must be non-empty")
+        if not self.asset_classes:
+            raise GrammarError("asset_classes must be non-empty")
+
     def _param_combo_count(self, family: MechanismFamily) -> int:
         grid = self.parameter_grids.get(family, {})
         count = 1
@@ -121,6 +151,7 @@ def _declaration_id(decl: PopulationDeclaration) -> str:
 
 
 def generate_population(decl: PopulationDeclaration) -> PopulationManifest:
+    decl.validate()
     declared = decl.declared_cardinality()
     if declared <= 0:
         raise GrammarError("predeclared population is empty — nothing to generate")
