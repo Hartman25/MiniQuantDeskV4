@@ -31,6 +31,7 @@ from mqk_research.strategy_mining.grammar import (
     _canonical_json,
     _canonical_value,
     _sha256_hex,
+    _thaw,
 )
 
 
@@ -57,14 +58,20 @@ class PopulationDeclaration:
     def __post_init__(self) -> None:
         """Same root cause as HypothesisGrammar's own fix (C2): a frozen
         dataclass does not stop a caller from mutating a nested mutable
-        mapping/list after construction. Defensively normalizes every
-        collection field into immutable storage backed by a fresh copy."""
+        mapping/list after construction. The PREVIOUS fix only wrapped the
+        outer grid dict in MappingProxyType and the per-axis container in
+        `tuple(values)` -- an individual axis VALUE that is itself a list
+        or dict (e.g. `parameter_grids[family]["n"] = ([1, 2], [3, 4])`)
+        was still a mutable object reachable via
+        `decl.parameter_grids[family]["n"][0].append(3)` (FW-C2-R1).
+        `_canonical_value` now freezes every level, recursively, including
+        each individual axis value."""
         object.__setattr__(self, "mechanism_families", tuple(self.mechanism_families))
         object.__setattr__(self, "directions", tuple(self.directions))
         object.__setattr__(self, "asset_classes", tuple(self.asset_classes))
         object.__setattr__(self, "data_inputs", tuple(self.data_inputs))
         normalized_grids = {
-            family: MappingProxyType({name: tuple(values) for name, values in grid.items()})
+            family: MappingProxyType({name: _canonical_value(tuple(values)) for name, values in grid.items()})
             for family, grid in self.parameter_grids.items()
         }
         object.__setattr__(self, "parameter_grids", MappingProxyType(normalized_grids))
@@ -90,7 +97,7 @@ class PopulationDeclaration:
         for name, value in required_str_fields.items():
             if not isinstance(value, str) or not value.strip():
                 raise GrammarError(f"{name} is missing/empty — every contract field must be explicitly declared")
-        if not self.data_inputs or any(not d.strip() for d in self.data_inputs):
+        if not self.data_inputs or any(not isinstance(d, str) or not d.strip() for d in self.data_inputs):
             raise GrammarError("data_inputs must be a non-empty tuple of non-empty strings")
         if not self.mechanism_families:
             raise GrammarError("mechanism_families must be non-empty")
@@ -99,6 +106,13 @@ class PopulationDeclaration:
         if not self.asset_classes:
             raise GrammarError("asset_classes must be non-empty")
 
+        if not all(isinstance(f, MechanismFamily) for f in self.mechanism_families):
+            raise GrammarError("every mechanism_families element must be a MechanismFamily enum member")
+        if not all(isinstance(d, Direction) for d in self.directions):
+            raise GrammarError("every directions element must be a Direction enum member")
+        if not all(isinstance(a, AssetClassTag) for a in self.asset_classes):
+            raise GrammarError("every asset_classes element must be an AssetClassTag enum member")
+
         missing_grids = [f for f in self.mechanism_families if f not in self.parameter_grids]
         if missing_grids:
             raise GrammarError(
@@ -106,6 +120,22 @@ class PopulationDeclaration:
                 "-- declare it (an empty {} is a valid explicit 'no parameters' declaration, but the key itself "
                 "must be present; a silently-missing key is a caller who forgot to declare the contract)"
             )
+        extra_grids = [f for f in self.parameter_grids if f not in self.mechanism_families]
+        if extra_grids:
+            raise GrammarError(
+                f"parameter_grids declares {[f.value for f in extra_grids]}, which are not in mechanism_families "
+                "-- undeclared/transport-only metadata must not exist (it would change declaration identity "
+                "while generating the identical candidate set, FW-C3 addendum)"
+            )
+        for family, grid in self.parameter_grids.items():
+            for name, values in grid.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise GrammarError(f"parameter domain name for {family.value} must be a non-empty string, got {name!r}")
+                if len(values) == 0:
+                    raise GrammarError(
+                        f"parameter domain {family.value}.{name} is empty — an axis with zero declared values "
+                        "yields zero real combinations, not one (remove the axis, or supply at least one value)"
+                    )
 
         if isinstance(self.max_population_size, bool):
             raise GrammarError("max_population_size must not be a bool")
@@ -115,10 +145,17 @@ class PopulationDeclaration:
             raise GrammarError("max_population_size must be a positive integer")
 
     def _param_combo_count(self, family: MechanismFamily) -> int:
+        """An empty grid `{}` (no axes at all) correctly stays at the
+        initial 1 (one parameterless variant) since the loop below never
+        executes. A NAMED axis with zero values (`"n": ()`) must drive the
+        count to 0 -- `max(len(values), 1)` previously treated it as 1,
+        silently reporting a wrong cardinality (FW-C3-R7); `validate()`
+        now rejects this case explicitly before it would ever reach here,
+        but this function must also compute the honest number on its own."""
         grid = self.parameter_grids.get(family, {})
         count = 1
         for values in grid.values():
-            count *= max(len(values), 1)
+            count *= len(values)
         return count
 
     def declared_cardinality(self) -> int:
@@ -158,7 +195,7 @@ def _declaration_id(decl: PopulationDeclaration) -> str:
         "directions": sorted(d.value for d in decl.directions),
         "asset_classes": sorted(a.value for a in decl.asset_classes),
         "parameter_grids": {
-            family.value: {name: list(values) for name, values in grid.items()}
+            family.value: {name: _thaw(values) for name, values in grid.items()}
             for family, grid in decl.parameter_grids.items()
         },
         "timeframe": decl.timeframe,

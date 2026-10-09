@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -71,11 +72,21 @@ class GrammarError(ValueError):
 
 
 def _canonical_value(obj: Any) -> Any:
-    """Recursively validates and normalizes a value for inclusion in an
+    """Recursively validates and DEEPLY FREEZES a value for inclusion in an
     economic identity. Only explicit, finite, JSON-native types are
     accepted -- no `default=str` fallback, so an unsupported object can
     never enter an identity hash through its (possibly unstable, possibly
-    process-specific) string representation."""
+    process-specific) string representation.
+
+    Returns a deeply immutable structure: nested lists/tuples become
+    tuples, nested dicts become MappingProxyType. A single outer
+    MappingProxyType is NOT enough -- a mutable list or dict *value* nested
+    inside it is still reachable and mutable unless every level is frozen
+    (FW-C2-R1). Idempotent: accepts its own previously-frozen output
+    (MappingProxyType/tuple) as input, so re-canonicalizing an
+    already-canonical structure (e.g. when population.py builds a
+    HypothesisGrammar from an already-frozen parameter_grids value) is a
+    safe no-op, not a spurious type-rejection."""
     if obj is None or isinstance(obj, str):
         return obj
     if isinstance(obj, bool):
@@ -87,8 +98,8 @@ def _canonical_value(obj: Any) -> Any:
             raise GrammarError(f"non-finite float is not an allowed economic parameter value: {obj!r}")
         return obj
     if isinstance(obj, (list, tuple)):
-        return [_canonical_value(v) for v in obj]
-    if isinstance(obj, dict):
+        return tuple(_canonical_value(v) for v in obj)
+    if isinstance(obj, ABCMapping):
         canon: Dict[str, Any] = {}
         for k, v in obj.items():
             if not isinstance(k, str):
@@ -96,12 +107,28 @@ def _canonical_value(obj: Any) -> Any:
                     f"only string keys are allowed in economic parameters, got {type(k).__name__}: {k!r}"
                 )
             canon[k] = _canonical_value(v)
-        return canon
+        return MappingProxyType(canon)
     raise GrammarError(f"unsupported economic parameter value type {type(obj).__name__}: {obj!r}")
 
 
+def _thaw(obj: Any) -> Any:
+    """Inverse of the freezing performed by `_canonical_value`: recursively
+    converts MappingProxyType -> dict and tuple -> list, producing a plain
+    JSON-native structure. Used ONLY at the boundary where a plain,
+    mutable-looking (but freshly-built, not aliased to any stored object)
+    structure is actually required: `economic_fields()`, declaration-id
+    payload assembly, and `trial_identity_for()`. Byte-identical JSON
+    output to the pre-freeze representation for any previously-valid
+    input, so existing fingerprints/ids are unaffected."""
+    if isinstance(obj, MappingProxyType):
+        return {k: _thaw(v) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return [_thaw(v) for v in obj]
+    return obj
+
+
 def _canonical_json(obj: Any) -> str:
-    return json.dumps(_canonical_value(obj), sort_keys=True, separators=(",", ":"))
+    return json.dumps(_thaw(_canonical_value(obj)), sort_keys=True, separators=(",", ":"))
 
 
 def _sha256_hex(text: str) -> str:
@@ -138,14 +165,16 @@ class HypothesisGrammar:
     def __post_init__(self) -> None:
         """A frozen dataclass only prevents REASSIGNING `self.parameters`;
         it does nothing to stop a caller from mutating the same mapping
-        object after construction, which would silently change a supposedly
-        fixed economic identity. Defensively copies into an immutable view
-        backed by fresh storage (not aliased to the caller's object), and
-        validates/normalizes every parameter value (rejecting non-finite
-        floats and unsupported types) at construction time rather than only
-        when a fingerprint happens to be requested later."""
-        normalized_params = _canonical_value(dict(self.parameters))
-        object.__setattr__(self, "parameters", MappingProxyType(dict(normalized_params)))
+        object (or, critically, a mutable value NESTED inside it) after
+        construction, which would silently change a supposedly fixed
+        economic identity (FW-C2-R1). `_canonical_value` freezes every
+        level of the structure -- not just the outer mapping -- into
+        MappingProxyType/tuple, so `grammar.parameters["n"].append(3)` has
+        no `.append` to call; it also validates/normalizes every value
+        (rejecting non-finite floats and unsupported types) at construction
+        time rather than only when a fingerprint happens to be requested
+        later."""
+        object.__setattr__(self, "parameters", _canonical_value(dict(self.parameters)))
         object.__setattr__(self, "data_inputs", tuple(self.data_inputs))
 
     def economic_fields(self) -> Dict[str, Any]:
@@ -157,7 +186,7 @@ class HypothesisGrammar:
             "mechanism_family": self.mechanism_family.value,
             "direction": self.direction.value,
             "asset_class": self.asset_class.value,
-            "parameters": dict(self.parameters),
+            "parameters": _thaw(self.parameters),
             "timeframe": self.timeframe,
             "data_inputs": sorted(self.data_inputs),
             "universe_requirement": self.universe_requirement,

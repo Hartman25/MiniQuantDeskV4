@@ -520,3 +520,170 @@ def test_changing_an_economic_field_still_changes_identity_even_with_the_same_ca
     m_a = generate_population(decl_a)
     m_b = generate_population(decl_b)
     assert m_a.declaration_id != m_b.declaration_id
+
+
+# ---------------------------------------------------------------------------
+# FW-C2-R1 (surgical closeout 02): the PREVIOUS C2 fix only froze the outer
+# mapping; a mutable value NESTED inside a parameter (a list/dict value,
+# not just a list/dict container at the top) was still reachable and
+# mutable. Deep-freeze must cover every level.
+# ---------------------------------------------------------------------------
+
+def test_direct_nested_list_mutation_through_grammar_parameters_cannot_change_identity():
+    g = _grammar_with_params({"n": [1, 2, 3]})
+    fp_before = g.semantic_fingerprint()
+    with pytest.raises(AttributeError):
+        g.parameters["n"].append(999)  # the stored value has no .append at all
+    assert g.semantic_fingerprint() == fp_before
+
+
+def test_direct_nested_dict_mutation_through_grammar_parameters_cannot_change_identity():
+    g = _grammar_with_params({"n": {"inner": 1}})
+    fp_before = g.semantic_fingerprint()
+    with pytest.raises(TypeError):
+        g.parameters["n"]["inner"] = 999  # MappingProxyType, no __setitem__
+    assert g.semantic_fingerprint() == fp_before
+
+
+def test_original_caller_nested_list_mutation_after_construction_does_not_change_identity():
+    original_inner_list = [1, 2]
+    g = _grammar_with_params({"n": original_inner_list})
+    fp_before = g.semantic_fingerprint()
+    original_inner_list.append(999)  # mutate the CALLER's own object
+    assert g.semantic_fingerprint() == fp_before
+    assert g.economic_fields()["parameters"]["n"] == [1, 2]
+
+
+def test_declaration_parameter_grids_nested_list_value_direct_mutation_cannot_change_identity():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"n": ([1, 2], [3, 4])}},
+    )
+    cardinality_before = decl.declared_cardinality()
+    with pytest.raises(AttributeError):
+        decl.parameter_grids[MechanismFamily.TREND_FOLLOWING]["n"][0].append(999)
+    assert decl.declared_cardinality() == cardinality_before
+    manifest = generate_population(decl)
+    manifest_id_before = manifest.manifest_id
+    manifest2 = generate_population(decl)
+    assert manifest2.manifest_id == manifest_id_before
+
+
+def test_declaration_parameter_grids_original_caller_nested_list_mutation_does_not_change_identity():
+    original_axis_value = [1, 2]
+    grids = {MechanismFamily.TREND_FOLLOWING: {"n": (original_axis_value, [3, 4])}}
+    decl = _decl(mechanism_families=(MechanismFamily.TREND_FOLLOWING,), parameter_grids=grids)
+    m1 = generate_population(decl)
+    original_axis_value.append(999)  # mutate the caller's own object
+    m2 = generate_population(decl)
+    assert m1.manifest_id == m2.manifest_id
+
+
+def test_golden_fingerprint_unchanged_by_the_deep_freeze_refactor():
+    # A scalar-only parameter set (no nested containers) must produce the
+    # exact same fingerprint shape/value class as before -- the freeze
+    # refactor must be byte-identical for ordinary inputs.
+    g = _grammar_with_params({"lookback_days": 20, "threshold": 1.5, "label": "x"})
+    fields = g.economic_fields()
+    assert fields["parameters"] == {"lookback_days": 20, "threshold": 1.5, "label": "x"}
+    assert isinstance(fields["parameters"], dict)  # thawed, plain JSON-native dict
+    assert isinstance(fields["parameters"]["lookback_days"], int)
+
+
+# ---------------------------------------------------------------------------
+# FW-C3-R7 (surgical closeout 02): an empty named parameter axis `()` must
+# be rejected up front, not silently counted as 1 combination.
+# ---------------------------------------------------------------------------
+
+def test_empty_named_parameter_axis_is_rejected_not_silently_counted_as_one():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"n": ()}},
+    )
+    with pytest.raises(GrammarError, match="is empty"):
+        generate_population(decl)
+
+
+def test_param_combo_count_itself_reports_zero_for_an_empty_axis_not_one():
+    decl = PopulationDeclaration(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,), directions=(Direction.LONG,),
+        asset_classes=(AssetClassTag.EQUITY,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"n": ()}},
+        timeframe="1d", data_inputs=("daily_bars",), universe_requirement="u",
+        session_calendar_contract="c", sizing_contract="s", execution_model_contract="e",
+        cost_model_contract="co", risk_model_requirement="r",
+        point_in_time_universe_requirement="p", historical_evidence_partition="h",
+    )
+    # Direct unit check on the function the review flagged as "lying" --
+    # it must itself report 0, not rely solely on a downstream mismatch guard.
+    assert decl._param_combo_count(MechanismFamily.TREND_FOLLOWING) == 0
+
+
+def test_explicit_empty_family_grid_still_means_exactly_one_parameterless_variant():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {}},
+    )
+    assert decl._param_combo_count(MechanismFamily.TREND_FOLLOWING) == 1
+    manifest = generate_population(decl)
+    assert manifest.raw_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Addendum: extraneous parameter_grids key (family not in mechanism_families)
+# must be rejected -- it would otherwise change declaration_id without
+# changing the generated candidate set at all.
+# ---------------------------------------------------------------------------
+
+def test_extraneous_parameter_grids_family_not_in_mechanism_families_is_rejected():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={
+            MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)},
+            MechanismFamily.MOMENTUM: {"unused_axis": (1, 2)},  # never in mechanism_families
+        },
+    )
+    with pytest.raises(GrammarError, match="not in mechanism_families"):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Addendum: data_inputs must reject non-string elements deterministically
+# (GrammarError), not crash with an unrelated AttributeError from .strip().
+# ---------------------------------------------------------------------------
+
+def test_non_string_data_inputs_element_fails_closed_with_grammar_error_not_attribute_error():
+    decl = _decl(data_inputs=(3,))
+    with pytest.raises(GrammarError, match="data_inputs"):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Addendum: strict enum typing for mechanism_families/directions/asset_classes.
+# ---------------------------------------------------------------------------
+
+def test_plain_string_mechanism_family_is_rejected_not_silently_accepted():
+    decl = _decl(mechanism_families=("trend_following",))  # plain str, not the enum
+    with pytest.raises(GrammarError, match="MechanismFamily enum member"):
+        generate_population(decl)
+
+
+def test_plain_string_direction_is_rejected():
+    decl = _decl(directions=("long",))
+    with pytest.raises(GrammarError, match="Direction enum member"):
+        generate_population(decl)
+
+
+def test_plain_string_asset_class_is_rejected():
+    decl = _decl(asset_classes=("equity",))
+    with pytest.raises(GrammarError, match="AssetClassTag enum member"):
+        generate_population(decl)
+
+
+def test_non_string_parameter_domain_name_is_rejected():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {123: (1, 2)}},  # non-string axis name
+    )
+    with pytest.raises(GrammarError, match="non-empty string"):
+        generate_population(decl)
