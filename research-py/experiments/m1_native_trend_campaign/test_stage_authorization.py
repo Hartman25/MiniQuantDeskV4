@@ -495,6 +495,11 @@ def test_a_genuine_authorization_of_the_wrong_class_executes_nothing_in_the_help
         _inject(rb, stage, wrong)
         with pytest.raises(sa.AuthorizationError, match="does not authorize"):
             _probe(rb)
+    native_only = _mint_for(rb, [sa.NATIVE_IDENTITY_RESOLUTION], cli_sha256=pin(stub))  # right for check, wrong for these
+    for stage in ("register", "trials", "backtest", "finalize", "review"):
+        _inject(rb, stage, native_only)
+        with pytest.raises(sa.AuthorizationError, match="does not authorize"):
+            _probe(rb)
     _inject(rb, "summary", _mint_for(rb, [sa.NATIVE_IDENTITY_RESOLUTION], cli_sha256=pin(stub)))
     with pytest.raises(sa.AuthorizationError, match="may not execute"):
         _probe(rb)
