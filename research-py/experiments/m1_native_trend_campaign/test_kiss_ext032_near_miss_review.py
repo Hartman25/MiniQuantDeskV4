@@ -49,6 +49,13 @@ def _adjudicated():
     return [*entries, e]
 
 
+def benchmark_evidence(symbol: str, alpha: float, **over) -> dict:
+    ev = {"policy_id": DECL["benchmark"]["policy_id"], "strategy_id": STRATEGY, "symbol": symbol,
+          "allocation_fraction_bps": DECL["capital_sizing"]["allocation_fraction_bps"], "alpha_pct": alpha}
+    ev.update(over)
+    return ev
+
+
 def good_row(symbol: str, trial_id: str, **over) -> dict:
     row = {"strategy": STRATEGY, "symbol": symbol, "trial_id": trial_id, "attempt_index": 1,
            "semantic_fingerprint": WRAPPED[symbol], "backtest_run_id": RUN_ID[symbol], "net_return": 0.08, "sharpe": 0.8,
@@ -57,7 +64,7 @@ def good_row(symbol: str, trial_id: str, **over) -> dict:
            "rust_profit_factor": 1.5, "rust_max_drawdown_pct": 12.0, "robustness_failed": [],
            "robustness_not_applicable": [], "robustness_missing": [], "stress_failed": [],
            "review_state": "paper_candidate", "reason_codes": "eligible_paper_candidate",
-           "benchmark_evidence": {"alpha_pct": 1.2}}
+           "benchmark_evidence": benchmark_evidence(symbol, 1.2)}
     row.update(over)
     return row
 
@@ -550,7 +557,7 @@ def test_distances_are_exact_and_equality_passes_for_every_comparator(w):
         "scanner_min_total_return_pct": ("rust_total_return_pct", -0.5, 0.5, 0.0),
         "scanner_max_drawdown_pct": ("rust_max_drawdown_pct", 26.0, 1.0, 25.0),
         "scanner_min_profit_factor": ("rust_profit_factor", 1.0, 0.05, 1.05),
-        "scanner_min_alpha_pct": ("benchmark_evidence", {"alpha_pct": -0.3}, 0.3, {"alpha_pct": 0.0}),
+        "scanner_min_alpha_pct": ("benchmark_evidence", benchmark_evidence("SPY", -0.3), 0.3, benchmark_evidence("SPY", 0.0)),
     }
     scanner = set(nm.SCANNER_GATE_IDS)
     for name, (field, bad, shortfall, edge) in cases.items():
@@ -565,7 +572,7 @@ def test_distances_are_exact_and_equality_passes_for_every_comparator(w):
             else:
                 assert g["status"] == "FAIL" and math.isclose(g["shortfall"], shortfall, abs_tol=1e-12) and g["margin"] < 0, name
                 assert t["final_status"] == nm.NEAR_MISS
-    t = trial(w.review(rows=[dict(r, benchmark_evidence={"alpha_pct": -0.3}, review_state="rejected") if r["symbol"] == "SPY" else r
+    t = trial(w.review(rows=[dict(r, benchmark_evidence=benchmark_evidence("SPY", -0.3), review_state="rejected") if r["symbol"] == "SPY" else r
                              for r in w.rows]), "SPY")
     assert gate(t, "scanner_min_alpha_pct")["relative_shortfall"] is None  # threshold 0: no relative distance
 
@@ -579,6 +586,20 @@ def test_canonical_gate_equality_passes_and_all_comparators_are_the_evaluators(w
     over = {w.ids["SPY"]: proof("SPY", passed=False, metrics={"mdd": 0.2501})}
     g = gate(trial(w.review(promotion=over), "SPY"), "promotion_max_drawdown")
     assert g["status"] == "FAIL" and math.isclose(g["shortfall"], 0.0001, abs_tol=1e-12)
+
+
+@pytest.mark.parametrize("label,over,code", [
+    ("Benchmark V2 evidence in a capital-fraction campaign", {"policy_id": "capital_matched_exact_target_buy_hold_v1"},
+     "BENCHMARK_EVIDENCE_POLICY_MISMATCH"),
+    ("no policy id", {"policy_id": None}, "BENCHMARK_EVIDENCE_POLICY_MISMATCH"),
+    ("another symbol's benchmark", {"symbol": "QQQ"}, "BENCHMARK_EVIDENCE_SLOT_MISMATCH"),
+    ("another strategy's benchmark", {"strategy_id": "turn_of_month_v1"}, "BENCHMARK_EVIDENCE_SLOT_MISMATCH"),
+    ("a different allocation fraction", {"allocation_fraction_bps": 500}, "BENCHMARK_EVIDENCE_SIZING_MISMATCH"),
+])
+def test_benchmark_evidence_must_be_the_declared_benchmark_for_this_slot_and_sizing(w, label, over, code):
+    rows = [dict(r, benchmark_evidence={**benchmark_evidence("SPY", 1.2), **over}) if r["symbol"] == "SPY" else r for r in w.rows]
+    t = trial(w.review(rows=rows), "SPY")
+    assert t["final_status"] == nm.INVALID and code in t["reason_codes"], label
 
 
 # ------------------------------------------------------------------ D7: numeric evidence is strictly validated

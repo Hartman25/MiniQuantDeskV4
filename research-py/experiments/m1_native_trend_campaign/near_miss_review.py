@@ -568,6 +568,14 @@ def review_trial(slot: dict, rows_for_slot: list[dict], ctx: dict) -> dict:
         if g["status"] == "NOT_AVAILABLE" and g["gate"] not in ("judge_min_dsr", "judge_max_pbo") \
                 and not (g["authority"] == "promotion" and g["basis"] == "CANONICAL"):
             reasons.append(f"REQUIRED_METRIC_UNAVAILABLE:{g['gate']}")
+    ev = row.get("benchmark_evidence")
+    if isinstance(ev, dict):  # the alpha is only meaningful against the declared benchmark, for THIS slot and sizing
+        if ev.get("policy_id") != decl["benchmark"]["policy_id"]:
+            reasons.append("BENCHMARK_EVIDENCE_POLICY_MISMATCH")
+        if ev.get("strategy_id") != strategy or ev.get("symbol") != symbol:
+            reasons.append("BENCHMARK_EVIDENCE_SLOT_MISMATCH")
+        if ev.get("allocation_fraction_bps") != decl["capital_sizing"]["allocation_fraction_bps"]:
+            reasons.append("BENCHMARK_EVIDENCE_SIZING_MISMATCH")
     if robustness_missing:
         reasons.append("REQUIRED_ROBUSTNESS_EVIDENCE_MISSING")
     if fidelity is None or not out["execution_fidelity"]["passed"]:
