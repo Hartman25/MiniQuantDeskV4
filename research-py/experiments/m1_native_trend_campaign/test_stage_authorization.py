@@ -24,6 +24,7 @@ sys.path.insert(0, str(HERE.parents[1] / "src"))
 import _netguard  # noqa: E402
 import holdout_incident as hi  # noqa: E402
 import stage_authorization as sa  # noqa: E402
+import stage_auth_testkit as kit  # noqa: E402
 from test_hermetic_provider_isolation import _load_runner, _opened_declaration  # noqa: E402
 
 KEY = "k" * 40
@@ -112,17 +113,32 @@ def test_an_authorization_without_an_operator_or_approval_reference_is_refused()
             check(a, sa.PROVIDER_FETCH)
 
 
-def test_the_pending_holdout_incident_must_be_acknowledged_and_blocks_promotion_and_paper_outright():
+def test_the_pending_holdout_incident_must_be_acknowledged_and_blocks_promotion_and_paper_outright(monkeypatch):
     with pytest.raises(sa.AuthorizationError, match="does not acknowledge"):
         check(auth([sa.PROVIDER_FETCH], acknowledged_incidents=[]), sa.PROVIDER_FETCH)
     for cls in (sa.PROMOTION, sa.PAPER):
         with pytest.raises(SystemExit, match="ACCESS_INCIDENT_PENDING_ADJUDICATION"):
             check(auth([cls]), cls)
-    adj = hi.load_ledger()
-    e = {"sequence": 2, "kind": "ADJUDICATION", "incident_id": ACK[0], "state": hi.ADJUDICATED_PRESERVED,
-         "decision": "test", "prev_entry_sha256": adj[-1]["entry_sha256"]}
-    e["entry_sha256"] = hi.entry_sha256(e)
-    check(auth([sa.PROMOTION], acknowledged_incidents=[]), sa.PROMOTION, entries=[*adj, e])
+    kit.use_incident_key(monkeypatch)
+    check(auth([sa.PROMOTION], acknowledged_incidents=[]), sa.PROMOTION, entries=kit.adjudicated_entries())
+
+
+def test_a_consumed_window_blocks_promotion_and_paper_and_still_needs_acknowledgement(monkeypatch):
+    kit.use_incident_key(monkeypatch)
+    consumed = kit.adjudicated_entries(hi.ADJUDICATED_CONSUMED)
+    for cls in (sa.PROMOTION, sa.PAPER):
+        with pytest.raises(SystemExit, match="ADJUDICATED_HOLDOUT_CONSUMED"):
+            check(auth([cls]), cls, entries=consumed)
+    with pytest.raises(sa.AuthorizationError, match="does not acknowledge"):
+        check(auth([sa.PROVIDER_FETCH], acknowledged_incidents=[]), sa.PROVIDER_FETCH, entries=consumed)
+    check(auth([sa.PROVIDER_FETCH]), sa.PROVIDER_FETCH, entries=consumed)  # development stages may proceed, acknowledged
+
+
+def test_an_unauthenticated_preserved_adjudication_does_not_unblock_promotion(monkeypatch):
+    signed = kit.adjudicated_entries()
+    monkeypatch.delenv(hi.KEY_ENV, raising=False)  # no operator secret in this process
+    with pytest.raises(SystemExit, match="ACCESS_INCIDENT_PENDING_ADJUDICATION"):
+        check(auth([sa.PROMOTION]), sa.PROMOTION, entries=signed)
 
 
 def test_the_fetch_authorization_must_acknowledge_the_declared_data_boundary():

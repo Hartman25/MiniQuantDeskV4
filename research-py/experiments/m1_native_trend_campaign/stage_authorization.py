@@ -48,7 +48,7 @@ PAPER = "paper_deployment"
 CLASSES = (READ_ONLY, DATA_MATERIALIZATION, PROVIDER_FETCH, REGISTRATION, ATTEMPT, JUDGE_FINALIZE, PROMOTION, PAPER)
 # Read-only verification never needs an authorization artifact; every other class does.
 AUTHORIZABLE = tuple(c for c in CLASSES if c != READ_ONLY)
-# Promotion and Paper depend on the holdout being independently clear; a pending incident refuses them.
+# Promotion and Paper depend on the holdout being independently clear; a pending or consumed window refuses them.
 INCIDENT_BLOCKED = (PROMOTION, PAPER)
 
 STAGE_CLASS = {"check": READ_ONLY, "gate": READ_ONLY, "summary": READ_ONLY, "reuse_data": DATA_MATERIALIZATION,
@@ -147,16 +147,16 @@ def verify(decl: dict, auth_class: str, auth: dict | None, *, key: str | None, n
         raise AuthorizationError("fail-closed: stage authorization validity window is unreadable") from exc
     if not (timedelta(0) < expires - issued <= MAX_VALIDITY) or not (issued <= now < expires):
         raise AuthorizationError("fail-closed: stage authorization is expired, not yet valid, or has an invalid window")
-    pending = holdout_incident.affecting_incidents(decl, incident_entries)
-    if pending and not set(pending) <= set(auth.get("acknowledged_incident_ids") or []):
-        raise AuthorizationError(f"fail-closed: stage authorization does not acknowledge pending incident(s) {pending}")
+    blocking = holdout_incident.affecting_incidents(decl, incident_entries)  # pending or consumed
+    if blocking and not set(blocking) <= set(auth.get("acknowledged_incident_ids") or []):
+        raise AuthorizationError(f"fail-closed: stage authorization does not acknowledge blocking incident(s) {blocking}")
     if auth_class == PROVIDER_FETCH:
         required = set((decl.get("data") or {}).get("required_fetch_acknowledgements") or [])
         if not required <= set(auth.get("acknowledged_data_boundaries") or []):
             raise AuthorizationError(f"fail-closed: the fetch authorization does not acknowledge data boundaries "
                                      f"{sorted(required - set(auth.get('acknowledged_data_boundaries') or []))}")
     if auth_class in INCIDENT_BLOCKED:
-        holdout_incident.require_no_pending_incident(decl, auth_class, incident_entries)
+        holdout_incident.require_independence_clear(decl, auth_class, incident_entries)
 
 
 def load_auth_file(path: str | os.PathLike | None) -> dict | None:

@@ -20,3 +20,22 @@ def grant_runner_stages(monkeypatch, rb, classes=None, acknowledged=("HOA-KISS-E
     monkeypatch.setenv(sa.KEY_ENV, TEST_KEY)
     monkeypatch.setenv(sa.AUTH_FILE_ENV, "synthetic")
     monkeypatch.setattr(sa, "load_auth_file", fresh)
+
+
+# ---- incident-ledger test support: a synthetic operator secret and signed adjudications (never real keys)
+import holdout_incident as _hi  # noqa: E402
+
+INCIDENT_TEST_KEY = "i" * 40
+
+
+def adjudicated_entries(state: str = _hi.ADJUDICATED_PRESERVED, *, key: str = INCIDENT_TEST_KEY, now=None,
+                        base=None) -> list[dict]:
+    """The committed ledger plus one correctly signed ADJUDICATION entry (a test stand-in for the operator)."""
+    base = base if base is not None else _hi.load_ledger()
+    entry = _hi.make_adjudication(base, "HOA-KISS-EXT032-01", state, decision="test decision", operator="test-operator",
+                                  approval_ref="TEST-APPROVAL", key=key, now=now or datetime.now(timezone.utc))
+    return [*base, entry]
+
+
+def use_incident_key(monkeypatch, key: str = INCIDENT_TEST_KEY) -> None:
+    monkeypatch.setenv(_hi.KEY_ENV, key)

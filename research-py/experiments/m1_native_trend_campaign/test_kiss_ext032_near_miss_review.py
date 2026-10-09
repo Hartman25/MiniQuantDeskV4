@@ -29,6 +29,7 @@ import holdout_guard as hg  # noqa: E402
 import holdout_incident as hi  # noqa: E402
 import near_miss_review as nm  # noqa: E402
 import search_accounting as sacc  # noqa: E402
+import stage_auth_testkit as kit  # noqa: E402
 import test_kiss_ext032_registration_gate as gatehelp  # noqa: E402  (synthetic bars-provenance helper only)
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 
@@ -41,12 +42,8 @@ RUN_ID = {s: f"00000000-0000-4000-8000-00000000000{i + 1}" for i, s in enumerate
 HOLDOUT_STATUS = "RESERVED_NOT_FORMALLY_CONSUMED__ACCESS_INCIDENT_PENDING_ADJUDICATION"
 
 
-def _adjudicated():
-    entries = hi.load_ledger()
-    e = {"sequence": 2, "kind": "ADJUDICATION", "incident_id": "HOA-KISS-EXT032-01", "state": hi.ADJUDICATED_PRESERVED,
-         "decision": "test", "prev_entry_sha256": entries[-1]["entry_sha256"]}
-    e["entry_sha256"] = hi.entry_sha256(e)
-    return [*entries, e]
+def _adjudicated(state=hi.ADJUDICATED_PRESERVED):
+    return kit.adjudicated_entries(state)
 
 
 def benchmark_evidence(symbol: str, alpha: float, **over) -> dict:
@@ -133,8 +130,9 @@ def w(tmp_path):
 
 @pytest.fixture
 def cleared(monkeypatch):
-    """The two conditions that cannot hold today, cleared for the test only: a supported pooled method and an
-    operator adjudication. Everything else must already be true for QUALIFIES."""
+    """The two conditions that cannot hold today, cleared for the test only: a supported pooled method and a
+    correctly SIGNED operator adjudication (synthetic key). Everything else must already be true for QUALIFIES."""
+    kit.use_incident_key(monkeypatch)
     real = sacc.pooled_statistics_support
     monkeypatch.setattr(sacc, "pooled_statistics_support", lambda: {**real(), "status": sacc.POOLED_SUPPORTED})
     return _adjudicated()
@@ -180,8 +178,25 @@ def test_today_the_same_consistent_evidence_is_withheld_by_exactly_the_two_open_
 def test_each_blocker_alone_withholds(w, cleared, monkeypatch):
     assert set(statuses(w.review(incident_entries=cleared)).values()) == {nm.QUALIFIES}
     monkeypatch.undo()  # pooled support unsupported again; incident adjudicated
+    kit.use_incident_key(monkeypatch)
     r = w.review(incident_entries=_adjudicated())
     assert set(statuses(r).values()) == {nm.WITHHELD} and r["qualification_blockers"] == [sacc.CUMULATIVE_SEARCH_VALIDATION_BLOCKED]
+
+
+def test_a_consumed_holdout_withholds_every_qualification_even_when_everything_else_clears(w, cleared):
+    r = w.review(incident_entries=_adjudicated(hi.ADJUDICATED_CONSUMED))
+    assert set(statuses(r).values()) == {nm.WITHHELD}
+    assert r["qualification_blockers"] == ["HOLDOUT_CONSUMED_BY_ADJUDICATION"]
+    assert r["holdout"]["consumed_incident_ids"] == ["HOA-KISS-EXT032-01"] and r["holdout"]["pending_incident_ids"] == []
+
+
+def test_an_unauthenticated_adjudication_does_not_unblock_the_review(w, cleared, monkeypatch):
+    entries = _adjudicated()  # correctly signed ...
+    monkeypatch.delenv(hi.KEY_ENV)  # ... but this process holds no operator secret, so it cannot be believed
+    r = w.review(incident_entries=entries)
+    assert set(statuses(r).values()) == {nm.WITHHELD}
+    assert "HOLDOUT_ACCESS_INCIDENT_PENDING_ADJUDICATION" in r["qualification_blockers"]
+    assert r["holdout"]["unverified_adjudication_ids"] == ["HOA-KISS-EXT032-01"]
 
 
 # ------------------------------------------------------------------ D1: exact trial identity

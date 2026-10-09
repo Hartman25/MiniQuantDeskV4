@@ -374,7 +374,7 @@
    ],
    "record": "docs/research/M1_KISS_EXT032_ACCESS_INCIDENT_01.md",
    "ledger": "research-py/experiments/m1_native_trend_campaign/HOLDOUT_ACCESS_INCIDENTS.json",
-   "effect": "No code path may represent the Final Holdout as independently cleared; Promotion and Paper deployment stages and any 'qualifies' label are refused until an operator ADJUDICATION entry is appended."
+   "effect": "No code path may represent the Final Holdout as independently cleared. Promotion and Paper deployment stages and any 'qualifies' label are refused while the incident is pending or adjudicated CONSUMED. Only an ADJUDICATION entry authenticated under the operator-held secret (MQK_M1_INCIDENT_ADJUDICATION_KEY) and moving the state forward to PRESERVED clears the veto; an unauthenticated entry is ignored. The committed opening entry is pinned in source and cannot be rewritten."
   },
   "rule": "never consumed by discovery; consumed holdout data is never fresh again; a rerun requiring the holdout is a hard stop"
  },

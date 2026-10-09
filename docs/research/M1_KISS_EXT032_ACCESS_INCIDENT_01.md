@@ -42,3 +42,14 @@ Decide whether the Final Holdout remains usable for its single-use purpose, is c
 
 * `M1_KISS_EXT032_CLOSEOUT.md` C15 reported the incident but called the fix complete and left the holdout characterization to the operator without a durable state; this record and the ledger supersede that wording.
 * Any document describing the holdout as "RESERVED / UNCONSUMED" for the KISS campaign describes the formal ledger only. Historical campaigns share the same calendar window; their historical results are unchanged and not re-opened, but they inherit the same pending incident for the purposes of any future independence claim.
+
+## Ledger authority (correction V4-M1-KISS-EXT032-INDEPENDENT-REVIEW-CORRECTION-01)
+
+A SHA-256 hash chain alone is not operator authentication: anyone can rewrite an entry and recompute the hashes. The ledger now relies on two anchors a file edit cannot move.
+
+* **Pinned opening.** Every `OPEN` entry must equal a hash pinned in `holdout_incident.PINNED_OPENINGS`; the first entry must be the committed incident. Rewriting or re-hashing the opening, replacing the ledger, or adding an unpinned opening is rejected. Changing a recorded fact or opening a new incident is a reviewed code change.
+* **Authenticated adjudication.** An `ADJUDICATION` counts only with an HMAC-SHA256 signature under the operator-held secret `MQK_M1_INCIDENT_ADJUDICATION_KEY` (at least 32 characters), plus operator, approval reference, decision and a UTC timestamp. Without the secret the entry is *unverified* and ignored: the incident stays pending and reports list it as `unverified_adjudication_ids`. With the secret, a bad signature is tampering and raises. The HMAC is a shared-secret check, not non-repudiation. No secret is provisioned and no adjudication exists.
+* **Forward-only states.** PENDING to PRESERVED to CONSUMED, or PENDING to CONSUMED; never backwards, never repeated, never back to pending. Timestamps must be non-decreasing, not before the incident day and not in the future.
+* **Consumed never clears.** `ADJUDICATED_HOLDOUT_CONSUMED` blocks exactly like a pending incident (Promotion and Paper authorizations, the review's qualification) for every campaign whose reserved window overlaps. Only an authenticated `PRESERVED` decision by the operator clears the veto, and nothing infers it.
+
+Operator decision still open: who holds the adjudication secret and what the adjudication is. This work does not adjudicate and selects no replacement window.

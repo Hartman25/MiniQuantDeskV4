@@ -680,6 +680,8 @@ def build_review(decl: dict, rows: list[dict], judge: dict, *, registry: dict | 
         blockers.append(search_accounting.CUMULATIVE_SEARCH_VALIDATION_BLOCKED)
     if incidents["pending_incident_ids"]:
         blockers.append("HOLDOUT_ACCESS_INCIDENT_PENDING_ADJUDICATION")
+    if incidents["consumed_incident_ids"]:  # a consumed window is never untouched independent evidence again
+        blockers.append("HOLDOUT_CONSUMED_BY_ADJUDICATION")
     ctx = {"decl": decl, "judge": judge, "judge_check": judge_check, "registry": registry_check, "expected": expected,
            "provenance": provenance, "attempts": attempts, "promotion": promotion or {},
            "promotion_problems": promotion_problems or {}, "blockers": blockers}
