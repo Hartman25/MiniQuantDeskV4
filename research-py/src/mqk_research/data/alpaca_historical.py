@@ -582,6 +582,21 @@ CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC = pd.Timestamp("1900-01-01T00:00:00Z")
 CA_DISCOVERY_PROTOCOL_V2 = "process_date_full_history_through_retrieval_snapshot_v2"
 
 
+HERMETIC_NO_PROVIDER_ENV = "MQK_HERMETIC_NO_PROVIDER"
+
+
+class ProviderAccessDenied(RuntimeError):
+    """Provider access is refused in a hermetic (offline test) process, whatever credentials exist."""
+
+
+def require_provider_access_allowed() -> None:
+    """The provider boundary: a process flagged hermetic can neither load credentials from the real
+    environment nor issue a provider HTTP request. Callers that read credential files (`.env.local`)
+    must call this BEFORE touching the file."""
+    if os.environ.get(HERMETIC_NO_PROVIDER_ENV) == "1":
+        raise ProviderAccessDenied(f"provider access refused: {HERMETIC_NO_PROVIDER_ENV}=1 (hermetic process)")
+
+
 class AlpacaCredentialsMissing(RuntimeError):
     """Fail-closed: raised when ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER
     are not present in the environment (this repo's existing Alpaca
@@ -618,6 +633,8 @@ def load_alpaca_credentials(env: Optional[Dict[str, str]] = None) -> AlpacaCrede
     uses for historical data; market-data access is tied to the account, not
     to paper-vs-live order routing). Fails closed if either is absent. Never
     logs or returns the values in any exception message."""
+    if env is None:
+        require_provider_access_allowed()
     e = env if env is not None else os.environ
     key = e.get(ENV_ALPACA_KEY)
     secret = e.get(ENV_ALPACA_SECRET)
@@ -645,6 +662,7 @@ HttpGet = Callable[[str, Dict[str, str], Dict[str, str]], Tuple[int, bytes]]
 
 
 def _default_http_get(url: str, params: Dict[str, str], headers: Dict[str, str]) -> Tuple[int, bytes]:
+    require_provider_access_allowed()
     qs = urllib.parse.urlencode(params)
     full_url = f"{url}?{qs}" if qs else url
     req = urllib.request.Request(full_url, headers=headers, method="GET")

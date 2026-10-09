@@ -338,6 +338,8 @@ def stage_reuse_data(_args) -> None:
 
 def _load_alpaca_env() -> None:
     """Load only the two research-data credential keys from .env.local (values are never printed)."""
+    from mqk_research.data.alpaca_historical import require_provider_access_allowed
+    require_provider_access_allowed()  # before ANY read of the environment or .env.local
     want = {"ALPACA_API_KEY_PAPER", "ALPACA_API_SECRET_PAPER"}
     if all(os.environ.get(k) for k in want):
         return
