@@ -81,6 +81,23 @@ SEED_UNIVERSE_FILES = (
 
 CAMPAIGN_SYMBOLS = ("SPY", "QQQ", "IWM", "DIA")
 
+# The population this accounting is FOR, stated here so `build_accounting` can reject a declaration that has
+# drifted (a missing/extra slot, a variant, a changed trial budget) without trusting the declaration's own
+# consistency. Changing it is a new campaign contract, not an edit.
+NEW_CAMPAIGN_CONTRACT = {"hypotheses": 1, "strategy_id": "pre_holiday_two_session_long_v1",
+                         "symbols": CAMPAIGN_SYMBOLS, "trials": 4, "max_trials": 4}
+VALID_PRIOR_STATUSES = frozenset({STATUS_VOIDED, STATUS_AMENDMENT, STATUS_REJECTED, STATUS_SUPERSEDED_V1,
+                                  STATUS_DISCOVERY_NOT_PROMOTED})
+# Frozen declaration files in the experiment directory that are not search campaigns.
+NON_CAMPAIGN_DECLARATION_FILES = frozenset({"PREDECLARED_BATCH_02_ERRATUM.json"})
+
+FOUR_TRIAL_JUDGE_RESULT = "FOUR_TRIAL_JUDGE_RESULT"
+CUMULATIVE_SEARCH_DISCLOSED = "CUMULATIVE_SEARCH_DISCLOSED"
+CUMULATIVE_SEARCH_VALIDATED = "CUMULATIVE_SEARCH_VALIDATED"
+CUMULATIVE_SEARCH_VALIDATION_BLOCKED = "CUMULATIVE_SEARCH_VALIDATION_BLOCKED"
+POOLED_SUPPORTED = "SUPPORTED_AND_VERIFIED"
+REPO_ROOT = HERE.parents[2]
+
 
 def _strategy_ids(decl: dict) -> list[str]:
     if "hypotheses" in decl:
@@ -104,6 +121,12 @@ def prior_inventory(root: Path = HERE) -> list[dict]:
     """One row per frozen prior declaration, in the fixed PRIOR_DECLARATIONS order."""
     rows = []
     for name, status, counts, evidence in PRIOR_DECLARATIONS:
+        if status not in VALID_PRIOR_STATUSES:
+            raise ValueError(f"{name}: invalid prior status {status!r}")
+        if counts != (status != STATUS_SUPERSEDED_V1):
+            raise ValueError(f"{name}: counts_in_operative_rule={counts} contradicts status {status}")
+        if not (REPO_ROOT / evidence).is_file():
+            raise ValueError(f"{name}: evidence document {evidence} does not exist")
         decl = json.loads((root / name).read_text(encoding="utf-8"))
         pairs = _trial_pairs(decl)
         declared = decl["universe"].get("max_trials")
@@ -119,6 +142,10 @@ def prior_inventory(root: Path = HERE) -> list[dict]:
             "strategy_ids": sorted(set(_strategy_ids(decl))),
             "symbols": sorted(decl["universe"]["symbols"]),
             "registered_trial_identities": len(pairs),
+            # derived from the frozen declaration; the historical registries are git-ignored run directories
+            # and were not re-read, so "registered" here is the declaration's claim, not independent proof
+            "identity_basis": "DECLARED_IN_FROZEN_DECLARATION",
+            "registry_verified": False,
             "pairs": [list(p) for p in pairs],
             "status_class": status,
             "counts_in_operative_rule": counts,
@@ -172,16 +199,98 @@ def pooled_statistics_support() -> dict:
     }
 
 
+def _check_prior_set(root: Path, new_declaration: dict) -> None:
+    """Every campaign declaration on disk other than the new one and the non-campaign files must be accounted
+    for, and nothing accounted for may be absent: an omitted prior campaign shrinks the denominator."""
+    own = {new_declaration.get("batch_id"), new_declaration.get("campaign_id")} - {None}
+    on_disk = set()
+    for path in sorted(Path(root).glob("PREDECLARED_*.json")):
+        if path.name in NON_CAMPAIGN_DECLARATION_FILES:
+            continue
+        decl = json.loads(path.read_text(encoding="utf-8"))
+        if own & {decl.get("batch_id"), decl.get("campaign_id")}:
+            continue
+        on_disk.add(path.name)
+    accounted = {name for name, *_ in PRIOR_DECLARATIONS}
+    if len(accounted) != len(PRIOR_DECLARATIONS):
+        raise ValueError("a prior declaration is listed twice")
+    omitted, phantom = sorted(on_disk - accounted), sorted(accounted - on_disk)
+    if omitted or phantom:
+        raise ValueError(f"prior campaigns omitted from the accounting {omitted}; accounted but absent {phantom}")
+
+
+def validate_new_population(decl: dict) -> list[tuple[str, str]]:
+    """The new declaration must be exactly the one-hypothesis, four-trial population this accounting covers.
+    Returns its (strategy_id, symbol) slots in declared order, or raises ValueError."""
+    c = NEW_CAMPAIGN_CONTRACT
+    hyps = decl.get("hypotheses")
+    if not isinstance(hyps, list) or len(hyps) != c["hypotheses"]:
+        raise ValueError(f"hypothesis count {len(hyps) if isinstance(hyps, list) else hyps!r} != {c['hypotheses']}")
+    if [h.get("strategy_id") for h in hyps] != [c["strategy_id"]]:
+        raise ValueError("the declared hypothesis is not the contract's strategy (extra variant or substitution)")
+    universe = decl["universe"]
+    if tuple(universe.get("symbols", ())) != c["symbols"]:
+        raise ValueError(f"unexpected symbols {universe.get('symbols')!r}; the contract is {list(c['symbols'])}")
+    if universe.get("max_trials") != c["max_trials"]:
+        raise ValueError(f"max_trials {universe.get('max_trials')!r} != {c['max_trials']}")
+    trials = universe.get("trials")
+    if not isinstance(trials, list):
+        raise ValueError("universe.trials missing")
+    pairs = [(t.get("strategy_id"), t.get("symbol")) for t in trials]
+    if len(set(pairs)) != len(pairs):
+        raise ValueError("duplicate (strategy, symbol) trial pair")
+    expected = [(c["strategy_id"], s) for s in c["symbols"]]
+    if len(pairs) != c["trials"] or pairs != expected:
+        missing = [p for p in expected if p not in pairs]
+        extra = [p for p in pairs if p not in expected]
+        raise ValueError(f"trial slots differ from the contract (missing {missing}, unexpected {extra}, order matters)")
+    if [t.get("order") for t in trials] != list(range(1, c["trials"] + 1)):
+        raise ValueError("trial order fields must be exactly 1..N")
+    return pairs
+
+
+def validate_declared_block(decl: dict, accounting_counts: dict) -> None:
+    """The declaration's own `search_accounting` block, when present, must equal the recomputed counts."""
+    block = decl.get("search_accounting")
+    if block is None:
+        return
+    pairs = (
+        ("cumulative_disclosed_search_count", accounting_counts["cumulative_disclosed_search_count"]),
+        ("prior_native_trial_identities_operative", accounting_counts["prior_operative"]),
+        ("new_trials", accounting_counts["new_trials"]),
+        ("sensitivity_counts", accounting_counts["cumulative"]),
+        ("operative_rule", accounting_counts["operative_rule"]),
+    )
+    for key, value in pairs:
+        if block.get(key) != value:
+            raise ValueError(f"declared search_accounting.{key}={block.get(key)!r} contradicts the recomputed {value!r}")
+
+
+def cumulative_search_validation(accounting: dict) -> str:
+    """CUMULATIVE_SEARCH_VALIDATED only when a pooled method is supported AND verified; otherwise BLOCKED.
+    Disclosure of the count is a separate, weaker fact (CUMULATIVE_SEARCH_DISCLOSED)."""
+    if accounting.get("pooled_statistics_support", {}).get("status") == POOLED_SUPPORTED:
+        return CUMULATIVE_SEARCH_VALIDATED
+    return CUMULATIVE_SEARCH_VALIDATION_BLOCKED
+
+
 def build_accounting(new_declaration: dict, root: Path = HERE) -> dict:
+    pairs_new = validate_new_population(new_declaration)
+    _check_prior_set(root, new_declaration)
     inv = prior_inventory(root)
-    new_pairs = _trial_pairs(new_declaration)
-    c = counts(inv, len(new_pairs))
+    c = counts(inv, len(pairs_new))
+    validate_declared_block(new_declaration, c)
     windows = {json.dumps(r["window"], sort_keys=True) for r in inv}
     if len(windows) != 1:
         raise ValueError("prior declarations do not share one evaluation window")
-    return {
+    prior_window = json.loads(next(iter(windows)))
+    part = new_declaration["partition"]
+    new_window = {k: part[k] for k in prior_window}
+    if new_window != prior_window:
+        raise ValueError(f"the new evaluation window {new_window} is not the prior exposed window {prior_window}")
+    accounting = {
         "schema": ACCOUNTING_SCHEMA,
-        "same_exposed_window": json.loads(next(iter(windows))),
+        "same_exposed_window": prior_window,
         "definitions": {
             "hypothesis": "an economic idea (one strategy_id family); this campaign adds exactly 1",
             "trial": "one registered candidate identity: hypothesis x instrument under the frozen protocol; this campaign adds exactly 4",
@@ -192,6 +301,12 @@ def build_accounting(new_declaration: dict, root: Path = HERE) -> dict:
             "cross_campaign_exposure": "prior trials on the same exposed window; disclosed in the cumulative count, never removed after results",
         },
         "counts": c,
+        "identity_basis": {
+            "prior_trial_identities": "DECLARED_IN_FROZEN_DECLARATIONS",
+            "independently_verified_in_a_registry": None,
+            "note": "the historical registries live in git-ignored run directories; the counts are the declarations' "
+                    "claims cross-checked against their evidence documents, not a re-read of any registry",
+        },
         "prior_inventory": [{k: v for k, v in r.items() if k != "pairs"} for r in inv],
         "broader_exposure": [
             {"label": label, "evidence_document": doc, "pinned_literal": literal, "population": text,
@@ -201,6 +316,19 @@ def build_accounting(new_declaration: dict, root: Path = HERE) -> dict:
         "campaign_symbols_in_88_symbol_seed_universe": list(CAMPAIGN_SYMBOLS),
         "pooled_statistics_support": pooled_statistics_support(),
     }
+    validation = cumulative_search_validation(accounting)
+    accounting["statistical_validation"] = {
+        FOUR_TRIAL_JUDGE_RESULT: "the batch-wide judge over this experiment's four registered trials; produced only after "
+                                 "an authorized execution and NOT deflated for the prior campaigns",
+        CUMULATIVE_SEARCH_DISCLOSED: c["cumulative_disclosed_search_count"],
+        "cumulative_search_status": validation,
+        "statistical_acceptance_blocker": None if validation == CUMULATIVE_SEARCH_VALIDATED else {
+            "id": "SAB-1", "requirement": "OD-4: the accepted multiple-testing requirement over the cumulative search",
+            "status": "BLOCKED_UNSUPPORTED_BY_AVAILABLE_EVIDENCE",
+            "effect": "no trial of this campaign may be labelled cumulative-search validated or qualifying; the "
+                      "threshold (OD-4/OD-8) is not weakened"},
+    }
+    return accounting
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience printer

@@ -54,3 +54,9 @@ Census-01 (corrected) StrategyEdge 38,192 trials; Census-02 Strategy 9,400 trial
 ## 6. Promotion contract note
 
 `verify_promotion_oos_evidence` demands walk-forward fold evidence (`folds_used > 0`), the `economic_walk_forward_v1` protocol, the judge and `holdout.status == reserved_not_evaluated`. This research path can supply exactly that, so no Promotion gate is `BLOCKED` by it. It supplies no independent confirmation, none is claimed, and nothing here touches Gate 3b (`active_paper`).
+
+## Addendum: what the numbers establish (V4-M1-KISS-EXT032-ALL-DEFECT-CLOSURE-01)
+
+* **Declared, not registry-verified.** The 130/115/105 prior identities are derived from the frozen declarations and cross-checked against their evidence documents. The historical registries are git-ignored run directories and were not re-read, so "registered" describes the declarations' claim. The accounting artifact carries `identity_basis.independently_verified_in_a_registry = null`.
+* **Independent population validation.** `build_accounting` itself rejects a drifted new declaration (missing or duplicate trial slot, unexpected symbol, wrong hypothesis count, wrong `max_trials`, extra variant, wrong order), an omitted or phantom prior campaign, an invalid or contradictory prior status, a missing evidence document, an incompatible evaluation window, and a declared `search_accounting` block that disagrees with the recomputed counts.
+* **Distinct statistical states.** `FOUR_TRIAL_JUDGE_RESULT` (the in-experiment judge, not deflated for prior campaigns) is not `CUMULATIVE_SEARCH_DISCLOSED` (the count 119 printed beside every DSR), and neither is `CUMULATIVE_SEARCH_VALIDATED`. With pooled statistics `BLOCKED_UNSUPPORTED` the status is `CUMULATIVE_SEARCH_VALIDATION_BLOCKED`, recorded as statistical acceptance blocker `SAB-1`. The OD-4/OD-8 thresholds are not weakened: no trial of this campaign may be labelled cumulative-search validated or qualifying while SAB-1 stands.

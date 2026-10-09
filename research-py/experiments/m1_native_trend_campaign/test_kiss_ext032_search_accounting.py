@@ -68,7 +68,8 @@ def test_removing_or_adding_a_prior_declaration_changes_the_count_so_no_denomina
     base = sa.counts(sa.prior_inventory(), 4)["cumulative_disclosed_search_count"]
     monkeypatch.setattr(sa, "PRIOR_DECLARATIONS", sa.PRIOR_DECLARATIONS[:-1])  # drop Batch 03
     assert sa.counts(sa.prior_inventory(), 4)["cumulative_disclosed_search_count"] == base - 60
-    monkeypatch.setattr(sa, "PRIOR_DECLARATIONS", tuple((n, s, False, e) for n, s, _, e in sa.PRIOR_DECLARATIONS))
+    monkeypatch.setattr(sa, "PRIOR_DECLARATIONS",
+                        tuple((n, sa.STATUS_SUPERSEDED_V1, False, e) for n, _s, _, e in sa.PRIOR_DECLARATIONS))
     assert sa.counts(sa.prior_inventory(), 4)["prior_operative"] == 0
 
 
@@ -169,3 +170,98 @@ def test_prior_return_series_are_not_committed_so_no_pooled_matrix_can_be_rebuil
     for phrase in ("incompatible_comparison_scope", "git-ignored", "different measurement processes",
                    "unsupported arithmetic substitution"):
         assert phrase in reasons
+
+
+# ------------------------------------------------ build_accounting rejects a drifted population by itself (E1)
+
+import copy  # noqa: E402
+
+
+def _drift(mutate):
+    d = copy.deepcopy(DECL)
+    mutate(d)
+    return d
+
+
+@pytest.mark.parametrize("label,mutate,match", [
+    ("missing slot", lambda d: d["universe"]["trials"].pop(), "trial slots differ"),
+    ("duplicate pair", lambda d: d["universe"]["trials"].__setitem__(3, dict(d["universe"]["trials"][0], order=4)), "duplicate"),
+    ("unexpected symbol", lambda d: (d["universe"]["symbols"].__setitem__(3, "XLE"),
+                                     d["universe"]["trials"][3].update(symbol="XLE")), "unexpected symbols"),
+    ("trial for an unlisted symbol", lambda d: d["universe"]["trials"][3].update(symbol="XLE"), "trial slots differ"),
+    ("two hypotheses", lambda d: d["hypotheses"].append(copy.deepcopy(d["hypotheses"][0])), "hypothesis count"),
+    ("zero hypotheses", lambda d: d["hypotheses"].clear(), "hypothesis count"),
+    ("substituted hypothesis", lambda d: d["hypotheses"][0].update(strategy_id="turn_of_month_v1"), "not the contract's strategy"),
+    ("max_trials 5", lambda d: d["universe"].update(max_trials=5), "max_trials"),
+    ("max_trials 3", lambda d: d["universe"].update(max_trials=3), "max_trials"),
+    ("extra variant trial", lambda d: d["universe"]["trials"].append(
+        {"order": 5, "hypothesis_label": "H1", "strategy_id": "pre_holiday_two_session_long_v1_variant", "symbol": "SPY"}),
+     "trial slots differ"),
+    ("reordered slots", lambda d: d["universe"]["trials"].reverse(), "trial slots differ"),
+    ("bad order fields", lambda d: [t.update(order=9) for t in d["universe"]["trials"]], "order fields"),
+    ("window drift", lambda d: d["partition"].update(test_months=6), "not the prior exposed window"),
+    ("declared count contradicts", lambda d: d["search_accounting"].update(cumulative_disclosed_search_count=118), "contradicts"),
+    ("declared operative contradicts", lambda d: d["search_accounting"].update(prior_native_trial_identities_operative=105), "contradicts"),
+    ("declared sensitivities contradict", lambda d: d["search_accounting"]["sensitivity_counts"].update(
+        UNIQUE_STRATEGY_ID_SYMBOL_PAIRS=105), "contradicts"),
+])
+def test_build_accounting_rejects_a_drifted_new_population_on_its_own(label, mutate, match):
+    with pytest.raises(ValueError, match=match):
+        sa.build_accounting(_drift(mutate))
+
+
+def test_the_shipped_declaration_is_accepted_and_the_checks_are_not_vacuous():
+    acc = sa.build_accounting(DECL)
+    assert acc["counts"]["new_trials"] == 4 and len(sa.validate_new_population(DECL)) == 4
+
+
+def test_an_omitted_or_phantom_prior_campaign_or_an_invalid_status_is_rejected(monkeypatch):
+    monkeypatch.setattr(sa, "PRIOR_DECLARATIONS", sa.PRIOR_DECLARATIONS[:-1])
+    with pytest.raises(ValueError, match="omitted from the accounting"):
+        sa.build_accounting(DECL)
+    monkeypatch.undo()
+    monkeypatch.setattr(sa, "PRIOR_DECLARATIONS", (*sa.PRIOR_DECLARATIONS, ("PREDECLARED_GHOST.json", sa.STATUS_REJECTED, True,
+                                                                          sa.PRIOR_DECLARATIONS[0][3])))
+    with pytest.raises(ValueError, match="accounted but absent"):
+        sa.build_accounting(DECL)
+    monkeypatch.undo()
+    bad = list(sa.PRIOR_DECLARATIONS)
+    bad[0] = (bad[0][0], "WINNER", True, bad[0][3])
+    monkeypatch.setattr(sa, "PRIOR_DECLARATIONS", tuple(bad))
+    with pytest.raises(ValueError, match="invalid prior status"):
+        sa.build_accounting(DECL)
+    monkeypatch.undo()
+    flipped = list(sa.PRIOR_DECLARATIONS)
+    flipped[5] = (flipped[5][0], flipped[5][1], True, flipped[5][3])  # a superseded v1 evaluation forced into the operative count
+    monkeypatch.setattr(sa, "PRIOR_DECLARATIONS", tuple(flipped))
+    with pytest.raises(ValueError, match="contradicts status"):
+        sa.build_accounting(DECL)
+    monkeypatch.undo()
+    missing_doc = list(sa.PRIOR_DECLARATIONS)
+    missing_doc[0] = (missing_doc[0][0], missing_doc[0][1], missing_doc[0][2], "docs/research/NOPE.md")
+    monkeypatch.setattr(sa, "PRIOR_DECLARATIONS", tuple(missing_doc))
+    with pytest.raises(ValueError, match="evidence document"):
+        sa.build_accounting(DECL)
+
+
+# ------------------------------------------------ what the numbers do and do not establish (E2)
+
+def test_declared_identities_are_not_called_registry_verified():
+    acc = sa.build_accounting(DECL)
+    assert acc["identity_basis"]["independently_verified_in_a_registry"] is None
+    assert acc["identity_basis"]["prior_trial_identities"] == "DECLARED_IN_FROZEN_DECLARATIONS"
+    assert all(r["identity_basis"] == "DECLARED_IN_FROZEN_DECLARATION" and r["registry_verified"] is False
+               for r in acc["prior_inventory"])
+
+
+def test_disclosure_and_validation_are_distinct_and_validation_is_blocked_with_a_named_blocker():
+    acc = sa.build_accounting(DECL)
+    sv = acc["statistical_validation"]
+    assert sv[sa.CUMULATIVE_SEARCH_DISCLOSED] == 119
+    assert sv["cumulative_search_status"] == sa.CUMULATIVE_SEARCH_VALIDATION_BLOCKED != sa.CUMULATIVE_SEARCH_VALIDATED
+    assert sv["statistical_acceptance_blocker"]["id"] == "SAB-1" and "not weakened" in sv["statistical_acceptance_blocker"]["effect"]
+    assert "NOT deflated" in sv[sa.FOUR_TRIAL_JUDGE_RESULT]
+    assert sa.cumulative_search_validation(acc) == sa.CUMULATIVE_SEARCH_VALIDATION_BLOCKED
+    assert sa.cumulative_search_validation({"pooled_statistics_support": {"status": "SUPPORTED"}}) == \
+        sa.CUMULATIVE_SEARCH_VALIDATION_BLOCKED, "only the exact verified status validates"
+    assert sa.cumulative_search_validation({}) == sa.CUMULATIVE_SEARCH_VALIDATION_BLOCKED
