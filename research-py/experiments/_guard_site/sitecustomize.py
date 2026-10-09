@@ -9,5 +9,4 @@ if _EXPERIMENTS not in sys.path:
     sys.path.insert(0, _EXPERIMENTS)
 import _netguard  # noqa: E402
 
-_netguard.install()
-_netguard.install_subprocess_guard()
+_netguard.install_child()

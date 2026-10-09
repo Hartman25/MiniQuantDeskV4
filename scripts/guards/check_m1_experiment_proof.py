@@ -68,6 +68,8 @@ def main(argv: list[str]) -> int:
         problems.append(f"offline guard recorded unexpected attempts: {summary.get('unexpected_attempts')!r}")
     if summary.get("unexpected_child_attempts") != 0:
         problems.append(f"offline guard recorded unexpected attempts by spawned children: {summary.get('unexpected_child_attempts')!r}")
+    if summary.get("uninitialized_children") != 0:
+        problems.append(f"offline guard: spawned children that never initialized the guard: {summary.get('uninitialized_children')!r}")
     if not isinstance(summary.get("attempted_total"), int) or summary["attempted_total"] < MIN_DELIBERATE_PROBES:
         problems.append(f"offline guard recorded {summary.get('attempted_total')!r} deliberate probes "
                         f"(< {MIN_DELIBERATE_PROBES}): it was not installed or did not run")

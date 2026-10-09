@@ -40,7 +40,7 @@ run_guard() { python3 "$GUARD" "$1" "$2" >"$WORK/out.txt" 2>&1; echo $?; }
 
 echo ""
 echo "check_m1_experiment_proof mutation-negative tests"
-GOOD='{"attempted_total": 7, "unexpected_attempts": 0, "unexpected_child_attempts": 0}'
+GOOD='{"attempted_total": 7, "unexpected_attempts": 0, "unexpected_child_attempts": 0, "uninitialized_children": 0}'
 
 make_junit "$WORK/ok.xml"; echo "$GOOD" > "$WORK/ok.json"
 [ "$(run_guard "$WORK/ok.xml" "$WORK/ok.json")" = 0 ] && pass M1P-A "intact run passes" || fail M1P-A "intact run rejected: $(cat "$WORK/out.txt")"
@@ -50,14 +50,18 @@ for m in skip fail drop trim; do
   [ "$(run_guard "$WORK/$m.xml" "$WORK/ok.json")" != 0 ] && pass "M1P-$m" "mutation '$m' is rejected" || fail "M1P-$m" "mutation '$m' passed"
 done
 
-echo '{"attempted_total": 7, "unexpected_attempts": 1, "unexpected_child_attempts": 0}' > "$WORK/dirty.json"
+echo '{"attempted_total": 7, "unexpected_attempts": 1, "unexpected_child_attempts": 0, "uninitialized_children": 0}' > "$WORK/dirty.json"
 [ "$(run_guard "$WORK/ok.xml" "$WORK/dirty.json")" != 0 ] && pass M1P-dirty "an unexpected network attempt is rejected" || fail M1P-dirty "dirty summary passed"
-echo '{"attempted_total": 0, "unexpected_attempts": 0, "unexpected_child_attempts": 0}' > "$WORK/inert.json"
+echo '{"attempted_total": 0, "unexpected_attempts": 0, "unexpected_child_attempts": 0, "uninitialized_children": 0}' > "$WORK/inert.json"
 [ "$(run_guard "$WORK/ok.xml" "$WORK/inert.json")" != 0 ] && pass M1P-inert "an offline guard that recorded no probe (not installed) is rejected" || fail M1P-inert "inert guard passed"
-echo '{"attempted_total": 7, "unexpected_attempts": 1, "unexpected_child_attempts": 1}' > "$WORK/childdirty.json"
+echo '{"attempted_total": 7, "unexpected_attempts": 1, "unexpected_child_attempts": 1, "uninitialized_children": 0}' > "$WORK/childdirty.json"
 [ "$(run_guard "$WORK/ok.xml" "$WORK/childdirty.json")" != 0 ] && pass M1P-child "an unexpected attempt by a spawned child is rejected" || fail M1P-child "child attempt passed"
-echo '{"attempted_total": 7, "unexpected_attempts": 0}' > "$WORK/nochildkey.json"
+echo '{"attempted_total": 7, "unexpected_attempts": 0, "unexpected_child_attempts": 0}' > "$WORK/nochildkey.json"
 [ "$(run_guard "$WORK/ok.xml" "$WORK/nochildkey.json")" != 0 ] && pass M1P-nochildkey "a summary without child accounting (guard predates child inheritance) is rejected" || fail M1P-nochildkey "summary lacking child accounting passed"
+echo '{"attempted_total": 7, "unexpected_attempts": 1, "unexpected_child_attempts": 0, "uninitialized_children": 1}' > "$WORK/ghost.json"
+[ "$(run_guard "$WORK/ok.xml" "$WORK/ghost.json")" != 0 ] && pass M1P-ghost "a spawned child that never initialized the guard is rejected" || fail M1P-ghost "uninitialized child passed"
+echo '{"attempted_total": 7, "unexpected_attempts": 0, "unexpected_child_attempts": 0}' > "$WORK/noghostkey.json"
+[ "$(run_guard "$WORK/ok.xml" "$WORK/noghostkey.json")" != 0 ] && pass M1P-noghostkey "a summary without child-initialization accounting is rejected" || fail M1P-noghostkey "summary lacking initialization accounting passed"
 [ "$(run_guard "$WORK/ok.xml" "$WORK/absent.json")" != 0 ] && pass M1P-nosummary "a missing summary is rejected" || fail M1P-nosummary "missing summary passed"
 [ "$(run_guard "$WORK/absent.xml" "$WORK/ok.json")" != 0 ] && pass M1P-nojunit "a missing junit report is rejected" || fail M1P-nojunit "missing junit passed"
 
