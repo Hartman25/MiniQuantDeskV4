@@ -99,6 +99,24 @@ def _require_known_provider(provider_id: str) -> ProviderCapabilityRecord:
     return record
 
 
+def _require_utc_instant(label: str, value: Optional[str]) -> pd.Timestamp:
+    """Strict UTC-instant parsing: rejects None/empty, unparseable strings,
+    NaT, and naive (non-timezone-aware) timestamps -- never silently lets a
+    malformed `as_of`/event timestamp slip through a comparison where NaT
+    would otherwise just evaluate False and let an event through."""
+    if value is None or not isinstance(value, str) or not value.strip():
+        raise AltDataProvenanceError(f"{label} is missing/empty — a UTC instant is required")
+    try:
+        ts = pd.Timestamp(value)
+    except (ValueError, TypeError) as exc:
+        raise AltDataProvenanceError(f"{label} is not a parseable timestamp: {value!r}: {exc}") from exc
+    if pd.isna(ts):
+        raise AltDataProvenanceError(f"{label} parsed to NaT (not-a-time): {value!r}")
+    if ts.tzinfo is None:
+        raise AltDataProvenanceError(f"{label} must be timezone-aware/UTC, got a naive timestamp: {value!r}")
+    return ts
+
+
 def fetch_from_provider(provider_id: str, **_kwargs: Any) -> None:
     """Always refuses. There is no provider in `PROVIDER_CAPABILITIES` that
     is currently both `api_available` and `license_status ==
@@ -129,9 +147,13 @@ class AltDataEvent:
       - event_datetime_utc: when the underlying economic event actually
         happened (e.g. the date of a congressional trade, or the fiscal
         period a statement covers).
-      - public_disclosure_datetime_utc: when it became PUBLICLY knowable
-        (e.g. the filing/disclosure date) — this, never event_datetime_utc,
-        is what gates availability to a strategy.
+      - public_disclosure_datetime_utc: when the event was FIRST publicly
+        knowable (e.g. the original filing/disclosure date).
+      - revision_publication_datetime_utc: when THIS SPECIFIC payload
+        revision became public, if different from the first disclosure
+        (a later restatement/correction). Required whenever
+        data_revision_version > 1 -- fail closed rather than assume a
+        restated revision was knowable as of the original disclosure date.
       - provider_ingestion_timestamp_utc: when our own system observed it.
       - data_revision_version: a later correction/restatement of the SAME
         logical event is a new revision, not a silent overwrite.
@@ -147,17 +169,13 @@ class AltDataEvent:
     original_source_id: str
     raw_payload: Mapping[str, Any]
     license_status: LicenseStatus = LicenseStatus.UNKNOWN
+    revision_publication_datetime_utc: Optional[str] = None
 
     def validate(self) -> None:
         if not self.instrument_identity or not self.instrument_identity.strip():
             raise AltDataProvenanceError("instrument_identity is empty/ambiguous")
         if self.event_category == EventCategory.UNKNOWN:
             raise AltDataProvenanceError("event_category must be a known, supported category")
-        if self.public_disclosure_datetime_utc is None:
-            raise AltDataProvenanceError(
-                "public_disclosure_datetime_utc is missing/unknown — cannot gate availability "
-                "without it (fail closed rather than assume immediately available)"
-            )
         if self.data_revision_version < 1:
             raise AltDataProvenanceError("data_revision_version must be >= 1")
         try:
@@ -165,6 +183,38 @@ class AltDataEvent:
         except TypeError as exc:
             raise AltDataProvenanceError(f"raw_payload is not JSON-serializable: {exc}") from exc
         _require_known_provider(self.provider_id)
+
+        event_ts = _require_utc_instant("event_datetime_utc", self.event_datetime_utc)
+        disclosure_ts = _require_utc_instant("public_disclosure_datetime_utc", self.public_disclosure_datetime_utc)
+        if event_ts > disclosure_ts:
+            raise AltDataProvenanceError(
+                f"event_datetime_utc ({self.event_datetime_utc!r}) is after "
+                f"public_disclosure_datetime_utc ({self.public_disclosure_datetime_utc!r}) — "
+                "an event cannot be disclosed before it happens"
+            )
+
+        if self.data_revision_version > 1 and self.revision_publication_datetime_utc is None:
+            raise AltDataProvenanceError(
+                f"data_revision_version={self.data_revision_version} but revision_publication_datetime_utc "
+                "is missing — when a payload has been restated, its OWN publication time must be proven; "
+                "fail closed rather than assume it was knowable as of the original disclosure date"
+            )
+        if self.revision_publication_datetime_utc is not None:
+            revision_ts = _require_utc_instant("revision_publication_datetime_utc", self.revision_publication_datetime_utc)
+            if revision_ts < disclosure_ts:
+                raise AltDataProvenanceError(
+                    f"revision_publication_datetime_utc ({self.revision_publication_datetime_utc!r}) is before "
+                    f"public_disclosure_datetime_utc ({self.public_disclosure_datetime_utc!r}) — "
+                    "a revision cannot be published before the original disclosure"
+                )
+
+    @property
+    def effective_publication_datetime_utc(self) -> str:
+        """The timestamp that actually gates availability of THIS payload
+        revision: its own revision publication time if proven, else the
+        original disclosure time (valid for revision 1, or any revision
+        whose own publication time coincides with the original disclosure)."""
+        return self.revision_publication_datetime_utc or self.public_disclosure_datetime_utc
 
     def content_fields(self) -> Dict[str, Any]:
         """The content that defines this event's identity. Deliberately
@@ -177,6 +227,7 @@ class AltDataEvent:
             "instrument_identity": self.instrument_identity,
             "event_datetime_utc": self.event_datetime_utc,
             "public_disclosure_datetime_utc": self.public_disclosure_datetime_utc,
+            "revision_publication_datetime_utc": self.revision_publication_datetime_utc,
             "data_revision_version": self.data_revision_version,
             "original_source_id": self.original_source_id,
             "raw_payload": dict(self.raw_payload),
@@ -192,28 +243,50 @@ class AltDataEvent:
 def require_point_in_time_available(event: AltDataEvent, *, as_of_utc: str) -> None:
     """
     Fail-closed gate: a strategy evaluating "as of" `as_of_utc` must never
-    see an event before it was actually publicly knowable. Compares against
-    `public_disclosure_datetime_utc` — never `event_datetime_utc`, which may
-    legitimately be much earlier (e.g. a congressional trade's execution
-    date, long before its disclosure filing).
+    see an event before THIS SPECIFIC revision was actually publicly
+    knowable. Compares against `effective_publication_datetime_utc` (the
+    revision's own publication time when proven, else the original
+    disclosure) — never `event_datetime_utc`, which may legitimately be
+    much earlier (e.g. a congressional trade's execution date, long before
+    its disclosure filing).
     """
     event.validate()
-    # Parsed comparison (not lexical string comparison), so differing valid
-    # ISO-8601 representations (e.g. trailing "Z" vs "+00:00", with/without
-    # fractional seconds) can never flip the ordering.
-    if pd.Timestamp(as_of_utc) < pd.Timestamp(event.public_disclosure_datetime_utc):
+    # Strict parsed comparison (never a raw string/NaT comparison): a
+    # malformed or naive `as_of_utc` raises here rather than silently
+    # letting an event through because a NaT comparison evaluates False.
+    as_of_ts = _require_utc_instant("as_of_utc", as_of_utc)
+    effective_ts = _require_utc_instant(
+        "effective_publication_datetime_utc", event.effective_publication_datetime_utc
+    )
+    if as_of_ts < effective_ts:
         raise AltDataProvenanceError(
             f"event {event.event_id()[:16]} is not yet knowable as of {as_of_utc!r} "
-            f"(public_disclosure_datetime_utc={event.public_disclosure_datetime_utc!r})"
+            f"(effective_publication_datetime_utc={event.effective_publication_datetime_utc!r})"
         )
 
 
 def require_licensed_for_research(event: AltDataEvent) -> None:
+    """
+    Fail-closed gate requiring BOTH verified provider-level authority AND
+    event-level rights. A caller constructing an event with
+    license_status=LICENSED_FOR_RESEARCH cannot, by itself, confer license
+    authority a provider does not actually have (D1) — e.g. a caller-built
+    `stocknest` event claiming licensed status still refuses, because the
+    provider's own registry entry (PROVIDER_CAPABILITIES) stays unlicensed
+    until real authorization evidence exists.
+    """
     event.validate()
+    provider_record = _require_known_provider(event.provider_id)
+    if provider_record.license_status != LicenseStatus.LICENSED_FOR_RESEARCH:
+        raise AltDataProvenanceError(
+            f"provider {event.provider_id!r} is not verified licensed for research "
+            f"(provider license_status={provider_record.license_status.value}) — "
+            "an event cannot confer license authority a provider does not have"
+        )
     if event.license_status != LicenseStatus.LICENSED_FOR_RESEARCH:
         raise AltDataProvenanceError(
-            f"event from provider {event.provider_id!r} is not verified licensed for research "
-            f"(license_status={event.license_status.value})"
+            f"event from provider {event.provider_id!r} is not itself verified licensed "
+            f"(event license_status={event.license_status.value})"
         )
 
 

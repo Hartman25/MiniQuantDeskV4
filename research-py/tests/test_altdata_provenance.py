@@ -11,6 +11,7 @@ from mqk_research.data.altdata_provenance import (
     AltDataProvenanceError,
     EventCategory,
     LicenseStatus,
+    ProviderCapabilityRecord,
     ProviderUnavailableError,
     deduplicate_events,
     fetch_from_provider,
@@ -84,7 +85,7 @@ def test_unknown_event_category_fails_closed():
 
 
 def test_missing_public_disclosure_time_fails_closed():
-    with pytest.raises(AltDataProvenanceError, match="missing/unknown"):
+    with pytest.raises(AltDataProvenanceError, match="missing/empty"):
         _event(public_disclosure_datetime_utc=None).validate()
 
 
@@ -172,7 +173,10 @@ def test_identical_events_deduplicate_to_one_entry():
 
 def test_conflicting_revisions_are_distinguished_not_merged():
     e_rev1 = _event(data_revision_version=1, raw_payload={"metric": "pe_ratio", "value": 25.0})
-    e_rev2 = _event(data_revision_version=2, raw_payload={"metric": "pe_ratio", "value": 26.0})  # restated
+    e_rev2 = _event(
+        data_revision_version=2, raw_payload={"metric": "pe_ratio", "value": 26.0},  # restated
+        revision_publication_datetime_utc="2026-02-01T00:00:00Z",
+    )
     deduped = deduplicate_events([e_rev1, e_rev2])
     assert len(deduped) == 2
     assert e_rev1.event_id() != e_rev2.event_id()
@@ -228,3 +232,145 @@ def test_require_point_in_time_available_does_not_mutate_the_event():
     assert ev.event_id() == before
     assert ev.event_datetime_utc == "2026-01-01T00:00:00Z"
     assert ev.public_disclosure_datetime_utc == "2026-01-15T00:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# D1: economic use requires BOTH verified provider-level authority AND
+# event-level rights -- a caller cannot confer license authority a
+# provider does not have by self-declaring it on an event object.
+# ---------------------------------------------------------------------------
+
+def test_caller_declared_license_on_a_disabled_provider_still_refuses():
+    # stocknest is disabled in PROVIDER_CAPABILITIES; a caller-constructed
+    # event claiming LICENSED_FOR_RESEARCH must not bypass that.
+    ev = _event(license_status=LicenseStatus.LICENSED_FOR_RESEARCH)
+    assert PROVIDER_CAPABILITIES["stocknest"].license_status != LicenseStatus.LICENSED_FOR_RESEARCH
+    with pytest.raises(AltDataProvenanceError, match="provider .* is not verified licensed"):
+        require_licensed_for_research(ev)
+
+
+def test_licensed_provider_but_unlicensed_event_still_refuses(monkeypatch):
+    # Independently exercise the OTHER half of the AND: even if the
+    # provider itself were licensed, an event that doesn't itself declare
+    # LICENSED_FOR_RESEARCH must still refuse.
+    licensed_providers = dict(PROVIDER_CAPABILITIES)
+    licensed_providers["test_licensed_provider"] = ProviderCapabilityRecord(
+        provider_id="test_licensed_provider", api_available=True,
+        license_status=LicenseStatus.LICENSED_FOR_RESEARCH,
+        verified_at_utc="2026-01-01T00:00:00Z", verification_method="test_fixture", notes="test only",
+    )
+    monkeypatch.setattr(adp, "PROVIDER_CAPABILITIES", licensed_providers)
+    ev = _event(provider_id="test_licensed_provider", license_status=LicenseStatus.UNLICENSED_FOR_RESEARCH)
+    with pytest.raises(AltDataProvenanceError, match="event from provider .* is not itself verified licensed"):
+        require_licensed_for_research(ev)
+
+
+def test_both_provider_and_event_licensed_succeeds(monkeypatch):
+    licensed_providers = dict(PROVIDER_CAPABILITIES)
+    licensed_providers["test_licensed_provider"] = ProviderCapabilityRecord(
+        provider_id="test_licensed_provider", api_available=True,
+        license_status=LicenseStatus.LICENSED_FOR_RESEARCH,
+        verified_at_utc="2026-01-01T00:00:00Z", verification_method="test_fixture", notes="test only",
+    )
+    monkeypatch.setattr(adp, "PROVIDER_CAPABILITIES", licensed_providers)
+    ev = _event(provider_id="test_licensed_provider", license_status=LicenseStatus.LICENSED_FOR_RESEARCH)
+    require_licensed_for_research(ev)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# D2: a restated/revised payload must prove ITS OWN publication time; the
+# original disclosure date alone cannot gate a later revision.
+# ---------------------------------------------------------------------------
+
+def test_revision_without_its_own_publication_time_fails_closed():
+    ev = _event(data_revision_version=2, revision_publication_datetime_utc=None)
+    with pytest.raises(AltDataProvenanceError, match="revision_publication_datetime_utc"):
+        ev.validate()
+
+
+def test_revision_gated_by_its_own_later_publication_time_not_the_original_disclosure():
+    ev = _event(
+        public_disclosure_datetime_utc="2026-01-15T00:00:00Z",
+        data_revision_version=2,
+        revision_publication_datetime_utc="2026-03-01T00:00:00Z",  # restated much later
+    )
+    # Available right after the ORIGINAL disclosure date would be wrong for
+    # this revision -- it wasn't knowable yet.
+    with pytest.raises(AltDataProvenanceError, match="not yet knowable"):
+        require_point_in_time_available(ev, as_of_utc="2026-01-16T00:00:00Z")
+    # Only becomes available once as_of passes the REVISION's own publication date.
+    require_point_in_time_available(ev, as_of_utc="2026-03-02T00:00:00Z")
+
+
+def test_revision_one_without_an_explicit_revision_publication_time_is_fine():
+    # Revision 1 has no separate restatement -- falls back to the original
+    # disclosure date, preserving pre-existing behavior.
+    ev = _event(data_revision_version=1, revision_publication_datetime_utc=None)
+    ev.validate()  # must not raise
+    assert ev.effective_publication_datetime_utc == ev.public_disclosure_datetime_utc
+
+
+def test_revision_publication_before_original_disclosure_fails_closed():
+    ev = _event(
+        public_disclosure_datetime_utc="2026-01-15T00:00:00Z",
+        data_revision_version=2,
+        revision_publication_datetime_utc="2026-01-01T00:00:00Z",  # before the original disclosure
+    )
+    with pytest.raises(AltDataProvenanceError, match="before"):
+        ev.validate()
+
+
+# ---------------------------------------------------------------------------
+# D3: strict UTC timestamp parsing -- malformed/naive/NaT values must
+# never silently pass a comparison.
+# ---------------------------------------------------------------------------
+
+def test_as_of_utc_none_fails_closed():
+    ev = _event()
+    with pytest.raises(AltDataProvenanceError, match="missing/empty"):
+        require_point_in_time_available(ev, as_of_utc=None)  # type: ignore[arg-type]
+
+
+def test_as_of_utc_empty_string_fails_closed():
+    ev = _event()
+    with pytest.raises(AltDataProvenanceError, match="missing/empty"):
+        require_point_in_time_available(ev, as_of_utc="")
+
+
+def test_as_of_utc_malformed_fails_closed():
+    ev = _event()
+    with pytest.raises(AltDataProvenanceError, match="not a parseable timestamp"):
+        require_point_in_time_available(ev, as_of_utc="not-a-timestamp")
+
+
+def test_as_of_utc_naive_timestamp_fails_closed():
+    ev = _event()
+    with pytest.raises(AltDataProvenanceError, match="timezone-aware"):
+        require_point_in_time_available(ev, as_of_utc="2026-01-20T00:00:00")  # no tz
+
+
+def test_event_datetime_after_disclosure_fails_closed():
+    ev = _event(event_datetime_utc="2026-02-01T00:00:00Z", public_disclosure_datetime_utc="2026-01-15T00:00:00Z")
+    with pytest.raises(AltDataProvenanceError, match="cannot be disclosed before it happens"):
+        ev.validate()
+
+
+def test_malformed_event_datetime_fails_closed():
+    ev = _event(event_datetime_utc="not-a-timestamp")
+    with pytest.raises(AltDataProvenanceError, match="not a parseable timestamp"):
+        ev.validate()
+
+
+def test_naive_public_disclosure_timestamp_fails_closed():
+    ev = _event(public_disclosure_datetime_utc="2026-01-15T00:00:00")  # no tz
+    with pytest.raises(AltDataProvenanceError, match="timezone-aware"):
+        ev.validate()
+
+
+# ---------------------------------------------------------------------------
+# D4: re-verify fetch_from_provider stays fully disabled after D1-D3.
+# ---------------------------------------------------------------------------
+
+def test_fetch_from_provider_still_has_no_success_path_after_corrections():
+    with pytest.raises(ProviderUnavailableError):
+        fetch_from_provider("stocknest")
