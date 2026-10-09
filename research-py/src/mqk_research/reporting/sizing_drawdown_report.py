@@ -71,10 +71,18 @@ class SizingReportSpec:
         if not float(self.trading_days_per_year).is_integer() or int(self.trading_days_per_year) <= 0:
             raise SizingReportError("trading_days_per_year must be a positive integer")
 
+        if not isinstance(self.compounding, bool):
+            # bool("false") is True (any non-empty string is truthy) --
+            # the old blind bool(...) coercion would have silently enabled
+            # compounding for a caller who passed the STRING "false".
+            raise SizingReportError(
+                f"compounding must be a real bool, not {type(self.compounding).__name__}: {self.compounding!r}"
+            )
+
         return SizingReportSpec(
             initial_strategy_capital_usd=float(self.initial_strategy_capital_usd),
             capital_fraction_bps=bps,
-            compounding=bool(self.compounding),
+            compounding=self.compounding,  # already proven a real bool above; no coercion
             trading_days_per_year=int(self.trading_days_per_year),
         )
 
@@ -145,6 +153,10 @@ class TradeRecord:
                 f"trade {self.trade_id}: unsupported instrument multiplier {self.multiplier!r}; "
                 f"only {_SUPPORTED_MULTIPLIER!r} is supported"
             )
+        if not self.trade_id or not self.trade_id.strip():
+            raise SizingReportError("trade_id must be a non-empty string")
+        if not self.symbol or not self.symbol.strip():
+            raise SizingReportError(f"trade {self.trade_id}: symbol must be a non-empty string")
         if self.side not in ("long", "short"):
             raise SizingReportError(f"trade {self.trade_id}: unsupported side {self.side!r}")
 
@@ -156,21 +168,23 @@ class TradeRecord:
 
         if self.exit_ts is not None and self.exit_price is None:
             raise SizingReportError(f"trade {self.trade_id}: exit_ts present but exit_price missing/invalid")
+        if self.exit_price is not None and self.exit_ts is None:
+            raise SizingReportError(f"trade {self.trade_id}: exit_price present but exit_ts missing")
 
-        try:
-            entry_ts_parsed = pd.Timestamp(self.entry_ts)
-        except (ValueError, TypeError) as exc:
-            raise SizingReportError(f"trade {self.trade_id}: entry_ts is not a parseable timestamp: {self.entry_ts!r}") from exc
-        if pd.isna(entry_ts_parsed):
-            raise SizingReportError(f"trade {self.trade_id}: entry_ts parsed to NaT: {self.entry_ts!r}")
-
-        if self.exit_ts is not None:
+        def _parse_aware(label: str, value: str) -> pd.Timestamp:
             try:
-                exit_ts_parsed = pd.Timestamp(self.exit_ts)
+                ts = pd.Timestamp(value)
             except (ValueError, TypeError) as exc:
-                raise SizingReportError(f"trade {self.trade_id}: exit_ts is not a parseable timestamp: {self.exit_ts!r}") from exc
-            if pd.isna(exit_ts_parsed):
-                raise SizingReportError(f"trade {self.trade_id}: exit_ts parsed to NaT: {self.exit_ts!r}")
+                raise SizingReportError(f"trade {self.trade_id}: {label} is not a parseable timestamp: {value!r}") from exc
+            if pd.isna(ts):
+                raise SizingReportError(f"trade {self.trade_id}: {label} parsed to NaT: {value!r}")
+            if ts.tzinfo is None:
+                raise SizingReportError(f"trade {self.trade_id}: {label} must be timezone-aware/UTC, got naive: {value!r}")
+            return ts
+
+        entry_ts_parsed = _parse_aware("entry_ts", self.entry_ts)
+        if self.exit_ts is not None:
+            exit_ts_parsed = _parse_aware("exit_ts", self.exit_ts)
             if exit_ts_parsed < entry_ts_parsed:
                 raise SizingReportError(
                     f"trade {self.trade_id}: exit_ts ({self.exit_ts!r}) is before entry_ts ({self.entry_ts!r})"
@@ -219,6 +233,20 @@ def _require_equity_columns(eq: pd.DataFrame, *, label: str) -> None:
     if not np.all(np.isfinite(equity_values)):
         raise SizingReportError(f"{label} equity curve contains NaN/Infinity — every observation must be finite")
 
+    parsed_ts = []
+    for v in eq["ts"]:
+        try:
+            ts = pd.Timestamp(v)
+        except (ValueError, TypeError) as exc:
+            raise SizingReportError(f"{label} equity curve has an unparseable timestamp {v!r}: {exc}") from exc
+        if pd.isna(ts):
+            raise SizingReportError(f"{label} equity curve has a NaT timestamp: {v!r}")
+        if ts.tzinfo is None:
+            raise SizingReportError(f"{label} equity curve timestamp must be timezone-aware/UTC, got naive: {v!r}")
+        parsed_ts.append(ts)
+    if len(set(parsed_ts)) != len(parsed_ts):
+        raise SizingReportError(f"{label} equity curve contains duplicate timestamps")
+
 
 def _time_underwater_seconds(eq: pd.DataFrame) -> Optional[float]:
     """Longest span between a new equity peak and the point equity recovers to
@@ -262,54 +290,105 @@ def _aggregate_partial_fills(trades: List[TradeRecord]) -> Dict[str, float]:
     return agg
 
 
+def _validate_trade_groups(trades: List[TradeRecord]) -> None:
+    """Fail-closed structural checks the mathematical functions below rely
+    on silently: unique fill ids, no orphan `partial_fill_of` reference,
+    and internally-consistent symbol/side within one logical position."""
+    seen_ids: Dict[str, TradeRecord] = {}
+    for t in trades:
+        if t.trade_id in seen_ids:
+            raise SizingReportError(f"duplicate trade_id {t.trade_id!r}: fill ids must be unique")
+        seen_ids[t.trade_id] = t
+
+    all_ids = set(seen_ids.keys())
+    groups: Dict[str, List[TradeRecord]] = {}
+    for t in trades:
+        if t.partial_fill_of is not None and t.partial_fill_of not in all_ids:
+            raise SizingReportError(
+                f"trade {t.trade_id}: partial_fill_of={t.partial_fill_of!r} does not reference any "
+                "existing trade_id in this trade list (orphan group)"
+            )
+        key = t.partial_fill_of or t.trade_id
+        groups.setdefault(key, []).append(t)
+
+    for key, fills in groups.items():
+        symbols = {f.symbol for f in fills}
+        sides = {f.side for f in fills}
+        if len(symbols) > 1:
+            raise SizingReportError(f"logical position {key!r}: inconsistent symbol across fills: {sorted(symbols)}")
+        if len(sides) > 1:
+            raise SizingReportError(f"logical position {key!r}: inconsistent side across fills: {sorted(sides)}")
+
+
 def _concentration_and_concurrency(trades: List[TradeRecord]) -> Dict[str, Any]:
     """Max concurrent open LOGICAL positions (partial fills of the same
     position collapse to one, via `partial_fill_of`), and the largest
     single-position share of total open notional *at the moment(s)
     concurrency peaks* — not the global max share, which is trivially 1.0
-    whenever a lone position ever exists (e.g. at the start of the very
-    first trade).
+    whenever a lone position ever exists.
 
-    A logical position opens at the earliest fill's entry_ts. It only
-    closes if EVERY fill in the group is closed, at the latest fill's
-    exit_ts; if any fill is still open, the whole logical position is
-    treated as open (no invented partial-close instant)."""
+    CAUSAL per-fill accumulation (FW-B3-R2): a logical position's exposure
+    is a running sum of its OWN fills, each contributing its own notional
+    only from its own entry_ts onward (and removing it again at its own
+    exit_ts, if closed) — never the group's full eventual notional
+    backdated to the group's earliest fill. A later add to an existing
+    position does not retroactively inflate its exposure at an earlier
+    point in time. Entry-notional-based throughout (this is explicitly NOT
+    a mark-to-market valuation).
+
+    Events at the exact same timestamp are applied as one batch before a
+    snapshot is taken (never one snapshot per individual event at a single
+    instant); within a batch, closes are applied before opens, matching
+    the existing tie-break convention. A logical position with any fill
+    still open never drops out of `open_notional` (partial closes reduce
+    its running notional but do not end it)."""
     if not trades:
         return {"max_concurrent_positions": 0, "concentration_pct_at_max_concurrency": None}
 
-    groups: Dict[str, List[TradeRecord]] = {}
+    # (timestamp, kind, key, delta)  kind: 0=remove (close), 1=add (open) —
+    # close sorts before open at an identical timestamp, same convention
+    # as before.
+    events: List[Any] = []
     for t in trades:
         key = t.partial_fill_of or t.trade_id
-        groups.setdefault(key, []).append(t)
-
-    events = []
-    for key, fills in groups.items():
-        notional = sum(f.notional_usd for f in fills)
-        open_ts = min(pd.Timestamp(f.entry_ts) for f in fills)
-        events.append((open_ts, 1, key, notional))  # open sorts after close at same ts
-        if all(f.is_closed for f in fills):
-            close_ts = max(pd.Timestamp(f.exit_ts) for f in fills)
-            events.append((close_ts, 0, key, notional))  # close
+        events.append((pd.Timestamp(t.entry_ts), 1, key, t.notional_usd))
+        if t.is_closed:
+            events.append((pd.Timestamp(t.exit_ts), 0, key, -t.notional_usd))
     events.sort(key=lambda e: (e[0], e[1]))
 
+    _EPS = 1e-9
     open_notional: Dict[str, float] = {}
-    snapshots: List[tuple] = []
-    for _, kind, tid, notional in events:
-        if kind == 1:
-            open_notional[tid] = notional
-        else:
-            open_notional.pop(tid, None)
-        total = sum(open_notional.values())
-        share = (max(open_notional.values()) / total) if total > 0 else None
-        snapshots.append((len(open_notional), share))
+    max_concurrent = 0
+    best_share_at_max: Optional[float] = None
 
-    max_concurrent = max((c for c, _ in snapshots), default=0)
-    shares_at_max = [s for c, s in snapshots if c == max_concurrent and s is not None]
-    concentration_at_max = max(shares_at_max) if shares_at_max else None
+    i = 0
+    while i < len(events):
+        batch_ts = events[i][0]
+        j = i
+        while j < len(events) and events[j][0] == batch_ts:
+            _, _, key, delta = events[j]
+            open_notional[key] = open_notional.get(key, 0.0) + delta
+            if abs(open_notional[key]) <= _EPS:
+                del open_notional[key]
+            j += 1
+        i = j
+
+        concurrency = len(open_notional)
+        if concurrency > 0:
+            total = sum(open_notional.values())
+            share = (max(open_notional.values()) / total) if total > 0 else None
+        else:
+            share = None
+
+        if concurrency > max_concurrent:
+            max_concurrent = concurrency
+            best_share_at_max = share
+        elif concurrency == max_concurrent and concurrency > 0 and share is not None:
+            best_share_at_max = share if best_share_at_max is None else max(best_share_at_max, share)
 
     return {
         "max_concurrent_positions": max_concurrent,
-        "concentration_pct_at_max_concurrency": float(concentration_at_max) if concentration_at_max is not None else None,
+        "concentration_pct_at_max_concurrency": float(best_share_at_max) if best_share_at_max is not None else None,
     }
 
 
@@ -342,9 +421,16 @@ def _trade_content_hash(trades: List[TradeRecord]) -> Optional[str]:
 
 
 def _equity_curve_content_hash(eq: Optional[pd.DataFrame]) -> Optional[str]:
+    """Canonical over normalized UTC instant/value pairs, sorted by
+    timestamp — independent of the incoming row order and of superficial
+    timestamp string-format differences that represent the identical
+    instant (e.g. a trailing "Z" vs "+00:00")."""
     if eq is None or not len(eq):
         return None
-    records = [{"ts": str(row["ts"]), "equity": float(row["equity"])} for _, row in eq.iterrows()]
+    records = sorted(
+        ({"ts": pd.Timestamp(row["ts"]).isoformat(), "equity": float(row["equity"])} for _, row in eq.iterrows()),
+        key=lambda r: r["ts"],
+    )
     return sha256_json(records)
 
 
@@ -364,6 +450,7 @@ def compute_sizing_drawdown_report(
     spec = (spec or SizingReportSpec()).normalized()
     for t in trades:
         t.validate()
+    _validate_trade_groups(trades)
 
     _require_equity_columns(strategy_equity, label="strategy")
     perf_spec = PerfSpec(trading_days_per_year=spec.trading_days_per_year)
@@ -371,7 +458,11 @@ def compute_sizing_drawdown_report(
     strategy_time_underwater_s = _time_underwater_seconds(strategy_equity)
     strategy_insolvent = bool(np.any(strategy_equity["equity"].to_numpy(dtype=np.float64) <= 0.0))
 
-    if account_equity is not None and len(account_equity):
+    # `None` means "not supplied" (-> not_provided, below). Anything else
+    # -- including an explicitly-supplied but EMPTY DataFrame -- was
+    # supplied and must fail closed like any other invalid equity curve
+    # (FW-B5-R4); `_require_equity_columns` already rejects zero rows.
+    if account_equity is not None:
         _require_equity_columns(account_equity, label="account")
         account_metrics = _sanitize_metrics(_equity_metrics(account_equity, "equity", perf_spec))
         account_block: Dict[str, Any] = {

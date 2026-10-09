@@ -654,3 +654,244 @@ def test_module_does_not_import_subprocess_network_or_native_cli_paths():
     src = inspect.getsource(sdr)
     for forbidden in ("subprocess", "requests", "httpx", "socket", "mqk-cli", "mqk_cli"):
         assert forbidden not in src, f"unexpected production/network/native reference: {forbidden!r}"
+
+
+# ---------------------------------------------------------------------------
+# FW-B3-R2 (surgical closeout 02): causal per-timestamp notional
+# accumulation. The PREVIOUS fix grouped fills into logical positions
+# correctly, but then summed ALL of a group's fills' notional (including
+# fills that haven't happened yet) and backdated the total to the group's
+# EARLIEST fill. Exact oracle from the review: logical A fills $100 Jan1
+# (never closes) and $900 Jan10 (never closes); logical B fills $100
+# Jan2, closes Jan3. At peak concurrency (2, during Jan2-Jan3), the TRUE
+# entry-notional concentration is 0.50 (A=$100 vs B=$100 at that time);
+# the previous bug reported 0.90909 (it had already backdated A's future
+# $900 add to Jan1).
+# ---------------------------------------------------------------------------
+
+def test_b3_oracle_exact_fixed_expected_value_not_just_result_to_result():
+    a_fill1 = _trade(trade_id="A1", qty=1.0, entry_price=100.0, entry_ts="2026-01-01T00:00:00Z")
+    a_fill2 = _trade(trade_id="A2", partial_fill_of="A1", qty=1.0, entry_price=900.0, entry_ts="2026-01-10T00:00:00Z")
+    b_fill = _trade(trade_id="B1", qty=1.0, entry_price=100.0, entry_ts="2026-01-02T00:00:00Z",
+                     exit_ts="2026-01-03T00:00:00Z", exit_price=100.0)
+    eq = _curve([100_000] * 10, start="2026-01-01")
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[a_fill1, a_fill2, b_fill])
+    assert report["trades"]["max_concurrent_positions"] == 2
+    # Fixed literal expected value -- not a result-to-result comparison.
+    assert report["trades"]["concentration_pct_at_max_concurrency"] == pytest.approx(0.50)
+    # Negative assertion against the PREVIOUS (buggy) value, so a mutant
+    # that reintroduces the backdating bug is caught even if 0.50 were
+    # coincidentally produced some other wrong way.
+    assert report["trades"]["concentration_pct_at_max_concurrency"] != pytest.approx(0.90909, abs=1e-4)
+
+
+def test_b3_partial_close_before_a_later_add_stays_open_at_reduced_notional():
+    # fill1 (group A1) opens Jan1 notional=500, closes Jan5.
+    # fill2 (group A1, partial_fill_of) opens Jan3 notional=300, closes Jan10.
+    # At Jan5 (fill1 closes), the group must NOT fully close -- fill2 is
+    # still open, so the position's running notional drops to 300, not 0.
+    fill1 = _trade(trade_id="A1", qty=5.0, entry_price=100.0, entry_ts="2026-01-01T00:00:00Z",
+                    exit_ts="2026-01-05T00:00:00Z", exit_price=100.0)
+    fill2 = _trade(trade_id="A2", partial_fill_of="A1", qty=3.0, entry_price=100.0, entry_ts="2026-01-03T00:00:00Z",
+                    exit_ts="2026-01-10T00:00:00Z", exit_price=100.0)
+    other = _trade(trade_id="B1", qty=1.0, entry_price=1000.0, entry_ts="2026-01-06T00:00:00Z")  # still open
+    eq = _curve([100_000] * 10, start="2026-01-01")
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[fill1, fill2, other])
+    # Group A1 stays open past Jan5 (fill2 still active) and is concurrent
+    # with B1 (opens Jan6) -> 2 concurrent positions, not sequential.
+    assert report["trades"]["max_concurrent_positions"] == 2
+
+
+def test_b3_simultaneous_open_and_close_at_the_same_instant_is_deterministic():
+    closing = _trade(trade_id="X1", qty=1.0, entry_price=100.0, entry_ts="2026-01-01T00:00:00Z",
+                      exit_ts="2026-01-05T00:00:00Z", exit_price=100.0)
+    opening = _trade(trade_id="X2", qty=1.0, entry_price=100.0, entry_ts="2026-01-05T00:00:00Z")  # same instant
+    eq = _curve([100_000] * 10, start="2026-01-01")
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[closing, opening])
+    # Close-before-open convention at a tie: never both counted open at once.
+    assert report["trades"]["max_concurrent_positions"] == 1
+
+
+def test_b3_missing_close_remains_active_through_the_whole_series():
+    never_closes = _trade(trade_id="Y1", qty=1.0, entry_price=100.0, entry_ts="2026-01-01T00:00:00Z")
+    eq = _curve([100_000, 100_000], start="2026-01-01")
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[never_closes])
+    assert report["trades"]["max_concurrent_positions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# FW-B5-R3 (surgical closeout 02): compounding must be a real bool.
+# bool("false") is True in Python -- a blind bool(...) coercion would have
+# silently enabled compounding for the STRING "false".
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_value", ["false", "true", 0, 1, None, "0"])
+def test_compounding_non_bool_fails_closed(bad_value):
+    with pytest.raises(SizingReportError, match="compounding must be a real bool"):
+        SizingReportSpec(compounding=bad_value).normalized()
+
+
+def test_compounding_real_bool_true_and_false_both_still_work():
+    assert SizingReportSpec(compounding=True).normalized().compounding is True
+    assert SizingReportSpec(compounding=False).normalized().compounding is False
+
+
+# ---------------------------------------------------------------------------
+# FW-B5-R4 (surgical closeout 02): None means not supplied; an explicitly
+# supplied but EMPTY account_equity must fail closed, not be silently
+# represented as not_provided.
+# ---------------------------------------------------------------------------
+
+def test_account_equity_none_is_genuinely_not_provided():
+    eq = _curve([100_000, 100_000])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+    assert report["account"] == {"truth_state": "not_provided"}
+
+
+def test_account_equity_explicitly_empty_dataframe_fails_closed_not_not_provided():
+    eq = _curve([100_000, 100_000])
+    empty_account = pd.DataFrame(columns=["ts", "equity"])
+    with pytest.raises(SizingReportError, match="zero rows"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=empty_account, trades=[])
+
+
+# ---------------------------------------------------------------------------
+# Addendum: exit_price without exit_ts must be rejected (symmetric to the
+# already-existing exit_ts-without-exit_price check); empty trade_id/symbol
+# rejected; duplicate trade_id rejected; orphan/inconsistent partial-fill
+# groups rejected.
+# ---------------------------------------------------------------------------
+
+def test_exit_price_without_exit_ts_fails_closed():
+    t = _trade(exit_ts=None, exit_price=120.0)
+    with pytest.raises(SizingReportError, match="exit_price present but exit_ts missing"):
+        t.validate()
+
+
+def test_open_trade_with_neither_exit_field_remains_valid():
+    t = _trade(exit_ts=None, exit_price=None)
+    t.validate()  # must not raise
+    assert t.is_closed is False
+
+
+def test_closed_trade_with_both_exit_fields_remains_valid():
+    t = _trade(exit_ts="2026-01-02T00:00:00Z", exit_price=120.0)
+    t.validate()  # must not raise
+    assert t.is_closed is True
+
+
+def test_empty_trade_id_fails_closed():
+    t = _trade(trade_id="")
+    with pytest.raises(SizingReportError, match="trade_id must be a non-empty string"):
+        t.validate()
+
+
+def test_whitespace_only_trade_id_fails_closed():
+    t = _trade(trade_id="   ")
+    with pytest.raises(SizingReportError, match="trade_id must be a non-empty string"):
+        t.validate()
+
+
+def test_empty_symbol_fails_closed():
+    t = _trade(symbol="")
+    with pytest.raises(SizingReportError, match="symbol must be a non-empty string"):
+        t.validate()
+
+
+def test_duplicate_trade_id_across_distinct_trades_fails_closed():
+    eq = _curve([100_000, 100_000])
+    t1 = _trade(trade_id="dup", symbol="AAA")
+    t2 = _trade(trade_id="dup", symbol="BBB")
+    with pytest.raises(SizingReportError, match="duplicate trade_id"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[t1, t2])
+
+
+def test_orphan_partial_fill_of_reference_fails_closed():
+    eq = _curve([100_000, 100_000])
+    t = _trade(trade_id="A2", partial_fill_of="NONEXISTENT_BASE")
+    with pytest.raises(SizingReportError, match="orphan group"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[t])
+
+
+def test_inconsistent_symbol_within_a_partial_fill_group_fails_closed():
+    eq = _curve([100_000, 100_000])
+    t1 = _trade(trade_id="A1", symbol="AAA")
+    t2 = _trade(trade_id="A2", partial_fill_of="A1", symbol="BBB")
+    with pytest.raises(SizingReportError, match="inconsistent symbol"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[t1, t2])
+
+
+def test_inconsistent_side_within_a_partial_fill_group_fails_closed():
+    eq = _curve([100_000, 100_000])
+    t1 = _trade(trade_id="A1", side="long")
+    t2 = _trade(trade_id="A2", partial_fill_of="A1", side="short")
+    with pytest.raises(SizingReportError, match="inconsistent side"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[t1, t2])
+
+
+# ---------------------------------------------------------------------------
+# Addendum: naive timestamps and mixed naive/aware comparisons must fail
+# closed with SizingReportError, never an unrelated raw TypeError.
+# ---------------------------------------------------------------------------
+
+def test_naive_entry_ts_fails_closed():
+    t = _trade(entry_ts="2026-01-01")  # no time/tz component
+    with pytest.raises(SizingReportError, match="timezone-aware"):
+        t.validate()
+
+
+def test_naive_exit_ts_with_aware_entry_fails_closed_not_raw_type_error():
+    t = _trade(entry_ts="2026-01-01T00:00:00Z", exit_ts="2026-01-02", exit_price=100.0)
+    with pytest.raises(SizingReportError, match="timezone-aware"):
+        t.validate()
+
+
+def test_naive_entry_ts_with_aware_exit_fails_closed_not_raw_type_error():
+    # This exact combination previously reached the exit<entry comparison
+    # with one naive and one aware Timestamp, raising an uncontrolled
+    # `TypeError: Cannot compare tz-naive and tz-aware timestamps`.
+    t = _trade(entry_ts="2026-01-01", exit_ts="2026-01-02T00:00:00Z", exit_price=100.0)
+    with pytest.raises(SizingReportError, match="timezone-aware"):
+        t.validate()
+
+
+# ---------------------------------------------------------------------------
+# Addendum: equity-curve timestamp validity/uniqueness, and a canonical,
+# row-order-independent content hash.
+# ---------------------------------------------------------------------------
+
+def test_equity_curve_malformed_timestamp_fails_closed_with_sizing_report_error():
+    eq = pd.DataFrame({"ts": ["not-a-timestamp"], "equity": [100_000.0]})
+    with pytest.raises(SizingReportError, match="unparseable timestamp"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+
+
+def test_equity_curve_naive_timestamp_fails_closed():
+    eq = pd.DataFrame({"ts": ["2026-01-01T00:00:00"], "equity": [100_000.0]})  # no tz
+    with pytest.raises(SizingReportError, match="timezone-aware"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+
+
+def test_equity_curve_duplicate_timestamps_fails_closed():
+    eq = pd.DataFrame({
+        "ts": ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+        "equity": [100_000.0, 99_000.0],
+    })
+    with pytest.raises(SizingReportError, match="duplicate timestamps"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+
+
+def test_equity_curve_content_hash_is_independent_of_row_order():
+    eq_sorted = _curve([100_000, 95_000, 105_000])
+    eq_shuffled = eq_sorted.iloc[[2, 0, 1]].reset_index(drop=True)  # same rows, different order
+    r1 = compute_sizing_drawdown_report(strategy_equity=eq_sorted.copy(), account_equity=None, trades=[])
+    r2 = compute_sizing_drawdown_report(strategy_equity=eq_shuffled.copy(), account_equity=None, trades=[])
+    assert r1["input_evidence_hash"]["strategy_equity"] == r2["input_evidence_hash"]["strategy_equity"]
+
+
+def test_equity_curve_content_hash_changes_on_a_real_value_change():
+    eq1 = _curve([100_000, 95_000])
+    eq2 = _curve([100_000, 95_001])
+    r1 = compute_sizing_drawdown_report(strategy_equity=eq1, account_equity=None, trades=[])
+    r2 = compute_sizing_drawdown_report(strategy_equity=eq2, account_equity=None, trades=[])
+    assert r1["input_evidence_hash"]["strategy_equity"] != r2["input_evidence_hash"]["strategy_equity"]
