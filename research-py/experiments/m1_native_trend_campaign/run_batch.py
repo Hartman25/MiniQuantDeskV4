@@ -140,6 +140,8 @@ def _load_index() -> dict:
 
 def _save_index(index: dict) -> None:
     _require_active_stage()
+    if not stage_authorization.is_frozen_historical(DECL):
+        stage_authorization.reverify_active_stage(DECL, _ACTIVE["stage"], _ACTIVE["auth"])
     INDEX.parent.mkdir(parents=True, exist_ok=True)
     INDEX.write_text(json.dumps(index, indent=1, sort_keys=True), encoding="utf-8")
 

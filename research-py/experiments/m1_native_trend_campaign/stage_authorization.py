@@ -200,6 +200,17 @@ def optional_authorization(decl: dict, auth_class: str, *, auth: dict | None = N
         return None
 
 
+def reverify_active_stage(decl: dict, stage: str | None, auth: dict | None, *, key: str | None = None,
+                          now: datetime | None = None, incident_entries: list[dict] | None = None) -> None:
+    """Re-check, at an effectful helper, that mutable runner state still names a stage whose signed authorization
+    verifies for this declaration now. A read-only stage has no effectful authority."""
+    auth_class = STAGE_CLASS.get(stage or "")
+    if auth_class is None or auth_class == READ_ONLY:
+        raise AuthorizationError("fail-closed: no authorized effectful runner stage is active")
+    verify(decl, auth_class, auth, key=key if key is not None else os.environ.get(KEY_ENV),
+           now=now or datetime.now(timezone.utc), incident_entries=incident_entries)
+
+
 def native_execution_class(stage: str) -> str:
     """The authorization class a stage must hold to execute the native binary. Only `check` among the read-only
     stages may (its optional identity cross-check); every effectful stage needs its own class."""

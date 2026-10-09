@@ -575,3 +575,24 @@ def test_a_failing_or_refused_stage_leaves_no_residual_authority(stub_world, mon
     with pytest.raises(sa.AuthorizationError):                       # an unauthorized stage must not touch state either
         rb.staged("trials")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
     assert rb._ACTIVE == {"stage": None, "auth": None} and not marker.exists()
+
+
+def test_a_forged_active_state_cannot_write_the_trial_index_either(stub_world, monkeypatch):
+    rb, stub, marker, tmp = stub_world
+    monkeypatch.setattr(rb, "INDEX", tmp / "idx" / "trials_index.json")
+    monkeypatch.setenv(sa.KEY_ENV, KEY)
+    for stage, forged in (("register", None), ("register", {"authorized_classes": ["registry_registration"]}),
+                          ("check", _mint_for(rb, [sa.NATIVE_IDENTITY_RESOLUTION])), ("summary", None)):
+        _inject(rb, stage, forged)
+        try:
+            with pytest.raises(sa.AuthorizationError):
+                rb._save_index({"x": 1})
+        finally:
+            _inject(rb, None, None)
+    assert not (tmp / "idx").exists()
+    _inject(rb, "register", _mint_for(rb, [sa.REGISTRATION]))      # a genuine, matching authorization still writes
+    try:
+        rb._save_index({"x": 1})
+    finally:
+        _inject(rb, None, None)
+    assert (tmp / "idx" / "trials_index.json").exists()
