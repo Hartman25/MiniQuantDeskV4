@@ -28,57 +28,68 @@ _CREDENTIAL_PREFIXES = ("ALPACA", "APCA", "TIINGO", "TWELVEDATA", "POLYGON", "FI
 for _k in [k for k in os.environ if k.upper().startswith(_CREDENTIAL_PREFIXES)]:
     del os.environ[_k]
 os.environ[HERMETIC_FLAG] = "1"
-# Children inherit the guard: PYTHONPATH carries the sitecustomize directory and every child attempt is logged to
-# one session file the parent audits (attempts made in the parent are excluded by pid). The sink is fixed here and
-# re-imposed on every child environment; a child cannot redirect it, and every guarded Python child must announce
-# `guard_ready` there or the session fails.
-_SESSION_CHILD_LOG = Path(tempfile.mkdtemp(prefix="mqk_netguard_")) / "children.log"
-_SESSION_CHILD_LOG.touch()
-_netguard.install(sink=_SESSION_CHILD_LOG)
+# Children inherit the guard: PYTHONPATH carries the sitecustomize directory and every guarded process writes its
+# denied attempts, launches and `guard_ready` announcements to ONE root audit sink that the session audits. The root
+# is fixed when the guard first installs and can never be rebound: a process that already inherited one (a pytest run
+# started by a test) audits its own subtree of the inherited root, the outermost process owns a fresh file.
+if _netguard.root_sink() is None:
+    _root = Path(tempfile.mkdtemp(prefix="mqk_netguard_")) / "children.log"
+    _netguard.install(sink=_root)
+_netguard.install()
+_SESSION_CHILD_LOG = Path(_netguard.root_sink())
 os.environ.update(_netguard.guarded_env(os.environ))
+os.environ.pop(_netguard.LAUNCH_ENV, None)  # an unwrapped child must not adopt a launch id nobody recorded
 READY_GRACE_SECONDS = 5.0
 
 
 def _rows() -> list[dict]:
+    for _ in range(20):  # a child may be between bytes of one row; a row that stays partial is corruption
+        try:
+            return _netguard.sink_rows(_SESSION_CHILD_LOG)
+        except _netguard.SinkPartialRow:
+            time.sleep(0.05)
     return _netguard.sink_rows(_SESSION_CHILD_LOG)
 
 
-def _child_attempts(rows: list[dict] | None = None) -> list[dict]:
-    return [r for r in (_rows() if rows is None else rows)
-            if r.get("kind") not in _netguard.NON_ATTEMPT_KINDS and r.get("pid") != os.getpid() and not r.get("expected")]
-
-
-def _uninitialized_children(rows: list[dict] | None = None, *, wait: bool = False) -> list[int]:
-    """Guarded Python children that never announced `guard_ready` (polled briefly: a child announces itself
-    before it runs any of its own code)."""
+def _audit(rows: list[dict] | None = None, start: int = 0, *, wait: bool = False) -> dict:
+    """The lineage audit of this session's subtree (polled briefly for `guard_ready`: a child announces itself
+    before it runs any of its own code). An unreadable or malformed root sink raises `SinkCorrupt`."""
     deadline = time.monotonic() + (READY_GRACE_SECONDS if wait else 0)
     while True:
-        missing = _netguard.uninitialized_children(_rows() if rows is None else rows)
-        if not missing or time.monotonic() >= deadline:
-            return missing
+        result = _netguard.audit(_rows() if rows is None else rows, _netguard.process_token(), start=start,
+                                 owner=_netguard._state["owns_root"])
+        if not result["uninitialized"] or time.monotonic() >= deadline:
+            return result
         time.sleep(0.05)
 
 
 @pytest.fixture(autouse=True)
 def _no_external_attempt_in_this_test():
-    before, children_before, rows_before = len(_netguard.unexpected_attempts()), len(_child_attempts()), len(_rows())
+    before, rows_before = len(_netguard.unexpected_attempts()), len(_rows())
     yield
     new = _netguard.unexpected_attempts()[before:]
     assert not new, f"offline guard: external network/secret access attempted: {new}"
-    new_children = _child_attempts()[children_before:]
-    assert not new_children, f"offline guard: a spawned child attempted external network/secret access: {new_children}"
-    missing = _uninitialized_children(_rows()[rows_before:], wait=True)
-    assert not missing, f"offline guard: spawned Python child pid(s) {missing} never initialized the guard (attempts invisible)"
+    found = _audit(start=rows_before, wait=True)
+    bad = found["unexpected"] + found["orphans"]
+    assert not bad, f"offline guard: a spawned child attempted external network/secret access: {bad}"
+    assert not found["uninitialized"], (f"offline guard: spawned Python child launch(es) {found['uninitialized']} never "
+                                        "initialized the guard (attempts invisible)")
 
 
 def pytest_sessionfinish(session, exitstatus):
-    rows = _rows()
-    children, uninitialized = _child_attempts(rows), _uninitialized_children(rows, wait=True)
-    unexpected = _netguard.unexpected_attempts() + children
-    summary = {"attempted_total": len(_netguard.attempts()), "unexpected_attempts": len(unexpected) + len(uninitialized),
-               "unexpected_child_attempts": len(children), "uninitialized_children": len(uninitialized)}
+    errors = _netguard._state["sink_errors"]
+    try:
+        found = _audit(wait=True)
+    except _netguard.SinkError:
+        found, errors = {"unexpected": [], "orphans": [], "uninitialized": []}, errors + 1
+    children = found["unexpected"] + found["orphans"]
+    unexpected = _netguard.unexpected_attempts()
+    summary = {"attempted_total": len(_netguard.attempts()),
+               "unexpected_attempts": len(unexpected) + len(children) + len(found["uninitialized"]) + errors,
+               "unexpected_child_attempts": len(children), "uninitialized_children": len(found["uninitialized"]),
+               "sink_integrity_errors": errors}
     path = os.environ.get(SUMMARY_ENV)
     if path:
         Path(path).write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
-    if (unexpected or uninitialized) and session.exitstatus == 0:
+    if (unexpected or children or found["uninitialized"] or errors) and session.exitstatus == 0:
         session.exitstatus = 1

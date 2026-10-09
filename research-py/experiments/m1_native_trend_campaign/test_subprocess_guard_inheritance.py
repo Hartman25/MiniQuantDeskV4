@@ -5,6 +5,7 @@ no real credential, no external connection."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -22,6 +23,14 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(EXPERIMENTS))
 
 import _netguard  # noqa: E402
+
+@contextlib.contextmanager
+def probing(log):
+    """Deliberate probes: explicit expected-denial semantics plus a diagnostic copy. The root sink still receives
+    every row; nothing here exempts a `sink_to` scope from the session audit."""
+    with _netguard.expect_denied(), _netguard.sink_to(log):
+        yield
+
 
 CHILD = """
 import os, socket, sys
@@ -93,7 +102,7 @@ def world(tmp_path):
 def run_child(world, *, env, via, log: Path):
     tmp, secret, sink = world
     argv = [sys.executable, "-c", CHILD, str(secret), str(sink.port)]
-    with _netguard.sink_to(log):
+    with probing(log):
         if via == "run":
             return subprocess.run(argv, capture_output=True, text=True, env=env, cwd=tmp)
         if via == "popen":
@@ -149,7 +158,7 @@ def test_multiprocessing_spawn_children_are_guarded_too(tmp_path):
         "    ctx = mp.get_context('spawn'); q = ctx.Queue(); p = ctx.Process(target=child, args=(q,)); p.start()\n"
         "    print('RESULT', q.get(timeout=30)); p.join()\n", encoding="utf-8")
     log = tmp_path / "mp.log"
-    with _netguard.sink_to(log):
+    with probing(log):
         proc = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True, cwd=tmp_path,
                               env={"PATH": os.environ["PATH"]})
     assert "RESULT REFUSED:NetworkDenied" in proc.stdout, proc.stdout + proc.stderr[-400:]
@@ -162,7 +171,7 @@ def test_a_grandchild_started_by_a_child_with_a_cleared_environment_is_guarded_t
              "r = subprocess.run([sys.executable, '-c', sys.argv[3], sys.argv[1], sys.argv[2]], env={}, capture_output=True, text=True)\n"
              "print(r.stdout.strip() or r.stderr.strip()[-300:])\n")
     log = tmp_path / "grand.log"
-    with _netguard.sink_to(log):
+    with probing(log):
         proc = subprocess.run([sys.executable, "-c", child, str(secret), str(sink.port), CHILD], capture_output=True, text=True,
                               env={"PATH": os.environ["PATH"]}, cwd=tmp)
     got = eval([l for l in proc.stdout.splitlines() if l.startswith("RESULT ")][0][len("RESULT "):])
@@ -244,8 +253,9 @@ def test_a_child_attempt_in_an_ordinary_test_fails_that_test_even_when_the_child
         "def test_clean_child():\n"
         "    subprocess.run([sys.executable, '-c', 'print(1)'])\n", encoding="utf-8")
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(EXPERIMENTS)}
-    proc = subprocess.run([sys.executable, "-m", "pytest", str(test), "-p", "conftest", "-p", "no:cacheprovider", "-q",
-                           "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
+    with _netguard.expect_denied():
+        proc = subprocess.run([sys.executable, "-m", "pytest", str(test), "-p", "conftest", "-p", "no:cacheprovider", "-q",
+                               "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0 and "2 passed, 1 error" in out, out[-800:]  # the teardown check errors the leaky test
     assert "a spawned child attempted external network/secret access" in out
@@ -398,7 +408,7 @@ def test_a_child_that_rewrites_its_own_sink_variable_after_start_still_reports_t
     log = tmp_path / "late.log"
     code = ("import os, socket\nos.environ['MQK_NETGUARD_LOG'] = '/dev/null'\n"
             "try:\n socket.create_connection(('127.0.0.1', 9), timeout=1)\nexcept Exception:\n pass\n")
-    with _netguard.sink_to(log):
+    with probing(log):
         subprocess.run([sys.executable, "-c", code], capture_output=True, cwd=tmp)
     assert [r["kind"] for r in log_rows(log)] == ["network"]
 
@@ -408,22 +418,25 @@ def test_every_guarded_child_announces_itself_before_running_and_grandchildren_t
     log = tmp_path / "ready.log"
     grand = ("import subprocess, sys\n"
              "subprocess.run([sys.executable, '-c', 'pass'], env={})\n")
-    with _netguard.sink_to(log):
+    with probing(log):
         subprocess.run([sys.executable, "-c", grand], cwd=tmp)
         subprocess.run([sys.executable, "-c", "pass"], cwd=tmp)
     rows = _netguard.sink_rows(log)
-    launched = {r["child_pid"] for r in rows if r["kind"] == "child_launched" and r["guarded"]}
-    ready = {r["pid"] for r in rows if r["kind"] == "guard_ready"}
+    launched = {r["launch"] for r in rows if r["kind"] == "child_launched" and r["guarded"]}
+    ready = {r["proc"] for r in rows if r["kind"] == "guard_ready"}
     assert len(launched) == 3 and launched <= ready, (launched, ready)
-    assert _netguard.uninitialized_children(rows) == []
+    assert _netguard.audit(rows, _netguard.process_token())["uninitialized"] == []
+    root = _netguard.sink_rows(_netguard.root_sink())
+    assert all(r in root for r in rows), "a diagnostic copy holds a row the root sink does not"
 
 
 def test_a_launched_child_that_never_announced_the_guard_is_detected():
-    rows = [{"kind": "child_launched", "child_pid": 41, "guarded": True, "pid": 1},
-            {"kind": "child_launched", "child_pid": 42, "guarded": True, "pid": 1},
-            {"kind": "child_launched", "child_pid": 43, "guarded": False, "pid": 1},   # a vouched non-Python stub
-            {"kind": "guard_ready", "pid": 41}]
-    assert _netguard.uninitialized_children(rows) == [42]
+    rows = [{"kind": "child_launched", "proc": "me", "launch": "L1", "guarded": True},
+            {"kind": "child_launched", "proc": "me", "launch": "L2", "guarded": True},
+            {"kind": "child_launched", "proc": "me", "launch": "L3", "guarded": False},   # a vouched non-Python stub
+            {"kind": "child_launched", "proc": "stranger", "launch": "L4", "guarded": True},  # another session's launch
+            {"kind": "guard_ready", "proc": "L1", "parent_proc": "me"}]
+    assert _netguard.audit(rows, "me")["uninitialized"] == ["L2"]
 
 
 def test_run_guarded_fails_when_a_child_it_launched_never_initialized_the_guard(tmp_path, monkeypatch):
@@ -436,38 +449,59 @@ def test_run_guarded_fails_when_a_child_it_launched_never_initialized_the_guard(
         _netguard.run_guarded(script, [], env={"PATH": os.environ["PATH"]}, cwd=tmp_path, log=log)
 
 
-def test_a_launch_whose_evidence_cannot_be_collected_is_refused(tmp_path):
-    unusable = tmp_path / "a_directory_is_not_a_log"
-    unusable.mkdir()
+def test_a_scope_naming_an_unusable_destination_is_refused_before_anything_launches(tmp_path):
+    directory = tmp_path / "a_directory_is_not_a_log"
+    directory.mkdir()
     marker = tmp_path / "ran"
+    for bad in (directory, os.devnull, tmp_path / "nope" / "x.log"):
+        with pytest.raises(_netguard.SinkInvalid):
+            with _netguard.sink_to(bad):
+                subprocess.run([sys.executable, "-c", f"open(r'{marker}', 'w')"])
+    assert not marker.exists() and _netguard._state["diag"] == []
+
+
+def test_a_launch_whose_required_destination_stopped_being_writable_is_refused(tmp_path):
+    copy = tmp_path / "copy.log"
+    marker = tmp_path / "ran"
+    errors_before = _netguard._state["sink_errors"]
     with _netguard.expect_denied() as seen:
-        with _netguard.sink_to(unusable):
+        with _netguard.sink_to(copy):
+            with _netguard._sink_io():
+                os.remove(copy)          # an outside actor (not this process's audited code) removes the file
             with pytest.raises(_netguard.NetworkDenied, match="audit sink is not writable"):
                 subprocess.run([sys.executable, "-c", f"open(r'{marker}', 'w')"])
     assert not marker.exists() and [a["kind"] for a in seen] == ["audit_sink_unavailable"]
+    assert _netguard._state["sink_errors"] == errors_before + 1, "the lost copy of the refusal row was not counted"
+    _netguard._state["sink_errors"] = errors_before  # this test caused and verified the loss; the session must not inherit it
 
 
-def test_a_child_that_cannot_write_its_ready_record_refuses_to_run(tmp_path):
+@pytest.mark.parametrize("break_it", ["root_is_a_directory", "root_is_devnull", "no_root", "diagnostic_is_a_directory"])
+def test_a_child_that_cannot_write_its_ready_record_refuses_to_run(tmp_path, break_it):
     """Launched around the wrapper (so the parent-side pre-check is not what stops it): the child's own sitecustomize
     cannot report to the sink, so it exits before running any of its code."""
     original = _netguard._state["original_popen_init"]
     marker = tmp_path / "ran"
-    unusable = tmp_path / "dir_sink"
-    unusable.mkdir()
-    env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(_netguard.GUARD_SITE), _netguard.LOG_ENV: str(unusable)}
-    def launch():
-        proc = subprocess.Popen.__new__(subprocess.Popen)
-        _netguard._in_guarded_popen.depth = 1   # the test stands in for the wrapper: only the child's own check is under test
-        try:
-            original(proc, [sys.executable, "-c", f"open(r'{marker}', 'w')"], env=env, stderr=subprocess.PIPE)
-        finally:
-            _netguard._in_guarded_popen.depth = 0
-        return proc, proc.communicate()[1]
-    proc, err = launch()
-    assert proc.returncode == _netguard.CHILD_SINK_EXIT and b"no writable audit sink" in err and not marker.exists()
-    env.pop(_netguard.LOG_ENV)                                       # no sink at all: same refusal
-    proc, err = launch()
-    assert proc.returncode == _netguard.CHILD_SINK_EXIT and not marker.exists()
+    directory = tmp_path / "dir_sink"
+    directory.mkdir()
+    good = Path(_netguard.root_sink())
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(_netguard.GUARD_SITE), _netguard.LOG_ENV: str(good)}
+    if break_it == "root_is_a_directory":
+        env[_netguard.LOG_ENV] = str(directory)
+    elif break_it == "root_is_devnull":
+        env[_netguard.LOG_ENV] = os.devnull
+    elif break_it == "no_root":
+        env.pop(_netguard.LOG_ENV)
+    else:
+        env[_netguard.DIAG_ENV] = str(directory)
+    proc = subprocess.Popen.__new__(subprocess.Popen)
+    _netguard._in_guarded_popen.depth = 1   # the test stands in for the wrapper: only the child's own check is under test
+    try:
+        original(proc, [sys.executable, "-c", f"open(r'{marker}', 'w')"], env=env, stderr=subprocess.PIPE)
+    finally:
+        _netguard._in_guarded_popen.depth = 0
+    _, err = proc.communicate()
+    assert proc.returncode == _netguard.CHILD_SINK_EXIT and b"refusing to run" in err and not marker.exists(), err
+    assert _netguard.sink_rows(good) == [r for r in _netguard.sink_rows(good)]  # the root sink is still readable
 
 
 @pytest.mark.parametrize("where", ["child_pythonpath_first", "cwd_with_dash_c", "script_directory", "pythonpath_relative_dot"])
@@ -491,11 +525,11 @@ def test_a_conflicting_sitecustomize_cannot_displace_the_guard(world, tmp_path, 
     elif where == "pythonpath_relative_dot":
         env["PYTHONPATH"] = "."
         cwd = decoy
-    with _netguard.sink_to(log):
+    with probing(log):
         proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=cwd)
     assert result_of(proc)["read"].startswith("REFUSED:") and sink.accepted == 0
     assert not flag.exists(), "a decoy sitecustomize/usercustomize ran in the child"
-    assert _netguard.uninitialized_children(_netguard.sink_rows(log)) == []
+    assert _netguard.audit(_netguard.sink_rows(log), _netguard.process_token())["uninitialized"] == []
 
 
 def test_a_leaky_child_with_a_redirected_sink_still_fails_its_test_and_the_session_summary(tmp_path):
@@ -511,8 +545,9 @@ def test_a_leaky_child_with_a_redirected_sink_still_fails_its_test_and_the_sessi
         "    subprocess.run([sys.executable, '-c', 'print(1)'])\n", encoding="utf-8")
     summary = tmp_path / "summary.json"
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(EXPERIMENTS), "MQK_NETGUARD_SUMMARY": str(summary)}
-    proc = subprocess.run([sys.executable, "-m", "pytest", str(test), "-p", "conftest", "-p", "no:cacheprovider", "-q",
-                           "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
+    with _netguard.expect_denied():
+        proc = subprocess.run([sys.executable, "-m", "pytest", str(test), "-p", "conftest", "-p", "no:cacheprovider", "-q",
+                               "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0 and "2 passed, 1 error" in out, out[-800:]
     assert "a spawned child attempted external network/secret access" in out
@@ -525,12 +560,15 @@ def test_a_child_that_never_initialized_the_guard_fails_its_test_and_the_session
     test.write_text(
         "import _netguard, os\n"
         "def test_ghost_child():\n"
-        "    _netguard._write_sink({'kind': 'child_launched', 'child_pid': 2**22 + 1, 'guarded': True, 'pid': os.getpid()})\n",
+        "    _netguard._write_all({'kind': 'child_launched', 'proc': _netguard.process_token(), 'launch': 'ghost-launch-0001',\n"
+        "                          'child_pid': 2**22 + 1, 'guarded': True, 'expected': False, 'pid': os.getpid()})\n",
         encoding="utf-8")
     summary = tmp_path / "summary.json"
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(EXPERIMENTS), "MQK_NETGUARD_SUMMARY": str(summary)}
     proc = subprocess.run([sys.executable, "-m", "pytest", str(test), "-p", "conftest", "-p", "no:cacheprovider", "-q",
                            "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
+    # the synthetic launch is also visible to THIS session (it is the nested session's parent): reconcile it
+    _netguard._write_all({"kind": "guard_ready", "proc": "ghost-launch-0001", "parent_proc": None, "pid": 0, "ppid": 0})
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0 and "never initialized the guard" in out, out[-800:]
     got = json.loads(summary.read_text(encoding="utf-8"))
@@ -555,7 +593,7 @@ def test_a_child_cannot_erase_or_forge_the_audit_sink(world, tmp_path, name):
     log = tmp_path / "tamper.log"
     code = ("import os, socket\ntry:\n socket.create_connection(('127.0.0.1', 9), timeout=1)\nexcept Exception:\n pass\n"
             f"try:\n {TAMPER[name]}\nexcept Exception as e:\n print('REFUSED', type(e).__name__)\n")
-    with _netguard.sink_to(log):
+    with probing(log):
         proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp)
     kinds = [r["kind"] for r in log_rows(log)]
     assert "REFUSED NetworkDenied" in proc.stdout, proc.stdout + proc.stderr[-300:]
@@ -565,6 +603,6 @@ def test_a_child_cannot_erase_or_forge_the_audit_sink(world, tmp_path, name):
 
 def test_the_parent_can_still_read_the_sink_and_the_guard_still_writes_it(tmp_path):
     log = tmp_path / "ok.log"
-    with _netguard.sink_to(log):
+    with probing(log):
         subprocess.run([sys.executable, "-c", "pass"])
     assert open(log).read() and _netguard.sink_rows(log)

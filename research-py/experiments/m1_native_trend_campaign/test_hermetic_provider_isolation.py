@@ -159,7 +159,8 @@ def test_a_spawned_child_with_credentials_and_the_flag_removed_cannot_reach_the_
         "    print('refused', type(exc).__name__)\n    sys.exit(3)\nsys.exit(0)\n" % str(HERE.parents[1] / "src"),
         encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "MQK_HERMETIC_NO_PROVIDER"}
-    proc, attempts = _netguard.run_guarded(probe, [], env=env, cwd=tmp_path, log=tmp_path / "guard.log")
+    with _netguard.expect_denied():  # the probe is deliberate: marked here, per probe, not by the scope that copies it
+        proc, attempts = _netguard.run_guarded(probe, [], env=env, cwd=tmp_path, log=tmp_path / "guard.log")
     assert proc.returncode == 3, proc.stdout + proc.stderr
     assert attempts and all(a["kind"] == "network" for a in attempts)
 
