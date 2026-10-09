@@ -197,11 +197,14 @@ mod tests {
         );
         assert_eq!(CalendarContract::V1.id(), "us_equity_regular_sessions_v1");
         assert_eq!(CalendarContract::V2.id(), "us_equity_regular_sessions_v2");
+        assert_eq!(
+            CalendarContract::V2.content_sha256(),
+            "88b305dbe93f67f0cf7247e9a850234ce5b59ebe55bcec65fbee6842e8a49fe2"
+        );
         assert_ne!(
             CalendarContract::V1.content_sha256(),
             CalendarContract::V2.content_sha256()
         );
-        assert_eq!(CalendarContract::V2.content_sha256().len(), 64);
     }
 
     #[test]

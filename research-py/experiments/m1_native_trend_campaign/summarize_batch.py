@@ -18,8 +18,10 @@ import pandas as pd
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from select_batch import REQUIRED_ROBUSTNESS_SCENARIOS  # noqa: E402
+from select_batch import REQUIRED_ROBUSTNESS_SCENARIOS, require_declaration_runnable  # noqa: E402
 DECL = json.loads((HERE / os.environ.get("MQK_M1_BATCH_DECLARATION", "PREDECLARED_BATCH_01.json")).read_text(encoding="utf-8"))
+if __name__ == "__main__":  # importing the module for its helpers must stay possible; running it must not read evidence
+    require_declaration_runnable(DECL)
 RUN = HERE / DECL["run_dir"]
 TRIALS = [(t["strategy_id"], t["symbol"]) for t in DECL["universe"]["trials"]]
 IDX = json.loads((RUN / "trials_index.json").read_text(encoding="utf-8"))

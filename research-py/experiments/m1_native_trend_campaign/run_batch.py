@@ -688,6 +688,9 @@ def require_executable_declaration(decl: dict) -> None:
     Declarations without the block (closed historical campaigns) are unaffected."""
     gate = decl.get("execution_gate")
     if gate is None:
+        if "evidence_grade" in decl:
+            raise SystemExit(f"fail-closed: {decl['batch_id']} declares an evidence_grade but carries no execution_gate; "
+                             "a graded declaration is never runnable without an explicit executable gate")
         return
     if gate.get("executable") is not True:
         raise SystemExit(f"fail-closed: {decl['batch_id']} is {gate.get('status')} "

@@ -71,8 +71,12 @@ def test_record_states_its_verdict_and_authorizes_nothing():
     for phrase in ("CATALOG_FROZEN_AND_DISPOSITIONED", "NO_ELIGIBLE_CANDIDATE_EXISTS", "ONE_ESTABLISHED_PROMOTION_CONSTRAINT_EXT_169", "`M1_BLOCKED`", "NOT_AUTHORIZED",
                    "NOT_EXECUTABLE", "`execution_gate.executable = false`", "**not pushed**"):
         assert phrase in DOC, phrase
-    assert "EXT-" not in "".join(p.read_text(encoding="utf-8") for p in
-                                 (ROOT / "research-py/experiments").glob("**/PREDECLARED_*.json"))
+    # The separately authorized, non-executable KISS campaign names exactly EXT-032; nothing else names a catalog id.
+    kiss = "PREDECLARED_KISS_EXT032_ETF_01.json"
+    declarations = list((ROOT / "research-py/experiments").glob("**/PREDECLARED_*.json"))
+    assert "EXT-" not in "".join(p.read_text(encoding="utf-8") for p in declarations if p.name != kiss)
+    assert set(re.findall(r"EXT-\d{3}", (ROOT / "research-py/experiments/m1_native_trend_campaign" / kiss)
+                          .read_text(encoding="utf-8"))) == {"EXT-032"}
 
 
 def test_record_counts_tiers_and_structural_numbers_match_the_committed_ledger_and_the_calendar_analysis():

@@ -31,6 +31,22 @@ GATES = ("economic_evaluation", "judge_evaluable", "dsr", "pbo", "robustness", "
          "scanner_review", "promotion_thresholds")
 
 
+def require_declaration_runnable(decl: dict) -> None:
+    """Refuse to read evidence or decide an outcome for a declaration that is not executable, or that
+    forbids automatic selection (its outcome is reviewed in full by near_miss_review.py instead).
+    Historical declarations without an `execution_gate` / `evidence_grade` are unaffected."""
+    gate = decl.get("execution_gate")
+    if gate is None:
+        if "evidence_grade" in decl:
+            raise SystemExit(f"fail-closed: {decl['batch_id']} declares an evidence_grade but carries no execution_gate")
+    elif gate.get("executable") is not True:
+        raise SystemExit(f"fail-closed: {decl['batch_id']} is {gate.get('status')} (blocker {gate.get('blocker')}); "
+                         "no evidence is read and no outcome is decided until the declaration is re-issued executable")
+    if decl.get("outcome_policy", {}).get("automatic_selection") is False:
+        raise SystemExit(f"fail-closed: {decl['batch_id']} forbids automatic selection; use near_miss_review.py, which "
+                         "reports every registered trial and selects none")
+
+
 class UnresolvedPopulation(Exception):
     """The population cannot be decided yet (never reported as a rejection)."""
 
@@ -100,6 +116,7 @@ def decide(rows: list[dict], judge: dict, policy: dict, promotion_eval: dict | N
 def main() -> None:
     here = Path(__file__).resolve().parent
     decl = json.loads((here / os.environ["MQK_M1_BATCH_DECLARATION"]).read_text(encoding="utf-8"))
+    require_declaration_runnable(decl)
     run = here / decl["run_dir"]
     rows = json.loads((run / "batch_results.json").read_text(encoding="utf-8"))
     judge = json.loads((run / "judge" / "judge.json").read_text(encoding="utf-8"))
