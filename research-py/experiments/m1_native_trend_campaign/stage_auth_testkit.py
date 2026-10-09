@@ -15,7 +15,8 @@ RUNNER_CLASSES = [c for c in sa.AUTHORIZABLE if c not in sa.INCIDENT_BLOCKED]
 def grant_runner_stages(monkeypatch, rb, classes=None, acknowledged=("HOA-KISS-EXT032-01",)) -> None:
     def fresh(_path):
         return sa.mint(rb.DECL, list(classes or RUNNER_CLASSES), operator="test-operator", approval_ref="TEST",
-                       key=TEST_KEY, now=datetime.now(timezone.utc), acknowledged_incidents=list(acknowledged))
+                       key=TEST_KEY, now=datetime.now(timezone.utc), acknowledged_incidents=list(acknowledged),
+                       acknowledged_data_boundaries=list((rb.DECL.get("data") or {}).get("required_fetch_acknowledgements") or []))
     monkeypatch.setenv(sa.KEY_ENV, TEST_KEY)
     monkeypatch.setenv(sa.AUTH_FILE_ENV, "synthetic")
     monkeypatch.setattr(sa, "load_auth_file", fresh)

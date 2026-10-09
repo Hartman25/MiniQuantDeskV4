@@ -227,12 +227,15 @@
   "timeframe_identity": "canonical_semantic_v1",
   "adjustment": "all",
   "start_utc": "2016-01-01T00:00:00Z",
-  "end_utc": "2026-09-01T00:00:00Z",
+  "end_utc": "2026-03-01T00:00:00Z",
   "asof": "2026-10-09",
   "completed_bars_only": true,
   "verification_required_before_registration": "fetch/verify provider bars for SPY, QQQ, IWM and DIA, record the provenance manifest and row counts; any symbol without sufficient adjusted history is reported, never substituted. No prior verified bars cover DIA, so all four are fetched under this campaign's own manifest.",
   "asof_note": "the data vintage date; an executable re-issue may move it only if the fetch date differs, and discloses the change",
-  "holdout_window_fetch_disclosure": "The established bridge derives the reserved holdout start from the fetched bars' last timestamp (compute_holdout_boundary over the bars), so the fetch window ends 2026-09-01 exactly as in Batch 03 and every evaluation input is truncated before 2026-03-01; the holdout guard fails closed on any holdout-period row in an evaluation artifact. Fetching raw provider rows for the reserved months is an execution-time act that the operator must acknowledge when authorizing execution (OD-3: no read, trial, query or economic calculation of that window is authorized by this predeclaration)."
+  "holdout_window_fetch_disclosure": "The provider request ends at the reserved holdout start (2026-03-01T00:00:00Z, exclusive): no OHLCV timestamp at or after it is requested, parsed or admitted (fetch window end <= partition.holdout_boundary.holdout_start_utc is enforced before credentials or HTTP, and verify_fetched_bars refuses any returned reserved row). The reserved boundary is DECLARED, not derived from the last fetched bar, so a short final month cannot move it. Disclosed residual, not an OHLCV read: the official extractor's corporate-action DISCOVERY queries action metadata by process date up to the extraction instant (REPAIR-02: a superset ceiling that is deliberately not the research end); entries are filtered to the research interval before use. The provider_fetch authorization must acknowledge CA_DISCOVERY_PROCESS_DATE_TO_EXTRACTION_TIME.",
+  "required_fetch_acknowledgements": [
+   "CA_DISCOVERY_PROCESS_DATE_TO_EXTRACTION_TIME"
+  ]
  },
  "partition": {
   "evaluation_start_utc": "2016-03-01T00:00:00Z",
@@ -240,7 +243,13 @@
   "holdout_months": 6,
   "expected_folds": 10,
   "holdout_rule": "the final 6 calendar months (from 2026-03-01) are RESERVED and not formally consumed (ACCESS_INCIDENT_PENDING_ADJUDICATION: see holdout.access_incident); discovery bars are truncated before the holdout start",
-  "warmup_note": "EXT-032 needs two completed bars; the first fold is never structurally flat for warm-up. A fold with zero long signals is non-evaluable under the unchanged policy (OD-8); about nine to ten events a year make this not expected."
+  "warmup_note": "EXT-032 needs two completed bars; the first fold is never structurally flat for warm-up. A fold with zero long signals is non-evaluable under the unchanged policy (OD-8); about nine to ten events a year make this not expected.",
+  "holdout_boundary": {
+   "version": "fixed_holdout_boundary_v1",
+   "holdout_start_utc": "2026-03-01T00:00:00Z",
+   "holdout_end_utc": "2026-09-01T00:00:00Z"
+  },
+  "holdout_boundary_note": "Fixed partition (additive, versioned): reproduces the ten accepted 12-month folds 2016-03-01..2026-03-01 and the 2026-03-01..2026-09-01 reserved window that the historical derivation yields from bars ending 2026-08-31, without fetching them and without a fabricated dataset-end observation. holdout_end is the declared reserved-window end, not an observation. Bound into every trial identity; historical campaigns keep the derivation and their trial ids."
  },
  "economic_protocol": {
   "protocol_id": "economic_walk_forward_v1",
@@ -478,9 +487,9 @@
   },
   {
    "id": "U5",
-   "item": "holdout-window raw rows in the fetch",
-   "status": "OPERATOR_ACKNOWLEDGEMENT_REQUIRED_AT_EXECUTION",
-   "why": "see data.holdout_window_fetch_disclosure"
+   "item": "corporate-action metadata discovery by process date up to the extraction instant (non-OHLCV)",
+   "status": "OPERATOR_ACKNOWLEDGEMENT_REQUIRED_IN_THE_FETCH_AUTHORIZATION",
+   "why": "see data.holdout_window_fetch_disclosure; the OHLCV request itself never reaches the reserved window"
   },
   {
    "id": "U6",

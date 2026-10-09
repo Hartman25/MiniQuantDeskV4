@@ -337,7 +337,7 @@ def test_the_holdout_start_is_2026_03_01_and_a_holdout_row_never_reaches_discove
 
 def _guard_world(tmp: Path, ledger_status="reserved"):
     run = tmp / "run"
-    dates = pd.date_range("2025-01-02", "2026-08-31", freq="B", tz="UTC")
+    dates = pd.date_range("2025-01-02", "2026-02-27", freq="B", tz="UTC")  # the fixed partition ends the fetch at the reserved start
     pd.DataFrame([{"symbol": s, "end_ts": d.isoformat(), "close": 1.0} for s in SYMBOLS for d in dates]).to_csv(
         (run / "data").mkdir(parents=True) or run / "data" / "research_bars.csv", index=False)
     before = int(pd.Timestamp("2026-02-27T05:00:00", tz="UTC").timestamp())

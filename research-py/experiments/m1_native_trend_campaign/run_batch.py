@@ -332,6 +332,7 @@ def _require_frozen_trial_structure() -> None:
 @staged("check")
 def stage_check(_args) -> None:
     _require_exact_target_protocol()
+    require_development_window(DECL)
     sizing_args(DECL)
     stress_plan(DECL)
     _require_frozen_trial_structure()
@@ -387,13 +388,57 @@ def _load_alpaca_env() -> None:
         raise SystemExit(f"fail-closed: credentials unavailable: {missing}")
 
 
+def fixed_holdout_boundary(decl: dict) -> dict | None:
+    """The declared fixed partition (`partition.holdout_boundary`), validated, or None for the historical
+    derivation from the fetched span. A malformed boundary is refused, never ignored."""
+    boundary = decl["partition"].get("holdout_boundary")
+    if boundary is None:
+        return None
+    from mqk_research.ml.native_signal_registry_integration import NativeSignalError, validate_fixed_holdout_boundary
+    try:
+        validate_fixed_holdout_boundary(boundary, decl["partition"]["holdout_months"])
+    except NativeSignalError as exc:
+        raise SystemExit(f"fail-closed: {exc}") from exc
+    return boundary
+
+
+def require_development_window(decl: dict) -> None:
+    """A graded declaration (one carrying `evidence_grade`) must name a fixed reserved boundary, and any
+    declared boundary bounds the provider request: the development fetch can never ask for a reserved date.
+    Ungraded historical declarations keep their derived boundary and their recorded fetch window."""
+    boundary = fixed_holdout_boundary(decl)
+    if boundary is None:
+        if "evidence_grade" in decl:
+            raise SystemExit("fail-closed: a graded declaration must declare partition.holdout_boundary "
+                             "(the provider request may not be allowed to reach a derived reserved window)")
+        return
+    start, end = pd.Timestamp(decl["data"]["start_utc"]), pd.Timestamp(decl["data"]["end_utc"])
+    reserved = pd.Timestamp(boundary["holdout_start_utc"])
+    if start.tzinfo is None or end.tzinfo is None or not start < end <= reserved:
+        raise SystemExit(f"fail-closed: data.end_utc {end} must be a UTC instant at or before the reserved holdout "
+                         f"start {reserved}; the provider request may not include a reserved date")
+
+
 def verify_fetched_bars(decl: dict, bars: pd.DataFrame) -> dict[str, int]:
     """Every declared symbol present exactly (no extras, no substitution) with enough history to cover the
-    widest declared strategy requirement. Returns per-symbol row counts."""
+    widest declared strategy requirement. Returns per-symbol row counts. Under a fixed partition every
+    returned row must lie in [data.start_utc, holdout_start) and every symbol must cover the same span."""
     symbols = list(decl["universe"]["symbols"])
     present = sorted(bars["symbol"].unique())
     if present != sorted(symbols):
         raise SystemExit(f"fail-closed: fetched symbols {present} differ from the declared universe {sorted(symbols)}")
+    boundary = fixed_holdout_boundary(decl)
+    if boundary is not None:
+        ts = pd.to_datetime(bars["end_ts"], utc=True)
+        reserved, begin = pd.Timestamp(boundary["holdout_start_utc"]), pd.Timestamp(decl["data"]["start_utc"])
+        if (ts >= reserved).any():
+            raise SystemExit(f"fail-closed: the provider returned {int((ts >= reserved).sum())} row(s) at or after the "
+                             f"reserved holdout start {reserved}; nothing is admitted")
+        if (ts < begin).any():
+            raise SystemExit("fail-closed: the provider returned rows before the declared development start")
+        spans = {s: (ts[bars["symbol"] == s].min(), ts[bars["symbol"] == s].max()) for s in symbols}
+        if len(set(spans.values())) != 1:
+            raise SystemExit(f"fail-closed: symbols cover different spans {sorted((s, str(v)) for s, v in spans.items())}")
     need = max(h["required_history_bars"] for h in decl["hypotheses"])
     counts = {s: int((bars["symbol"] == s).sum()) for s in symbols}
     short = {s: n for s, n in counts.items() if n < need}
@@ -406,6 +451,7 @@ def verify_fetched_bars(decl: dict, bars: pd.DataFrame) -> dict[str, int]:
 def stage_fetch(args) -> None:
     if not args.execute:
         raise SystemExit("fetch contacts the data provider; pass --execute")
+    require_development_window(DECL)  # before credentials, HTTP or any directory
     dest = RUN / "data"
     if (dest / "research_bars.csv").exists():
         raise SystemExit("fail-closed: bars already fetched for this run; refusing to overwrite")
@@ -442,7 +488,8 @@ def expected_trial_ids(fingerprints: dict, manifest: dict) -> list[tuple[str, st
             evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]), test_months=part["test_months"],
             holdout_months=part["holdout_months"], economic_spec=_economic_spec(),
             capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL),
-            canonical_timeframe_identity=canonical_timeframe_identity(DECL))
+            canonical_timeframe_identity=canonical_timeframe_identity(DECL),
+            fixed_holdout_boundary=fixed_holdout_boundary(DECL))
         out.append((strategy, sym, trial_id, identity))
     return out
 
@@ -502,6 +549,7 @@ def stage_register(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.native_signal_registry_integration import register_native_signal_trial
     _require_exact_target_protocol()
+    require_development_window(DECL)
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     store = ResearchResultStore(REGISTRY)
@@ -523,7 +571,8 @@ def stage_register(_args) -> None:
             test_months=part["test_months"], holdout_months=part["holdout_months"],
             hypothesis_text=h["economic_rationale"], registry_db=REGISTRY,
             capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL),
-            canonical_timeframe_identity=canonical_timeframe_identity(DECL))
+            canonical_timeframe_identity=canonical_timeframe_identity(DECL),
+            fixed_holdout_boundary=fixed_holdout_boundary(DECL))
         index[key(strategy, sym)] = {"trial_id": trial_id, "hypothesis_id": h["hypothesis_id"],
                                      "semantic_fingerprint": fingerprint, "required_history_bars": required}
         print(key(strategy, sym), trial_id, fingerprint[:12])
@@ -542,6 +591,7 @@ def stage_trials(_args) -> None:
         NativeSignalError, native_holdout_start, research_bars_to_backtest_csv,
         run_registered_native_signal_economic_eval)
     _require_exact_target_protocol()
+    require_development_window(DECL)
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     store = ResearchResultStore(REGISTRY)
     if len(store.list_trials(experiment_id=EXPERIMENT)) != len(TRIALS):
@@ -551,7 +601,7 @@ def stage_trials(_args) -> None:
     for strategy, sym in TRIALS:  # frozen order; failures never stop the batch
         h, sdir, rec = HYP[strategy], tdir(strategy, sym), index[key(strategy, sym)]
         sdir.mkdir(parents=True, exist_ok=True)
-        hold = native_holdout_start(BARS, sym, part["holdout_months"])
+        hold = native_holdout_start(BARS, sym, part["holdout_months"], fixed_holdout_boundary(DECL))
         bt = research_bars_to_backtest_csv(BARS, sym, sdir / "bt_bars.csv", end_exclusive_utc=hold)
 
         def emit(bt=bt, strategy=strategy, sym=sym, sdir=sdir, h=h):
@@ -570,7 +620,8 @@ def stage_trials(_args) -> None:
                 required_history_bars=rec["required_history_bars"],
                 expected_capital_sizing=research_capital_sizing(DECL),
                 expected_stress_contract=research_stress_contract(DECL),
-                canonical_timeframe_identity=canonical_timeframe_identity(DECL))
+                canonical_timeframe_identity=canonical_timeframe_identity(DECL),
+                fixed_holdout_boundary=fixed_holdout_boundary(DECL))
         except NativeSignalError as exc:  # the failed attempt is already durable
             rec["failed"] = str(exc)
             print(key(strategy, sym), "FAILED attempt kept:", str(exc)[:200])

@@ -147,17 +147,19 @@ def test_promotion_policy_thresholds_are_unchanged_and_explicit():
 
 def test_data_and_partition_follow_the_accepted_contract_with_the_holdout_excluded():
     d, b = RAW["data"], B3["data"]
-    for key in ("path", "feed", "timeframe", "timeframe_identity", "adjustment", "start_utc", "end_utc",
-                "completed_bars_only"):
+    for key in ("path", "feed", "timeframe", "timeframe_identity", "adjustment", "start_utc", "completed_bars_only"):
         assert d[key] == b[key], key
+    # the one deliberate difference from Batch 03: the development fetch ends AT the reserved start (OD-3)
+    assert b["end_utc"] == "2026-09-01T00:00:00Z" and d["end_utc"] == "2026-03-01T00:00:00Z"
+    assert d["end_utc"] == RAW["partition"]["holdout_boundary"]["holdout_start_utc"]
     assert d["timeframe_identity"] == "canonical_semantic_v1" and d["adjustment"] == "all" and d["feed"] == "sip"
     p = RAW["partition"]
     assert {k: p[k] for k in ("evaluation_start_utc", "test_months", "holdout_months", "expected_folds")} == {
         k: B3["partition"][k] for k in ("evaluation_start_utc", "test_months", "holdout_months", "expected_folds")}
     assert "ACCESS_INCIDENT_PENDING_ADJUDICATION" in p["holdout_rule"] and "2026-03-01" in p["holdout_rule"]
     assert RAW["holdout"]["status"] == HOLDOUT_STATUS
-    assert "OD-3" in d["holdout_window_fetch_disclosure"]
-    assert "OPERATOR_ACKNOWLEDGEMENT_REQUIRED_AT_EXECUTION" in {u["status"] for u in RAW["unresolved_proof_capabilities"]}
+    assert "no OHLCV timestamp at or after it is requested" in d["holdout_window_fetch_disclosure"]
+    assert "OPERATOR_ACKNOWLEDGEMENT_REQUIRED_AT_EXECUTION" not in {u["status"] for u in RAW["unresolved_proof_capabilities"]}
 
 
 def test_evidence_grade_is_exposed_development_and_never_independent():

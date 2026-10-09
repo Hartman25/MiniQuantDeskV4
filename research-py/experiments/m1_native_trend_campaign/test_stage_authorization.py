@@ -33,8 +33,12 @@ ACK = ["HOA-KISS-EXT032-01"]
 EFFECTFUL = [s for s, c in sa.STAGE_CLASS.items() if c != sa.READ_ONLY]
 
 
+CA_ACK = ["CA_DISCOVERY_PROCESS_DATE_TO_EXTRACTION_TIME"]
+
+
 def auth(classes, **kw):
     kw.setdefault("acknowledged_incidents", ACK)
+    kw.setdefault("acknowledged_data_boundaries", CA_ACK)
     return sa.mint(KISS, list(classes), operator="op", approval_ref="APPROVAL-1", key=KEY, now=NOW, **kw)
 
 
@@ -121,6 +125,13 @@ def test_the_pending_holdout_incident_must_be_acknowledged_and_blocks_promotion_
     check(auth([sa.PROMOTION], acknowledged_incidents=[]), sa.PROMOTION, entries=[*adj, e])
 
 
+def test_the_fetch_authorization_must_acknowledge_the_declared_data_boundary():
+    assert KISS["data"]["required_fetch_acknowledgements"] == CA_ACK
+    with pytest.raises(sa.AuthorizationError, match="data boundaries"):
+        check(auth([sa.PROVIDER_FETCH], acknowledged_data_boundaries=[]), sa.PROVIDER_FETCH)
+    check(auth([sa.REGISTRATION], acknowledged_data_boundaries=[]), sa.REGISTRATION)  # only the fetch needs it
+
+
 def test_read_only_stages_need_no_authorization_and_every_effectful_stage_has_a_distinct_class():
     for stage, cls in sa.STAGE_CLASS.items():
         if cls == sa.READ_ONLY:
@@ -200,7 +211,7 @@ def test_the_closed_declaration_refuses_a_direct_fetch_before_credentials_http_d
 def test_a_valid_authorization_for_the_wrong_class_does_not_open_registration_or_attempts(opened_runner, tmp_path, monkeypatch):
     rb, tmp = opened_runner
     fetch_only = sa.mint(rb.DECL, [sa.PROVIDER_FETCH], operator="op", approval_ref="A", key=KEY,
-                         now=datetime.now(timezone.utc), acknowledged_incidents=ACK)
+                         now=datetime.now(timezone.utc), acknowledged_incidents=ACK, acknowledged_data_boundaries=CA_ACK)
     path = tmp / "auth.json"
     path.write_text(json.dumps(fetch_only), encoding="utf-8")
     monkeypatch.setenv(sa.KEY_ENV, KEY)
@@ -216,7 +227,7 @@ def test_a_valid_fetch_authorization_still_stops_at_the_provider_boundary_in_a_h
     rb, tmp = opened_runner
     monkeypatch.undo()  # drop the booby traps; keep only the real boundary + audit guard below
     a = sa.mint(rb.DECL, [sa.PROVIDER_FETCH], operator="op", approval_ref="A", key=KEY, now=datetime.now(timezone.utc),
-                acknowledged_incidents=ACK)
+                acknowledged_incidents=ACK, acknowledged_data_boundaries=CA_ACK)
     path = tmp / "auth_ok.json"
     path.write_text(json.dumps(a), encoding="utf-8")
     monkeypatch.setenv(sa.KEY_ENV, KEY)

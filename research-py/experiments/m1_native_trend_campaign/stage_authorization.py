@@ -103,7 +103,8 @@ def _signature(auth: dict, key: str) -> str:
 
 
 def mint(decl: dict, classes: list[str], *, operator: str, approval_ref: str, key: str, now: datetime,
-         valid_for: timedelta = timedelta(hours=24), acknowledged_incidents: list[str] | None = None) -> dict:
+         valid_for: timedelta = timedelta(hours=24), acknowledged_incidents: list[str] | None = None,
+         acknowledged_data_boundaries: list[str] | None = None) -> dict:
     """Operator tool (needs the secret). The controller never calls this outside tests. Incident
     acknowledgement is explicit: nothing is acknowledged unless the operator names it."""
     if len(key) < MIN_KEY_CHARS:
@@ -116,7 +117,8 @@ def mint(decl: dict, classes: list[str], *, operator: str, approval_ref: str, ke
             "authorized_classes": sorted(classes), "operator": operator, "approval_ref": approval_ref,
             "issued_utc": now.astimezone(timezone.utc).isoformat(),
             "expires_utc": (now + valid_for).astimezone(timezone.utc).isoformat(),
-            "acknowledged_incident_ids": sorted(acknowledged_incidents or [])}
+            "acknowledged_incident_ids": sorted(acknowledged_incidents or []),
+            "acknowledged_data_boundaries": sorted(acknowledged_data_boundaries or [])}
     auth["signature"] = _signature(auth, key)
     return auth
 
@@ -148,6 +150,11 @@ def verify(decl: dict, auth_class: str, auth: dict | None, *, key: str | None, n
     pending = holdout_incident.affecting_incidents(decl, incident_entries)
     if pending and not set(pending) <= set(auth.get("acknowledged_incident_ids") or []):
         raise AuthorizationError(f"fail-closed: stage authorization does not acknowledge pending incident(s) {pending}")
+    if auth_class == PROVIDER_FETCH:
+        required = set((decl.get("data") or {}).get("required_fetch_acknowledgements") or [])
+        if not required <= set(auth.get("acknowledged_data_boundaries") or []):
+            raise AuthorizationError(f"fail-closed: the fetch authorization does not acknowledge data boundaries "
+                                     f"{sorted(required - set(auth.get('acknowledged_data_boundaries') or []))}")
     if auth_class in INCIDENT_BLOCKED:
         holdout_incident.require_no_pending_incident(decl, auth_class, incident_entries)
 
