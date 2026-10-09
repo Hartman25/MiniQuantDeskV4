@@ -98,12 +98,12 @@ def key(strategy: str, symbol: str) -> str:
     return f"{strategy}/{symbol}"
 
 
-def _economic_spec():
+def _economic_spec(decl: dict | None = None):
     from mqk_research.ml.economic_walkforward import (
         AnnualizationSpec, CostModelSpec, EconomicWalkForwardSpec, SignalPolicySpec)
     from mqk_research.ml.execution_pricing import ExecutionPricingSpec
     from mqk_research.ml.weight_to_share import WeightToShareSpec
-    p = DECL["economic_protocol"]
+    p = (decl or DECL)["economic_protocol"]
     return EconomicWalkForwardSpec(
         signal_policy=SignalPolicySpec(**p["signal_policy"]),
         cost_model=CostModelSpec(**p["cost_model"]),
@@ -474,22 +474,29 @@ def _resolve_native_identity(strategy: str, sym: str) -> tuple[str, int]:
     return _parse(info, "semantic_fingerprint"), int(_parse(info, "required_history_bars"))
 
 
-def expected_trial_ids(fingerprints: dict, manifest: dict) -> list[tuple[str, str, str, dict]]:
+def expected_trial_ids(fingerprints: dict, manifest: dict, decl: dict | None = None) -> list[tuple[str, str, str, dict]]:
     """The predeclared (strategy, symbol, trial_id, identity) for every slot, derived only from the
-    declaration, the resolved native fingerprints and the data provenance -- never from a result."""
+    declaration, the resolved native fingerprints and the data provenance -- never from a result.
+    `decl` defaults to the runner's declaration; a reviewer passes the declaration it is reviewing."""
     from mqk_research.ml.native_signal_registry_integration import build_native_signal_trial_identity
-    part = DECL["partition"]
+    if decl is None:  # the runner's own (possibly test-narrowed) module state
+        decl, experiment, hyp, slots = DECL, EXPERIMENT, HYP, TRIALS
+    else:
+        experiment = decl["experiment"]["real_experiment_id"]
+        hyp = {h["strategy_id"]: h for h in decl["hypotheses"]}
+        slots = [(t["strategy_id"], t["symbol"]) for t in decl["universe"]["trials"]]
+    part = decl["partition"]
     out = []
-    for strategy, sym in TRIALS:
-        h, (fingerprint, required) = HYP[strategy], fingerprints[(strategy, sym)]
+    for strategy, sym in slots:
+        h, (fingerprint, required) = hyp[strategy], fingerprints[(strategy, sym)]
         trial_id, identity = build_native_signal_trial_identity(
-            experiment_id=EXPERIMENT, hypothesis_id=h["hypothesis_id"], strategy_id=strategy, symbol=sym,
+            experiment_id=experiment, hypothesis_id=h["hypothesis_id"], strategy_id=strategy, symbol=sym,
             semantic_fingerprint=fingerprint, required_history_bars=required, bars_provenance=manifest,
             evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]), test_months=part["test_months"],
-            holdout_months=part["holdout_months"], economic_spec=_economic_spec(),
-            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL),
-            canonical_timeframe_identity=canonical_timeframe_identity(DECL),
-            fixed_holdout_boundary=fixed_holdout_boundary(DECL))
+            holdout_months=part["holdout_months"], economic_spec=_economic_spec(decl),
+            capital_sizing=research_capital_sizing(decl), stress_contract=research_stress_contract(decl),
+            canonical_timeframe_identity=canonical_timeframe_identity(decl),
+            fixed_holdout_boundary=fixed_holdout_boundary(decl))
         out.append((strategy, sym, trial_id, identity))
     return out
 

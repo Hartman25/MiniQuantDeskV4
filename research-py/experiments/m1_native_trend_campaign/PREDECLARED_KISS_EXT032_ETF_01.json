@@ -449,14 +449,18 @@
  },
  "near_miss_review": {
   "module": "near_miss_review.py",
-  "schema": "m1_near_miss_review_v1",
+  "schema": "m1_near_miss_review_v2",
   "classes": [
    "QUALIFIES_UNDER_EVERY_APPLICABLE_GATE",
+   "QUALIFICATION_WITHHELD",
    "QUANTITATIVE_ECONOMIC_NEAR_MISS",
    "STRUCTURALLY_UNQUALIFIED_OR_NON_EVALUABLE",
    "INSUFFICIENT_PROVENANCE_OR_INDEPENDENT_VALIDATION",
    "INVALID_EXECUTION_IDENTITY_OR_SAFETY_EVIDENCE"
   ],
+  "precedence": "INVALID > UNQUALIFIED > INSUFFICIENT (provenance, canonical Promotion proof) > NEAR_MISS (numbers) > WITHHELD (global conditions) > QUALIFIES; first match wins",
+  "identity_rule": "expected trial ids are recomputed from this declaration, the declared wrapped fingerprints and the bars provenance manifest; rows, registry records and the judge inventory must each equal them",
+  "promotion_proof": "only a validated run-bound canonical PromotionReport (PromotionProof.from_report); a free-form verdict mapping is never a proof; unavailable proof is PROMOTION_PROOF_UNAVAILABLE",
   "populated_only_after_authorized_execution": true
  },
  "economic_outcome_status": "NONE_NOT_EXECUTED",

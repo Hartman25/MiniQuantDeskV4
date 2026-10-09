@@ -57,8 +57,19 @@ def review_rows() -> dict:
     return out
 
 
+def scan_bars_used() -> dict:
+    """(strategy, symbol) -> the scanner's own `bars_used`, the evidence for the review policy's minimum-bars gate."""
+    out = {}
+    for strategy in {s for s, _ in TRIALS}:
+        path = one(RUN / "scan" / strategy / "scans" / "*" / "candidates.json")
+        for cand in json.loads(path.read_text(encoding="utf-8")):
+            out[(strategy, cand["symbol"])] = cand["metrics"]["bars_used"]
+    return out
+
+
 def main() -> None:
     reviews = review_rows()
+    bars_used = scan_bars_used()
     rows = []
     for strategy, sym in TRIALS:
         rec = IDX[f"{strategy}/{sym}"]
@@ -66,6 +77,7 @@ def main() -> None:
             rows.append({
                 "strategy": strategy, "symbol": sym, "trial_id": rec["trial_id"], "economic_failed": rec["failed"],
                 "semantic_fingerprint": rec["semantic_fingerprint"], "attempt_index": None,
+                "backtest_run_id": None, "economic_eval_id": None, "rust_bars_used": bars_used.get((strategy, sym)),
                 "judge_status": "excluded:" + EXCLUDED[rec["trial_id"]] if rec["trial_id"] in EXCLUDED else "not_in_judge",
                 "dsr": DSR.get(rec["trial_id"], {}).get("deflated_sharpe_ratio"),
                 "robustness_failed": ["economic_failed"], "robustness_not_applicable": [], "stress_failed": [],
@@ -93,7 +105,8 @@ def main() -> None:
         na_scen = [s["name"] for s in gaunt["scenarios"] if not s.get("applicable", True)]
         rows.append({
             "strategy": strategy, "symbol": sym, "trial_id": rec["trial_id"], "attempt_index": rec["attempt_index"],
-            "semantic_fingerprint": rec["semantic_fingerprint"],
+            "semantic_fingerprint": rec["semantic_fingerprint"], "backtest_run_id": rec.get("backtest_run_id"),
+            "economic_eval_id": rec["economic_eval_id"], "rust_bars_used": bars_used.get((strategy, sym)),
             "net_return": agg["net_total_return"], "gross_return": agg["gross_total_return"],
             "cost_drag": agg["cost_drag"], "sharpe": agg["net_sharpe"], "cagr": agg["annualized_net_return"],
             "max_drawdown": agg["max_drawdown"], "profitable_months": profitable_months(daily),
