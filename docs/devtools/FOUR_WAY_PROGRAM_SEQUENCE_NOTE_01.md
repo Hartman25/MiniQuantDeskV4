@@ -62,3 +62,47 @@ The one row that initially failed its own check (missing calendar/execution
 model validation in Component C) is recorded here rather than silently
 corrected and forgotten: it is real evidence the final adversarial sweep
 was not a formality.
+
+## Independent-review correction round (2026-10-09, commits `505f2425`,
+`02304e4d`, `db1e47c0`)
+
+An independent review of the pushed branch (SHA `d4fc2c64`) found 14
+further defects by direct code inspection — all confirmed against actual
+HEAD before any fix, none assumed from the review text alone:
+
+- **Component B (B1–B6)**: a missing/unreadable `trades_csv` path silently
+  became zero trades; unit/currency/multiplier/cost defaulted silently on
+  blank CSV cells (plus a related bug found while writing the negative
+  control — pandas represents a blank cell in a sparse column as float
+  `NaN`, not `None`, which the loader didn't check); partial fills inflated
+  concurrency by counting each fill row as a separate position; time-
+  underwater measurement dropped the final leg up to the actual recovery
+  instant; NaN/Infinity/bool/fractional inputs and exit-before-entry
+  timestamps weren't rejected; `report_id` only hashed summarized output,
+  so different trade histories with coincidentally identical aggregates
+  collapsed to the same id.
+- **Component C (C1–C4)**: `json.dumps(..., default=str)` let unsupported
+  objects and non-finite floats enter an economic identity through their
+  string representation; a frozen dataclass didn't stop a caller mutating
+  a nested mutable mapping after construction; a mechanism family with no
+  explicit `parameter_grids` key (vs. an explicit `{}`) silently generated
+  one parameterless variant; `max_population_size` (a resource bound)
+  participated in economic identity.
+- **Component D (D1–D4)**: `require_licensed_for_research` trusted the
+  caller-declared `event.license_status` without checking the provider's
+  own registry authority — a caller-built `stocknest` event claiming
+  `LICENSED_FOR_RESEARCH` passed even though `stocknest` stays unlicensed;
+  a restated/revised payload had no way to prove its own publication time
+  separate from the original disclosure date; timestamps were compared via
+  raw `pd.Timestamp()` with no rejection of missing/malformed/naive/NaT
+  values.
+
+All fixed with reproduction + negative/mutation proof (76 new/updated
+tests: Component B 30→70, C 31→52, D 25→40). Combined regression including
+the existing `test_experiment_registry.py`: 209/209 passing. No change to
+`tax/metrics.py`, `exp_distributed/storage.py`, or any production sizing/
+execution/risk code. Component A required no change (narrow acceptance
+check only, per the correction mission's own scoping). These three commits
+are **local only, not pushed** — the original publication
+(`d4fc2c64`) is unaffected; a human reviewer merging this work should
+re-publish from the new ending HEAD rather than from `d4fc2c64`.
