@@ -93,8 +93,10 @@ def test_malformed_source_data_fails_closed():
     class NotJsonSerializable:
         pass
 
-    with pytest.raises(AltDataProvenanceError, match="not JSON-serializable"):
-        _event(raw_payload={"bad": NotJsonSerializable()}).validate()
+    # Rejected at CONSTRUCTION time now (deep-freeze validates eagerly),
+    # before .validate() would even be reached.
+    with pytest.raises(AltDataProvenanceError, match="unsupported payload value type"):
+        _event(raw_payload={"bad": NotJsonSerializable()})
 
 
 def test_revision_below_one_fails_closed():
@@ -374,3 +376,92 @@ def test_naive_public_disclosure_timestamp_fails_closed():
 def test_fetch_from_provider_still_has_no_success_path_after_corrections():
     with pytest.raises(ProviderUnavailableError):
         fetch_from_provider("stocknest")
+
+
+# ---------------------------------------------------------------------------
+# FW-D-R5 (surgical closeout 02): data_revision_version must be a real
+# positive int, not NaN/bool; provider_ingestion_timestamp_utc must be a
+# valid UTC instant; original_source_id must be non-empty.
+# ---------------------------------------------------------------------------
+
+def test_nan_data_revision_version_fails_closed():
+    # float('nan') < 1 is False in Python -- the old bare comparison let it through.
+    with pytest.raises(AltDataProvenanceError, match="data_revision_version must be a real int"):
+        _event(data_revision_version=float("nan")).validate()
+
+
+def test_bool_true_data_revision_version_fails_closed():
+    # True < 1 is also False (True == 1) -- bool-as-int coercion gap.
+    with pytest.raises(AltDataProvenanceError, match="data_revision_version must be a real int"):
+        _event(data_revision_version=True).validate()
+
+
+def test_malformed_provider_ingestion_timestamp_fails_closed():
+    with pytest.raises(AltDataProvenanceError, match="not a parseable timestamp"):
+        _event(provider_ingestion_timestamp_utc="junk").validate()
+
+
+def test_empty_original_source_id_fails_closed():
+    with pytest.raises(AltDataProvenanceError, match="original_source_id is empty"):
+        _event(original_source_id="").validate()
+
+
+def test_ingestion_timestamp_is_not_identity_bearing_despite_now_being_validated():
+    # D3/D-R5 added validation of provider_ingestion_timestamp_utc, but it
+    # must still be deliberately EXCLUDED from content_fields()/event_id()
+    # -- re-ingesting identical disclosed content later must not manufacture
+    # a new logical event.
+    e1 = _event(provider_ingestion_timestamp_utc="2026-01-16T00:00:00Z")
+    e2 = _event(provider_ingestion_timestamp_utc="2026-02-01T00:00:00Z")
+    assert e1.event_id() == e2.event_id()
+    assert "provider_ingestion_timestamp_utc" not in e1.content_fields()
+
+
+# ---------------------------------------------------------------------------
+# FW-D-R6 (surgical closeout 02): raw_payload must be deep-frozen at
+# construction; a caller mutating the original mutable object they passed
+# in, or a direct attempt to mutate event.raw_payload itself, must not
+# change event_id().
+# ---------------------------------------------------------------------------
+
+def test_original_caller_raw_payload_list_mutation_does_not_change_event_id():
+    original_payload = {"values": [10, 20]}
+    ev = _event(raw_payload=original_payload)
+    id_before = ev.event_id()
+    original_payload["values"].append(30)  # mutate the caller's own object
+    assert ev.event_id() == id_before
+    assert ev.content_fields()["raw_payload"] == {"values": [10, 20]}
+
+
+def test_direct_mutation_of_event_raw_payload_is_ineffective():
+    ev = _event(raw_payload={"values": [10, 20]})
+    with pytest.raises(AttributeError):
+        ev.raw_payload["values"].append(30)  # stored as a frozen tuple, no .append
+
+
+def test_mutating_the_returned_content_fields_does_not_mutate_the_event():
+    ev = _event(raw_payload={"values": [10, 20]})
+    id_before = ev.event_id()
+    cf = ev.content_fields()
+    cf["raw_payload"]["values"].append(30)  # mutate the freshly-thawed, detached copy
+    cf["original_source_id"] = "tampered"
+    assert ev.event_id() == id_before
+    assert ev.original_source_id != "tampered"
+
+
+def test_non_finite_raw_payload_value_fails_closed_at_construction():
+    with pytest.raises(AltDataProvenanceError, match="non-finite float"):
+        _event(raw_payload={"value": float("nan")})
+
+
+def test_same_valid_content_yields_the_same_event_id_sha256_json_compatible():
+    e1 = _event(raw_payload={"metric": "pe_ratio", "value": 25.0})
+    e2 = _event(raw_payload={"metric": "pe_ratio", "value": 25.0})
+    assert e1.event_id() == e2.event_id()
+    assert len(e1.event_id()) == 64  # sha256 hex digest
+
+
+def test_event_id_calls_validate_so_an_invalid_object_never_returns_a_looking_valid_hash():
+    ev = _event(instrument_identity="   ")  # invalid, but construction alone doesn't catch this
+    with pytest.raises(AltDataProvenanceError, match="ambiguous"):
+        ev.event_id()

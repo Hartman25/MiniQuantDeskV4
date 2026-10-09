@@ -18,8 +18,11 @@ no provider, writes no registry, and calls no Research/Promotion seam.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 import pandas as pd
@@ -90,6 +93,48 @@ PROVIDER_CAPABILITIES: Dict[str, ProviderCapabilityRecord] = {
         ),
     ),
 }
+
+
+def _freeze_json_native(obj: Any, *, label: str) -> Any:
+    """Recursively validates and DEEPLY FREEZES a value for inclusion in an
+    event's content identity (FW-D-R6): only finite JSON-native types are
+    accepted, and the result is immutable at every level (tuple/
+    MappingProxyType), not just the outer container -- a caller mutating
+    `raw_payload={"values": [10, 20]}` by appending to that same list
+    object after construction must not change `event_id()`. Mirrors
+    strategy_mining/grammar.py's `_canonical_value` discipline but is kept
+    local to this module (not cross-imported) so Component D's provenance
+    boundary stays self-contained, per its own module docstring."""
+    if obj is None or isinstance(obj, str):
+        return obj
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, int):
+        return obj
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            raise AltDataProvenanceError(f"{label}: non-finite float is not an allowed payload value: {obj!r}")
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return tuple(_freeze_json_native(v, label=label) for v in obj)
+    if isinstance(obj, ABCMapping):
+        canon: Dict[str, Any] = {}
+        for k, v in obj.items():
+            if not isinstance(k, str):
+                raise AltDataProvenanceError(f"{label}: only string keys are allowed, got {type(k).__name__}: {k!r}")
+            canon[k] = _freeze_json_native(v, label=label)
+        return MappingProxyType(canon)
+    raise AltDataProvenanceError(f"{label}: unsupported payload value type {type(obj).__name__}: {obj!r}")
+
+
+def _thaw_json_native(obj: Any) -> Any:
+    """Inverse of `_freeze_json_native`: produces a plain JSON-native
+    dict/list, used only when building `content_fields()`'s output."""
+    if isinstance(obj, MappingProxyType):
+        return {k: _thaw_json_native(v) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return [_thaw_json_native(v) for v in obj]
+    return obj
 
 
 def _require_known_provider(provider_id: str) -> ProviderCapabilityRecord:
@@ -171,18 +216,33 @@ class AltDataEvent:
     license_status: LicenseStatus = LicenseStatus.UNKNOWN
     revision_publication_datetime_utc: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        """Defensively deep-freezes `raw_payload` at construction time
+        (FW-D-R6): a frozen dataclass does not stop a caller from mutating
+        a mutable value stored BY REFERENCE inside it. Also rejects
+        non-finite/unsupported payload content immediately rather than
+        only when `event_id()` happens to be called later -- and before it
+        could ever reach `util_hash.sha256_json`, which (being shared,
+        unmodified, protected infrastructure) allows NaN/Infinity through
+        as non-standard JSON tokens with no complaint of its own."""
+        object.__setattr__(self, "raw_payload", _freeze_json_native(dict(self.raw_payload), label="raw_payload"))
+
     def validate(self) -> None:
         if not self.instrument_identity or not self.instrument_identity.strip():
             raise AltDataProvenanceError("instrument_identity is empty/ambiguous")
         if self.event_category == EventCategory.UNKNOWN:
             raise AltDataProvenanceError("event_category must be a known, supported category")
+        if not isinstance(self.original_source_id, str) or not self.original_source_id.strip():
+            raise AltDataProvenanceError("original_source_id is empty/ambiguous")
+        if isinstance(self.data_revision_version, bool) or not isinstance(self.data_revision_version, int):
+            raise AltDataProvenanceError(
+                f"data_revision_version must be a real int, not {type(self.data_revision_version).__name__}: "
+                f"{self.data_revision_version!r} (NaN/bool are not valid revisions)"
+            )
         if self.data_revision_version < 1:
             raise AltDataProvenanceError("data_revision_version must be >= 1")
-        try:
-            sha256_json(dict(self.raw_payload))
-        except TypeError as exc:
-            raise AltDataProvenanceError(f"raw_payload is not JSON-serializable: {exc}") from exc
         _require_known_provider(self.provider_id)
+        _require_utc_instant("provider_ingestion_timestamp_utc", self.provider_ingestion_timestamp_utc)
 
         event_ts = _require_utc_instant("event_datetime_utc", self.event_datetime_utc)
         disclosure_ts = _require_utc_instant("public_disclosure_datetime_utc", self.public_disclosure_datetime_utc)
@@ -230,13 +290,16 @@ class AltDataEvent:
             "revision_publication_datetime_utc": self.revision_publication_datetime_utc,
             "data_revision_version": self.data_revision_version,
             "original_source_id": self.original_source_id,
-            "raw_payload": dict(self.raw_payload),
+            "raw_payload": _thaw_json_native(self.raw_payload),
         }
 
     def event_id(self) -> str:
         """Deterministic, content-derived id. A later revision of the same
         logical event gets a DIFFERENT id (because data_revision_version is
-        part of the content) rather than overwriting the prior one."""
+        part of the content) rather than overwriting the prior one.
+        Validates first: an unvalidated/invalid object must never return a
+        valid-looking hash."""
+        self.validate()
         return sha256_json(self.content_fields())
 
 
