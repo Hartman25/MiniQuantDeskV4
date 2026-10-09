@@ -20,6 +20,7 @@ REQUIRED_MODULES = (
     "experiments.m1_native_trend_campaign.test_hermetic_provider_isolation",
     "experiments.m1_native_trend_campaign.test_stage_authorization",
     "experiments.m1_native_trend_campaign.test_subprocess_guard_inheritance",
+    "experiments.m1_native_trend_campaign.test_audit_sink_authority",
     "experiments.m1_native_trend_campaign.test_holdout_incident",
     "experiments.m1_native_trend_campaign.test_holdout_guard",
     "experiments.m1_native_trend_campaign.test_kiss_ext032_predeclaration",
@@ -70,6 +71,9 @@ def main(argv: list[str]) -> int:
         problems.append(f"offline guard recorded unexpected attempts by spawned children: {summary.get('unexpected_child_attempts')!r}")
     if summary.get("uninitialized_children") != 0:
         problems.append(f"offline guard: spawned children that never initialized the guard: {summary.get('uninitialized_children')!r}")
+    if summary.get("sink_integrity_errors") != 0:
+        problems.append(f"offline guard: audit-sink integrity errors (unreadable, malformed or unwritable sink): "
+                        f"{summary.get('sink_integrity_errors')!r}")
     if not isinstance(summary.get("attempted_total"), int) or summary["attempted_total"] < MIN_DELIBERATE_PROBES:
         problems.append(f"offline guard recorded {summary.get('attempted_total')!r} deliberate probes "
                         f"(< {MIN_DELIBERATE_PROBES}): it was not installed or did not run")
