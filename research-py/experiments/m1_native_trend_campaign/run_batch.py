@@ -463,6 +463,15 @@ def stage_fetch(args) -> None:
         symbols=list(DECL["universe"]["symbols"]), start_utc=pd.Timestamp(d["start_utc"]),
         end_utc=pd.Timestamp(d["end_utc"]), asof=d["asof"], timeframe=d["timeframe"], feed=d["feed"])
     counts = verify_fetched_bars(DECL, result["bars"])
+    boundary = fixed_holdout_boundary(DECL)
+    if boundary is not None:  # the attested range, not only the rows, must stay inside the development window
+        try:
+            attested_end = pd.Timestamp(result["manifest"]["end_utc"])
+        except (KeyError, TypeError, ValueError):
+            raise SystemExit("fail-closed: the provenance manifest carries no readable end_utc") from None
+        if attested_end.tzinfo is None or attested_end > pd.Timestamp(boundary["holdout_start_utc"]):
+            raise SystemExit(f"fail-closed: the provenance manifest attests a range ending {attested_end}, past the "
+                             f"reserved holdout start {boundary['holdout_start_utc']}")
     paths = write_research_extraction_artifacts(dest, result)
     print("rows", counts, {k: v.name for k, v in paths.items()})
 

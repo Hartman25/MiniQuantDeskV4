@@ -200,11 +200,12 @@ def fetch_world(tmp_path, monkeypatch):
     stage_auth_testkit.grant_runner_stages(monkeypatch, runner)
     monkeypatch.setattr(runner, "_load_alpaca_env", lambda: None)
     calls: list[dict] = []
-    state = {"frame": bars()}
+    state = {"frame": bars(), "manifest": {"start_utc": "2016-01-01T00:00:00+00:00", "end_utc": "2026-03-01T00:00:00+00:00"}}
 
     def fake_extract(**kw):
         calls.append(kw)
-        return {"bars": state["frame"], "manifest": {}, "corporate_action_evidence": {}, "corporate_action_entries": []}
+        return {"bars": state["frame"], "manifest": state["manifest"], "corporate_action_evidence": {},
+                "corporate_action_entries": []}
 
     monkeypatch.setattr(ah, "extract_research_bars_with_provenance", fake_extract)
     written: list = []
@@ -242,6 +243,16 @@ def test_symbols_with_different_coverage_fail_closed(fetch_world):
     late = late[~((late["symbol"] == "IWM") & (pd.to_datetime(late["end_ts"], utc=True) < pd.Timestamp("2016-02-01", tz="UTC")))]
     state["frame"] = late
     with pytest.raises(SystemExit, match="different spans"):
+        runner.stage_fetch(argparse.Namespace(execute=True))
+    assert written == []
+
+
+@pytest.mark.parametrize("manifest", [{}, {"end_utc": "2026-09-01T00:00:00+00:00"}, {"end_utc": "2026-03-01T00:00:01+00:00"},
+                                       {"end_utc": "2026-03-01T00:00:00"}, {"end_utc": "garbage"}])
+def test_a_manifest_that_attests_a_range_past_the_boundary_or_none_is_refused_before_writing(fetch_world, manifest):
+    runner, _, state, written, _ = fetch_world
+    state["manifest"] = manifest
+    with pytest.raises(SystemExit, match="fail-closed"):
         runner.stage_fetch(argparse.Namespace(execute=True))
     assert written == []
 

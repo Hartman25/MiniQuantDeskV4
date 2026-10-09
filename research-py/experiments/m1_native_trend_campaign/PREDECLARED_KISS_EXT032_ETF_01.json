@@ -469,7 +469,7 @@
    "id": "U1",
    "item": "pooled DSR/PBO across campaigns",
    "status": "BLOCKED_UNSUPPORTED",
-   "why": "see search_accounting.pooled_statistics_support"
+   "why": "see search_accounting.pooled_statistics_support; named statistical acceptance blocker SAB-1: CUMULATIVE_SEARCH_VALIDATION_BLOCKED, so no trial may be labelled cumulative-search validated or qualifying"
   },
   {
    "id": "U2",
@@ -500,6 +500,18 @@
    "item": "2016-2022 early-close dates",
    "status": "RULE_DERIVED_NOT_PROVIDER_EVIDENCED",
    "why": "economics-neutral for EXT-032"
+  },
+  {
+   "id": "U7",
+   "item": "canonical Promotion report for each trial",
+   "status": "PROMOTION_PROOF_UNAVAILABLE",
+   "why": "no producer writes run/promotion/<strategy>/<symbol>/promotion_report.json; the review accepts only a validated run-bound report and never a free-form verdict"
+  },
+  {
+   "id": "U8",
+   "item": "Final-Holdout independence",
+   "status": "ACCESS_INCIDENT_PENDING_ADJUDICATION",
+   "why": "see holdout.access_incident; Promotion and Paper stage authorizations are refused and no qualification label is issued until an operator ADJUDICATION entry is appended"
   }
  ],
  "batch_stopping_rule": {

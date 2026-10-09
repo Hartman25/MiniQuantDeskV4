@@ -144,6 +144,13 @@ def test_read_only_stages_need_no_authorization_and_every_effectful_stage_has_a_
         sa.require_stage(KISS, "promote")
 
 
+def test_every_runner_stage_is_guarded_and_known_so_a_new_unguarded_stage_fails_here(tmp_path):
+    rb = _load_runner(_opened_declaration(tmp_path))
+    assert set(rb.STAGES) == set(sa.STAGE_CLASS), "a stage without an authorization class (or a class without a stage)"
+    for name, fn in rb.STAGES.items():
+        assert hasattr(fn, "__wrapped__") and fn.__wrapped__.__name__ == f"stage_{name}", f"{name} is not wrapped by @staged"
+
+
 def test_frozen_historical_declarations_are_matched_by_content_and_keep_their_behaviour():
     for name, pinned in sa.HISTORICAL_DECLARATION_SHA256.items():
         decl = json.loads((HERE / name).read_text(encoding="utf-8"))
