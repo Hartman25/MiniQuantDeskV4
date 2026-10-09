@@ -81,3 +81,7 @@ Unpromoted/default strategy trading: ALREADY CORRECT (0 promotions; gate tests).
 ## Post-Discovery update (2026-10-08)
 
 `M1_SYSTEM_CANDIDATE_READY = true` is re-confirmed for non-monthly candidates. Two candidate-independent items were found and handled by `V4-M1-POST-DISCOVERY-CANDIDATE-AUTHORITY-AND-OOS-READINESS-01` (`docs/research/M1_POST_DISCOVERY_CANDIDATE_AUTHORITY.md`): the M1.10 ledger now counts Paper sessions through 2028 (it ended 2026-12-31), and the capital-fraction store/restart DB proofs run in the CI DB lane. The monthly engines (F01/F05/F08/F10) remain fail-closed flat for bars on/after 2026-12-31 until the operator authorizes a calendar-contract migration (OD-6).
+
+## KISS campaign update (2026-10-09)
+
+E1 (monthly/calendar engines fail closed flat from 2026-12-31) is resolved at the helper level by the `CalendarContract` seam and the `us_equity_regular_sessions_v2` contract (`docs/research/M1_KISS_EXT032_CLOSEOUT.md` C1); registered v2-bound siblings of those engines remain DEFERRED (each is a new strategy identity). The existing engines and their fingerprints are unchanged (96/96 identical to the baseline build).

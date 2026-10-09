@@ -6,6 +6,15 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -37. M1 KISS campaign: calendar v2, EXT-032 engine and non-executable predeclaration (2026-10-09, `V4-M1-KISS-CALENDAR-CAMPAIGN-PREDECLARATION-AND-ENGINE-01`)
+
+Seven local commits on top of `a49cae1f` (CI #637 green), **not pushed**. Records: `docs/research/M1_KISS_EXT032_CLOSEOUT.md` (census, sweep, proof), `M1_KISS_EXT032_CAMPAIGN_DESIGN.md`, `M1_KISS_EXT032_SEARCH_ACCOUNTING.md`, `M1_KISS_EXT032_RESULTS_REVIEW_FRAMEWORK.md`; ledger G2.24.
+
+- Status `LOCALLY_COMPLETE`, awaiting independent review. **Research execution is NOT authorized**: `PREDECLARED_KISS_EXT032_ETF_01.json` has `execution_gate.executable = false`, blocker `OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED`; 1 hypothesis (EXT-032), 4 trials (SPY, QQQ, IWM, DIA), 0 attempts, no result. Evidence grade `EXPOSED_DEVELOPMENT` (never independent); Final Holdout untouched.
+- New: `us_equity_regular_sessions_v2` (2016-2028, scheduled vs unscheduled closures, early closes; v1 unchanged, 96/96 pre-existing fingerprints identical to the baseline build); `CalendarContract` seam (resolves E1 at the helper level; registered v2 siblings of the monthly/calendar engines DEFERRED); native `pre_holiday_two_session_long_v1` (25th identity, `MAX_STRATEGY_UNIVERSE` 25); stage guards for graded declarations; cross-campaign accounting (operative cumulative count 119 = 115 verified + 4; pooled DSR/PBO BLOCKED); read-only near-miss review of every trial (no selection).
+- Disclosure: a mutation run that opened the gate made a spawn test execute the `fetch` stage with the environment's provider credentials (about 10.7k raw bars including the reserved months downloaded to a git-ignored directory, never read, deleted; no trial, attempt or evaluation). Spawn tests are now hermetic and refuse to start when the gate is open. The operator should acknowledge this and the holdout-window fetch (U5) before authorizing execution.
+- Unchanged: M1 `M1_BLOCKED`; Paper INACTIVE; Live NOT TOUCHED; no promotion; Gate 3b untouched. Full local workspace acceptance NOT RUN (laptop resource-safety rule); broad proof delegated to GitHub CI.
+
 ## -36. Candidate supply, OOS design and Paper readiness, consolidated (2026-10-08, `V4-M1-CANDIDATE-SUPPLY-OOS-DESIGN-AND-PAPER-READINESS-CONSOLIDATED-01`)
 
 Part 1 (`91b3e9b`, `ef5c0ef`, `d30a68e`) is preserved on `review/m1-consolidated-continuation-01`; Part 2 (catalog) commits are local, **not pushed**. Record: `docs/research/M1_CANDIDATE_SUPPLY_OOS_PAPER_READINESS_CONSOLIDATED_01.md`; runbook `docs/runbooks/m1_9_paper_deployment_preflight.md`; ledger `docs/research/intake/external_idea_disposition_ledger_v1.{json,csv}`.
