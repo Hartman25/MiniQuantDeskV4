@@ -12,7 +12,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +22,6 @@ GUARD_SITE = Path(__file__).resolve().parent / "_guard_site"
 # Spawn paths the guard cannot follow into a child: refused outright (Popen is routed through the guarded wrapper).
 UNGUARDED_SPAWN_EVENTS = frozenset({"os.system", "os.exec", "os.posix_spawn", "os.spawn"})
 NETWORK_TOOLS = frozenset({"curl", "wget", "nc", "ncat", "netcat", "telnet", "ssh", "scp", "sftp", "ftp", "socat", "nmap"})
-PYTHON_NAME = re.compile(r"^python[0-9.]*(\.exe)?$")
 DENIED_EVENTS = frozenset({"socket.connect", "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr",
                            "socket.getnameinfo", "socket.sendto", "socket.sendmsg"})
 SECRET_BASENAMES = frozenset({".env", ".env.local", ".env.production", ".env.development"})
@@ -80,18 +78,10 @@ def _record(kind: str, detail: str) -> None:
 
 
 def _is_python(executable: str) -> bool:
-    """A real Python interpreter: this interpreter (by resolved path), or a binary named python[N.N] that is not a
-    script. A shell script named `python` is not one: it would run without the guard."""
+    """Only THIS interpreter (the same file as sys.executable or its base executable, whatever the path or name it
+    is reached by). A binary merely named python, or a symlink called python to a shell, is not one."""
     real = os.path.realpath(str(executable))
-    if real == os.path.realpath(sys.executable):
-        return True
-    if not (PYTHON_NAME.match(os.path.basename(str(executable))) or PYTHON_NAME.match(os.path.basename(real))):
-        return False
-    try:
-        with open(real, "rb") as fh:  # `open` of a non-secret name: not screened by the audit hook
-            return fh.read(2) != b"#!"
-    except OSError:
-        return False
+    return any(real == os.path.realpath(ref) for ref in {sys.executable, getattr(sys, "_base_executable", sys.executable)})
 
 
 def _carries_guard(env) -> bool:

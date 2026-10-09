@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -310,6 +311,12 @@ def test_alternate_interpreter_paths_are_judged_by_what_they_are_not_what_they_a
     fake.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
     fake.chmod(0o755)
     assert _refused([str(fake)], cwd=tmp_path) == ["unsupported_launcher"] and not marker.exists()
+    disguised = tmp_path / "disguised" / "python"                     # a symlink NAMED python that is really a shell
+    disguised.parent.mkdir()
+    disguised.symlink_to(shutil.which("sh"))
+    assert _refused([str(disguised), "-c", f"touch {marker}"], cwd=tmp_path) == ["unsupported_launcher"]
+    assert _refused(["python", "-c", f"touch {marker}"], env={"PATH": str(disguised.parent)}, cwd=tmp_path) == ["unsupported_launcher"]
+    assert not marker.exists()
     other = tmp_path / "bin"
     other.mkdir()
     (other / "python3").symlink_to(fake)                              # via PATH lookup too
