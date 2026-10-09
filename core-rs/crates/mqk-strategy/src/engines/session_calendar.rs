@@ -20,7 +20,6 @@ use crate::{BarStub, SemanticIdentityBuilder};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CalendarContract {
     V1,
-    #[allow(dead_code)] // selected by the first v2-bound engine
     V2,
 }
 

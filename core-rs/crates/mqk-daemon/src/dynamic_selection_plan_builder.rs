@@ -722,7 +722,7 @@ pub(crate) mod tests {
         ));
         let calendar = NyseWeekdaysProvider;
         let ctx = ctx_no_db(&st, &calendar);
-        // 5 symbols x 26 strategy ids (25 fleet + assigned; over MAX_STRATEGY_UNIVERSE=24) = 130 > 120.
+        // 5 symbols x 26 strategy ids (25 fleet + assigned; over MAX_STRATEGY_UNIVERSE=25) = 130 > 125.
         let symbols = vec!["A", "B", "C", "D", "E"]
             .into_iter()
             .map(|s| SymbolStrategyAssignment {
@@ -1537,7 +1537,7 @@ pub(crate) mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(fleet.len(), 24);
+        assert_eq!(fleet.len(), 25);
 
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
         assert_eq!(
@@ -1545,7 +1545,7 @@ pub(crate) mod tests {
             mqk_portfolio::DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED
         );
         let aapl = &plan.symbol_results[0];
-        assert_eq!(aapl.candidates.len(), 24, "all known IDs evaluate");
+        assert_eq!(aapl.candidates.len(), 25, "all known IDs evaluate");
         // With no DB, every known ID reaches the promotion-query stage (the
         // stage right after the cheap registration check) -- proving each
         // one was individually evaluated, not short-circuited as unknown.

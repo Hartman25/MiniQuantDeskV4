@@ -21,7 +21,7 @@ Status target: `LOCALLY_COMPLETE`, research execution **not authorized** (`OPERA
 
 Catalog row (hash-verified workbook, committed ledger): *Pre-Holiday Effect*, long a broad equity ETF "during two trading days before holidays", "exit at holiday window end", holding horizon 1-2 days, "use exchange holiday calendar", known bias risk "small sample, holiday definition drift". The short side is a derived negative control and is **not** part of this identity.
 
-Native identity: `pre_holiday_two_session_long_v1` (long/flat, canonical daily, one instrument, stateless).
+Native identity: `pre_holiday_two_session_long_v1` (long/flat, canonical daily, one instrument, stateless). It is the 25th registered strategy identity, so `MAX_STRATEGY_UNIVERSE = 25` (raised from 24 in the same commit as the registration, as the capacity rule requires).
 
 **Holiday event.** A weekday on which the regular session does not occur and which the v2 calendar classifies `SCHEDULED` (a closure derivable from the published exchange observation rules and the civil date alone). Weekends are not holiday events. Unscheduled closures (national mourning) are never holiday events. A Saturday New Year's Day that the exchange does not observe is not an event.
 

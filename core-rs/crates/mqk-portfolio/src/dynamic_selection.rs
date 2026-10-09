@@ -481,7 +481,7 @@ pub const MAX_ELIGIBLE_SYMBOLS: usize = 5;
 /// `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (cross-checked by a daemon
 /// test). Any candidate strategy_id set the daemon builds must already be
 /// deduplicated against this universe before it reaches this module.
-pub const MAX_STRATEGY_UNIVERSE: usize = 24;
+pub const MAX_STRATEGY_UNIVERSE: usize = 25;
 
 /// Derived bound on total `(symbol, strategy_id[, timeframe])` candidate
 /// pairs a plan may consider: [`MAX_ELIGIBLE_SYMBOLS`] × [`MAX_STRATEGY_UNIVERSE`].
@@ -3347,14 +3347,14 @@ mod tests {
     }
 
     /// Defect F: a single symbol carrying more candidates than
-    /// `MAX_STRATEGY_UNIVERSE` (24) fails the whole plan closed with its own
-    /// distinct truth_state -- proven with a total candidate count (25) well
-    /// under `MAX_CANDIDATE_PAIRS` (120), so this is genuinely a *different*
+    /// `MAX_STRATEGY_UNIVERSE` (25) fails the whole plan closed with its own
+    /// distinct truth_state -- proven with a total candidate count (26) well
+    /// under `MAX_CANDIDATE_PAIRS` (125), so this is genuinely a *different*
     /// bound from the total-pairs check above, not a restatement of it.
     #[test]
     fn over_universe_strategy_ids_for_one_symbol_fails_whole_plan_closed() {
         let eligible = symbols(&["AAPL"]);
-        assert_eq!(MAX_STRATEGY_UNIVERSE, 24);
+        assert_eq!(MAX_STRATEGY_UNIVERSE, 25);
         let mut over_candidates = Vec::new();
         for i in 0..(MAX_STRATEGY_UNIVERSE + 1) {
             over_candidates.push(candidate(
