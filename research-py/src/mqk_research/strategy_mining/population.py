@@ -17,9 +17,9 @@ omitted / no extra member" proof, not just a test-level one.
 from __future__ import annotations
 
 import itertools
-import json
-import hashlib
+import math
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 from mqk_research.strategy_mining.grammar import (
@@ -28,15 +28,10 @@ from mqk_research.strategy_mining.grammar import (
     GrammarError,
     HypothesisGrammar,
     MechanismFamily,
+    _canonical_json,
+    _canonical_value,
+    _sha256_hex,
 )
-
-
-def _canonical_json(obj: Any) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def _sha256_hex(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -58,6 +53,21 @@ class PopulationDeclaration:
     point_in_time_universe_requirement: str
     historical_evidence_partition: str
     max_population_size: int = 2_000
+
+    def __post_init__(self) -> None:
+        """Same root cause as HypothesisGrammar's own fix (C2): a frozen
+        dataclass does not stop a caller from mutating a nested mutable
+        mapping/list after construction. Defensively normalizes every
+        collection field into immutable storage backed by a fresh copy."""
+        object.__setattr__(self, "mechanism_families", tuple(self.mechanism_families))
+        object.__setattr__(self, "directions", tuple(self.directions))
+        object.__setattr__(self, "asset_classes", tuple(self.asset_classes))
+        object.__setattr__(self, "data_inputs", tuple(self.data_inputs))
+        normalized_grids = {
+            family: MappingProxyType({name: tuple(values) for name, values in grid.items()})
+            for family, grid in self.parameter_grids.items()
+        }
+        object.__setattr__(self, "parameter_grids", MappingProxyType(normalized_grids))
 
     def validate(self) -> None:
         """Every contract field is mandatory and must be an explicit,
@@ -88,6 +98,21 @@ class PopulationDeclaration:
             raise GrammarError("directions must be non-empty")
         if not self.asset_classes:
             raise GrammarError("asset_classes must be non-empty")
+
+        missing_grids = [f for f in self.mechanism_families if f not in self.parameter_grids]
+        if missing_grids:
+            raise GrammarError(
+                f"mechanism_families {[f.value for f in missing_grids]} have no explicit parameter_grids entry "
+                "-- declare it (an empty {} is a valid explicit 'no parameters' declaration, but the key itself "
+                "must be present; a silently-missing key is a caller who forgot to declare the contract)"
+            )
+
+        if isinstance(self.max_population_size, bool):
+            raise GrammarError("max_population_size must not be a bool")
+        if not isinstance(self.max_population_size, (int, float)) or not math.isfinite(float(self.max_population_size)):
+            raise GrammarError("max_population_size must be a finite number")
+        if not float(self.max_population_size).is_integer() or int(self.max_population_size) <= 0:
+            raise GrammarError("max_population_size must be a positive integer")
 
     def _param_combo_count(self, family: MechanismFamily) -> int:
         grid = self.parameter_grids.get(family, {})
@@ -124,6 +149,7 @@ class PopulationManifest:
     unsupported_count: int
     manifest_id: str
     items: Tuple[Tuple[HypothesisGrammar, str], ...]  # (grammar, compatibility_status), fingerprint-sorted
+    max_population_size: int  # administrative/resource bound only -- not identity-bearing (C4)
 
 
 def _declaration_id(decl: PopulationDeclaration) -> str:
@@ -145,7 +171,10 @@ def _declaration_id(decl: PopulationDeclaration) -> str:
         "risk_model_requirement": decl.risk_model_requirement,
         "point_in_time_universe_requirement": decl.point_in_time_universe_requirement,
         "historical_evidence_partition": decl.historical_evidence_partition,
-        "max_population_size": decl.max_population_size,
+        # max_population_size is deliberately EXCLUDED: it is a resource/
+        # execution-layout bound, not an economic parameter (C4). Changing
+        # only the cap while every economic field stays identical must not
+        # manufacture a different declaration/manifest identity.
     }
     return _sha256_hex(_canonical_json(payload))
 
@@ -230,6 +259,7 @@ def generate_population(decl: PopulationDeclaration) -> PopulationManifest:
         unsupported_count=unsupported_count,
         manifest_id=manifest_id,
         items=tuple(items),
+        max_population_size=int(decl.max_population_size),
     )
 
 

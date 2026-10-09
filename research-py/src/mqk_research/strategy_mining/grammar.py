@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Tuple
 
 
@@ -68,8 +70,38 @@ class GrammarError(ValueError):
     """Fail-closed refusal: malformed, unbounded, or undeclared grammar input."""
 
 
+def _canonical_value(obj: Any) -> Any:
+    """Recursively validates and normalizes a value for inclusion in an
+    economic identity. Only explicit, finite, JSON-native types are
+    accepted -- no `default=str` fallback, so an unsupported object can
+    never enter an identity hash through its (possibly unstable, possibly
+    process-specific) string representation."""
+    if obj is None or isinstance(obj, str):
+        return obj
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, int):
+        return obj
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            raise GrammarError(f"non-finite float is not an allowed economic parameter value: {obj!r}")
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [_canonical_value(v) for v in obj]
+    if isinstance(obj, dict):
+        canon: Dict[str, Any] = {}
+        for k, v in obj.items():
+            if not isinstance(k, str):
+                raise GrammarError(
+                    f"only string keys are allowed in economic parameters, got {type(k).__name__}: {k!r}"
+                )
+            canon[k] = _canonical_value(v)
+        return canon
+    raise GrammarError(f"unsupported economic parameter value type {type(obj).__name__}: {obj!r}")
+
+
 def _canonical_json(obj: Any) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(_canonical_value(obj), sort_keys=True, separators=(",", ":"))
 
 
 def _sha256_hex(text: str) -> str:
@@ -102,6 +134,19 @@ class HypothesisGrammar:
     risk_model_requirement: str
     point_in_time_universe_requirement: str
     historical_evidence_partition: str
+
+    def __post_init__(self) -> None:
+        """A frozen dataclass only prevents REASSIGNING `self.parameters`;
+        it does nothing to stop a caller from mutating the same mapping
+        object after construction, which would silently change a supposedly
+        fixed economic identity. Defensively copies into an immutable view
+        backed by fresh storage (not aliased to the caller's object), and
+        validates/normalizes every parameter value (rejecting non-finite
+        floats and unsupported types) at construction time rather than only
+        when a fingerprint happens to be requested later."""
+        normalized_params = _canonical_value(dict(self.parameters))
+        object.__setattr__(self, "parameters", MappingProxyType(dict(normalized_params)))
+        object.__setattr__(self, "data_inputs", tuple(self.data_inputs))
 
     def economic_fields(self) -> Dict[str, Any]:
         """Every field is economically load-bearing for identity; this is

@@ -357,3 +357,166 @@ def test_trial_identity_round_trips_through_the_real_registry(tmp_path: Path):
                 strategy_id="strategy_mining_dry_run", protocol_id="strategy_mining_population_v1",
                 identity=conflicting_identity,
             )
+
+
+# ---------------------------------------------------------------------------
+# C1: only explicit, finite, JSON-native parameter values are allowed --
+# no `default=str` fallback that could let an unsupported/unstable object
+# representation enter an economic identity.
+# ---------------------------------------------------------------------------
+
+def _grammar_with_params(params):
+    return HypothesisGrammar(
+        mechanism_family=MechanismFamily.TREND_FOLLOWING, direction=Direction.LONG,
+        asset_class=AssetClassTag.EQUITY, parameters=params,
+        timeframe="1d", data_inputs=("daily_bars",), universe_requirement="u",
+        session_calendar_contract="c", sizing_contract="s", execution_model_contract="e",
+        cost_model_contract="co", risk_model_requirement="r",
+        point_in_time_universe_requirement="p", historical_evidence_partition="h",
+    )
+
+
+def test_unsupported_object_in_parameters_fails_closed():
+    class Unapproved:
+        def __str__(self):
+            return "unapproved-but-stringifiable"
+
+    with pytest.raises(GrammarError, match="unsupported economic parameter value type"):
+        _grammar_with_params({"x": Unapproved()})
+
+
+def test_nan_float_in_parameters_fails_closed():
+    with pytest.raises(GrammarError, match="non-finite float"):
+        _grammar_with_params({"x": float("nan")})
+
+
+def test_infinite_float_in_parameters_fails_closed():
+    with pytest.raises(GrammarError, match="non-finite float"):
+        _grammar_with_params({"x": float("inf")})
+
+
+def test_set_value_in_parameters_fails_closed():
+    with pytest.raises(GrammarError, match="unsupported economic parameter value type"):
+        _grammar_with_params({"x": {1, 2, 3}})
+
+
+def test_non_string_key_in_nested_parameter_dict_fails_closed():
+    with pytest.raises(GrammarError, match="only string keys"):
+        _grammar_with_params({"x": {1: "nested_non_string_key"}})
+
+
+def test_nested_list_of_finite_values_is_accepted():
+    g = _grammar_with_params({"x": [1, 2.5, "a", None, True]})
+    assert g.semantic_fingerprint()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# C2: a frozen dataclass does not stop a caller mutating a nested mutable
+# mapping after construction -- economic identity must be immutable once
+# declared/generated.
+# ---------------------------------------------------------------------------
+
+def test_mutating_the_original_dict_after_construction_does_not_change_identity():
+    original = {"lookback_days": 20}
+    g = _grammar_with_params(original)
+    fp_before = g.semantic_fingerprint()
+    original["lookback_days"] = 999  # mutate the SAME dict object the caller still holds
+    original["new_key"] = "sneaked_in"
+    assert g.semantic_fingerprint() == fp_before
+    assert g.parameters["lookback_days"] == 20
+    assert "new_key" not in g.parameters
+
+
+def test_grammar_parameters_mapping_is_read_only():
+    g = _grammar_with_params({"lookback_days": 20})
+    with pytest.raises(TypeError):
+        g.parameters["lookback_days"] = 999  # type: ignore[index]
+
+
+def test_grammar_data_inputs_is_a_tuple_even_if_a_list_was_passed():
+    original = ["daily_bars"]
+    g = HypothesisGrammar(
+        mechanism_family=MechanismFamily.TREND_FOLLOWING, direction=Direction.LONG,
+        asset_class=AssetClassTag.EQUITY, parameters={}, timeframe="1d",
+        data_inputs=original, universe_requirement="u", session_calendar_contract="c",
+        sizing_contract="s", execution_model_contract="e", cost_model_contract="co",
+        risk_model_requirement="r", point_in_time_universe_requirement="p",
+        historical_evidence_partition="h",
+    )
+    original.append("sneaked_in")
+    assert g.data_inputs == ("daily_bars",)
+
+
+def test_population_declaration_parameter_grids_is_read_only():
+    decl = _decl()
+    with pytest.raises(TypeError):
+        decl.parameter_grids[MechanismFamily.TREND_FOLLOWING]["lookback_days"] = (999,)  # type: ignore[index]
+
+
+def test_mutating_the_original_parameter_grids_dict_after_construction_does_not_change_declaration():
+    grids = {
+        MechanismFamily.TREND_FOLLOWING: {"lookback_days": [20, 50]},
+        MechanismFamily.BREAKOUT: {"lookback_days": [10]},
+    }
+    decl = _decl(parameter_grids=grids)
+    id_before = decl.declared_cardinality()
+    grids[MechanismFamily.TREND_FOLLOWING]["lookback_days"].append(999)  # mutate original list
+    assert decl.declared_cardinality() == id_before
+
+
+# ---------------------------------------------------------------------------
+# C3: every declared mechanism_family must have an EXPLICIT parameter_grids
+# entry (even an empty one); max_population_size must be a real positive
+# integer.
+# ---------------------------------------------------------------------------
+
+def test_mechanism_family_without_an_explicit_grid_key_fails_closed():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING, MechanismFamily.MOMENTUM),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)}},
+        # MOMENTUM is declared as a family to generate but has NO grid entry at all.
+    )
+    with pytest.raises(GrammarError, match="no explicit parameter_grids entry"):
+        generate_population(decl)
+
+
+def test_explicit_empty_grid_for_a_family_is_a_valid_parameterless_declaration():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {}},  # explicit "no parameters"
+    )
+    manifest = generate_population(decl)
+    assert manifest.raw_count == 1
+    assert manifest.items[0][0].parameters == {}
+
+
+@pytest.mark.parametrize("bad_cap", [float("nan"), float("inf"), True, 0, -5, 10.5])
+def test_invalid_max_population_size_fails_closed(bad_cap):
+    decl = _decl(max_population_size=bad_cap)
+    with pytest.raises(GrammarError):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# C4: max_population_size is an administrative/resource bound, not an
+# economic parameter -- it must not participate in declaration/manifest
+# identity, even though the manifest still records it for transparency.
+# ---------------------------------------------------------------------------
+
+def test_changing_only_max_population_size_does_not_change_declaration_or_manifest_identity():
+    decl_a = _decl(max_population_size=100)
+    decl_b = dataclasses.replace(decl_a, max_population_size=500)
+    m_a = generate_population(decl_a)
+    m_b = generate_population(decl_b)
+    assert m_a.declaration_id == m_b.declaration_id
+    assert m_a.manifest_id == m_b.manifest_id
+    assert m_a.max_population_size == 100
+    assert m_b.max_population_size == 500
+
+
+def test_changing_an_economic_field_still_changes_identity_even_with_the_same_cap():
+    decl_a = _decl(max_population_size=100, cost_model_contract="flat_bps_v1")
+    decl_b = _decl(max_population_size=100, cost_model_contract="flat_bps_v2")
+    m_a = generate_population(decl_a)
+    m_b = generate_population(decl_b)
+    assert m_a.declaration_id != m_b.declaration_id
