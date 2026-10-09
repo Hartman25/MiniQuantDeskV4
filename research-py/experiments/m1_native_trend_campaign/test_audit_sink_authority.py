@@ -407,3 +407,28 @@ def test_a_scope_naming_the_same_file_twice_or_the_root_writes_each_file_once(tm
         _netguard._write_all({"kind": "probe_row", "proc": _netguard.process_token()})
     assert [r["kind"] for r in _netguard.sink_rows(b)] == ["probe_row"]
     assert [r["kind"] for r in root_rows()[mark:]].count("probe_row") == 1
+
+
+# ------------------------------------------------ fail-closed paths of the wrapper and of a child's own recording
+
+def test_a_launch_that_cannot_be_recorded_is_refused_and_the_child_is_stopped(tmp_path, monkeypatch):
+    marker = tmp_path / "survived"
+    real = _netguard._write_all
+    monkeypatch.setattr(_netguard, "_write_all", lambda row: False if row["kind"] == "child_launched" else real(row))
+    code = f"import time, pathlib\ntime.sleep(1.5)\npathlib.Path({str(marker)!r}).write_text('x')\n"
+    with pytest.raises(_netguard.NetworkDenied, match="could not be recorded"):
+        subprocess.Popen([sys.executable, "-c", code], cwd=tmp_path)
+    monkeypatch.undo()
+    import time
+    time.sleep(2.5)
+    assert not marker.exists(), "an unrecorded child kept running"
+
+
+def test_a_child_whose_own_evidence_can_no_longer_be_written_terminates_instead_of_continuing(tmp_path):
+    plant_env_local(tmp_path)
+    code = ("import _netguard\n_netguard._state['root_id'] = (0, 0)      # simulate the root having been replaced under it\n"
+            + SWALLOWED_READ + "print('CONTINUED')\n")
+    with _netguard.expect_denied():
+        proc = run_child(code, tmp_path)
+    assert proc.returncode == _netguard.CHILD_SINK_EXIT and "CONTINUED" not in proc.stdout, proc.stdout + proc.stderr
+    assert "audit sink unwritable" in proc.stderr
