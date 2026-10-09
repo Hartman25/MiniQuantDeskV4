@@ -28,6 +28,8 @@ from mqk_research.data.bars_provenance import (  # noqa: E402
 )
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 import mqk_research.ml.native_signal_registry_integration as bridge  # noqa: E402
+sys.path.insert(0, str(HERE))
+import stage_auth_testkit  # noqa: E402
 
 FP = "c" * 64
 SPEC = importlib.util.spec_from_file_location("run_batch_under_test", HERE / "run_batch.py")
@@ -94,6 +96,7 @@ def runner(tmp_path, monkeypatch):
     }.items():
         monkeypatch.setattr(rb, name, value)
     rb.DECL["universe"]["max_trials"] = len(trials)
+    stage_auth_testkit.grant_runner_stages(monkeypatch, rb)  # the mutated declaration is not a frozen historical one
     return rb, calls
 
 

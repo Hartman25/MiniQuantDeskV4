@@ -8,7 +8,25 @@
   "status": "KISS_EXT032_PREDECLARED_NOT_EXECUTED",
   "executable": false,
   "blocker": "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED",
-  "rule": "Every runner stage, the batch outcome selector and the results review refuse this declaration until the operator re-issues it as executable. Registration of 4 trials, the data fetch and attempt #1 are separate authorizations; none has happened. The re-issue may change only execution_gate (and asof if the fetch date differs, disclosed); any other change is a new predeclaration."
+  "rule": "Every runner stage, the batch outcome selector and the results review refuse this declaration until the operator re-issues it as executable. Registration of 4 trials, the data fetch and attempt #1 are separate authorizations; none has happened. The re-issue may change only execution_gate (and asof if the fetch date differs, disclosed); any other change is a new predeclaration.",
+  "stage_authorization": {
+   "required": true,
+   "schema": "m1_stage_authorization_v1",
+   "module": "stage_authorization.py",
+   "classes": [
+    "data_materialization",
+    "provider_fetch",
+    "registry_registration",
+    "attempt_execution",
+    "judge_finalize",
+    "promotion",
+    "paper_deployment"
+   ],
+   "binding": "sha256 of the declaration excluding execution_gate; operator, approval reference, validity window (at most 7 days), acknowledged pending incident ids; HMAC-SHA256 under the operator-held secret MQK_M1_STAGE_AUTH_KEY",
+   "enforcement": "the check runs at the top of every runner stage function and in the effectful helpers, so a directly imported stage is gated like the CLI dispatcher; executable=true alone authorizes nothing",
+   "active_authorizations": "NONE",
+   "limits": "a shared-secret check, not non-repudiation; library functions called outside the runner are protected by credentials, the hermetic provider boundary and the network guard, not by this artifact"
+  }
  },
  "evidence_grade": {
   "grade": "EXPOSED_DEVELOPMENT",

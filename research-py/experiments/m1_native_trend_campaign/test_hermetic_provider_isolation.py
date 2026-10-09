@@ -25,6 +25,7 @@ sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 import _netguard  # noqa: E402
 from mqk_research.data import alpaca_historical as ah  # noqa: E402
+import stage_auth_testkit  # noqa: E402
 
 DECL_NAME = "PREDECLARED_KISS_EXT032_ETF_01.json"
 FAKE_CREDS = {"ALPACA_API_KEY_PAPER": "fake-key-0000", "ALPACA_API_SECRET_PAPER": "fake-secret-0000"}
@@ -115,6 +116,7 @@ def test_opened_gate_plus_credentials_plus_env_local_plus_direct_stage_call_atte
     for k, v in FAKE_CREDS.items():
         monkeypatch.setenv(k, v)
     rb.require_executable_declaration(rb.DECL)  # the CLI-level gate IS open in this mutation
+    stage_auth_testkit.grant_runner_stages(monkeypatch, rb)  # even fully authorized, the provider boundary stands alone
     before = len(_netguard.attempts())
     with pytest.raises(ah.ProviderAccessDenied):
         rb.stage_fetch(argparse.Namespace(execute=True))  # imported module, direct call
@@ -145,16 +147,21 @@ def test_with_the_flag_removed_the_audit_guard_alone_stops_the_request_and_the_e
     assert [a["kind"] for a in seen] == ["secret_file_read"]
 
 
-def test_a_spawned_runner_stage_with_credentials_gate_open_and_flag_removed_cannot_reach_the_network(tmp_path):
-    decl = _opened_declaration(tmp_path)
+def test_a_spawned_child_with_credentials_and_the_flag_removed_cannot_reach_the_network(tmp_path):
+    """The audit guard is installed in the child too: with the provider-boundary flag stripped and credentials
+    present, the default transport is refused at connect and nothing is written."""
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import sys\nsys.path.insert(0, %r)\nimport pandas as pd\nfrom mqk_research.data import alpaca_historical as ah\n"
+        "try:\n    ah.fetch_historical_bars(symbols=['SPY'], start_utc=pd.Timestamp('2016-01-01', tz='UTC'),\n"
+        "        end_utc=pd.Timestamp('2016-02-01', tz='UTC'), asof='2026-10-09', timeframe='1Day',\n"
+        "        credentials=ah.AlpacaCredentials('fake-key-0000', 'fake-secret-0000'))\nexcept Exception as exc:\n"
+        "    print('refused', type(exc).__name__)\n    sys.exit(3)\nsys.exit(0)\n" % str(HERE.parents[1] / "src"),
+        encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "MQK_HERMETIC_NO_PROVIDER"}
-    env.update(FAKE_CREDS)
-    env.update(MQK_M1_BATCH_DECLARATION=str(decl), MQK_M1_CLI=str(tmp_path / "no-such-cli"))
-    proc, attempts = _netguard.run_guarded(HERE / "run_batch.py", ["fetch", "--execute"], env=env, cwd=tmp_path,
-                                           log=tmp_path / "guard.log")
-    assert proc.returncode != 0
-    assert not (tmp_path / "run" / "data").exists(), "no provider artifact may be written"
-    assert attempts and all(a["kind"] in ("network", "secret_file_read") for a in attempts)
+    proc, attempts = _netguard.run_guarded(probe, [], env=env, cwd=tmp_path, log=tmp_path / "guard.log")
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert attempts and all(a["kind"] == "network" for a in attempts)
 
 
 def test_a_spawned_runner_stage_in_a_hermetic_child_attempts_nothing(tmp_path):

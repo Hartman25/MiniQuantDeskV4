@@ -35,6 +35,7 @@ from mqk_research.data.bars_provenance import (  # noqa: E402
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 import mqk_research.ml.native_signal_registry_integration as bridge  # noqa: E402
 import holdout_guard as hg  # noqa: E402
+import stage_auth_testkit  # noqa: E402
 
 DECL_NAME = "PREDECLARED_KISS_EXT032_ETF_01.json"
 os.environ["MQK_M1_BATCH_DECLARATION"] = DECL_NAME
@@ -234,6 +235,7 @@ def test_the_trials_stage_refuses_before_any_attempt_unless_all_four_are_registe
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(man), encoding="utf-8")
     monkeypatch.setattr(rb, "MANIFEST", manifest_path)
+    stage_auth_testkit.grant_runner_stages(monkeypatch, rb)  # authorized: the refusal below is the registration gate's own
     with pytest.raises(SystemExit, match="every predeclared trial must be registered"):
         rb.stage_trials(None)
     con = sqlite3.connect(tmp_path / "research.sqlite3")

@@ -34,6 +34,8 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "research-py" / "src"))
+sys.path.insert(0, str(HERE))
+import stage_authorization  # noqa: E402
 
 DECL_FILE = os.environ.get("MQK_M1_BATCH_DECLARATION", "PREDECLARED_BATCH_01.json")
 DECL = json.loads((HERE / DECL_FILE).read_text(encoding="utf-8"))
@@ -61,6 +63,33 @@ BENCHMARK_CF = "capital_fraction_matched_passive_buy_hold_v1"
 CAPITAL_BASIS = "native_backtest.initial_cash_micros"
 
 
+_ACTIVE = {"stage": None}
+
+
+def _require_active_stage() -> None:
+    """Effectful helpers (`_run_cli`, `_save_index`) run only inside an authorized stage of a non-historical
+    declaration, so importing this module and calling a helper directly cannot bypass the stage gate."""
+    if _ACTIVE["stage"] is None and not stage_authorization.is_frozen_historical(DECL):
+        raise stage_authorization.AuthorizationError(
+            "fail-closed: effectful helper called outside an authorized runner stage")
+
+
+def staged(name: str):
+    """Authorize `name` for this exact declaration BEFORE the stage does anything (credentials, HTTP,
+    directories, registry, subprocess), whether it is reached from the CLI dispatcher or called directly."""
+    def wrap(fn):
+        def run(args):
+            stage_authorization.require_stage(DECL, name)
+            _ACTIVE["stage"] = name
+            try:
+                return fn(args)
+            finally:
+                _ACTIVE["stage"] = None
+        run.__name__, run.__doc__, run.__wrapped__ = fn.__name__, fn.__doc__, fn
+        return run
+    return wrap
+
+
 def tdir(strategy: str, symbol: str) -> Path:
     return RUN / "trials" / strategy / symbol
 
@@ -85,6 +114,7 @@ def _economic_spec():
 
 
 def _run_cli(*argv: str) -> str:
+    _require_active_stage()
     out = subprocess.run([str(CLI), *argv], capture_output=True, text=True)
     if out.returncode != 0:
         raise SystemExit(f"mqk-cli failed ({argv[:2]}): {out.stderr[-800:]}")
@@ -103,6 +133,7 @@ def _load_index() -> dict:
 
 
 def _save_index(index: dict) -> None:
+    _require_active_stage()
     INDEX.parent.mkdir(parents=True, exist_ok=True)
     INDEX.write_text(json.dumps(index, indent=1, sort_keys=True), encoding="utf-8")
 
@@ -298,6 +329,7 @@ def _require_frozen_trial_structure() -> None:
         raise SystemExit("fail-closed: the declared trial count differs from max_trials")
 
 
+@staged("check")
 def stage_check(_args) -> None:
     _require_exact_target_protocol()
     sizing_args(DECL)
@@ -313,6 +345,7 @@ def stage_check(_args) -> None:
     print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()}")
 
 
+@staged("reuse_data")
 def stage_reuse_data(_args) -> None:
     import shutil
     from mqk_research.ml.util_hash import sha256_file
@@ -369,6 +402,7 @@ def verify_fetched_bars(decl: dict, bars: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
+@staged("fetch")
 def stage_fetch(args) -> None:
     if not args.execute:
         raise SystemExit("fetch contacts the data provider; pass --execute")
@@ -444,6 +478,8 @@ def registration_gate(store, experiment_id: str, expected: list, *, require_zero
 
 def _run_registration_gate(*, require_zero_attempts: bool) -> dict:
     from mqk_research.exp_distributed.storage import ResearchResultStore
+    if not REGISTRY.exists():  # the store constructor creates directories and a database: verification must not
+        raise SystemExit("fail-closed: the batch registry does not exist; nothing to verify")
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     fingerprints = {(strategy, sym): _resolve_native_identity(strategy, sym) for strategy, sym in TRIALS}
     return registration_gate(ResearchResultStore(REGISTRY), EXPERIMENT,
@@ -451,6 +487,7 @@ def _run_registration_gate(*, require_zero_attempts: bool) -> dict:
                              require_zero_attempts=require_zero_attempts)
 
 
+@staged("gate")
 def stage_gate(_args) -> None:
     """Pre-run gate: every predeclared trial is registered, nothing else is, and no attempt exists."""
     _require_exact_target_protocol()
@@ -458,6 +495,7 @@ def stage_gate(_args) -> None:
     print("registration_gate_passed registered", result["registered"], "attempts", result["attempts"])
 
 
+@staged("register")
 def stage_register(_args) -> None:
     """Register every hypothesis and trial. Resolves the native fingerprint from the
     strategy registry only -- no emitter, no Backtest, no market data."""
@@ -497,6 +535,7 @@ def stage_register(_args) -> None:
     print("registered_unique_trials", len(registered), "attempts", attempts)
 
 
+@staged("trials")
 def stage_trials(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.native_signal_registry_integration import (
@@ -546,6 +585,7 @@ def stage_trials(_args) -> None:
     _save_index(index)
 
 
+@staged("judge")
 def stage_judge(_args) -> None:
     from mqk_research.exp_distributed.hashing import canonical_json, sha256_bytes
     from mqk_research.exp_distributed.storage import ResearchResultStore
@@ -562,6 +602,7 @@ def stage_judge(_args) -> None:
           "included", len(art["included_trial_ids"]), "excluded", art["excluded_trial_ids"], "sha", sha[:12])
 
 
+@staged("backtest")
 def stage_backtest(_args) -> None:
     index = _load_index()
     nb = DECL["native_backtest"]
@@ -599,6 +640,7 @@ def _capital_fraction_stress_args(strategy: str, sym: str, plan: dict) -> list[s
             "--stress-sizing-expected-semantic-fingerprint", fingerprint]
 
 
+@staged("finalize")
 def stage_finalize(_args) -> None:
     index = _load_index()
     sha = (RUN / "judge" / "judge_sha256.txt").read_text(encoding="utf-8").strip()
@@ -641,6 +683,7 @@ SCAN_REGISTRY_SUPPLEMENT = {
 }
 
 
+@staged("review")
 def stage_review(_args) -> None:
     reg = json.loads((REPO / "config" / "instruments" / "equities.json").read_text(encoding="utf-8"))
     symbols = sorted({s for _, s in TRIALS})
@@ -674,6 +717,7 @@ def stage_review(_args) -> None:
         print(strategy, out)
 
 
+@staged("summary")
 def stage_summary(_args) -> None:
     print(INDEX.read_text(encoding="utf-8"))
 
