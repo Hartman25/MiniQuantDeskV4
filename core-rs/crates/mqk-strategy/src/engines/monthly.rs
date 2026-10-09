@@ -6,8 +6,10 @@
 //! `REQUIRED` contiguous completed sessions: a month has at most 23 sessions, so `t - m <= 22`.
 
 use chrono::{Datelike, NaiveDate};
+#[cfg(test)]
 use mqk_integrity::sessions;
 
+use super::session_calendar::CalendarContract;
 use crate::BarStub;
 
 /// Most sessions after a month-end decision bar before the next month-end.
@@ -24,19 +26,23 @@ fn month_key(d: NaiveDate) -> (i32, u32) {
 /// run of consecutive regular sessions (unknown label, holiday label, a missing or repeated
 /// session) or the next session after the last bar is outside the calendar coverage.
 /// Month-end = the next regular session falls in a different calendar month.
-pub(crate) fn month_end_indices(win: &[BarStub]) -> Option<Vec<usize>> {
+/// Resolved under the explicit calendar `contract`.
+pub(crate) fn month_end_indices_in(
+    contract: CalendarContract,
+    win: &[BarStub],
+) -> Option<Vec<usize>> {
     let mut dates = Vec::with_capacity(win.len());
     for b in win {
-        let d = sessions::session_of_daily_bar(b.end_ts).ok()?;
+        let d = contract.session_of_daily_bar(b.end_ts)?;
         if let Some(&prev) = dates.last() {
-            if sessions::next_session_after(prev).ok()? != d {
+            if contract.next_session_after(prev)? != d {
                 return None;
             }
         }
         dates.push(d);
     }
     let last = *dates.last()?;
-    let after_last = sessions::next_session_after(last).ok()?;
+    let after_last = contract.next_session_after(last)?;
     let mut out = Vec::new();
     for (i, d) in dates.iter().enumerate() {
         let next = dates.get(i + 1).copied().unwrap_or(after_last);
@@ -45,6 +51,11 @@ pub(crate) fn month_end_indices(win: &[BarStub]) -> Option<Vec<usize>> {
         }
     }
     Some(out)
+}
+
+/// [`month_end_indices_in`] under the frozen v1 contract (every registered monthly engine).
+pub(crate) fn month_end_indices(win: &[BarStub]) -> Option<Vec<usize>> {
+    month_end_indices_in(CalendarContract::V1, win)
 }
 
 #[cfg(test)]
@@ -136,6 +147,38 @@ mod tests {
             None,
             "uncovered next session"
         );
+    }
+
+    #[test]
+    fn v2_month_ends_resolve_past_the_v1_horizon_with_identical_results_where_both_cover() {
+        use super::super::session_calendar::CalendarContract::{V1, V2};
+        // v1 refuses a window whose next session leaves its coverage; v2 resolves it.
+        let edge = [bar(d(2026, 12, 31), 1, true)];
+        assert_eq!(month_end_indices_in(V1, &edge), None);
+        assert_eq!(month_end_indices_in(V2, &edge), Some(vec![0]));
+        let w: Vec<BarStub> = [28, 29, 30]
+            .iter()
+            .map(|&day| bar(d(2027, 12, day), 100_000_000, true))
+            .collect(); // Dec 31 2027 trades
+        assert_eq!(month_end_indices_in(V1, &w), None);
+        assert_eq!(month_end_indices_in(V2, &w), Some(vec![]));
+        // Wherever v1 can answer, v2 gives the same answer.
+        for (from, n) in [
+            (d(2024, 3, 26), 6),
+            (d(2024, 4, 25), 4),
+            (d(2024, 12, 27), 3),
+            (d(2018, 11, 28), 9),
+        ] {
+            let w = run(from, n);
+            assert_eq!(
+                month_end_indices_in(V1, &w),
+                month_end_indices_in(V2, &w),
+                "{from}"
+            );
+        }
+        // The v1 entry point is exactly the v1 contract.
+        let w = run(d(2024, 3, 26), 6);
+        assert_eq!(month_end_indices(&w), month_end_indices_in(V1, &w));
     }
 
     #[test]
