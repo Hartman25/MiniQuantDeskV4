@@ -298,16 +298,22 @@ def test_mutation_changed_capital_fraction_changes_report_id_and_budget():
 # File-driving wrapper round-trip
 # ---------------------------------------------------------------------------
 
+def _full_trade_row(**over):
+    row = {
+        "trade_id": "t1", "symbol": "AAA", "side": "long", "qty": 10.0,
+        "unit": "shares", "entry_ts": "2026-01-01T00:00:00Z", "entry_price": 100.0,
+        "currency": "USD", "multiplier": 1.0, "costs_usd": 1.0,
+        "exit_ts": "2026-01-02T00:00:00Z", "exit_price": 95.0,
+    }
+    row.update(over)
+    return row
+
+
 def test_write_sizing_drawdown_report_round_trip(tmp_path: Path):
     eq_path = tmp_path / "strategy_equity.csv"
     _curve([100_000, 95_000, 105_000]).to_csv(eq_path, index=False)
     trades_path = tmp_path / "trades.csv"
-    pd.DataFrame([{
-        "trade_id": "t1", "symbol": "AAA", "side": "long", "qty": 10.0,
-        "entry_ts": "2026-01-01T00:00:00Z", "entry_price": 100.0,
-        "exit_ts": "2026-01-02T00:00:00Z", "exit_price": 95.0,
-        "costs_usd": 1.0,
-    }]).to_csv(trades_path, index=False)
+    pd.DataFrame([_full_trade_row()]).to_csv(trades_path, index=False)
     out_path = tmp_path / "out" / "report.json"
 
     result_path = write_sizing_drawdown_report(
@@ -321,6 +327,321 @@ def test_write_sizing_drawdown_report_round_trip(tmp_path: Path):
     assert loaded["schema_version"] == "sizing_drawdown_report_v1"
     assert loaded["trades"]["realized_gross_pnl_usd_total"] == pytest.approx(-50.0)
     assert loaded["trades"]["realized_net_pnl_usd_total"] == pytest.approx(-51.0)
+    assert loaded["input_evidence_hash"]["trades"] is not None
+    assert loaded["input_evidence_hash"]["strategy_equity"] is not None
+
+
+# ---------------------------------------------------------------------------
+# B1: explicitly-supplied-but-missing/unreadable trades input is an error,
+# never a silent zero-trade report. Omitting it entirely is the only valid
+# way to declare zero trades.
+# ---------------------------------------------------------------------------
+
+def test_nonexistent_trades_csv_path_is_an_error_not_zero_trades(tmp_path: Path):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    out_path = tmp_path / "report.json"
+    with pytest.raises(SizingReportError, match="does not exist"):
+        write_sizing_drawdown_report(
+            strategy_equity_csv=eq_path, account_equity_csv=None,
+            trades_csv=tmp_path / "nonexistent_trades.csv", out_json=out_path,
+        )
+
+
+def test_omitted_trades_csv_is_a_valid_explicit_zero_trades_declaration(tmp_path: Path):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    out_path = tmp_path / "report.json"
+    result_path = write_sizing_drawdown_report(
+        strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=None, out_json=out_path,
+    )
+    import json
+    loaded = json.loads(result_path.read_text(encoding="utf-8"))
+    assert loaded["trades"]["count"] == 0
+
+
+def test_empty_but_well_formed_trades_csv_is_a_valid_explicit_zero_trades_declaration(tmp_path: Path):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame(columns=list(sdr._REQUIRED_TRADE_COLUMNS)).to_csv(trades_path, index=False)
+    out_path = tmp_path / "report.json"
+    result_path = write_sizing_drawdown_report(
+        strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
+    )
+    import json
+    loaded = json.loads(result_path.read_text(encoding="utf-8"))
+    assert loaded["trades"]["count"] == 0
+
+
+def test_unreadable_trades_csv_fails_closed(tmp_path: Path):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    trades_path = tmp_path / "trades.csv"
+    trades_path.write_text("this is not,,, valid\ncsv\"\"\" structure {{{", encoding="utf-8")
+    # Force a genuinely unparseable table (mismatched quoting breaks the C parser).
+    trades_path.write_text('"trade_id,symbol\n"unterminated quote,AAA\n"', encoding="utf-8")
+    out_path = tmp_path / "report.json"
+    with pytest.raises(SizingReportError, match="unreadable/malformed"):
+        write_sizing_drawdown_report(
+            strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
+        )
+
+
+@pytest.mark.parametrize("missing_col", ["unit", "currency", "multiplier", "costs_usd"])
+def test_missing_required_trade_column_fails_closed(tmp_path: Path, missing_col):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    row = _full_trade_row()
+    del row[missing_col]
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame([row]).to_csv(trades_path, index=False)
+    out_path = tmp_path / "report.json"
+    with pytest.raises(SizingReportError, match="missing required columns"):
+        write_sizing_drawdown_report(
+            strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
+        )
+
+
+@pytest.mark.parametrize("blank_col", ["unit", "currency", "multiplier", "costs_usd", "qty", "entry_price"])
+def test_present_but_blank_trade_value_fails_closed(tmp_path: Path, blank_col):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    row = _full_trade_row()
+    row[blank_col] = None  # column exists, value is blank/missing for this row
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame([row]).to_csv(trades_path, index=False)
+    out_path = tmp_path / "report.json"
+    with pytest.raises(SizingReportError, match="missing value|malformed trade data"):
+        write_sizing_drawdown_report(
+            strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
+        )
+
+
+def test_malformed_numeric_value_in_trade_row_fails_closed(tmp_path: Path):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    row = _full_trade_row(qty="not_a_number")
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame([row]).to_csv(trades_path, index=False)
+    out_path = tmp_path / "report.json"
+    with pytest.raises(SizingReportError, match="malformed trade data"):
+        write_sizing_drawdown_report(
+            strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
+        )
+
+
+def test_explicit_zero_cost_is_preserved_not_treated_as_missing(tmp_path: Path):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame([_full_trade_row(costs_usd=0.0)]).to_csv(trades_path, index=False)
+    out_path = tmp_path / "report.json"
+    result_path = write_sizing_drawdown_report(
+        strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
+    )
+    import json
+    loaded = json.loads(result_path.read_text(encoding="utf-8"))
+    assert loaded["trades"]["costs_usd_total"] == 0.0
+
+
+def test_missing_strategy_equity_csv_fails_closed(tmp_path: Path):
+    out_path = tmp_path / "report.json"
+    with pytest.raises(SizingReportError, match="does not exist"):
+        write_sizing_drawdown_report(
+            strategy_equity_csv=tmp_path / "nonexistent.csv", account_equity_csv=None,
+            trades_csv=None, out_json=out_path,
+        )
+
+
+# ---------------------------------------------------------------------------
+# B3: partial fills must not inflate concurrency; staggered legs of one
+# logical position collapse to one concurrently-open position.
+# ---------------------------------------------------------------------------
+
+def test_two_partial_fills_of_one_position_plus_one_independent_position_counts_two_not_three():
+    fill_a = _trade(trade_id="A1", qty=5.0, entry_price=50.0,
+                     entry_ts="2026-01-01T00:00:00Z", exit_ts="2026-01-05T00:00:00Z", exit_price=55.0)
+    fill_b = _trade(trade_id="A2", partial_fill_of="A1", qty=5.0, entry_price=52.0,
+                     entry_ts="2026-01-02T00:00:00Z", exit_ts="2026-01-05T00:00:00Z", exit_price=55.0)
+    independent = _trade(trade_id="B1", qty=20.0, entry_price=10.0,
+                          entry_ts="2026-01-03T00:00:00Z", exit_ts="2026-01-04T00:00:00Z", exit_price=11.0)
+    eq = _curve([100_000, 100_000, 100_000, 100_000, 100_000])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[fill_a, fill_b, independent])
+    # Old buggy behavior would have reported 3 (one per fill row); the
+    # correct logical count is 2: {A1-group, B1}.
+    assert report["trades"]["max_concurrent_positions"] == 2
+
+
+def test_partial_fill_group_stays_open_until_every_leg_is_closed():
+    fill_a = _trade(trade_id="A1", qty=5.0, entry_price=50.0,
+                     entry_ts="2026-01-01T00:00:00Z", exit_ts="2026-01-03T00:00:00Z", exit_price=55.0)
+    fill_b_still_open = _trade(trade_id="A2", partial_fill_of="A1", qty=5.0, entry_price=52.0,
+                                entry_ts="2026-01-02T00:00:00Z")  # no exit at all
+    other = _trade(trade_id="B1", qty=20.0, entry_price=10.0,
+                    entry_ts="2026-01-04T00:00:00Z")  # opens after A1's one leg closed
+    eq = _curve([100_000, 100_000, 100_000, 100_000, 100_000])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[fill_a, fill_b_still_open, other])
+    # A1-group never fully closes (A2 leg still open), so it is still open
+    # when B1 opens on day 4 -> 2 concurrent, not treated as sequential.
+    assert report["trades"]["max_concurrent_positions"] == 2
+
+
+# ---------------------------------------------------------------------------
+# B4: time underwater must count through the actual recovery instant, not
+# just the last strictly-underwater sample before it.
+# ---------------------------------------------------------------------------
+
+def test_time_underwater_counts_through_the_recovery_instant_mid_series():
+    # peak=120 on day1, drops to 50 on day2 (1 day underwater by the old
+    # buggy measurement), recovers to exactly 120 on day3. True episode
+    # length is 2 days (day1 -> day3), not 1.
+    eq = _curve([100, 120, 50, 120])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+    assert report["strategy"]["time_underwater_seconds"] == pytest.approx(2 * 86400.0)
+
+
+def test_flat_curve_has_zero_time_underwater_no_false_positive():
+    eq = _curve([100, 100, 100])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+    assert report["strategy"]["time_underwater_seconds"] == pytest.approx(0.0)
+
+
+def test_repeated_peaks_do_not_manufacture_underwater_time():
+    eq = _curve([100, 120, 120, 120])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+    assert report["strategy"]["time_underwater_seconds"] == pytest.approx(0.0)
+
+
+def test_delayed_recovery_measures_the_full_episode():
+    # drop on day1, stays down through day4, recovers exactly on day5.
+    eq = _curve([100, 50, 50, 50, 100])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+    assert report["strategy"]["time_underwater_seconds"] == pytest.approx(4 * 86400.0)
+
+
+# ---------------------------------------------------------------------------
+# B5: comprehensive numeric/timestamp validation
+# ---------------------------------------------------------------------------
+
+def test_nan_capital_fails_closed():
+    with pytest.raises(SizingReportError, match="finite"):
+        SizingReportSpec(initial_strategy_capital_usd=float("nan")).normalized()
+
+
+def test_infinite_capital_fails_closed():
+    with pytest.raises(SizingReportError, match="finite"):
+        SizingReportSpec(initial_strategy_capital_usd=float("inf")).normalized()
+
+
+def test_fractional_bps_fails_closed():
+    with pytest.raises(SizingReportError, match="integer"):
+        SizingReportSpec(capital_fraction_bps=999.5).normalized()
+
+
+def test_bool_as_bps_fails_closed():
+    with pytest.raises(SizingReportError, match="bool"):
+        SizingReportSpec(capital_fraction_bps=True).normalized()
+
+
+def test_nan_bps_fails_closed():
+    with pytest.raises(SizingReportError, match="finite"):
+        SizingReportSpec(capital_fraction_bps=float("nan")).normalized()
+
+
+def test_zero_trading_days_per_year_fails_closed():
+    with pytest.raises(SizingReportError, match="positive integer"):
+        SizingReportSpec(trading_days_per_year=0).normalized()
+
+
+def test_negative_trading_days_per_year_fails_closed():
+    with pytest.raises(SizingReportError, match="positive integer"):
+        SizingReportSpec(trading_days_per_year=-252).normalized()
+
+
+def test_nan_qty_fails_closed():
+    eq = _curve([100_000, 100_000])
+    with pytest.raises(SizingReportError, match="finite"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[_trade(qty=float("nan"))])
+
+
+def test_infinite_entry_price_fails_closed():
+    eq = _curve([100_000, 100_000])
+    with pytest.raises(SizingReportError, match="finite"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[_trade(entry_price=float("inf"))])
+
+
+def test_nan_costs_fails_closed():
+    eq = _curve([100_000, 100_000])
+    with pytest.raises(SizingReportError, match="finite"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[_trade(costs_usd=float("nan"))])
+
+
+def test_exit_before_entry_fails_closed():
+    eq = _curve([100_000, 100_000])
+    t = _trade(entry_ts="2026-01-05T00:00:00Z", exit_ts="2026-01-01T00:00:00Z", exit_price=100.0)
+    with pytest.raises(SizingReportError, match="before entry_ts"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[t])
+
+
+def test_malformed_entry_ts_fails_closed():
+    eq = _curve([100_000, 100_000])
+    t = _trade(entry_ts="not-a-timestamp")
+    with pytest.raises(SizingReportError, match="not a parseable timestamp"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[t])
+
+
+def test_empty_equity_curve_fails_closed():
+    eq = pd.DataFrame(columns=["ts", "equity"])
+    with pytest.raises(SizingReportError, match="zero rows"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+
+
+def test_nan_in_equity_curve_fails_closed():
+    eq = _curve([100_000, float("nan"), 100_000])
+    with pytest.raises(SizingReportError, match="NaN/Infinity"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+
+
+def test_legitimate_undefined_sharpe_is_not_evaluable_not_nan_not_zero():
+    # A single-point curve: CAGR/Sharpe are genuinely undefined.
+    eq = _curve([100_000])
+    report = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])
+    assert report["strategy"]["equity_metrics"]["sharpe"] == {
+        "truth_state": "not_evaluable",
+        "reason": "undefined for this equity curve (insufficient history, zero variance, or non-positive equity)",
+    }
+    # And the final JSON must contain no raw NaN/Infinity tokens.
+    import json
+    text = json.dumps(report, allow_nan=False)  # must not raise
+    assert "NaN" not in text and "Infinity" not in text
+
+
+# ---------------------------------------------------------------------------
+# B6: report identity must be bound to the raw input evidence, not just
+# summarized output aggregates.
+# ---------------------------------------------------------------------------
+
+def test_different_trade_histories_with_identical_aggregates_get_different_report_ids():
+    eq = _curve([100_000, 100_000])
+    # Two trades with the same net PnL (+50 - 10 = +40) via completely
+    # different underlying prices/quantities -- aggregates coincide.
+    t1 = _trade(trade_id="x1", qty=10.0, entry_price=100.0, exit_ts="2026-01-02T00:00:00Z", exit_price=105.0, costs_usd=10.0)
+    t2 = _trade(trade_id="x2", qty=5.0, entry_price=50.0, exit_ts="2026-01-02T00:00:00Z", exit_price=60.0, costs_usd=10.0)
+    r1 = compute_sizing_drawdown_report(strategy_equity=eq.copy(), account_equity=None, trades=[t1])
+    r2 = compute_sizing_drawdown_report(strategy_equity=eq.copy(), account_equity=None, trades=[t2])
+    assert r1["trades"]["realized_net_pnl_usd_total"] == pytest.approx(r2["trades"]["realized_net_pnl_usd_total"])
+    assert r1["report_id"] != r2["report_id"]
+    assert r1["input_evidence_hash"]["trades"] != r2["input_evidence_hash"]["trades"]
+
+
+def test_mutating_only_an_untracked_instrument_field_still_changes_report_id():
+    eq = _curve([100_000, 100_000])
+    t1 = _trade(trade_id="x1", symbol="AAA")
+    t2 = _trade(trade_id="x1", symbol="BBB")  # same aggregate-relevant fields, different symbol
+    r1 = compute_sizing_drawdown_report(strategy_equity=eq.copy(), account_equity=None, trades=[t1])
+    r2 = compute_sizing_drawdown_report(strategy_equity=eq.copy(), account_equity=None, trades=[t2])
+    assert r1["report_id"] != r2["report_id"]
 
 
 # ---------------------------------------------------------------------------

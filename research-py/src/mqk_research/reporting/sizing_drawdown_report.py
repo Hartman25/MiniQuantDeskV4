@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -45,13 +47,33 @@ class SizingReportSpec:
     trading_days_per_year: int = 252
 
     def normalized(self) -> "SizingReportSpec":
+        if isinstance(self.capital_fraction_bps, bool):
+            raise SizingReportError("capital_fraction_bps must not be a bool")
+        if not isinstance(self.capital_fraction_bps, (int, float)) or not math.isfinite(float(self.capital_fraction_bps)):
+            raise SizingReportError("capital_fraction_bps must be a finite number")
+        if not float(self.capital_fraction_bps).is_integer():
+            raise SizingReportError(f"capital_fraction_bps must be an integer, got {self.capital_fraction_bps!r}")
+        bps = int(self.capital_fraction_bps)
+        if bps < 0 or bps > 10_000:
+            raise SizingReportError("capital_fraction_bps must be in [0, 10000]")
+
+        if not isinstance(self.initial_strategy_capital_usd, (int, float)) or isinstance(self.initial_strategy_capital_usd, bool):
+            raise SizingReportError("initial_strategy_capital_usd must be a number")
+        if not math.isfinite(float(self.initial_strategy_capital_usd)):
+            raise SizingReportError("initial_strategy_capital_usd must be finite (not NaN/Infinity)")
         if self.initial_strategy_capital_usd <= 0:
             raise SizingReportError("initial_strategy_capital_usd must be positive")
-        if self.capital_fraction_bps < 0 or self.capital_fraction_bps > 10_000:
-            raise SizingReportError("capital_fraction_bps must be in [0, 10000]")
+
+        if isinstance(self.trading_days_per_year, bool):
+            raise SizingReportError("trading_days_per_year must not be a bool")
+        if not isinstance(self.trading_days_per_year, (int, float)) or not math.isfinite(float(self.trading_days_per_year)):
+            raise SizingReportError("trading_days_per_year must be a finite number")
+        if not float(self.trading_days_per_year).is_integer() or int(self.trading_days_per_year) <= 0:
+            raise SizingReportError("trading_days_per_year must be a positive integer")
+
         return SizingReportSpec(
             initial_strategy_capital_usd=float(self.initial_strategy_capital_usd),
-            capital_fraction_bps=int(self.capital_fraction_bps),
+            capital_fraction_bps=bps,
             compounding=bool(self.compounding),
             trading_days_per_year=int(self.trading_days_per_year),
         )
@@ -92,6 +114,22 @@ class TradeRecord:
     partial_fill_of: Optional[str] = None
 
     def validate(self) -> None:
+        def _finite_positive(label: str, value: Optional[float], *, required: bool) -> None:
+            if value is None:
+                if required:
+                    raise SizingReportError(f"trade {self.trade_id}: missing/invalid {label} (instrument valuation required)")
+                return
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise SizingReportError(f"trade {self.trade_id}: {label} must be a finite number, got {value!r}")
+            if value <= 0:
+                raise SizingReportError(f"trade {self.trade_id}: {label} must be positive, got {value!r}")
+
+        def _finite(label: str, value: Optional[float]) -> None:
+            if value is None:
+                return
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise SizingReportError(f"trade {self.trade_id}: {label} must be a finite number, got {value!r}")
+
         if self.unit != _SUPPORTED_UNIT:
             raise SizingReportError(
                 f"trade {self.trade_id}: unsupported quantity unit {self.unit!r}; "
@@ -109,12 +147,34 @@ class TradeRecord:
             )
         if self.side not in ("long", "short"):
             raise SizingReportError(f"trade {self.trade_id}: unsupported side {self.side!r}")
-        if self.qty is None or self.qty <= 0:
-            raise SizingReportError(f"trade {self.trade_id}: qty must be positive (side encodes direction)")
-        if self.entry_price is None or self.entry_price <= 0:
-            raise SizingReportError(f"trade {self.trade_id}: missing/invalid entry_price (instrument valuation required)")
-        if self.exit_ts is not None and (self.exit_price is None or self.exit_price <= 0):
+
+        _finite_positive("qty", self.qty, required=True)
+        _finite_positive("entry_price", self.entry_price, required=True)
+        _finite_positive("exit_price", self.exit_price, required=False)
+        _finite_positive("stop_price", self.stop_price, required=False)
+        _finite("costs_usd", self.costs_usd)
+
+        if self.exit_ts is not None and self.exit_price is None:
             raise SizingReportError(f"trade {self.trade_id}: exit_ts present but exit_price missing/invalid")
+
+        try:
+            entry_ts_parsed = pd.Timestamp(self.entry_ts)
+        except (ValueError, TypeError) as exc:
+            raise SizingReportError(f"trade {self.trade_id}: entry_ts is not a parseable timestamp: {self.entry_ts!r}") from exc
+        if pd.isna(entry_ts_parsed):
+            raise SizingReportError(f"trade {self.trade_id}: entry_ts parsed to NaT: {self.entry_ts!r}")
+
+        if self.exit_ts is not None:
+            try:
+                exit_ts_parsed = pd.Timestamp(self.exit_ts)
+            except (ValueError, TypeError) as exc:
+                raise SizingReportError(f"trade {self.trade_id}: exit_ts is not a parseable timestamp: {self.exit_ts!r}") from exc
+            if pd.isna(exit_ts_parsed):
+                raise SizingReportError(f"trade {self.trade_id}: exit_ts parsed to NaT: {self.exit_ts!r}")
+            if exit_ts_parsed < entry_ts_parsed:
+                raise SizingReportError(
+                    f"trade {self.trade_id}: exit_ts ({self.exit_ts!r}) is before entry_ts ({self.entry_ts!r})"
+                )
 
     @property
     def is_closed(self) -> bool:
@@ -153,12 +213,19 @@ class TradeRecord:
 def _require_equity_columns(eq: pd.DataFrame, *, label: str) -> None:
     if "ts" not in eq.columns or "equity" not in eq.columns:
         raise SizingReportError(f"{label} equity curve must contain 'ts' and 'equity' columns")
+    if len(eq) == 0:
+        raise SizingReportError(f"{label} equity curve has zero rows — at least one observation is required")
+    equity_values = eq["equity"].to_numpy(dtype=np.float64)
+    if not np.all(np.isfinite(equity_values)):
+        raise SizingReportError(f"{label} equity curve contains NaN/Infinity — every observation must be finite")
 
 
 def _time_underwater_seconds(eq: pd.DataFrame) -> Optional[float]:
     """Longest span between a new equity peak and the point equity recovers to
-    (or exceeds) that peak. Still-underwater-at-series-end counts up to the
-    last observation; recovery is never assumed."""
+    (or exceeds) that peak — measured through the recovery observation
+    itself, not just the last strictly-underwater sample before it.
+    Still-underwater-at-series-end counts up to the last observation;
+    recovery is never assumed."""
     if len(eq) < 2:
         return None
     e = eq.sort_values("ts", kind="mergesort").reset_index(drop=True)
@@ -167,14 +234,21 @@ def _time_underwater_seconds(eq: pd.DataFrame) -> Optional[float]:
 
     peak = curve[0]
     peak_ts = ts[0]
+    was_underwater = False
     worst_seconds = 0.0
     for i in range(1, len(curve)):
         if curve[i] >= peak:
+            if was_underwater:
+                # Recovery instant: the full episode ran from the prior peak
+                # to THIS observation — not just the last strictly-underwater
+                # sample seen before it.
+                worst_seconds = max(worst_seconds, float((ts[i] - peak_ts) / np.timedelta64(1, "s")))
             peak = curve[i]
             peak_ts = ts[i]
+            was_underwater = False
         else:
-            underwater = (ts[i] - peak_ts) / np.timedelta64(1, "s")
-            worst_seconds = max(worst_seconds, float(underwater))
+            was_underwater = True
+            worst_seconds = max(worst_seconds, float((ts[i] - peak_ts) / np.timedelta64(1, "s")))
     return worst_seconds
 
 
@@ -189,18 +263,33 @@ def _aggregate_partial_fills(trades: List[TradeRecord]) -> Dict[str, float]:
 
 
 def _concentration_and_concurrency(trades: List[TradeRecord]) -> Dict[str, Any]:
-    """Max concurrent open positions, and the largest single-position share
-    of total open notional *at the moment(s) concurrency peaks* — not the
-    global max share, which is trivially 1.0 whenever a lone position ever
-    exists (e.g. at the start of the very first trade)."""
+    """Max concurrent open LOGICAL positions (partial fills of the same
+    position collapse to one, via `partial_fill_of`), and the largest
+    single-position share of total open notional *at the moment(s)
+    concurrency peaks* — not the global max share, which is trivially 1.0
+    whenever a lone position ever exists (e.g. at the start of the very
+    first trade).
+
+    A logical position opens at the earliest fill's entry_ts. It only
+    closes if EVERY fill in the group is closed, at the latest fill's
+    exit_ts; if any fill is still open, the whole logical position is
+    treated as open (no invented partial-close instant)."""
     if not trades:
         return {"max_concurrent_positions": 0, "concentration_pct_at_max_concurrency": None}
 
-    events = []
+    groups: Dict[str, List[TradeRecord]] = {}
     for t in trades:
-        events.append((pd.Timestamp(t.entry_ts), 1, t.trade_id, t.notional_usd))  # open sorts after close at same ts
-        if t.exit_ts:
-            events.append((pd.Timestamp(t.exit_ts), 0, t.trade_id, t.notional_usd))  # close
+        key = t.partial_fill_of or t.trade_id
+        groups.setdefault(key, []).append(t)
+
+    events = []
+    for key, fills in groups.items():
+        notional = sum(f.notional_usd for f in fills)
+        open_ts = min(pd.Timestamp(f.entry_ts) for f in fills)
+        events.append((open_ts, 1, key, notional))  # open sorts after close at same ts
+        if all(f.is_closed for f in fills):
+            close_ts = max(pd.Timestamp(f.exit_ts) for f in fills)
+            events.append((close_ts, 0, key, notional))  # close
     events.sort(key=lambda e: (e[0], e[1]))
 
     open_notional: Dict[str, float] = {}
@@ -224,6 +313,41 @@ def _concentration_and_concurrency(trades: List[TradeRecord]) -> Dict[str, Any]:
     }
 
 
+def _sanitize_metrics(metrics: Dict[str, float]) -> Dict[str, Any]:
+    """Legitimate undefined CAGR/Sharpe (insufficient history, zero
+    variance, non-positive start/end equity) must surface as an explicit
+    not_evaluable marker, never as a raw JSON NaN/Infinity token and never
+    as a fabricated zero."""
+    out: Dict[str, Any] = {}
+    for k, v in metrics.items():
+        if isinstance(v, float) and not math.isfinite(v):
+            out[k] = {
+                "truth_state": "not_evaluable",
+                "reason": "undefined for this equity curve (insufficient history, zero variance, or non-positive equity)",
+            }
+        else:
+            out[k] = v
+    return out
+
+
+def _trade_content_hash(trades: List[TradeRecord]) -> Optional[str]:
+    """Binds report identity to the RAW per-trade evidence (every field of
+    every trade), not just the summarized aggregate output — two different
+    trade histories that coincidentally produce identical aggregates must
+    not collapse to the same report_id."""
+    if not trades:
+        return None
+    content = sorted((dataclasses.asdict(t) for t in trades), key=lambda d: d["trade_id"])
+    return sha256_json(content)
+
+
+def _equity_curve_content_hash(eq: Optional[pd.DataFrame]) -> Optional[str]:
+    if eq is None or not len(eq):
+        return None
+    records = [{"ts": str(row["ts"]), "equity": float(row["equity"])} for _, row in eq.iterrows()]
+    return sha256_json(records)
+
+
 def compute_sizing_drawdown_report(
     *,
     strategy_equity: pd.DataFrame,
@@ -243,13 +367,13 @@ def compute_sizing_drawdown_report(
 
     _require_equity_columns(strategy_equity, label="strategy")
     perf_spec = PerfSpec(trading_days_per_year=spec.trading_days_per_year)
-    strategy_metrics = _equity_metrics(strategy_equity, "equity", perf_spec)
+    strategy_metrics = _sanitize_metrics(_equity_metrics(strategy_equity, "equity", perf_spec))
     strategy_time_underwater_s = _time_underwater_seconds(strategy_equity)
-    strategy_insolvent = bool(np.any(strategy_equity["equity"].to_numpy(dtype=np.float64) <= 0.0)) if len(strategy_equity) else False
+    strategy_insolvent = bool(np.any(strategy_equity["equity"].to_numpy(dtype=np.float64) <= 0.0))
 
     if account_equity is not None and len(account_equity):
         _require_equity_columns(account_equity, label="account")
-        account_metrics = _equity_metrics(account_equity, "equity", perf_spec)
+        account_metrics = _sanitize_metrics(_equity_metrics(account_equity, "equity", perf_spec))
         account_block: Dict[str, Any] = {
             "equity_metrics": account_metrics,
             "time_underwater_seconds": _time_underwater_seconds(account_equity),
@@ -313,6 +437,11 @@ def compute_sizing_drawdown_report(
             "max_concurrent_positions": concentration["max_concurrent_positions"],
             "concentration_pct_at_max_concurrency": concentration["concentration_pct_at_max_concurrency"],
         },
+        "input_evidence_hash": {
+            "strategy_equity": _equity_curve_content_hash(strategy_equity),
+            "account_equity": _equity_curve_content_hash(account_equity),
+            "trades": _trade_content_hash(trades),
+        },
         "correlated_exposure": {
             "truth_state": "not_evaluable",
             "reason": "requires a multi-instrument joint price history; not computed from a single-strategy trade list",
@@ -320,6 +449,87 @@ def compute_sizing_drawdown_report(
     }
     report["report_id"] = sha256_json({k: v for k, v in report.items() if k != "report_id"})
     return report
+
+
+_REQUIRED_TRADE_COLUMNS = (
+    "trade_id", "symbol", "side", "qty", "unit", "entry_ts", "entry_price",
+    "currency", "multiplier", "costs_usd",
+)
+
+
+def _read_equity_csv(path: Path, *, label: str) -> pd.DataFrame:
+    if not path.exists():
+        raise SizingReportError(f"{label} equity CSV does not exist: {path}")
+    try:
+        return pd.read_csv(path)
+    except Exception as exc:  # pandas raises several distinct error types for malformed CSV
+        raise SizingReportError(f"{label} equity CSV is unreadable/malformed: {path}: {exc}") from exc
+
+
+def _load_trades_csv(trades_csv: Path) -> List[TradeRecord]:
+    """An explicitly supplied trades_csv must exist and be well-formed; a
+    missing/unreadable file is always an error, never a silent empty trade
+    list. (Omitting --trades entirely, i.e. `trades_csv=None` upstream, is
+    the only valid way to declare "no trades input".) Every required
+    economic field must be an explicit CSV column with an explicit value
+    per row -- no unit/currency/multiplier/cost defaulting in this generic
+    adapter. An explicit `0` for costs_usd is preserved exactly as given."""
+    if not trades_csv.exists():
+        raise SizingReportError(f"trades_csv does not exist: {trades_csv}")
+    try:
+        tdf = pd.read_csv(trades_csv)
+    except Exception as exc:
+        raise SizingReportError(f"trades_csv is unreadable/malformed: {trades_csv}: {exc}") from exc
+
+    missing_cols = [c for c in _REQUIRED_TRADE_COLUMNS if c not in tdf.columns]
+    if missing_cols:
+        raise SizingReportError(f"trades_csv is missing required columns: {missing_cols}")
+
+    trades: List[TradeRecord] = []
+    for idx, row in tdf.iterrows():
+        def _req(col: str) -> Any:
+            v = row[col]
+            # pandas represents a blank CSV cell as either None or a float
+            # NaN depending on column dtype inference (a sparse/single-row
+            # column infers float64, not object) -- both mean "missing" and
+            # must both be refused, never silently cast to the string "nan".
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                raise SizingReportError(f"trades_csv row {idx}: missing value for required column {col!r}")
+            return v
+
+        def _opt(col: str) -> Optional[str]:
+            if col not in tdf.columns:
+                return None
+            v = row[col]
+            if v is None or v == "" or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        try:
+            trades.append(
+                TradeRecord(
+                    trade_id=str(_req("trade_id")),
+                    symbol=str(_req("symbol")),
+                    side=str(_req("side")),
+                    qty=float(_req("qty")),
+                    unit=str(_req("unit")),
+                    entry_ts=str(_req("entry_ts")),
+                    entry_price=float(_req("entry_price")),
+                    currency=str(_req("currency")),
+                    multiplier=float(_req("multiplier")),
+                    costs_usd=float(_req("costs_usd")),
+                    exit_ts=_opt("exit_ts"),
+                    exit_price=(float(row["exit_price"]) if _opt("exit_price") is not None else None),
+                    stop_price=(float(row["stop_price"]) if _opt("stop_price") is not None else None),
+                    partial_fill_of=_opt("partial_fill_of"),
+                )
+            )
+        except SizingReportError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise SizingReportError(f"trades_csv row {idx}: malformed trade data: {exc}") from exc
+
+    return trades  # an existing, well-formed, but zero-row file is a valid explicit "no trades" declaration
 
 
 def write_sizing_drawdown_report(
@@ -331,36 +541,13 @@ def write_sizing_drawdown_report(
     spec: Optional[SizingReportSpec] = None,
 ) -> Path:
     """File-driving wrapper matching the existing reporting/tax CLI convention."""
-    strategy_equity = pd.read_csv(Path(strategy_equity_csv))
-    account_equity = pd.read_csv(Path(account_equity_csv)) if account_equity_csv else None
+    strategy_equity = _read_equity_csv(Path(strategy_equity_csv), label="strategy")
+    account_equity = _read_equity_csv(Path(account_equity_csv), label="account") if account_equity_csv else None
 
-    trades: List[TradeRecord] = []
-    if trades_csv is not None and Path(trades_csv).exists():
-        tdf = pd.read_csv(Path(trades_csv))
-        tdf = tdf.where(pd.notnull(tdf), None)
-        for _, row in tdf.iterrows():
-            def _opt(col: str) -> Optional[str]:
-                v = row[col] if col in tdf.columns else None
-                return None if v in (None, "") else str(v)
-
-            trades.append(
-                TradeRecord(
-                    trade_id=str(row["trade_id"]),
-                    symbol=str(row["symbol"]),
-                    side=str(row["side"]),
-                    qty=float(row["qty"]),
-                    unit=str(row["unit"]) if row.get("unit") not in (None, "") else _SUPPORTED_UNIT,
-                    entry_ts=str(row["entry_ts"]),
-                    entry_price=float(row["entry_price"]),
-                    currency=str(row["currency"]) if row.get("currency") not in (None, "") else _SUPPORTED_CURRENCY,
-                    multiplier=float(row["multiplier"]) if row.get("multiplier") not in (None, "") else _SUPPORTED_MULTIPLIER,
-                    costs_usd=float(row["costs_usd"]) if row.get("costs_usd") not in (None, "") else 0.0,
-                    exit_ts=_opt("exit_ts"),
-                    exit_price=(float(row["exit_price"]) if _opt("exit_price") is not None else None),
-                    stop_price=(float(row["stop_price"]) if _opt("stop_price") is not None else None),
-                    partial_fill_of=_opt("partial_fill_of"),
-                )
-            )
+    # trades_csv omitted entirely (None) is a valid explicit "no trades"
+    # declaration; trades_csv given but missing/unreadable/malformed is an
+    # error (B1) -- the two must never be conflated.
+    trades: List[TradeRecord] = _load_trades_csv(Path(trades_csv)) if trades_csv is not None else []
 
     report = compute_sizing_drawdown_report(
         strategy_equity=strategy_equity,
@@ -371,7 +558,10 @@ def write_sizing_drawdown_report(
 
     out_json = Path(out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(report, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    # allow_nan=False: defense in depth -- any raw NaN/Infinity that reached
+    # this point despite _sanitize_metrics is a bug, and must raise loudly
+    # rather than write non-standard JSON silently.
+    out_json.write_text(json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False), encoding="utf-8")
     return out_json
 
 
