@@ -200,6 +200,32 @@ def optional_authorization(decl: dict, auth_class: str, *, auth: dict | None = N
         return None
 
 
+def native_execution_class(stage: str) -> str:
+    """The authorization class a stage must hold to execute the native binary. Only `check` among the read-only
+    stages may (its optional identity cross-check); every effectful stage needs its own class."""
+    auth_class = STAGE_CLASS.get(stage)
+    if auth_class is None:
+        raise AuthorizationError(f"fail-closed: {stage!r} is not a known runner stage")
+    if auth_class != READ_ONLY:
+        return auth_class
+    if stage == "check":
+        return NATIVE_IDENTITY_RESOLUTION
+    raise AuthorizationError(f"fail-closed: the read-only stage {stage!r} may not execute the native binary")
+
+
+def authorize_native_execution(decl: dict, stage: str | None, auth: dict | None, cli: Path, *, key: str | None = None,
+                               now: datetime | None = None, incident_entries: list[dict] | None = None) -> Path:
+    """The only way to obtain an executable path for the native binary. Re-verifies, at the moment of execution,
+    that `auth` is HMAC-signed, bound to this declaration, unexpired, authorizes the class this stage needs, and
+    pins the binary on disk. Mutable runner state (`stage`, `auth`) alone confers nothing: a forged mapping fails
+    the signature check."""
+    if stage is None:
+        raise AuthorizationError("fail-closed: no authorized runner stage is active")
+    verify(decl, native_execution_class(stage), auth, key=key if key is not None else os.environ.get(KEY_ENV),
+           now=now or datetime.now(timezone.utc), incident_entries=incident_entries)
+    return verified_cli(auth, cli)
+
+
 def verified_cli(auth: dict | None, cli: Path) -> Path:
     """The native binary a stage may execute: a regular file whose sha256 equals the authorization's signed
     `cli_sha256`. A different path, a swapped binary, an unpinned authorization or no authorization all refuse."""

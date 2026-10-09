@@ -393,9 +393,9 @@ def test_the_helper_cannot_execute_the_binary_directly_or_from_a_read_only_stage
     rb, stub, marker, _ = stub_world
     with pytest.raises(sa.AuthorizationError, match="outside an authorized runner stage"):
         rb._run_cli("backtest", "native-fingerprint")
-    with pytest.raises(sa.AuthorizationError, match="pins a native binary"):
+    with pytest.raises(sa.AuthorizationError, match="read-only stage 'summary' may not execute"):
         rb.staged("summary")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
-    with pytest.raises(sa.AuthorizationError, match="pins a native binary"):
+    with pytest.raises(sa.AuthorizationError, match="no operator authorization secret"):
         rb.staged("check")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
     assert not marker.exists()
 
@@ -421,3 +421,142 @@ def test_frozen_historical_declarations_still_run_their_binary_as_before(tmp_pat
     assert sa.is_frozen_historical(rb.DECL)
     rb.staged("check")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
     assert marker.exists()
+
+
+# ------------------------------------------- the executable helper re-verifies; mutable runner state confers nothing
+
+def _inject(rb, stage, auth):
+    rb._ACTIVE["stage"], rb._ACTIVE["auth"] = stage, auth
+
+
+def _probe(rb):
+    try:
+        rb._run_cli("backtest", "native-fingerprint")
+    finally:
+        _inject(rb, None, None)
+
+
+def _mint_for(rb, classes, *, now=None, valid_for=timedelta(hours=1), **kw):
+    return sa.mint(rb.DECL, classes, operator="op", approval_ref="A", key=KEY, now=now or datetime.now(timezone.utc),
+                   valid_for=valid_for, acknowledged_incidents=ACK, **kw)
+
+
+@pytest.mark.parametrize("stage", ["check", "gate", "register", "trials", "backtest", "finalize", "review"])
+def test_a_forged_unsigned_active_state_executes_nothing_even_with_the_right_pin(stub_world, monkeypatch, stage):
+    rb, stub, marker, _ = stub_world
+    for key_present in (False, True):  # with or without the operator secret in the environment
+        if key_present:
+            monkeypatch.setenv(sa.KEY_ENV, KEY)
+        _inject(rb, stage, {"cli_sha256": pin(stub)})
+        with pytest.raises(sa.AuthorizationError):
+            _probe(rb)
+        _inject(rb, stage, {"schema": sa.SCHEMA, "cli_sha256": pin(stub), "signature": "0" * 64,
+                            "authorized_classes": list(sa.AUTHORIZABLE)})
+        with pytest.raises(sa.AuthorizationError):
+            _probe(rb)
+    assert not marker.exists(), "a caller-populated _ACTIVE ran the binary"
+
+
+@pytest.mark.parametrize("label,mutate,match", [
+    ("pin replaced after signing", lambda a: {**a, "cli_sha256": "cd" * 32}, "signature"),
+    ("class list widened after signing", lambda a: {**a, "authorized_classes": sorted(sa.AUTHORIZABLE)}, "signature"),
+    ("expiry extended after signing", lambda a: {**a, "expires_utc": "2099-01-01T00:00:00+00:00"}, "signature"),
+])
+def test_a_tampered_signed_authorization_executes_nothing(stub_world, monkeypatch, label, mutate, match):
+    rb, stub, marker, _ = stub_world
+    monkeypatch.setenv(sa.KEY_ENV, KEY)
+    genuine = _mint_for(rb, [sa.NATIVE_IDENTITY_RESOLUTION, sa.REGISTRATION], cli_sha256=pin(stub))
+    _inject(rb, "check", mutate(genuine))
+    with pytest.raises(sa.AuthorizationError, match=match):
+        _probe(rb)
+    assert not marker.exists()
+
+
+def test_a_genuine_authorization_of_the_wrong_class_executes_nothing_in_the_helper(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    monkeypatch.setenv(sa.KEY_ENV, KEY)
+    wrong = _mint_for(rb, [sa.REGISTRATION, sa.DATA_MATERIALIZATION], cli_sha256=pin(stub))
+    for stage in ("check", "gate", "trials", "judge"):  # none of these classes is the one the stage needs
+        _inject(rb, stage, wrong)
+        with pytest.raises(sa.AuthorizationError, match="does not authorize"):
+            _probe(rb)
+    _inject(rb, "summary", _mint_for(rb, [sa.NATIVE_IDENTITY_RESOLUTION], cli_sha256=pin(stub)))
+    with pytest.raises(sa.AuthorizationError, match="may not execute"):
+        _probe(rb)
+    assert not marker.exists()
+
+
+def test_an_expired_or_not_yet_valid_authorization_executes_nothing_even_when_injected(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    monkeypatch.setenv(sa.KEY_ENV, KEY)
+    now = datetime.now(timezone.utc)
+    for issued in (now - timedelta(days=2), now + timedelta(days=1)):
+        _inject(rb, "check", _mint_for(rb, [sa.NATIVE_IDENTITY_RESOLUTION], now=issued, cli_sha256=pin(stub)))
+        with pytest.raises(sa.AuthorizationError, match="expired, not yet valid"):
+            _probe(rb)
+    assert not marker.exists()
+
+
+def test_authorization_that_expires_between_stage_entry_and_the_call_is_rechecked_at_the_call(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    a = _mint_for(rb, [sa.NATIVE_IDENTITY_RESOLUTION], cli_sha256=pin(stub), valid_for=timedelta(minutes=5))
+    now = datetime.now(timezone.utc)
+    assert sa.authorize_native_execution(rb.DECL, "check", a, stub, key=KEY, now=now) == stub.resolve()
+    with pytest.raises(sa.AuthorizationError, match="expired"):
+        sa.authorize_native_execution(rb.DECL, "check", a, stub, key=KEY, now=now + timedelta(minutes=6))
+
+
+def test_an_authorization_for_another_declaration_executes_nothing(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    monkeypatch.setenv(sa.KEY_ENV, KEY)
+    foreign = sa.mint(KISS, [sa.NATIVE_IDENTITY_RESOLUTION], operator="op", approval_ref="A", key=KEY,
+                      now=datetime.now(timezone.utc), acknowledged_incidents=ACK, cli_sha256=pin(stub))
+    assert sa.declaration_identity(KISS) != sa.declaration_identity(rb.DECL)
+    _inject(rb, "check", foreign)
+    with pytest.raises(sa.AuthorizationError, match="different declaration"):
+        _probe(rb)
+    assert not marker.exists()
+
+
+def test_an_unknown_stage_name_or_no_stage_executes_nothing(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    monkeypatch.setenv(sa.KEY_ENV, KEY)
+    good = _mint_for(rb, list(sa.AUTHORIZABLE), cli_sha256=pin(stub), acknowledged_data_boundaries=CA_ACK)
+    for stage in ("not-a-stage", "paper", "promotion", ""):
+        _inject(rb, stage, good)
+        with pytest.raises(sa.AuthorizationError):
+            _probe(rb)
+    with pytest.raises(sa.AuthorizationError):
+        sa.authorize_native_execution(rb.DECL, None, good, stub, key=KEY)
+    assert not marker.exists()
+
+
+def test_a_nested_stage_neither_inherits_nor_ends_the_callers_authority(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    grant(monkeypatch, rb, [sa.REGISTRATION, sa.NATIVE_IDENTITY_RESOLUTION], cli_sha256=pin(stub))
+
+    def outer(_a):
+        rb._run_cli("backtest", "native-fingerprint")            # authorized by the outer stage
+        with pytest.raises(sa.AuthorizationError, match="may not execute"):
+            rb.staged("summary")(lambda _b: rb._run_cli("backtest", "native-fingerprint"))(None)  # inner: read-only
+        assert rb._ACTIVE["stage"] == "register"                  # the inner stage restored its caller
+        rb._run_cli("backtest", "native-fingerprint")            # the outer authority survived the inner stage
+    rb.staged("register")(outer)(None)
+    assert len(marker.read_text().split()) == 2
+    assert rb._ACTIVE == {"stage": None, "auth": None}
+
+
+def test_a_failing_or_refused_stage_leaves_no_residual_authority(stub_world, monkeypatch):
+    rb, stub, marker, _ = stub_world
+    grant(monkeypatch, rb, [sa.REGISTRATION], cli_sha256=pin(stub))
+
+    def boom(_a):
+        raise RuntimeError("stage failed")
+    with pytest.raises(RuntimeError):
+        rb.staged("register")(boom)(None)
+    assert rb._ACTIVE == {"stage": None, "auth": None}
+    with pytest.raises(sa.AuthorizationError, match="outside an authorized runner stage"):
+        rb._run_cli("backtest", "native-fingerprint")
+    with pytest.raises(sa.AuthorizationError):                       # an unauthorized stage must not touch state either
+        rb.staged("trials")(lambda _a: rb._run_cli("backtest", "native-fingerprint"))(None)
+    assert rb._ACTIVE == {"stage": None, "auth": None} and not marker.exists()

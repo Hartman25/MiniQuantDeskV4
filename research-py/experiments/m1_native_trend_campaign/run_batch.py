@@ -79,12 +79,13 @@ def staged(name: str):
     directories, registry, subprocess), whether it is reached from the CLI dispatcher or called directly."""
     def wrap(fn):
         def run(args):
+            outer = (_ACTIVE["stage"], _ACTIVE["auth"])
             _ACTIVE["auth"] = stage_authorization.require_stage(DECL, name)
             _ACTIVE["stage"] = name
             try:
                 return fn(args)
             finally:
-                _ACTIVE["stage"], _ACTIVE["auth"] = None, None
+                _ACTIVE["stage"], _ACTIVE["auth"] = outer  # a nested stage never ends or inherits its caller's authority
         run.__name__, run.__doc__, run.__wrapped__ = fn.__name__, fn.__doc__, fn
         return run
     return wrap
@@ -117,8 +118,9 @@ def _run_cli(*argv: str) -> str:
     _require_active_stage()
     exe = CLI
     if not stage_authorization.is_frozen_historical(DECL):
-        # The binary path is mutable (MQK_M1_CLI); only the exact binary an authorization pins may run, in any stage.
-        exe = stage_authorization.verified_cli(_ACTIVE["auth"], CLI)
+        # _ACTIVE is mutable state: the signed authorization is re-verified here, at the executable boundary, and
+        # only the exact binary it pins may run.
+        exe = stage_authorization.authorize_native_execution(DECL, _ACTIVE["stage"], _ACTIVE["auth"], CLI)
     out = subprocess.run([str(exe), *argv], capture_output=True, text=True)
     if out.returncode != 0:
         raise SystemExit(f"mqk-cli failed ({argv[:2]}): {out.stderr[-800:]}")
