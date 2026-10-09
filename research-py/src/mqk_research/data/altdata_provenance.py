@@ -1,0 +1,228 @@
+"""
+Provider-neutral provenance boundary for discrete alternative/fundamental
+data events (Component D — StockNest research-data intake).
+
+Deliberately NOT built on `bars_provenance.py`: that module's manifest shape
+is OHLC-bars-and-corporate-action-specific (RESEARCH-MARKET-DATA-AUTHORITY
+lineage). A 13F snapshot, an insider Form-4, or a congressional trade
+disclosure is a discrete point-in-time EVENT, not a bar series — forcing one
+into the other's schema would misrepresent its semantics. This module
+mirrors that module's PATTERN instead (content-addressed ids, fail-closed
+preflight before any economic use) for this distinct event shape.
+
+See docs/devtools/STOCKNEST_INTAKE_ASSESSMENT_01.md for the verified
+capability assessment this module's registry entries are evidence for.
+Zero network access, zero economic/Promotion authority: this module reads
+no provider, writes no registry, and calls no Research/Promotion seam.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, Mapping, Optional, Sequence
+
+import pandas as pd
+
+from mqk_research.ml.util_hash import sha256_json
+
+
+class EventCategory(str, Enum):
+    FUNDAMENTAL_STATEMENT = "fundamental_statement"
+    SCREENER_SNAPSHOT = "screener_snapshot"
+    INSTITUTIONAL_13F_HOLDING = "institutional_13f_holding"
+    INSIDER_TRANSACTION = "insider_transaction"
+    CONGRESSIONAL_DISCLOSURE = "congressional_disclosure"
+    EARNINGS_EVENT = "earnings_event"
+    UNKNOWN = "unknown"
+
+
+class LicenseStatus(str, Enum):
+    UNKNOWN = "unknown"
+    UNLICENSED_FOR_RESEARCH = "unlicensed_for_research"
+    LICENSED_FOR_RESEARCH = "licensed_for_research"
+
+
+class AltDataProvenanceError(ValueError):
+    """Fail-closed refusal: malformed event, ambiguous identity, or a
+    not-yet-knowable (future) disclosure treated as available."""
+
+
+class ProviderUnavailableError(RuntimeError):
+    """Fail-closed refusal to fetch from a provider that is not verified
+    `api_available=True` AND `license_status=LICENSED_FOR_RESEARCH` in
+    `PROVIDER_CAPABILITIES`. Never silently returns synthetic data."""
+
+
+@dataclass(frozen=True)
+class ProviderCapabilityRecord:
+    """Durable record of a verification finding, not a live capability
+    check. See docs/devtools/STOCKNEST_INTAKE_ASSESSMENT_01.md for the
+    evidence behind each field for the `stocknest` entry."""
+
+    provider_id: str
+    api_available: bool
+    license_status: LicenseStatus
+    verified_at_utc: str
+    verification_method: str
+    notes: str
+
+
+# Fail-closed by default: every entry must be added explicitly with its
+# evidence; there is no implicit "assume available" path anywhere in this
+# module. Flipping `api_available`/`license_status` to enabled requires the
+# future-authorization evidence described in the assessment doc, not a code
+# change alone.
+PROVIDER_CAPABILITIES: Dict[str, ProviderCapabilityRecord] = {
+    "stocknest": ProviderCapabilityRecord(
+        provider_id="stocknest",
+        api_available=False,
+        license_status=LicenseStatus.UNKNOWN,
+        verified_at_utc="2026-10-09T00:00:00Z",
+        verification_method="direct_fetch_403_plus_web_search_no_docs_found",
+        notes=(
+            "stocknest.app is a real consumer fundamentals/comparison/screener "
+            "web app (verified via search). Direct automated fetch returned "
+            "HTTP 403. No public API, developer docs, or licensing terms were "
+            "located. 13F/insider/congressional-disclosure capabilities are "
+            "NOT documented for this product (those belong to unrelated "
+            "services that appeared only as search noise)."
+        ),
+    ),
+}
+
+
+def _require_known_provider(provider_id: str) -> ProviderCapabilityRecord:
+    record = PROVIDER_CAPABILITIES.get(provider_id)
+    if record is None:
+        raise AltDataProvenanceError(f"unregistered provider_id {provider_id!r} — unsupported source category")
+    return record
+
+
+def fetch_from_provider(provider_id: str, **_kwargs: Any) -> None:
+    """Always refuses. There is no provider in `PROVIDER_CAPABILITIES` that
+    is currently both `api_available` and `license_status ==
+    LICENSED_FOR_RESEARCH`, so this function has no success path to fall
+    back on by construction — it cannot silently return synthetic or
+    partially-authorized data."""
+    record = _require_known_provider(provider_id)
+    if not record.api_available:
+        raise ProviderUnavailableError(
+            f"provider {provider_id!r} has no verified API (see PROVIDER_CAPABILITIES: {record.notes})"
+        )
+    if record.license_status != LicenseStatus.LICENSED_FOR_RESEARCH:
+        raise ProviderUnavailableError(
+            f"provider {provider_id!r} is not verified licensed for research use "
+            f"(license_status={record.license_status.value})"
+        )
+    raise ProviderUnavailableError(  # pragma: no cover — unreachable while the registry above stays all-disabled
+        f"provider {provider_id!r} is marked available but no ingestion implementation exists yet"
+    )
+
+
+@dataclass(frozen=True)
+class AltDataEvent:
+    """
+    One discrete, point-in-time alternative/fundamental-data observation.
+
+    Distinguishes:
+      - event_datetime_utc: when the underlying economic event actually
+        happened (e.g. the date of a congressional trade, or the fiscal
+        period a statement covers).
+      - public_disclosure_datetime_utc: when it became PUBLICLY knowable
+        (e.g. the filing/disclosure date) — this, never event_datetime_utc,
+        is what gates availability to a strategy.
+      - provider_ingestion_timestamp_utc: when our own system observed it.
+      - data_revision_version: a later correction/restatement of the SAME
+        logical event is a new revision, not a silent overwrite.
+    """
+
+    provider_id: str
+    event_category: EventCategory
+    instrument_identity: str  # e.g. a symbol; ambiguous/empty values are refused
+    event_datetime_utc: str
+    public_disclosure_datetime_utc: Optional[str]
+    provider_ingestion_timestamp_utc: str
+    data_revision_version: int
+    original_source_id: str
+    raw_payload: Mapping[str, Any]
+    license_status: LicenseStatus = LicenseStatus.UNKNOWN
+
+    def validate(self) -> None:
+        if not self.instrument_identity or not self.instrument_identity.strip():
+            raise AltDataProvenanceError("instrument_identity is empty/ambiguous")
+        if self.event_category == EventCategory.UNKNOWN:
+            raise AltDataProvenanceError("event_category must be a known, supported category")
+        if self.public_disclosure_datetime_utc is None:
+            raise AltDataProvenanceError(
+                "public_disclosure_datetime_utc is missing/unknown — cannot gate availability "
+                "without it (fail closed rather than assume immediately available)"
+            )
+        if self.data_revision_version < 1:
+            raise AltDataProvenanceError("data_revision_version must be >= 1")
+        try:
+            sha256_json(dict(self.raw_payload))
+        except TypeError as exc:
+            raise AltDataProvenanceError(f"raw_payload is not JSON-serializable: {exc}") from exc
+        _require_known_provider(self.provider_id)
+
+    def content_fields(self) -> Dict[str, Any]:
+        """The content that defines this event's identity. Deliberately
+        EXCLUDES provider_ingestion_timestamp_utc — re-ingesting the exact
+        same disclosed content a day later must not manufacture a new
+        logical event; only a real data_revision_version bump does."""
+        return {
+            "provider_id": self.provider_id,
+            "event_category": self.event_category.value,
+            "instrument_identity": self.instrument_identity,
+            "event_datetime_utc": self.event_datetime_utc,
+            "public_disclosure_datetime_utc": self.public_disclosure_datetime_utc,
+            "data_revision_version": self.data_revision_version,
+            "original_source_id": self.original_source_id,
+            "raw_payload": dict(self.raw_payload),
+        }
+
+    def event_id(self) -> str:
+        """Deterministic, content-derived id. A later revision of the same
+        logical event gets a DIFFERENT id (because data_revision_version is
+        part of the content) rather than overwriting the prior one."""
+        return sha256_json(self.content_fields())
+
+
+def require_point_in_time_available(event: AltDataEvent, *, as_of_utc: str) -> None:
+    """
+    Fail-closed gate: a strategy evaluating "as of" `as_of_utc` must never
+    see an event before it was actually publicly knowable. Compares against
+    `public_disclosure_datetime_utc` — never `event_datetime_utc`, which may
+    legitimately be much earlier (e.g. a congressional trade's execution
+    date, long before its disclosure filing).
+    """
+    event.validate()
+    # Parsed comparison (not lexical string comparison), so differing valid
+    # ISO-8601 representations (e.g. trailing "Z" vs "+00:00", with/without
+    # fractional seconds) can never flip the ordering.
+    if pd.Timestamp(as_of_utc) < pd.Timestamp(event.public_disclosure_datetime_utc):
+        raise AltDataProvenanceError(
+            f"event {event.event_id()[:16]} is not yet knowable as of {as_of_utc!r} "
+            f"(public_disclosure_datetime_utc={event.public_disclosure_datetime_utc!r})"
+        )
+
+
+def require_licensed_for_research(event: AltDataEvent) -> None:
+    event.validate()
+    if event.license_status != LicenseStatus.LICENSED_FOR_RESEARCH:
+        raise AltDataProvenanceError(
+            f"event from provider {event.provider_id!r} is not verified licensed for research "
+            f"(license_status={event.license_status.value})"
+        )
+
+
+def deduplicate_events(events: Sequence[AltDataEvent]) -> Dict[str, AltDataEvent]:
+    """Keyed by event_id: identical content (including revision) collapses
+    to one entry; a different revision of the same logical event keeps its
+    own distinct entry because its content — and therefore its id — differs."""
+    out: Dict[str, AltDataEvent] = {}
+    for ev in events:
+        ev.validate()
+        out[ev.event_id()] = ev
+    return out
