@@ -106,3 +106,62 @@ check only, per the correction mission's own scoping). These three commits
 are **local only, not pushed** — the original publication
 (`d4fc2c64`) is unaffected; a human reviewer merging this work should
 re-publish from the new ending HEAD rather than from `d4fc2c64`.
+
+## Surgical closeout 02 (2026-10-09, commits `d5a37f84`, `cfb6a600`,
+`218f70e2`, `d1215702`) — 7 further, deeper defects found by independent
+source-snapshot reproduction
+
+The PREVIOUS round's fixes for C2 (immutability) and B3 (partial-fill
+concurrency) were each confirmed, by direct trace against actual HEAD, to
+be *incomplete* rather than wrong in direction — each left a narrower but
+real version of the same root cause:
+
+- **FW-C2-R1**: the earlier fix wrapped only the OUTER mapping in
+  `MappingProxyType`; a mutable value NESTED inside a parameter (a list or
+  dict value, not just the top-level container) was still reachable —
+  `grammar.parameters["n"].append(3)` and
+  `decl.parameter_grids[family]["n"][0].append(3)` both still changed
+  identity. Fixed by making `_canonical_value` freeze every level
+  recursively (tuple/`MappingProxyType` all the way down), with a new
+  `_thaw()` used only at the JSON-output boundary. Golden-fixture
+  regression confirmed byte-identical fingerprints for all
+  previously-valid scalar inputs.
+- **FW-B3-R2**: the earlier fix correctly grouped partial fills into one
+  logical position, but then summed the group's ENTIRE eventual notional
+  (including fills that hadn't happened yet) and backdated it to the
+  group's earliest fill. Exact oracle: logical A fills $100 Jan1 and $900
+  Jan10 (both never close); logical B fills $100 Jan2, closes Jan3. At
+  peak concurrency (2, during Jan2–Jan3) the true concentration is 0.50;
+  the bug reported 0.90909 (A's future $900 was already counted at Jan1).
+  Fixed by switching to causal per-fill accumulation — each fill
+  contributes only its own notional, only from its own entry_ts.
+- **FW-C3-R7**: `_param_combo_count`'s `max(len(values), 1)` silently
+  counted an empty named parameter axis as one combination; the actual
+  generator produced zero. The function itself was wrong, not just caught
+  downstream by the existing mismatch guard.
+- **FW-D-R5/R6**: `AltDataEvent` accepted `data_revision_version=float('nan')`
+  or `True` (both bypass a bare `< 1` comparison), never validated
+  `provider_ingestion_timestamp_utc` or `original_source_id` at all, and
+  had no `__post_init__` whatsoever — `raw_payload` was stored by
+  reference with zero defensive copying, so a caller's own post-
+  construction mutation of a payload list silently changed `event_id()`.
+- **FW-B5-R3/R4**: `compounding` accepted any truthy value
+  (`bool("false")` is `True` in Python) via a blind coercion; an
+  explicitly-supplied-but-empty `account_equity` DataFrame was
+  represented identically to truly omitting it (`None`).
+- Plus ~20 addendum items across all three components (exit_price-
+  without-exit_ts, empty/duplicate trade ids, orphan/inconsistent
+  partial-fill groups, naive timestamps raising raw `TypeError` instead of
+  failing closed, equity-curve timestamp validity/uniqueness, canonical
+  row-order-independent content hashes, extraneous `parameter_grids` keys,
+  non-enum family/direction/asset-class values, and blank
+  `trial_identity_for` ids found in the second sweep).
+
+Every headline fix (C2 deep-freeze, B3 causal accumulation, D6 payload
+freeze) was mutation-proven: the fix was temporarily reverted, the
+corresponding new test failed for the exact intended reason (an
+`AttributeError` not raised, or — for B3 — the exact original buggy value
+`0.90909...` reproduced against the fixed literal `0.50` expectation),
+then the fix was restored and the full suite re-confirmed green. 76 new
+tests (209 → 271 passing, including the unaffected `test_experiment_registry.py`
+regression). All four commits are **local only, not pushed**.
