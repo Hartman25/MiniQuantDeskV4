@@ -9,9 +9,11 @@ swallowed exception still fails the test and the session summary reports attempt
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -21,13 +23,13 @@ GUARD_SITE = Path(__file__).resolve().parent / "_guard_site"
 # Spawn paths the guard cannot follow into a child: refused outright (Popen is routed through the guarded wrapper).
 UNGUARDED_SPAWN_EVENTS = frozenset({"os.system", "os.exec", "os.posix_spawn", "os.spawn"})
 NETWORK_TOOLS = frozenset({"curl", "wget", "nc", "ncat", "netcat", "telnet", "ssh", "scp", "sftp", "ftp", "socat", "nmap"})
-SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+PYTHON_NAME = re.compile(r"^python[0-9.]*(\.exe)?$")
 DENIED_EVENTS = frozenset({"socket.connect", "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr",
                            "socket.getnameinfo", "socket.sendto", "socket.sendmsg"})
 SECRET_BASENAMES = frozenset({".env", ".env.local", ".env.production", ".env.development"})
 LOG_ENV = "MQK_NETGUARD_LOG"
 
-_state: dict = {"installed": False, "attempts": [], "expect_depth": 0}
+_state: dict = {"installed": False, "attempts": [], "expect_depth": 0, "allowed": {}}
 _in_guarded_popen = threading.local()
 
 
@@ -50,13 +52,43 @@ def _record(kind: str, detail: str) -> None:
 
 
 def _is_python(executable: str) -> bool:
-    base = os.path.basename(str(executable))
-    return base.startswith("python") or os.path.realpath(str(executable)) == os.path.realpath(sys.executable)
+    """A real Python interpreter: this interpreter (by resolved path), or a binary named python[N.N] that is not a
+    script. A shell script named `python` is not one: it would run without the guard."""
+    real = os.path.realpath(str(executable))
+    if real == os.path.realpath(sys.executable):
+        return True
+    if not (PYTHON_NAME.match(os.path.basename(str(executable))) or PYTHON_NAME.match(os.path.basename(real))):
+        return False
+    try:
+        with open(real, "rb") as fh:  # `open` of a non-secret name: not screened by the audit hook
+            return fh.read(2) != b"#!"
+    except OSError:
+        return False
 
 
 def _carries_guard(env) -> bool:
-    paths = (env if env is not None else os.environ).get("PYTHONPATH", "")
-    return str(GUARD_SITE) in paths.split(os.pathsep)
+    """The guard's sitecustomize directory must come FIRST on PYTHONPATH, so no other `sitecustomize` wins."""
+    paths = [p for p in (env if env is not None else os.environ).get("PYTHONPATH", "").split(os.pathsep) if p]
+    return bool(paths) and paths[0] == str(GUARD_SITE)
+
+
+def _resolve(executable, env, cwd) -> str:
+    """The file Popen will exec: a bare name is looked up on the child's PATH, a relative path from its cwd."""
+    exe = os.fsdecode(executable)
+    if os.sep in exe:
+        return exe if os.path.isabs(exe) or cwd is None else os.path.join(os.fsdecode(cwd), exe)
+    path = (env if env is not None else os.environ).get("PATH", os.defpath)
+    return shutil.which(exe, path=path) or exe
+
+
+def _allowed_executable(path: str) -> bool:
+    """True for an executable a test vouched for with `allow_executable`, byte-identical to what it vouched for."""
+    real = os.path.realpath(path)
+    digest = _state["allowed"].get(real)
+    if digest is None or not os.path.isfile(real):
+        return False
+    with open(real, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest() == digest
 
 
 def _hook(event: str, args: tuple) -> None:
@@ -66,12 +98,12 @@ def _hook(event: str, args: tuple) -> None:
         _record("unguarded_spawn", event)
         raise NetworkDenied(f"offline guard: {event} cannot be followed into the child and is refused")
     if event == "subprocess.Popen" and args:
-        # Backstop for any launch that bypassed the guarded Popen wrapper: a Python child must carry the guard.
-        executable = args[0]
-        env = args[3] if len(args) > 3 else None
-        if _is_python(executable) and not _carries_guard(env):
-            _record("unguarded_python_child", str(executable))
-            raise NetworkDenied("offline guard: a Python child would start without the guard")
+        # Backstop for any launch that bypassed the guarded Popen wrapper: the same launch policy applies.
+        executable, argv, cwd, env = (list(args) + [None] * 4)[:4]
+        refusal = launch_refusal(executable, argv, cwd, env)
+        if refusal:
+            _record(refusal[0], refusal[1])
+            raise NetworkDenied(f"offline guard: {refusal[2]}")
         return
     if event in DENIED_EVENTS:
         if _is_local_unix(event, args):
@@ -115,51 +147,87 @@ def guarded_env(env) -> dict:
     PYTHONPATH and a log location, so a Python child installs the guard before running any of its own code even
     when the caller passed a minimal or hand-built environment."""
     out = dict(os.environ if env is None else env)
-    paths = [p for p in out.get("PYTHONPATH", "").split(os.pathsep) if p]
-    if str(GUARD_SITE) not in paths:
-        out["PYTHONPATH"] = os.pathsep.join([str(GUARD_SITE), *paths])
+    paths = [p for p in out.get("PYTHONPATH", "").split(os.pathsep) if p and p != str(GUARD_SITE)]
+    out["PYTHONPATH"] = os.pathsep.join([str(GUARD_SITE), *paths])  # first: no other sitecustomize may win
     if LOG_ENV not in out and os.environ.get(LOG_ENV):
         out[LOG_ENV] = os.environ[LOG_ENV]
     return out
 
 
-def _isolates_python(argv: list) -> bool:
-    """True when a Python command line disables the environment, the path or `site` (`-I`, `-S`, `-E`): those
-    flags would drop the guard's sitecustomize, so such a child cannot be guarded and is refused."""
-    for tok in argv[1:]:
-        if tok in ("-c", "-m") or not tok.startswith("-"):
+def _python_skips_guard(argv: list) -> bool:
+    """True when a Python command line disables the environment, the path or `site` (`-I`, `-S`, `-E`, alone or
+    in a cluster): the child would then never load the guard's sitecustomize. Option arguments (`-W x`, `-Xdev`)
+    are skipped, and parsing stops where Python stops reading options (`-c`, `-m`, a script, `-`)."""
+    it = iter(argv[1:])
+    for tok in it:
+        if tok in ("-", "--") or not tok.startswith("-"):
             return False
-        if not tok.startswith("--") and set(tok[1:]) & set("ISE"):
-            return True
+        if tok.startswith("--"):
+            if tok == "--check-hash-based-pycs":
+                next(it, None)
+            continue
+        for i, ch in enumerate(tok[1:], 1):
+            if ch in "ISE":
+                return True
+            if ch in "cm":
+                return False
+            if ch in "WX":
+                if i == len(tok) - 1:
+                    next(it, None)  # the option argument is the next token
+                break
     return False
 
 
-def screen_spawn(args, shell: bool, executable=None) -> None:
-    """Refuse a launch the guard cannot protect: a network client by name, or a Python interpreter started in
-    an isolation mode that skips the guard."""
-    if isinstance(args, (str, bytes, os.PathLike)):
-        argv = [os.fsdecode(args)] if not shell else os.fsdecode(args).split()
+def launch_refusal(executable, argv, cwd, env):
+    """None when the guard can prove the child is isolated; otherwise (kind, detail, reason). Supported:
+    this interpreter / a real Python interpreter started so that it loads the guard, and an executable a test
+    explicitly vouched for. Everything else is refused: a shell, `env`/`nice`/`timeout`/... wrappers, any other
+    interpreter or program is an intermediary the guard cannot instrument, whatever its command line says."""
+    exe = _resolve(executable, env, cwd)
+    base = os.path.basename(exe)
+    argv = [os.fsdecode(a) for a in (argv if isinstance(argv, (list, tuple)) else [argv])]
+    if _is_python(exe):
+        if _python_skips_guard(argv):
+            return ("guard_bypass_spawn", " ".join(argv[:4]), "a Python child in isolated mode (-I/-S/-E) would skip the guard")
+        if not _carries_guard(env):
+            return ("unguarded_python_child", base, "a Python child would start without the guard")
+        return None
+    if _allowed_executable(exe):
+        return None
+    if base in NETWORK_TOOLS:
+        return ("network_tool_spawn", base, f"launching a network client ({base}) is refused")
+    return ("unsupported_launcher", base, f"{base!r} is not a Python interpreter the guard can instrument; "
+                                          "shells, env/nice/timeout wrappers and other programs are refused")
+
+
+@contextlib.contextmanager
+def allow_executable(path):
+    """A test vouches for one exact executable (a stub it wrote) so the guard lets it run. Matched by resolved
+    path AND content hash, so a substituted file at the same path is still refused."""
+    install()
+    real = os.path.realpath(path)
+    with open(real, "rb") as fh:
+        _state["allowed"][real] = hashlib.sha256(fh.read()).hexdigest()
+    try:
+        yield
+    finally:
+        _state["allowed"].pop(real, None)
+
+
+def screen_spawn(args, shell: bool, executable=None, env=None, cwd=None) -> None:
+    """Refuse a launch the guard cannot protect (see `launch_refusal`). `shell=True` always launches a shell."""
+    if shell:
+        executable = executable or "/bin/sh"
+        argv = [executable, "-c", os.fsdecode(args) if isinstance(args, (str, bytes, os.PathLike)) else " ".join(map(os.fsdecode, args))]
     else:
-        argv = [os.fsdecode(a) for a in args]
-    if executable is not None:
-        argv = [os.fsdecode(executable), *argv[1:]]
-    if not argv:
+        argv = [os.fsdecode(args)] if isinstance(args, (str, bytes, os.PathLike)) else [os.fsdecode(a) for a in args]
+        executable = executable or (argv[0] if argv else None)
+    if executable is None:
         return
-    base = os.path.basename(argv[0])
-    words = {os.path.basename(w) for w in argv}
-    if base in SHELLS:  # a shell command line is one argument: look at the words inside it
-        words |= {os.path.basename(w) for tok in argv[1:] for w in re.split(r"[\s;|&()`$]+", tok) if w}
-    if base in NETWORK_TOOLS or (base in SHELLS and words & NETWORK_TOOLS):
-        _record("network_tool_spawn", base)
-        raise NetworkDenied(f"offline guard: launching a network client ({sorted(words & NETWORK_TOOLS) or base}) is refused")
-    if not _is_python(argv[0]):  # a Python child is guarded and reads files through the audit hook; others are not
-        secret = sorted(w for w in words if w in SECRET_BASENAMES)
-        if secret:
-            _record("secret_file_spawn", f"{base} {secret}")
-            raise NetworkDenied(f"offline guard: a non-Python child may not be handed a secret file ({secret})")
-    if _is_python(argv[0]) and _isolates_python(argv):
-        _record("guard_bypass_spawn", " ".join(argv[:4]))
-        raise NetworkDenied("offline guard: a Python child in isolated mode (-I/-S/-E) would skip the guard")
+    refusal = launch_refusal(executable, argv, cwd, guarded_env(env))
+    if refusal:
+        _record(refusal[0], refusal[1])
+        raise NetworkDenied(f"offline guard: {refusal[2]}")
 
 
 def install_subprocess_guard() -> None:
@@ -172,7 +240,9 @@ def install_subprocess_guard() -> None:
 
     def guarded_init(self, args, *pos, **kw):
         shell = kw.get("shell", pos[7] if len(pos) > 7 else False)
-        screen_spawn(args, bool(shell), kw.get("executable", pos[1] if len(pos) > 1 else None))
+        env = kw.get("env", pos[9] if len(pos) > 9 else None)
+        cwd = kw.get("cwd", pos[8] if len(pos) > 8 else None)
+        screen_spawn(args, bool(shell), kw.get("executable", pos[1] if len(pos) > 1 else None), env, cwd)
         if len(pos) > 9:  # env given positionally
             pos = list(pos)
             pos[9] = guarded_env(pos[9])

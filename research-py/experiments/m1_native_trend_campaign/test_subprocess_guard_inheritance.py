@@ -168,16 +168,17 @@ def test_a_grandchild_started_by_a_child_with_a_cleared_environment_is_guarded_t
     assert len({r["pid"] for r in log_rows(log)}) == 1 and any(r["kind"] == "secret_file_read" for r in log_rows(log))
 
 
-def test_a_shell_launched_python_child_is_guarded(world, tmp_path):
+def test_a_shell_launched_python_child_is_refused_because_the_guard_cannot_instrument_the_shell(world, tmp_path):
     tmp, secret, sink = world
-    log = tmp_path / "shell.log"
     cmd = f'"{sys.executable}" -c \'{CHILD}\' "{secret}" {sink.port}'
-    proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, env={"PATH": os.environ["PATH"], _netguard.LOG_ENV: str(log)}, cwd=tmp)
-    got = result_of(proc)
-    assert got["read"].startswith("REFUSED:") and got["connect"].startswith("REFUSED:") and sink.accepted == 0
+    with _netguard.expect_denied() as seen:
+        with pytest.raises(_netguard.NetworkDenied, match="not a Python interpreter"):
+            subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=tmp)
+    assert [a["kind"] for a in seen] == ["unsupported_launcher"] and sink.accepted == 0
 
 
-@pytest.mark.parametrize("flags", [["-I"], ["-S"], ["-E"], ["-Ic"], ["-sI"], ["-Wignore", "-S"]])
+@pytest.mark.parametrize("flags", [["-I"], ["-S"], ["-E"], ["-Ic"], ["-sI"], ["-Wignore", "-S"], ["-W", "ignore", "-I"],
+                                   ["-X", "dev", "-S"], ["-Xdev", "-E"], ["-B", "-s", "-E"], ["-bI"], ["-W", "ignore", "-Wall", "-I"]])
 def test_a_python_child_in_an_isolation_mode_that_would_skip_the_guard_is_refused_before_it_starts(tmp_path, flags):
     marker = tmp_path / "ran"
     code = f"open(r'{marker}', 'w').write('x')"
@@ -188,22 +189,23 @@ def test_a_python_child_in_an_isolation_mode_that_would_skip_the_guard_is_refuse
     assert not marker.exists() and [a["kind"] for a in seen] == ["guard_bypass_spawn"]
 
 
-@pytest.mark.parametrize("argv,shell", [(["curl", "https://example.invalid"], False), (["wget", "-q", "x"], False),
-                                         ("curl https://example.invalid", True), (["sh", "-c", "nc -z example.invalid 80"], False)])
-def test_launching_a_network_client_is_refused(argv, shell):
+@pytest.mark.parametrize("argv,shell,kind", [
+    (["curl", "https://example.invalid"], False, "network_tool_spawn"), (["wget", "-q", "x"], False, "network_tool_spawn"),
+    ("curl https://example.invalid", True, "unsupported_launcher"), (["sh", "-c", "nc -z example.invalid 80"], False, "unsupported_launcher")])
+def test_launching_a_network_client_is_refused(argv, shell, kind):
     with _netguard.expect_denied() as seen:
-        with pytest.raises(_netguard.NetworkDenied, match="network client"):
+        with pytest.raises(_netguard.NetworkDenied):
             subprocess.run(argv, shell=shell)
-    assert [a["kind"] for a in seen] == ["network_tool_spawn"]
+    assert [a["kind"] for a in seen] == [kind]
 
 
 @pytest.mark.parametrize("argv,shell", [(["cat", "/tmp/x/.env.local"], False), (["sh", "-c", "cat ./.env.local"], False),
                                          ("grep KEY .env", True), (["head", ".env.production"], False)])
 def test_a_non_python_child_is_never_handed_a_secret_file(argv, shell):
     with _netguard.expect_denied() as seen:
-        with pytest.raises(_netguard.NetworkDenied, match="secret file"):
+        with pytest.raises(_netguard.NetworkDenied, match="not a Python interpreter"):
             subprocess.run(argv, shell=shell)
-    assert [a["kind"] for a in seen] == ["secret_file_spawn"]
+    assert [a["kind"] for a in seen] == ["unsupported_launcher"]
 
 
 def test_spawn_apis_the_guard_cannot_follow_into_a_child_are_refused(tmp_path):
@@ -244,3 +246,122 @@ def test_a_child_attempt_in_an_ordinary_test_fails_that_test_even_when_the_child
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0 and "2 passed, 1 error" in out, out[-800:]  # the teardown check errors the leaky test
     assert "a spawned child attempted external network/secret access" in out
+
+
+# ----------------------------------------------- intermediary launchers and nested interpreters are refused, not scanned
+
+NESTED_READ = "print('LEAK', open('.env' + '.local').read().strip()[:22])"  # no secret word on any command line
+
+
+def _refused(argv, **kw):
+    with _netguard.expect_denied() as seen:
+        with pytest.raises(_netguard.NetworkDenied):
+            subprocess.run(argv, capture_output=True, text=True, **kw)
+    return [a["kind"] for a in seen]
+
+
+@pytest.mark.parametrize("build", [
+    lambda py, code: ["/bin/sh", "-c", f'{py} -I -c "{code}"'],                       # the independent reproduction
+    lambda py, code: ["/bin/sh", "-c", f"{py} -S -c '{code}'"],
+    lambda py, code: ["sh", "-c", f'exec {py} -E -c "{code}"'],
+    lambda py, code: ["bash", "-c", f'{py} -c "{code}"'],                               # even a plain nested Python
+    lambda py, code: ["/bin/dash", "-c", f"{py} -I -c \\\"{code}\\\""],              # shell quoting variants
+    lambda py, code: ["zsh", "-c", f"'{py}' -I -c '{code}'"],
+    lambda py, code: ["env", py, "-I", "-c", code],                                      # intermediary env
+    lambda py, code: ["/usr/bin/env", "-i", py, "-c", code],
+    lambda py, code: ["env", "-S", f"{py} -I -c '{code}'"],
+    lambda py, code: ["nice", py, "-c", code],
+    lambda py, code: ["timeout", "10", py, "-I", "-c", code],
+    lambda py, code: ["xargs", "-0", py, "-c", code],
+    lambda py, code: ["busybox", "sh", "-c", f"{py} -I -c '{code}'"],
+    lambda py, code: ["perl", "-e", f"exec('{py}', '-I', '-c', '{code}')"],
+])
+def test_an_intermediary_launcher_or_nested_interpreter_is_refused_and_never_reads_the_secret(tmp_path, build):
+    plant_env_local(tmp_path)
+    marker = tmp_path / "ran"
+    code = NESTED_READ + f"; open(r'{marker}', 'w')"
+    assert _refused(build(sys.executable, code), cwd=tmp_path) == ["unsupported_launcher"]
+    assert not marker.exists(), "the nested child ran"
+
+
+def test_shell_true_is_refused_whatever_the_command(tmp_path):
+    plant_env_local(tmp_path)
+    marker = tmp_path / "ran"
+    for cmd in (f"touch {marker}", f'{sys.executable} -I -c "open(\'{marker}\', \'w\')"', "true"):
+        assert _refused(cmd, shell=True, cwd=tmp_path) == ["unsupported_launcher"]
+    assert _refused(["true"], shell=True, executable="/bin/bash", cwd=tmp_path) == ["unsupported_launcher"]
+    assert not marker.exists()
+
+
+def test_the_executable_argument_cannot_disguise_a_shell_as_python(tmp_path):
+    marker = tmp_path / "ran"
+    kinds = _refused([sys.executable, "-c", f"open(r'{marker}', 'w')"], executable="/bin/sh", cwd=tmp_path)
+    assert kinds == ["unsupported_launcher"] and not marker.exists()
+
+
+def test_alternate_interpreter_paths_are_judged_by_what_they_are_not_what_they_are_called(tmp_path):
+    marker = tmp_path / "ran"
+    link = tmp_path / "py"
+    link.symlink_to(sys.executable)                                 # a real interpreter under another name: guarded
+    assert _refused([str(link), "-I", "-c", "pass"], cwd=tmp_path) == ["guard_bypass_spawn"]
+    fake = tmp_path / "python3"                                       # a script NAMED python is not an interpreter
+    fake.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    assert _refused([str(fake)], cwd=tmp_path) == ["unsupported_launcher"] and not marker.exists()
+    other = tmp_path / "bin"
+    other.mkdir()
+    (other / "python3").symlink_to(fake)                              # via PATH lookup too
+    assert _refused(["python3"], env={"PATH": str(other)}, cwd=tmp_path) == ["unsupported_launcher"]
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (["py", "-I"], True), (["py", "-S"], True), (["py", "-E"], True), (["py", "-sI"], True), (["py", "-BE"], True),
+    (["py", "-W", "ignore", "-I"], True), (["py", "-Wignore", "-S"], True), (["py", "-X", "dev", "-E"], True),
+    (["py", "-Xdev", "-I"], True), (["py", "--check-hash-based-pycs", "always", "-I"], True), (["py", "-O", "-S", "x.py"], True),
+    (["py", "-c", "-I"], False), (["py", "-m", "mod", "-I"], False), (["py", "script.py", "-I"], False), (["py", "-"], False),
+    (["py", "-W", "-I"], False),     # `-I` here is the argument of -W, not a flag
+    (["py", "-B", "-c", "x"], False), (["py", "-W", "ignore", "-m", "json.tool"], False), (["py"], False)])
+def test_python_isolation_flag_parsing_table(argv, expected):
+    assert _netguard._python_skips_guard(argv) is expected
+
+
+def test_only_a_vouched_executable_with_unchanged_bytes_may_run(tmp_path):
+    marker = tmp_path / "ran"
+    stub = tmp_path / "stub.sh"
+    stub.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    stub.chmod(0o755)
+    assert _refused([str(stub)]) == ["unsupported_launcher"] and not marker.exists()      # not vouched
+    with _netguard.allow_executable(stub):
+        assert subprocess.run([str(stub)]).returncode == 0 and marker.exists()           # vouched: runs
+        marker.unlink()
+        stub.write_text(stub.read_text() + "# substituted\n", encoding="utf-8")        # same path, new bytes
+        assert _refused([str(stub)]) == ["unsupported_launcher"] and not marker.exists()
+        assert _refused(["/bin/sh", str(stub)]) == ["unsupported_launcher"]               # vouching is not transitive
+    stub.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    assert _refused([str(stub)]) == ["unsupported_launcher"]                              # the vouching ended
+
+
+def test_the_audit_backstop_refuses_a_shell_launched_around_the_wrapper(tmp_path):
+    original = _netguard._state["original_popen_init"]
+    marker = tmp_path / "ran"
+    bare = subprocess.Popen.__new__(subprocess.Popen)
+    with _netguard.expect_denied() as seen:
+        with pytest.raises(_netguard.NetworkDenied, match="not a Python interpreter"):
+            original(bare, ["/bin/sh", "-c", f"touch {marker}"], env={"PATH": os.environ["PATH"]})
+    assert not marker.exists() and [a["kind"] for a in seen] == ["unsupported_launcher"]
+
+
+def test_a_python_child_with_the_guard_directory_not_first_on_the_path_is_refused_by_the_backstop(tmp_path):
+    original = _netguard._state["original_popen_init"]
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "sitecustomize.py").write_text("pass\n", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": os.pathsep.join([str(decoy), str(_netguard.GUARD_SITE)])}
+    bare = subprocess.Popen.__new__(subprocess.Popen)
+    with _netguard.expect_denied() as seen:
+        with pytest.raises(_netguard.NetworkDenied, match="without the guard"):
+            original(bare, [sys.executable, "-c", "pass"], env=env)
+    assert [a["kind"] for a in seen] == ["unguarded_python_child"]
+    # and the wrapper itself normalises such an environment so the guard's sitecustomize always wins
+    assert _netguard.guarded_env(env)["PYTHONPATH"].split(os.pathsep)[0] == str(_netguard.GUARD_SITE)

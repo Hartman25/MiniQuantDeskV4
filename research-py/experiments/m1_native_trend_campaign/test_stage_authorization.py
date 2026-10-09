@@ -6,6 +6,7 @@ touched."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
@@ -287,9 +288,23 @@ echo "timeframe_secs=86400"
 """
 
 
+_VOUCHED: list = []
+
+
+@pytest.fixture(autouse=True)
+def _vouched_stubs():
+    """The offline guard refuses every non-Python child; each stub this test writes is vouched for explicitly
+    (path and bytes), for this test only."""
+    with contextlib.ExitStack() as stack:
+        _VOUCHED.append(stack)
+        yield
+        _VOUCHED.pop()
+
+
 def make_stub(path: Path, marker: Path, fp: str = "ab" * 32) -> Path:
     path.write_text(STUB_BODY.format(marker=marker, fp=fp), encoding="utf-8")
     path.chmod(0o755)
+    _VOUCHED[-1].enter_context(_netguard.allow_executable(path))
     return path
 
 
