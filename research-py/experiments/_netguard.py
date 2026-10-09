@@ -152,6 +152,11 @@ def screen_spawn(args, shell: bool, executable=None) -> None:
     if base in NETWORK_TOOLS or (base in SHELLS and words & NETWORK_TOOLS):
         _record("network_tool_spawn", base)
         raise NetworkDenied(f"offline guard: launching a network client ({sorted(words & NETWORK_TOOLS) or base}) is refused")
+    if not _is_python(argv[0]):  # a Python child is guarded and reads files through the audit hook; others are not
+        secret = sorted(w for w in words if w in SECRET_BASENAMES)
+        if secret:
+            _record("secret_file_spawn", f"{base} {secret}")
+            raise NetworkDenied(f"offline guard: a non-Python child may not be handed a secret file ({secret})")
     if _is_python(argv[0]) and _isolates_python(argv):
         _record("guard_bypass_spawn", " ".join(argv[:4]))
         raise NetworkDenied("offline guard: a Python child in isolated mode (-I/-S/-E) would skip the guard")

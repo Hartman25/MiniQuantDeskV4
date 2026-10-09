@@ -137,6 +137,23 @@ def test_an_ordinary_child_cannot_read_a_fake_env_local_resolve_or_connect(world
     assert {r["pid"] for r in log_rows(log)}.isdisjoint({os.getpid()})
 
 
+def test_multiprocessing_spawn_children_are_guarded_too(tmp_path):
+    probe = tmp_path / "mp_probe.py"
+    probe.write_text(
+        "import multiprocessing as mp, socket\n"
+        "def child(q):\n"
+        "    try:\n        socket.getaddrinfo('example.invalid', 80); q.put('RESOLVED')\n"
+        "    except Exception as e:\n        q.put('REFUSED:' + type(e).__name__)\n"
+        "if __name__ == '__main__':\n"
+        "    ctx = mp.get_context('spawn'); q = ctx.Queue(); p = ctx.Process(target=child, args=(q,)); p.start()\n"
+        "    print('RESULT', q.get(timeout=30)); p.join()\n", encoding="utf-8")
+    log = tmp_path / "mp.log"
+    proc = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True, cwd=tmp_path,
+                          env={"PATH": os.environ["PATH"], _netguard.LOG_ENV: str(log)})
+    assert "RESULT REFUSED:NetworkDenied" in proc.stdout, proc.stdout + proc.stderr[-400:]
+    assert any(r["kind"] == "network" for r in log_rows(log))
+
+
 def test_a_grandchild_started_by_a_child_with_a_cleared_environment_is_guarded_too(world, tmp_path):
     tmp, secret, sink = world
     child = ("import subprocess, sys\n"
@@ -178,6 +195,15 @@ def test_launching_a_network_client_is_refused(argv, shell):
         with pytest.raises(_netguard.NetworkDenied, match="network client"):
             subprocess.run(argv, shell=shell)
     assert [a["kind"] for a in seen] == ["network_tool_spawn"]
+
+
+@pytest.mark.parametrize("argv,shell", [(["cat", "/tmp/x/.env.local"], False), (["sh", "-c", "cat ./.env.local"], False),
+                                         ("grep KEY .env", True), (["head", ".env.production"], False)])
+def test_a_non_python_child_is_never_handed_a_secret_file(argv, shell):
+    with _netguard.expect_denied() as seen:
+        with pytest.raises(_netguard.NetworkDenied, match="secret file"):
+            subprocess.run(argv, shell=shell)
+    assert [a["kind"] for a in seen] == ["secret_file_spawn"]
 
 
 def test_spawn_apis_the_guard_cannot_follow_into_a_child_are_refused(tmp_path):
