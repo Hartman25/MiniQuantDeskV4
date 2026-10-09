@@ -6,7 +6,7 @@ Usage: check_m1_experiment_proof.py <pytest-junit.xml> <netguard-summary.json>
 Fails when: a required test module is absent from the run (a dropped or renamed test, or a trimmed pytest
 command), any test failed/errored/was skipped (a skip would mask a load-bearing proof), the total is below the
 floor, the offline guard did not record its own deliberate probes (it did not run), or any unexpected external
-network / secret-file attempt was recorded.
+network / secret-file attempt (in the test process or in a spawned child) was recorded.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from pathlib import Path
 REQUIRED_MODULES = (
     "experiments.m1_native_trend_campaign.test_hermetic_provider_isolation",
     "experiments.m1_native_trend_campaign.test_stage_authorization",
+    "experiments.m1_native_trend_campaign.test_subprocess_guard_inheritance",
     "experiments.m1_native_trend_campaign.test_holdout_incident",
     "experiments.m1_native_trend_campaign.test_holdout_guard",
     "experiments.m1_native_trend_campaign.test_kiss_ext032_predeclaration",
@@ -32,7 +33,7 @@ REQUIRED_MODULES = (
     "experiments.external_idea_intake.test_consolidated_readiness_pins",
 )
 MIN_TESTS_PER_MODULE = 3
-MIN_TOTAL_TESTS = 450
+MIN_TOTAL_TESTS = 520
 MIN_DELIBERATE_PROBES = 5  # the isolation tests' own refused probes: proves the guard was installed and live
 
 
@@ -65,6 +66,8 @@ def main(argv: list[str]) -> int:
         summary = {}
     if summary.get("unexpected_attempts") != 0:
         problems.append(f"offline guard recorded unexpected attempts: {summary.get('unexpected_attempts')!r}")
+    if summary.get("unexpected_child_attempts") != 0:
+        problems.append(f"offline guard recorded unexpected attempts by spawned children: {summary.get('unexpected_child_attempts')!r}")
     if not isinstance(summary.get("attempted_total"), int) or summary["attempted_total"] < MIN_DELIBERATE_PROBES:
         problems.append(f"offline guard recorded {summary.get('attempted_total')!r} deliberate probes "
                         f"(< {MIN_DELIBERATE_PROBES}): it was not installed or did not run")
