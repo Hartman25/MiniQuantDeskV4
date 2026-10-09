@@ -316,7 +316,15 @@ def trial_identity_for(
     `test_strategy_mining_population.py::test_trial_identity_round_trips_through_the_real_registry`,
     which imports and calls the real `ResearchResultStore` against an
     isolated tmp-path database, never the production Research DB.
+
+    Second-sweep addition: rejects a blank experiment_id/hypothesis_id
+    here, at the shaping boundary, rather than relying on the (unmodified,
+    out-of-scope) registry to catch it later.
     """
+    if not experiment_id or not experiment_id.strip():
+        raise GrammarError("experiment_id must be a non-empty string")
+    if not hypothesis_id or not hypothesis_id.strip():
+        raise GrammarError("hypothesis_id must be a non-empty string")
     return {
         "generator": "strategy_mining.population_v1",
         "experiment_id": experiment_id,
@@ -328,4 +336,6 @@ def trial_identity_for(
 
 
 def deterministic_trial_id(experiment_id: str, grammar: HypothesisGrammar) -> str:
+    if not experiment_id or not experiment_id.strip():
+        raise GrammarError("experiment_id must be a non-empty string")
     return f"mining:{experiment_id}:{grammar.semantic_fingerprint()[:16]}"

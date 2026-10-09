@@ -895,3 +895,34 @@ def test_equity_curve_content_hash_changes_on_a_real_value_change():
     r1 = compute_sizing_drawdown_report(strategy_equity=eq1, account_equity=None, trades=[])
     r2 = compute_sizing_drawdown_report(strategy_equity=eq2, account_equity=None, trades=[])
     assert r1["input_evidence_hash"]["strategy_equity"] != r2["input_evidence_hash"]["strategy_equity"]
+
+
+# ---------------------------------------------------------------------------
+# Second-sweep negatives: _trade_content_hash row-layout independence, and
+# duplicate trade_id detection through the actual CSV loading path (not
+# just the in-memory API).
+# ---------------------------------------------------------------------------
+
+def test_trade_content_hash_is_independent_of_trade_list_order():
+    eq = _curve([100_000, 100_000])
+    t1 = _trade(trade_id="t1", entry_price=100.0)
+    t2 = _trade(trade_id="t2", entry_price=200.0)
+    r1 = compute_sizing_drawdown_report(strategy_equity=eq.copy(), account_equity=None, trades=[t1, t2])
+    r2 = compute_sizing_drawdown_report(strategy_equity=eq.copy(), account_equity=None, trades=[t2, t1])
+    assert r1["input_evidence_hash"]["trades"] == r2["input_evidence_hash"]["trades"]
+    assert r1["report_id"] == r2["report_id"]
+
+
+def test_duplicate_trade_id_via_csv_loading_path_fails_closed(tmp_path: Path):
+    eq_path = tmp_path / "strategy_equity.csv"
+    _curve([100_000, 100_000]).to_csv(eq_path, index=False)
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame([
+        _full_trade_row(trade_id="dup", symbol="AAA"),
+        _full_trade_row(trade_id="dup", symbol="BBB"),
+    ]).to_csv(trades_path, index=False)
+    out_path = tmp_path / "report.json"
+    with pytest.raises(SizingReportError, match="duplicate trade_id"):
+        write_sizing_drawdown_report(
+            strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
+        )

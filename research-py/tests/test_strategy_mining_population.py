@@ -687,3 +687,30 @@ def test_non_string_parameter_domain_name_is_rejected():
     )
     with pytest.raises(GrammarError, match="non-empty string"):
         generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Second-sweep negative: trial_identity_for/deterministic_trial_id must
+# reject a blank experiment_id/hypothesis_id at the shaping boundary,
+# rather than relying on the (unmodified, out-of-scope) registry.
+# ---------------------------------------------------------------------------
+
+def test_trial_identity_for_blank_experiment_id_fails_closed():
+    manifest = generate_population(_decl())
+    g, _status = manifest.items[0]
+    with pytest.raises(GrammarError, match="experiment_id must be a non-empty string"):
+        trial_identity_for(g, experiment_id="", hypothesis_id="h1")
+
+
+def test_trial_identity_for_blank_hypothesis_id_fails_closed():
+    manifest = generate_population(_decl())
+    g, _status = manifest.items[0]
+    with pytest.raises(GrammarError, match="hypothesis_id must be a non-empty string"):
+        trial_identity_for(g, experiment_id="exp1", hypothesis_id="   ")
+
+
+def test_deterministic_trial_id_blank_experiment_id_fails_closed():
+    manifest = generate_population(_decl())
+    g, _status = manifest.items[0]
+    with pytest.raises(GrammarError, match="experiment_id must be a non-empty string"):
+        deterministic_trial_id("", g)
