@@ -157,7 +157,7 @@ def test_the_report_carries_the_pbo_and_denominator_beside_every_dsr():
         assert gate(t, "pbo")["value"] == 0.2 and gate(t, "pbo")["threshold"] == 0.5
         assert set(t["caveats"]) == {"EXPOSED_DEVELOPMENT_NOT_INDEPENDENT", "CUMULATIVE_SEARCH_NOT_DEFLATED"}
         assert t["evidence_grade"] == "EXPOSED_DEVELOPMENT"
-        assert t["data_partition"]["holdout"] == "RESERVED / UNCONSUMED"
+        assert t["data_partition"]["holdout"] == "RESERVED_NOT_FORMALLY_CONSUMED__ACCESS_INCIDENT_PENDING_ADJUDICATION"
     assert r["independent_confirmation"] is False
 
 

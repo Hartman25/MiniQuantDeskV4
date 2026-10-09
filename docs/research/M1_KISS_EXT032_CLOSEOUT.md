@@ -73,3 +73,7 @@ Full local workspace acceptance: NOT RUN, prohibited by laptop resource-safety r
 * No independent confirmation is available by design; forward Paper after lawful Promotion is the only later independent observation.
 * U3 fetch and verification of DIA bars, U4 trial ids after fetch, U5 holdout-window fetch acknowledgement: all belong to the execution authorization.
 * Next (not authorized here): the operator re-issues the declaration executable (gate only, disclosed), then fetch and verify bars, register 4 and prove 4/0, execute once without retries-as-trials, one batch judge, scanner review, `near_miss_review.py`, independent review.
+
+## 9. Addendum (V4-M1-KISS-EXT032-ALL-DEFECT-CLOSURE-01): holdout incident status
+
+C15 above is superseded in status by `M1_KISS_EXT032_ACCESS_INCIDENT_01.md` and the hash-chained ledger `HOLDOUT_ACCESS_INCIDENTS.json`: the incident is `ACCESS_INCIDENT_PENDING_ADJUDICATION`. "RESERVED / UNCONSUMED" in the sections above describes the per-run formal ledger only; it is not an independence certification. C11 ("operator acknowledges the raw-row fetch") is no longer the mechanism: the prospective data path must not request reserved dates at all.

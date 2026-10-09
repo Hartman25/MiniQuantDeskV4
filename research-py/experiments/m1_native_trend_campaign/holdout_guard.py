@@ -20,6 +20,8 @@ import pandas as pd
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE))
+import holdout_incident  # noqa: E402
 
 # (category, glob under the run dir, timestamp column, kind)
 CATEGORIES = (
@@ -77,8 +79,11 @@ def check(decl: dict, run: Path, registry: Path, phase: str) -> dict:
     for holdout_id, status, consumed_at, consumer in ledger:
         if status != "reserved" or consumed_at is not None or consumer is not None:
             raise HoldoutBreach(f"holdout {holdout_id} is not RESERVED/UNCONSUMED: {status} {consumed_at}")
+    # A clean per-run ledger and clean artifacts show only what THIS run recorded; they never certify the
+    # window against access by other processes, so the incident ledger's truth rides in every report.
     report = {"phase": phase, "holdout_start_utc": start.isoformat(), "ledger_rows": len(ledger),
-              "ledger_all_reserved": True, "categories": {}}
+              "ledger_all_reserved": True, "categories": {},
+              "access_incident": holdout_incident.truth_summary(decl)}
     for name, pattern, column, kind in CATEGORIES:
         files = sorted(glob.glob(str(run / pattern)))
         latest = None

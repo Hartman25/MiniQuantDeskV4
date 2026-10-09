@@ -25,6 +25,7 @@ sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 NAME = "KISS"
 DECL_NAME = "PREDECLARED_KISS_EXT032_ETF_01.json"
+HOLDOUT_STATUS = "RESERVED_NOT_FORMALLY_CONSUMED__ACCESS_INCIDENT_PENDING_ADJUDICATION"
 STRATEGY = "pre_holiday_two_session_long_v1"
 SYMBOLS = ["SPY", "QQQ", "IWM", "DIA"]
 
@@ -114,9 +115,14 @@ def test_the_runner_check_contract_validates_the_shipped_declaration():
 # ---------------------------------------------------------------- unchanged contracts (OD-5, OD-8)
 
 @pytest.mark.parametrize("block", ["economic_protocol", "native_backtest", "capital_sizing", "benchmark", "robustness",
-                                   "scanner_review", "execution_fidelity", "holdout"])
+                                   "scanner_review", "execution_fidelity"])
 def test_economic_blocks_are_the_unchanged_batch03_contracts(block):
     assert RAW[block] == B3[block], f"{block} drifted from the accepted Batch 03 contract"
+
+
+def test_the_holdout_rule_is_unchanged_but_its_status_now_discloses_the_access_incident():
+    assert RAW["holdout"]["rule"] == B3["holdout"]["rule"]
+    assert RAW["holdout"]["status"] != B3["holdout"]["status"] == "RESERVED / UNCONSUMED"
 
 
 def test_promotion_policy_thresholds_are_unchanged_and_explicit():
@@ -148,8 +154,8 @@ def test_data_and_partition_follow_the_accepted_contract_with_the_holdout_exclud
     p = RAW["partition"]
     assert {k: p[k] for k in ("evaluation_start_utc", "test_months", "holdout_months", "expected_folds")} == {
         k: B3["partition"][k] for k in ("evaluation_start_utc", "test_months", "holdout_months", "expected_folds")}
-    assert "RESERVED / UNCONSUMED" in p["holdout_rule"] and "2026-03-01" in p["holdout_rule"]
-    assert RAW["holdout"]["status"] == "RESERVED / UNCONSUMED"
+    assert "ACCESS_INCIDENT_PENDING_ADJUDICATION" in p["holdout_rule"] and "2026-03-01" in p["holdout_rule"]
+    assert RAW["holdout"]["status"] == HOLDOUT_STATUS
     assert "OD-3" in d["holdout_window_fetch_disclosure"]
     assert "OPERATOR_ACKNOWLEDGEMENT_REQUIRED_AT_EXECUTION" in {u["status"] for u in RAW["unresolved_proof_capabilities"]}
 
@@ -333,7 +339,7 @@ def test_no_result_artifact_run_directory_or_registry_exists_and_no_paper_live_a
     assert not list(HERE.glob("**/batch_outcome.json")) and not list(HERE.glob("**/judge/judge.json"))
     assert RAW["paper_live"] == {"paper": "NOT ACTIVATED", "production_promotion_state": "NOT WRITTEN",
                                  "live": "NOT TOUCHED"}
-    assert RAW["holdout"]["status"] == "RESERVED / UNCONSUMED"
+    assert RAW["holdout"]["status"] == HOLDOUT_STATUS
     assert "Gate 3b (active_paper) is untouched" in RAW["evidence_grade"]["promotion_contract_note"]
     assert "hand promotion" in RAW["forbidden_after_predeclaration"]
     assert "Paper activation" in RAW["forbidden_after_predeclaration"] and "Live activation" in RAW["forbidden_after_predeclaration"]

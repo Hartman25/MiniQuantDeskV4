@@ -221,7 +221,7 @@
   "test_months": 12,
   "holdout_months": 6,
   "expected_folds": 10,
-  "holdout_rule": "the final 6 calendar months (from 2026-03-01) are RESERVED / UNCONSUMED; discovery bars are truncated before the holdout start",
+  "holdout_rule": "the final 6 calendar months (from 2026-03-01) are RESERVED and not formally consumed (ACCESS_INCIDENT_PENDING_ADJUDICATION: see holdout.access_incident); discovery bars are truncated before the holdout start",
   "warmup_note": "EXT-032 needs two completed bars; the first fold is never structurally flat for warm-up. A fold with zero long signals is non-evaluable under the unchanged policy (OD-8); about nine to ten events a year make this not expected."
  },
  "economic_protocol": {
@@ -338,7 +338,17 @@
   "metric": "fraction of evaluated bars on which the simulator's discrete post-order position equals the native desired target quantity"
  },
  "holdout": {
-  "status": "RESERVED / UNCONSUMED",
+  "status": "RESERVED_NOT_FORMALLY_CONSUMED__ACCESS_INCIDENT_PENDING_ADJUDICATION",
+  "formal_ledger_basis": "no research_holdout_ledger reservation or consumption exists for this campaign; a per-run reservation row is not evidence about other processes",
+  "access_incident": {
+   "state": "ACCESS_INCIDENT_PENDING_ADJUDICATION",
+   "incident_ids": [
+    "HOA-KISS-EXT032-01"
+   ],
+   "record": "docs/research/M1_KISS_EXT032_ACCESS_INCIDENT_01.md",
+   "ledger": "research-py/experiments/m1_native_trend_campaign/HOLDOUT_ACCESS_INCIDENTS.json",
+   "effect": "No code path may represent the Final Holdout as independently cleared; Promotion and Paper deployment stages and any 'qualifies' label are refused until an operator ADJUDICATION entry is appended."
+  },
   "rule": "never consumed by discovery; consumed holdout data is never fresh again; a rerun requiring the holdout is a hard stop"
  },
  "stop_loss_policy": {
