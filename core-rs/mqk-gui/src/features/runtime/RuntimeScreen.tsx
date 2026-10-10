@@ -2,7 +2,7 @@ import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatLabel, formatNumber } from "../../lib/format";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 function checkpointStatusClass(status: string): string {
@@ -19,7 +19,7 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
 
   // Hard-close on any compromised truth state: degraded recovery state shown as clean
   // leadership truth would be misleading about the most critical runtime invariant.
-  if (truthState !== null) {
+  if (truthState !== null && isTruthHardBlock(truthState)) {
     return <TruthStateNotice state={truthState} />;
   }
 
@@ -30,6 +30,7 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
 
       {/* Operator attention — only rendered when continuity is not clean */}
       {needsAttention && (

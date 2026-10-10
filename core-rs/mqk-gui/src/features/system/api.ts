@@ -715,12 +715,14 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         linked_order_id: null,
         linked_incident_id: null,
         linked_run_id: row.run_id,
+        source_ref: row.provenance_ref,
         // storage_path and note are not available from the runs-table artifact source.
       }));
 
       // last_updated_at: newest artifact created_at (rows are already desc by started_at_utc).
       const lastUpdatedAt = artifacts.length > 0 ? artifacts[0].created_at : null;
       const summary: ArtifactRegistrySummary = {
+        detail_authority: "run_metadata_only",
         last_updated_at: lastUpdatedAt,
         ready_count: artifacts.length,
         pending_count: 0,

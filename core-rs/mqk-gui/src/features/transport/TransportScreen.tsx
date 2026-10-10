@@ -2,14 +2,14 @@ import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function TransportScreen({ model }: { model: SystemModel }) {
   const t = model.transport;
   const truthState = panelTruthRenderState(model, "transport");
 
-  if (truthState !== null) {
+  if (truthState !== null && isTruthHardBlock(truthState)) {
     return <TruthStateNotice state={truthState} />;
   }
 
@@ -17,14 +17,13 @@ export function TransportScreen({ model }: { model: SystemModel }) {
   const hasDuplicates = t.duplicate_inbox_events !== null && t.duplicate_inbox_events > 0;
   const hasRetries = t.dispatch_retries > 0;
   const hasExceptions = hasOrphanedClaims || hasDuplicates || hasRetries;
-  const claimAgeBreached = t.max_claim_age_ms > 300000;
-  const claimAgeWarning = t.max_claim_age_ms > 120000;
 
   const outboxQueues = t.queues.filter((q) => q.direction === "outbox");
   const inboxQueues = t.queues.filter((q) => q.direction === "inbox");
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
 
       {/* Exception triage — rendered only when transport has non-clean state */}
       {hasExceptions && (
@@ -96,7 +95,7 @@ export function TransportScreen({ model }: { model: SystemModel }) {
             </div>
             <div>
               <span>Max claim age</span>
-              <strong className={claimAgeBreached ? "state-critical" : claimAgeWarning ? "state-warning" : undefined}>
+              <strong>
                 {formatDurationMs(t.max_claim_age_ms)}
               </strong>
             </div>

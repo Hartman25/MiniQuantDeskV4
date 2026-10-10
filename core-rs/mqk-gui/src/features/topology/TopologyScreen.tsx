@@ -2,14 +2,14 @@ import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 import type { ServiceDependencyNode } from "../system/types/infra";
 
 export function TopologyScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "topology");
 
-  if (truthState !== null) {
+  if (truthState !== null && isTruthHardBlock(truthState)) {
     return <TruthStateNotice state={truthState} />;
   }
 
@@ -41,6 +41,7 @@ export function TopologyScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
 
       {/* Blast-radius triage — only rendered when degraded services exist */}
       {degradedServices.length > 0 && (

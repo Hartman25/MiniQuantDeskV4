@@ -3,7 +3,7 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 function resultStateClass(result: string): string {
@@ -22,15 +22,16 @@ function feedSeverityClass(severity: string): string {
 export function AuditScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "audit");
 
-  if (truthState !== null) {
+  if (truthState !== null && isTruthHardBlock(truthState)) {
     return <TruthStateNotice state={truthState} />;
   }
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
       <div className="summary-grid summary-grid-four">
-        <StatCard title="Audit Actions" value={String(model.auditActions.length)} detail="Recent operator receipts" tone="good" />
-        <StatCard title="Feed Events" value={String(model.feed.length)} detail="Recent structured system events" tone="neutral" />
+        <StatCard title="Audit Actions" value={String(model.auditActions.length)} detail="Bounded operator-action evidence; history completeness unavailable" tone="neutral" />
+        <StatCard title="Feed Events" value={model.dataSource.realEndpoints.includes("/api/v1/events/feed") ? String(model.feed.length) : "Unavailable"} detail="Separate bounded event source" tone="neutral" />
         <StatCard title="Source State" value={model.dataSource.state} detail="Truth model state" tone={model.dataSource.state === "real" ? "good" : model.dataSource.state === "partial" ? "warn" : "bad"} />
         <StatCard title="Connected" value={model.connected ? "Yes" : "No"} detail="Daemon reachability" tone={model.connected ? "good" : "bad"} />
       </div>
@@ -41,6 +42,7 @@ export function AuditScreen({ model }: { model: SystemModel }) {
           rowKey={(row) => row.audit_ref}
           columns={[
             { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
+            { key: "identity", title: "Audit ID", render: (row) => row.audit_ref },
             { key: "actor", title: "Actor", render: (row) => row.actor ?? "—" },
             { key: "action", title: "Action", render: (row) => row.action_key },
             { key: "environment", title: "Env", render: (row) => row.environment ?? "—" },
@@ -52,7 +54,7 @@ export function AuditScreen({ model }: { model: SystemModel }) {
       </Panel>
 
       <Panel title="Event feed" subtitle="Recent structured events suitable for operator forensics.">
-        <DataTable
+        {!model.dataSource.realEndpoints.includes("/api/v1/events/feed") ? <div className="unavailable-notice">Event feed unavailable; no-event status is unknown.</div> : <DataTable
           rows={model.feed}
           rowKey={(row) => row.id}
           columns={[
@@ -61,7 +63,7 @@ export function AuditScreen({ model }: { model: SystemModel }) {
             { key: "source", title: "Source", render: (row) => row.source },
             { key: "text", title: "Text", render: (row) => row.text },
           ]}
-        />
+        />}
       </Panel>
     </div>
   );

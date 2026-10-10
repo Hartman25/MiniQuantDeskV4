@@ -165,6 +165,7 @@ export interface RuntimeLeadershipSummary {
 }
 
 export interface ArtifactRow {
+  source_ref?: string;
   artifact_id: string;
   // "run_config" is the artifact_type emitted by the daemon's audit/artifacts
   // handler (one entry per run from the runs table).  Other types are planned
@@ -183,6 +184,7 @@ export interface ArtifactRow {
 }
 
 export interface ArtifactRegistrySummary {
+  detail_authority?: "run_metadata_only";
   last_updated_at: string | null;
   ready_count: number;
   pending_count: number;
