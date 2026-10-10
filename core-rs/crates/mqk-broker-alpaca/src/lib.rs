@@ -57,6 +57,9 @@
 //! and are normalised through `normalize_trade_update`.
 pub mod fee_attribution;
 pub mod fill_authority;
+pub mod account_entitlement;
+#[cfg(test)]
+mod account_entitlement_tests;
 pub mod inbound;
 pub mod mleg;
 pub mod normalize;
@@ -80,8 +83,12 @@ pub use inbound::{
     build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
     InboundBatch, WsParseError,
 };
+pub use account_entitlement::{
+    evaluate_account_entitlement, AccountEntitlementEvidence, AccountEvidenceCell,
+    AccountEvidenceObservation,
+};
 use mqk_execution::{
-    micros_to_price, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent,
+    micros_to_price, AccountEntitlementRefusal, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent,
     BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
     BrokerSubmitResponse, QtyMicros, Side,
 };
@@ -214,11 +221,6 @@ pub struct AlpacaConfig {
     pub options_mleg_capability_enabled: bool,
 }
 
-impl AlpacaConfig {
-    /// `true` iff `base_url` targets Alpaca's PAPER API host. The sole
-    /// authority `supports_asset_class` consults (together with
-    /// `crypto_capability_enabled`) to decide Crypto capability -- never
-    /// inferred from deployment-mode labels or any other config field.
 /// Alpaca's PAPER trading API host.
 pub const ALPACA_PAPER_API_HOST: &str = "paper-api.alpaca.markets";
 
@@ -254,6 +256,11 @@ pub fn is_loopback_base_url(base_url: &str) -> bool {
         )
 }
 
+impl AlpacaConfig {
+    /// `true` iff `base_url` targets Alpaca's PAPER API host. The sole
+    /// authority `supports_asset_class` consults (together with
+    /// `crypto_capability_enabled`) to decide Crypto capability -- never
+    /// inferred from deployment-mode labels or any other config field.
     fn targets_paper_api(&self) -> bool {
         is_alpaca_paper_base_url(&self.base_url)
     }
@@ -268,6 +275,15 @@ pub fn is_loopback_base_url(base_url: &str) -> bool {
 pub struct AlpacaBrokerAdapter {
     cfg: AlpacaConfig,
     client: reqwest::Client,
+    /// Account-evidence binding. `None` => `admit_account_entitlement`
+    /// refuses (an unbound adapter can never admit an order); fetches then
+    /// record nothing.
+    account_evidence: Option<AccountEvidenceBinding>,
+}
+#[derive(Clone)]
+struct AccountEvidenceBinding {
+    cell: AccountEvidenceCell,
+    freshness_bound: chrono::Duration,
 }
 impl std::fmt::Debug for AlpacaBrokerAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -300,7 +316,46 @@ impl AlpacaBrokerAdapter {
                 options_mleg_capability_enabled: cfg.options_mleg_capability_enabled,
             },
             client,
+            account_evidence: None,
         }
+    }
+
+    /// Bind this adapter to a shared account-evidence cell: every
+    /// `GET /v2/account` it performs is recorded there, and
+    /// `admit_account_entitlement` admits only against a cell observation no
+    /// older than `freshness_bound`.
+    pub fn with_account_evidence(
+        mut self,
+        cell: AccountEvidenceCell,
+        freshness_bound: chrono::Duration,
+    ) -> Self {
+        self.account_evidence = Some(AccountEvidenceBinding {
+            cell,
+            freshness_bound,
+        });
+        self
+    }
+
+    /// Entitlement probe: one `GET /v2/account`, recorded into the bound
+    /// evidence cell (when bound) at the caller-injected `now_utc`.
+    pub fn fetch_account_entitlement(
+        &self,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AccountEntitlementEvidence, BrokerError> {
+        let account: serde_json::Value = self.get("/v2/account")?;
+        Ok(self.record_account_evidence(&account, now_utc))
+    }
+
+    fn record_account_evidence(
+        &self,
+        account: &serde_json::Value,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> AccountEntitlementEvidence {
+        let evidence = AccountEntitlementEvidence::from_account_json(account);
+        if let Some(b) = &self.account_evidence {
+            b.cell.observe(evidence.clone(), now_utc);
+        }
+        evidence
     }
 
     /// D2/B4: explicit opt-in for the Crypto capability flag, callable on
@@ -833,7 +888,12 @@ impl AlpacaBrokerAdapter {
         &self,
         now_utc: chrono::DateTime<chrono::Utc>,
     ) -> Result<BrokerSnapshot, BrokerError> {
-        let account_raw: AlpacaAccountRaw = self.get("/v2/account")?;
+        let account_json: serde_json::Value = self.get("/v2/account")?;
+        let account_raw: AlpacaAccountRaw = serde_json::from_value(account_json.clone())
+            .map_err(|e| BrokerError::Transient {
+                detail: format!("snapshot: cannot parse GET /v2/account: {e}"),
+            })?;
+        self.record_account_evidence(&account_json, now_utc);
         let positions_raw: Vec<AlpacaPositionRaw> = self.get("/v2/positions")?;
         let orders_raw: Vec<AlpacaOpenOrderRaw> = self.get("/v2/orders?status=open")?;
         let account = normalize_account(&account_raw);
@@ -1018,6 +1078,24 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 self.cfg.crypto_capability_enabled && self.cfg.targets_paper_api()
             }
             _ => false,
+        }
+    }
+
+    /// Provider-account entitlement authority (see
+    /// [`account_entitlement`]): an unbound adapter refuses; a bound one
+    /// admits only fresh, identity-bound, entitled evidence.
+    fn admit_account_entitlement(
+        &self,
+        asset_class: Option<mqk_execution::AssetClass>,
+    ) -> Result<(), AccountEntitlementRefusal> {
+        match &self.account_evidence {
+            None => Err(AccountEntitlementRefusal {
+                code: "account_evidence_not_bound".to_string(),
+                detail: "this Alpaca adapter has no account-evidence binding".to_string(),
+            }),
+            Some(b) => b
+                .cell
+                .admit(chrono::Utc::now(), b.freshness_bound, asset_class),
         }
     }
 
@@ -1496,6 +1574,55 @@ mod supports_asset_class_tests {
         assert!(opted_in.supports_asset_class(AssetClass::Crypto));
     }
 
+    /// Environment identity is the parsed host, not a substring: a URL that
+    /// merely contains the paper host text must not unlock Paper-only crypto.
+    #[test]
+    fn paper_host_must_be_parsed_host_not_substring() {
+        for (url, is_paper) in [
+            ("https://paper-api.alpaca.markets", true),
+            ("https://paper-api.alpaca.markets/", true),
+            ("https://PAPER-API.alpaca.markets/v2", true),
+            ("http://paper-api.alpaca.markets", false),
+            ("https://api.alpaca.markets", false),
+            ("https://paper-api.alpaca.markets.example.net", false),
+            ("https://api.alpaca.markets/?h=paper-api.alpaca.markets", false),
+            ("https://paper-api.alpaca.markets@api.alpaca.markets", false),
+            ("https://user:pw@paper-api.alpaca.markets", false),
+            ("not a url", false),
+            ("", false),
+        ] {
+            assert_eq!(is_alpaca_paper_base_url(url), is_paper, "url={url:?}");
+            let a = AlpacaBrokerAdapter::new(AlpacaConfig {
+                base_url: url.to_string(),
+                api_key_id: "k".to_string(),
+                api_secret_key: "s".to_string(),
+                crypto_capability_enabled: true,
+                options_mleg_capability_enabled: false,
+            });
+            assert_eq!(
+                a.supports_asset_class(AssetClass::Crypto),
+                is_paper,
+                "crypto capability must follow the parsed host for url={url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_base_url_is_recognised_only_for_loopback_hosts() {
+        for (url, loopback) in [
+            ("http://127.0.0.1:8080", true),
+            ("http://localhost:9", true),
+            ("http://[::1]:9", true),
+            ("https://api.alpaca.markets", false),
+            ("https://paper-api.alpaca.markets", false),
+            ("http://127.0.0.1.example.net", false),
+            ("http://user@127.0.0.1", false),
+            ("ftp://127.0.0.1", false),
+        ] {
+            assert_eq!(is_loopback_base_url(url), loopback, "url={url:?}");
+        }
+    }
+
     #[test]
     fn m5_option_future_forex_remain_refused() {
         let a = adapter();
@@ -1572,55 +1699,6 @@ mod crypto_qty_validation_tests {
         let token = BrokerInvokeToken::for_test();
         let req = BrokerSubmitRequest {
             order_id: "ord-1".to_string(),
-    /// Environment identity is the parsed host, not a substring: a URL that
-    /// merely contains the paper host text must not unlock Paper-only crypto.
-    #[test]
-    fn paper_host_must_be_parsed_host_not_substring() {
-        for (url, is_paper) in [
-            ("https://paper-api.alpaca.markets", true),
-            ("https://paper-api.alpaca.markets/", true),
-            ("https://PAPER-API.alpaca.markets/v2", true),
-            ("http://paper-api.alpaca.markets", false),
-            ("https://api.alpaca.markets", false),
-            ("https://paper-api.alpaca.markets.example.net", false),
-            ("https://api.alpaca.markets/?h=paper-api.alpaca.markets", false),
-            ("https://paper-api.alpaca.markets@api.alpaca.markets", false),
-            ("https://user:pw@paper-api.alpaca.markets", false),
-            ("not a url", false),
-            ("", false),
-        ] {
-            assert_eq!(is_alpaca_paper_base_url(url), is_paper, "url={url:?}");
-            let a = AlpacaBrokerAdapter::new(AlpacaConfig {
-                base_url: url.to_string(),
-                api_key_id: "k".to_string(),
-                api_secret_key: "s".to_string(),
-                crypto_capability_enabled: true,
-                options_mleg_capability_enabled: false,
-            });
-            assert_eq!(
-                a.supports_asset_class(AssetClass::Crypto),
-                is_paper,
-                "crypto capability must follow the parsed host for url={url:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn loopback_base_url_is_recognised_only_for_loopback_hosts() {
-        for (url, loopback) in [
-            ("http://127.0.0.1:8080", true),
-            ("http://localhost:9", true),
-            ("http://[::1]:9", true),
-            ("https://api.alpaca.markets", false),
-            ("https://paper-api.alpaca.markets", false),
-            ("http://127.0.0.1.example.net", false),
-            ("http://user@127.0.0.1", false),
-            ("ftp://127.0.0.1", false),
-        ] {
-            assert_eq!(is_loopback_base_url(url), loopback, "url={url:?}");
-        }
-    }
-
             symbol: "BTC/USD".to_string(),
             side: Side::Buy,
             quantity: qty("0.00001"),

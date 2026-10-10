@@ -34,7 +34,7 @@
 use crate::broker_error::BrokerError;
 use crate::id_map::BrokerOrderMap;
 use crate::order_router::{
-    AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
+    AccountEntitlementRefusal, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter, QtyMicros,
 };
 use crate::risk_decision::{RiskDecision, RiskDenial};
@@ -173,6 +173,11 @@ pub enum GateRefusal {
     AssetClassDisabled {
         asset_class: AssetClass,
     },
+    /// The broker adapter's account-entitlement authority did not admit the
+    /// order: account evidence unavailable, stale, identity-drifted, blocked
+    /// or not entitled for the order's asset class. Refused before any gate
+    /// evaluation or broker call. `code` is a stable machine-readable reason.
+    AccountEntitlementRefused(AccountEntitlementRefusal),
 }
 impl std::fmt::Display for GateRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -196,6 +201,13 @@ impl std::fmt::Display for GateRefusal {
                     f,
                     "GATE_REFUSED: asset class {:?} is disabled for the configured broker adapter (not in its declared supported-asset-class set)",
                     asset_class
+                )
+            }
+            GateRefusal::AccountEntitlementRefused(r) => {
+                write!(
+                    f,
+                    "GATE_REFUSED: broker account entitlement [{}] {}",
+                    r.code, r.detail
                 )
             }
         }
@@ -397,6 +409,12 @@ where
                 asset_class: req.asset_class,
             }));
         }
+        // Broker-account entitlement: the adapter's account authority must
+        // admit this order (evidence present, fresh, identity-bound, not
+        // blocked, entitled for the class). No risk-reducing exemption.
+        self.router
+            .broker_admit_account_entitlement(Some(req.asset_class))
+            .map_err(|r| SubmitError::Gate(GateRefusal::AccountEntitlementRefused(r)))?;
         self.enforce_gates(ctx).map_err(SubmitError::Gate)?;
         // EB-3: idempotency_key from the claimed outbox row is the authoritative
         // broker-side order_id. This prevents callers from submitting free-form
@@ -495,6 +513,11 @@ where
         limit_price: Option<i64>,
         time_in_force: String,
     ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error + Send + Sync>> {
+        // A replace can enlarge exposure and carries no asset class here, so
+        // it requires base account permission (class `None`).
+        self.router
+            .broker_admit_account_entitlement(None)
+            .map_err(GateRefusal::AccountEntitlementRefused)?;
         self.enforce_gates(RiskRequestContext::default())?;
         let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
             Box::new(UnknownOrder {

@@ -643,6 +643,14 @@ impl BrokerInvokeToken {
 // BrokerAdapter trait (public — external crates implement this)
 // ---------------------------------------------------------------------------
 
+/// Why a broker adapter's account-entitlement authority refused an order.
+/// `code` is a stable machine-readable reason; `detail` is operator text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEntitlementRefusal {
+    pub code: String,
+    pub detail: String,
+}
+
 /// Trait that all broker adapters must implement.
 ///
 /// Declared `pub` so external crates can provide implementations (paper,
@@ -671,6 +679,23 @@ pub trait BrokerAdapter {
     /// repository has not deliberately implemented.
     fn supports_asset_class(&self, asset_class: AssetClass) -> bool {
         matches!(asset_class, AssetClass::Equity)
+    }
+
+    /// Broker-account entitlement authority for a NEW order (`None` = no
+    /// asset-class information, e.g. replace: base account permission only).
+    /// `BrokerGateway` calls this after `supports_asset_class` and before any
+    /// gate evaluation or adapter invocation, and refuses with
+    /// `GateRefusal::AccountEntitlementRefused` on `Err`.
+    ///
+    /// The default admits: it is for adapters with no external account
+    /// entitlement concept (in-process paper simulator, test doubles). An
+    /// adapter backed by a real provider account MUST override it, and any
+    /// wrapper enum around such an adapter MUST forward it.
+    fn admit_account_entitlement(
+        &self,
+        _asset_class: Option<AssetClass>,
+    ) -> std::result::Result<(), AccountEntitlementRefusal> {
+        Ok(())
     }
 
     fn submit_order(
@@ -734,6 +759,14 @@ impl<B: BrokerAdapter> OrderRouter<B> {
     /// capability gate before any gate evaluation or adapter invocation.
     pub(crate) fn broker_supports_asset_class(&self, asset_class: AssetClass) -> bool {
         self.broker.supports_asset_class(asset_class)
+    }
+
+    /// Forwards to `BrokerAdapter::admit_account_entitlement`.
+    pub(crate) fn broker_admit_account_entitlement(
+        &self,
+        asset_class: Option<AssetClass>,
+    ) -> std::result::Result<(), AccountEntitlementRefusal> {
+        self.broker.admit_account_entitlement(asset_class)
     }
 
     pub(crate) fn route_submit(&self, req: BrokerSubmitRequest) -> Result<BrokerSubmitResponse> {
