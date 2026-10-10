@@ -95,6 +95,7 @@ export interface AlertTriageRow {
 }
 
 export interface OperatorTimelineEvent {
+  audit_event_id?: string | null;
   timeline_event_id: string;
   at: string;
   category: OperatorTimelineCategory;

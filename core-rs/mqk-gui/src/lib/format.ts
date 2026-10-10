@@ -15,16 +15,16 @@ export function formatDateTime(value: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  return date.toLocaleString(undefined, { timeZone: "UTC", timeZoneName: "short" });
 }
 
 export function formatLatency(value: number | null): string {
-  if (value === null || Number.isNaN(value)) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   return `${value.toFixed(0)} ms`;
 }
 
 export function formatDurationMs(value: number | null): string {
-  if (value == null || Number.isNaN(value)) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   if (value < 1000) return `${value} ms`;
   const seconds = value / 1000;
   if (seconds < 60) return `${seconds.toFixed(1)} s`;
@@ -33,17 +33,17 @@ export function formatDurationMs(value: number | null): string {
 }
 
 export function formatNumber(value: number | null, digits = 0): string {
-  if (value == null || Number.isNaN(value)) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   return value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
 export function formatMoney(value: number | null): string {
-  if (value == null || Number.isNaN(value)) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   return value.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 }
 
 export function formatPercent(value: number | null): string {
-  if (value == null || Number.isNaN(value)) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   return `${value.toFixed(2)}%`;
 }
 

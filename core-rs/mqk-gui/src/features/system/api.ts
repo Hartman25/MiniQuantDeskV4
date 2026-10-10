@@ -15,6 +15,7 @@ import { withClassifiedPanelSources } from "./sourceAuthority";
 import { parseIncidents } from "./incidentContract";
 import { parseMetricsDashboard } from "./metricsContract";
 import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from "./alertContract";
+import { parseEventFeed, parseOperatorTimeline } from "./historyContract";
 import {
   enforceRunScopeConsistency,
   parseDurablePortfolioPositions,
@@ -27,7 +28,6 @@ import {
 import {
   createReadClient,
   fetchJsonCandidate,
-  fetchJsonCandidates,
   tryFetchJson,
   type EndpointFetchResult,
 } from "./http";
@@ -73,13 +73,11 @@ import type {
 import {
   deriveDataSourceDetail,
   deriveExecutionSummaryFromOrders,
-  mapActiveAlertsResponse,
   mapAutonomousDailyOperationResponse,
   mapAutonomousDailyOperationsResponse,
   mapAutonomousPaperStatusWrapper,
   mapDaemonCatalog,
   mapDryRunStrategyStatusWrapper,
-  mapEventsFeedResponse,
   mapExecutionOutboxWrapper,
   mapFillQualityWrapper,
   mapMultiSymbolDispatchSummaryWrapper,
@@ -133,7 +131,6 @@ import {
 } from "./legacy";
 import type {
   AdmissionCheckSurface,
-  AlertTriageRow,
   ArtifactRegistrySummary,
   ArtifactRow,
   AuditActionRow,
@@ -160,7 +157,6 @@ import type {
   OmsOverview,
   OperatorActionDefinition,
   OperatorAlert,
-  OperatorTimelineCategory,
   OperatorTimelineEvent,
   PortfolioSummary,
   PreflightStatus,
@@ -582,7 +578,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         // honest unavailable state instead of empty-as-healthy.
         return { ok: false, endpoint: r.endpoint, error: "feed_backend_unavailable" };
       }
-      return { ok: true, endpoint: r.endpoint, data: mapEventsFeedResponse(wrapper) };
+      const rows = parseEventFeed(wrapper);
+      return rows === null ? { ok: false, endpoint: r.endpoint, error: "feed_contract_invalid" } : { ok: true, endpoint: r.endpoint, data: rows };
     })(),
     // audit/operator-actions: daemon returns {canonical_route, truth_state, backend, rows}.
     // "backend_unavailable" means durable operator-action history is unavailable and
@@ -708,27 +705,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         return { ok: false, endpoint: r.endpoint, error: "operator_timeline_backend_unavailable" };
       }
 
-      const events: OperatorTimelineEvent[] = wrapper.rows.map((row) => ({
-        // provenance_ref is the durable DB reference (e.g. "runs:{id}:started_at_utc"
-        // or "audit_events:{id}"); use as the stable event identity.
-        timeline_event_id: row.provenance_ref,
-        at: row.ts_utc,
-        // "runtime_transition" and "operator_action" are the two kinds emitted by the daemon.
-        category: row.kind as OperatorTimelineCategory,
-        // "info" is the correct baseline severity for lifecycle and operator-action events;
-        // no severity escalation data exists in the durable DB sources.
-        severity: "info" as const,
-        title: row.detail,
-        summary: row.detail,
-        // actor: not available in runs or audit_events per-row; omitted (optional field).
-        linked_incident_id: null,
-        linked_order_id: null,
-        linked_strategy_id: null,
-        linked_action_key: null,
-        linked_config_diff_id: null,
-        linked_runtime_generation_id: row.run_id ?? null,
-      }));
-      return { ok: true, endpoint: r.endpoint, data: events };
+      const events = parseOperatorTimeline(wrapper);
+      return events === null ? { ok: false, endpoint: r.endpoint, error: "timeline_contract_invalid" } : { ok: true, endpoint: r.endpoint, data: events };
     })(),
     // Canonical Action Catalog: daemon-authoritative action availability.
     fetchJsonCandidates<DaemonActionCatalogResponse>(["/api/v1/ops/catalog"]),

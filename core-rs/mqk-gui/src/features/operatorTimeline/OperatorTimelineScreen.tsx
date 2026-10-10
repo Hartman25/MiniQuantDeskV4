@@ -3,6 +3,7 @@ import { Panel } from "../../components/common/Panel";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
 import { panelTruthRenderState } from "../system/truthRendering";
+import { canonicalHistory } from "../system/historyContract";
 import type { SystemModel } from "../system/types";
 import type { OperatorTimelineCategory } from "../system/types/core";
 import type { OperatorTimelineEvent } from "../system/types/ops";
@@ -59,9 +60,8 @@ export function OperatorTimelineScreen({ model }: { model: SystemModel }) {
   }
 
   // Newest first for all display surfaces.
-  const events = [...model.operatorTimeline].sort(
-    (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime(),
-  );
+  const events = canonicalHistory(model.operatorTimeline, (row) => row.timeline_event_id, (row) => row.at);
+  if (events === null) return <TruthStateNotice state="unavailable" />;
 
   // Category posture — how many events per OperatorTimelineCategory.
   const byCategory = new Map<string, number>();
@@ -224,8 +224,8 @@ export function OperatorTimelineScreen({ model }: { model: SystemModel }) {
           All cross-link columns shown so the operator can trace any event to
           its linked domain objects without switching screens. */}
       <Panel
-        title="Full event ledger — complete chronological record"
-        subtitle="All timeline events, newest first. Use the linkage columns to navigate cross-domain sequences."
+        title="Bounded event ledger — source chronology"
+        subtitle="Current response only, newest first with stable identity ties. Backend reads at most 200 runs and 200 operator audit rows; pagination and retention metadata are unavailable. Older events may be omitted. Absence does not prove recovery."
         compact
       >
         {events.length === 0 ? (
@@ -235,6 +235,8 @@ export function OperatorTimelineScreen({ model }: { model: SystemModel }) {
             rows={events}
             rowKey={(row) => row.timeline_event_id}
             columns={[
+              { key: "identity", title: "Source identity", render: (row) => row.timeline_event_id },
+              { key: "audit", title: "Audit ID", render: (row) => row.audit_event_id ?? "—" },
               { key: "at",       title: "At",       render: (row) => formatDateTime(row.at) },
               { key: "category", title: "Category", render: (row) => row.category.replace(/_/g, " ") },
               { key: "severity", title: "Sev",      render: (row) => row.severity },
