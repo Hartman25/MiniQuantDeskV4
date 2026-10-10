@@ -31,7 +31,7 @@
 //! never collide on the same `plan_id`.
 
 use mqk_schemas::QtyMicros;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -217,6 +217,54 @@ pub struct ConflictPolicyOutcome {
     /// otherwise — this is the operator-visible/durable-evidence-worthy
     /// plan.
     pub plan: Option<ConflictCycleResult>,
+    /// Symbols whose decisions were withheld because more than one strategy
+    /// proposed for them while this mode does not enforce arbitration (see
+    /// [`refuse_unarbitrated_competition`]). Empty for `paper_enforced` and
+    /// whenever no symbol had competing proposers.
+    pub unarbitrated_refusals: Vec<UnarbitratedRefusal>,
+}
+
+/// One symbol withheld by [`refuse_unarbitrated_competition`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnarbitratedRefusal {
+    pub symbol: String,
+    /// Distinct proposing strategy ids, sorted.
+    pub strategy_ids: Vec<String>,
+}
+
+/// Bundle 6 is the only same-symbol arbiter. In `off`/`shadow` it passes
+/// every proposal through, so two strategies proposing for one symbol in the
+/// same tick would both reach submission, each sized against the same
+/// pre-trade position. No arbitration policy is invented here: such symbols
+/// are withheld entirely (fail closed) and reported. Symbols with a single
+/// proposing strategy are untouched.
+pub(crate) fn refuse_unarbitrated_competition(
+    decisions: Vec<PendingDecisionWithBarFacts>,
+) -> (Vec<PendingDecisionWithBarFacts>, Vec<UnarbitratedRefusal>) {
+    let mut proposers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for p in &decisions {
+        proposers
+            .entry(canonical_symbol(&p.decision.symbol))
+            .or_default()
+            .insert(p.decision.strategy_id.trim().to_string());
+    }
+    let refusals: Vec<UnarbitratedRefusal> = proposers
+        .iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(symbol, ids)| UnarbitratedRefusal {
+            symbol: symbol.clone(),
+            strategy_ids: ids.iter().cloned().collect(),
+        })
+        .collect();
+    if refusals.is_empty() {
+        return (decisions, refusals);
+    }
+    let refused: BTreeSet<&str> = refusals.iter().map(|r| r.symbol.as_str()).collect();
+    let kept = decisions
+        .into_iter()
+        .filter(|p| !refused.contains(canonical_symbol(&p.decision.symbol).as_str()))
+        .collect();
+    (kept, refusals)
 }
 
 fn candidate_inputs(
@@ -295,6 +343,7 @@ pub fn apply_conflict_policy(
         return ConflictPolicyOutcome {
             decisions,
             plan: None,
+            unarbitrated_refusals: Vec::new(),
         };
     }
 
@@ -319,6 +368,7 @@ pub fn apply_conflict_policy(
         ConflictPolicyMode::Shadow => ConflictPolicyOutcome {
             decisions,
             plan: Some(plan),
+            unarbitrated_refusals: Vec::new(),
         },
         ConflictPolicyMode::PaperEnforced => {
             let mut by_ordinal: Vec<Option<PendingDecisionWithBarFacts>> =
@@ -336,6 +386,7 @@ pub fn apply_conflict_policy(
             ConflictPolicyOutcome {
                 decisions: resolved,
                 plan: Some(plan),
+                unarbitrated_refusals: Vec::new(),
             }
         }
     }
@@ -494,13 +545,29 @@ async fn persist_plan_if_present(
     }
 }
 
+/// The live-lock-resolved conflict-policy mode this process dispatches
+/// under — the one resolution both the per-tick call site and the
+/// start-time arbitration check use.
+pub(crate) fn effective_conflict_mode_for_state(
+    state: &AppState,
+) -> crate::runtime_strategy_conflict_mode::EffectiveConflictPolicyMode {
+    let resolution = crate::runtime_strategy_conflict_mode::resolve_conflict_policy_mode_from_env();
+    let broker_kind = crate::state::BrokerKind::parse(state.adapter_id());
+    crate::runtime_strategy_conflict_mode::effective_mode(
+        &resolution,
+        state.deployment_mode(),
+        broker_kind,
+    )
+}
+
 /// The single per-tick call site `loop_runner.rs` uses. Resolves the
 /// effective mode (env + live-lock) and delegates to the pure
 /// [`apply_conflict_policy`] above.
 ///
-/// When the effective mode is `Off`, returns `decisions` untouched and
-/// performs no candidate construction — the default configuration has zero
-/// additional runtime cost.
+/// When the effective mode is `Off`, no plan or candidate is built and
+/// decisions pass through, except that symbols with more than one proposing
+/// strategy are withheld ([`refuse_unarbitrated_competition`]); the same
+/// withholding applies after `Shadow` evidence is recorded.
 ///
 /// Defect 1 repair: no `timeframe` parameter exists here at all — Bundle 6
 /// identity is now derived solely from canonical cycle facts and each
@@ -517,18 +584,14 @@ pub async fn gather_and_resolve(
     decisions: Vec<PendingDecisionWithBarFacts>,
     current_positions: &BTreeMap<String, QtyMicros>,
 ) -> ConflictPolicyOutcome {
-    let resolution = crate::runtime_strategy_conflict_mode::resolve_conflict_policy_mode_from_env();
-    let broker_kind = crate::state::BrokerKind::parse(state_arc.adapter_id());
-    let eff = crate::runtime_strategy_conflict_mode::effective_mode(
-        &resolution,
-        state_arc.deployment_mode(),
-        broker_kind,
-    );
+    let eff = effective_conflict_mode_for_state(state_arc);
 
     if eff.effective_mode == ConflictPolicyMode::Off {
+        let (decisions, unarbitrated_refusals) = refuse_unarbitrated_competition(decisions);
         return ConflictPolicyOutcome {
             decisions,
             plan: None,
+            unarbitrated_refusals,
         };
     }
 
@@ -539,7 +602,7 @@ pub async fn gather_and_resolve(
         market_date,
         now_micros,
     };
-    let outcome = apply_conflict_policy(&ctx, decisions, current_positions);
+    let mut outcome = apply_conflict_policy(&ctx, decisions, current_positions);
     persist_plan_if_present(
         state_arc,
         &outcome.plan,
@@ -549,6 +612,12 @@ pub async fn gather_and_resolve(
         now_micros,
     )
     .await;
+    if eff.effective_mode == ConflictPolicyMode::Shadow {
+        let (decisions, unarbitrated_refusals) =
+            refuse_unarbitrated_competition(std::mem::take(&mut outcome.decisions));
+        outcome.decisions = decisions;
+        outcome.unarbitrated_refusals = unarbitrated_refusals;
+    }
     outcome
 }
 

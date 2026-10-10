@@ -991,6 +991,43 @@ impl AppState {
                     ),
                 )
             })?;
+        // Competing strategies on one symbol need Bundle 6 enforced: it is
+        // the only same-symbol arbiter, and no other policy is invented.
+        let mut strategies_by_symbol: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeSet<&str>,
+        > = std::collections::BTreeMap::new();
+        for (symbol, strategy_id, _) in &explicit_config.bindings {
+            strategies_by_symbol
+                .entry(mqk_portfolio::canonical_symbol(symbol))
+                .or_default()
+                .insert(strategy_id.as_str());
+        }
+        let competing_symbols: Vec<&str> = strategies_by_symbol
+            .iter()
+            .filter(|(_, ids)| ids.len() > 1)
+            .map(|(symbol, _)| symbol.as_str())
+            .collect();
+        if !competing_symbols.is_empty() {
+            let conflict_mode =
+                crate::runtime_strategy_conflict::effective_conflict_mode_for_state(self);
+            if conflict_mode.effective_mode
+                != crate::runtime_strategy_conflict_mode::ConflictPolicyMode::PaperEnforced
+            {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_arbitration_not_enforced",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: symbols \
+                        {competing_symbols:?} carry more than one authorized strategy but the \
+                        effective conflict policy mode is '{}' (requires 'paper_enforced', \
+                        MQK_STRATEGY_CONFLICT_POLICY_MODE) ({CONTRACT})",
+                        conflict_mode.effective_mode.as_str()
+                    ),
+                ));
+            }
+        }
+
         let Some(&(_, _, timeframe_secs)) = explicit_config.bindings.first() else {
             return Err(RuntimeLifecycleError::forbidden(
                 "runtime.start_refused.explicit_multi_strategy_no_bindings",
@@ -9032,6 +9069,68 @@ mod explicit_multi_strategy_start_snapshot_tests {
             RuntimeStrategyAuthorityKind::Legacy
         );
         assert!(!dyn_state.approved_for_live);
+    }
+
+    /// C3-05: more than one authorized strategy on a symbol needs Bundle 6
+    /// enforced, the only same-symbol arbiter. Positive controls: enforced
+    /// arbitration, and a single strategy per symbol under every mode, must
+    /// not hit this refusal.
+    #[tokio::test]
+    async fn c3_05_same_symbol_strategies_require_enforced_arbitration_at_start() {
+        const REFUSAL: &str =
+            "runtime.start_refused.explicit_multi_strategy_arbitration_not_enforced";
+        const CONFLICT_ENV: &str = "MQK_STRATEGY_CONFLICT_POLICY_MODE";
+        let _env_guard = env_lock().lock().await;
+        clear_v3_env();
+        std::env::remove_var(CONFLICT_ENV);
+        let competing = write_watchlist_v3(
+            "c3_05_competing",
+            "ZZC3ARBIT",
+            &["intraday_scalper", "intraday_short_scalper"],
+        );
+        let single = write_watchlist_v3("c3_05_single", "ZZC3ARBIT", &["intraday_scalper"]);
+        std::env::set_var(STRATEGY_MD_TIMEFRAME_ENV, "5m");
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"c3-05-arbitration");
+
+        // (watchlist, conflict mode, start must be refused for arbitration)
+        let cases = [
+            (&competing, None, true),
+            (&competing, Some("off"), true),
+            (&competing, Some("shadow"), true),
+            (&competing, Some("paper_enforced"), false),
+            (&single, None, false),
+            (&single, Some("shadow"), false),
+        ];
+        let mut outcomes = Vec::new();
+        for (path, conflict, _) in &cases {
+            std::env::set_var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH, path);
+            match conflict {
+                Some(v) => std::env::set_var(CONFLICT_ENV, v),
+                None => std::env::remove_var(CONFLICT_ENV),
+            }
+            let result = snapshot_and_result(&state, run_id).await;
+            outcomes.push(result.err().map(|e| e.fault_class().to_string()));
+        }
+        let _ = std::fs::remove_file(&competing);
+        let _ = std::fs::remove_file(&single);
+        std::env::remove_var(CONFLICT_ENV);
+        clear_v3_env();
+
+        for ((_, conflict, refused), outcome) in cases.iter().zip(&outcomes) {
+            assert_eq!(
+                outcome.as_deref() == Some(REFUSAL),
+                *refused,
+                "conflict mode {conflict:?}: got {outcome:?}"
+            );
+        }
     }
 
     /// D1 (V4-STAGE-B-M2-C1-C3-REPAIR-04): full-wrapper proof, through the

@@ -1900,6 +1900,28 @@ pub(super) fn spawn_execution_loop(
                         )
                         .await;
 
+                        for refusal in &conflict_outcome.unarbitrated_refusals {
+                            tracing::error!(
+                                run_id = %run_id,
+                                symbol = %refusal.symbol,
+                                strategy_ids = ?refusal.strategy_ids,
+                                "unarbitrated_same_symbol_competition: symbol withheld this tick, zero submissions"
+                            );
+                            let current = current_positions
+                                .get(&refusal.symbol)
+                                .copied()
+                                .unwrap_or(QtyMicros::ZERO);
+                            state_arc
+                                .record_per_symbol_target_state(build_per_symbol_target_state(
+                                    refusal.symbol.clone(),
+                                    refusal.strategy_ids.join(","),
+                                    current,
+                                    current,
+                                    "unarbitrated_same_symbol_competition",
+                                ))
+                                .await;
+                        }
+
                         // PHASE-7B Part 6 / Blocker 1: re-validate after
                         // Bundle 6 — provenance must survive conflict
                         // resolution unchanged (Bundle 6 only ever moves the
