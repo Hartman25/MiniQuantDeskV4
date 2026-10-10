@@ -56,12 +56,12 @@ def decide(idea: Mapping[str, Any], dedup: Mapping[str, Any], *, grammar_availab
     if "S" in blockers or "X" in blockers:
         reasons.append("direction/short or execution policy requires an operator decision (no short/borrow authority in M1)")
         return out(Admission.REQUIRES_UNSUPPORTED_DATA_OR_ECONOMICS, Disposition.NEEDS_OPERATOR_POLICY)
-    if kind in ("RULE_TEXT_UNMAPPED", "COMPOSITE_RULE") or tpl is None or not tpl.get("template_id"):
-        reasons.append("a rule is described in prose but does not map to a recognized template")
-        return out(Admission.REJECTED_INSUFFICIENTLY_SPECIFIED, Disposition.NEEDS_FORMALIZATION)
     if kind == "UNRECOGNIZED":
         reasons.append("nothing computable can be recovered from the text")
         return out(Admission.REJECTED_INSUFFICIENTLY_SPECIFIED, Disposition.REJECTED_UNDERSPECIFIED)
+    if kind in ("RULE_TEXT_UNMAPPED", "COMPOSITE_RULE") or tpl is None or not tpl.get("template_id"):
+        reasons.append("a rule is described in prose but does not map to a recognized template")
+        return out(Admission.REJECTED_INSUFFICIENTLY_SPECIFIED, Disposition.NEEDS_FORMALIZATION)
     if tpl["missing_params"]:
         reasons.append("unstated parameters: " + ", ".join(tpl["missing_params"]) + " (not defaulted; operator decision required)")
         return out(Admission.REJECTED_INSUFFICIENTLY_SPECIFIED, Disposition.NEEDS_FORMALIZATION)

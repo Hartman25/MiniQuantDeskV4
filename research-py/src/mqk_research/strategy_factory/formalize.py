@@ -220,3 +220,28 @@ def apply_decision(idea: dict[str, Any], decision: Mapping[str, Any]) -> dict[st
 def _clone(obj):
     import copy
     return copy.deepcopy(obj)
+
+
+FIELD_DOMAINS = {"direction": ("long_flat", "long_only", "long_short", "short_only"),
+                 "asset_class": ("equity", "futures", "options", "fx", "crypto")}
+
+
+def apply_field_decision(idea: dict[str, Any], decision: Mapping[str, Any]) -> dict[str, Any]:
+    """Operator decision for an UNKNOWN/UNDERSPECIFIED direction or asset class (for example after reading an AI
+    suggestion). A source-EXPLICIT value is never overridden. Blockers are recomputed from the decided value."""
+    required = ("intake_id", "field", "value", "decided_by", "rationale", "decision_ref")
+    if any(not decision.get(k) for k in required) or decision["intake_id"] != idea["intake_id"]:
+        raise ValueError("a field decision needs intake_id, field, value, decided_by, rationale and decision_ref for THIS idea")
+    name, value = decision["field"], decision["value"]
+    if name not in FIELD_DOMAINS or value not in FIELD_DOMAINS[name]:
+        raise ValueError(f"{name}={value!r} is not an allowed decision")
+    if idea[name]["class"] == FieldClass.EXPLICIT_SOURCE_RULE.value:
+        raise ValueError(f"{name} is stated by the source and cannot be overridden")
+    out = _clone(idea)
+    out[name] = _fv(value, FieldClass.INFERRED_RULE, f"operator_decision:{decision['decision_ref']}")
+    out["blockers"] = blockers_for(asset_class=out["asset_class"]["value"], direction=out["direction"]["value"],
+                                   tags=out["required_data"], composite_unmapped=out["kind"] in ("COMPOSITE_RULE", "RULE_TEXT_UNMAPPED", "UNRECOGNIZED"))
+    out["known_unknowns"] = sorted(set(out["known_unknowns"]) - {name})
+    out["decisions"] = [*out["decisions"], {k: decision[k] for k in required}]
+    return out
+

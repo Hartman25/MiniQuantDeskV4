@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from mqk_research.strategy_factory.admission import decide
 from mqk_research.strategy_factory.contracts import sha
 from mqk_research.strategy_factory.dedup import apply_novelty_review, dedup_population
-from mqk_research.strategy_factory.formalize import apply_decision, formalize_ledger
+from mqk_research.strategy_factory.formalize import apply_decision, apply_field_decision, formalize_ledger
 from mqk_research.strategy_factory.known_index import KnownEntry
 
 
@@ -32,10 +32,10 @@ def process(ledgers: Sequence[Mapping[str, Any]], known: Sequence[KnownEntry], *
                                "this_file": idea["provenance"]["catalog_file_sha256"], "disposition": "DUPLICATE_SOURCE_COPY"})
             else:
                 raise ValueError(f"source conflict for {idea['intake_id']}: same entry id, different content across files")
-    for d in sorted(decisions, key=lambda d: (d["intake_id"], d["param"], d["decision_ref"])):
+    for d in sorted(decisions, key=lambda d: (d["intake_id"], d.get("field") or "", d.get("param") or "", d["decision_ref"])):
         if d["intake_id"] not in ideas:
             raise ValueError(f"decision names an unknown idea {d['intake_id']}")
-        ideas[d["intake_id"]] = apply_decision(ideas[d["intake_id"]], d)
+        ideas[d["intake_id"]] = (apply_field_decision if "field" in d else apply_decision)(ideas[d["intake_id"]], d)
     rel = dedup_population(list(ideas.values()), known)
     for r in sorted(reviews, key=lambda r: r["intake_id"]):
         rel[r["intake_id"]] = apply_novelty_review(rel[r["intake_id"]], r)
