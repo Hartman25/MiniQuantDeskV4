@@ -17,6 +17,7 @@ _NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
        "pr": "http://schemas.openxmlformats.org/package/2006/relationships"}
 MAX_MEMBER_BYTES = 32 * 1024 * 1024
 MAX_MEMBERS = 256
+MAX_TOTAL_BYTES = 96 * 1024 * 1024      # total uncompressed bytes across all members (zip-bomb bound)
 MAX_CSV_BYTES = 16 * 1024 * 1024
 
 
@@ -37,7 +38,11 @@ def _col_index(ref: str) -> int:
 def _member(zf: zipfile.ZipFile, name: str) -> bytes:
     if zf.getinfo(name).file_size > MAX_MEMBER_BYTES:
         raise CatalogReadError(f"member {name!r} exceeds the size bound")
-    return zf.read(name)
+    data = zf.read(name)
+    # A workbook never needs a DTD; refusing one removes entity-expansion attacks outright.
+    if b"<!DOCTYPE" in data[:4096].upper() or b"<!ENTITY" in data.upper():
+        raise CatalogReadError(f"member {name!r} declares a DTD/entity: refused")
+    return data
 
 
 def _text(si: ET.Element) -> str:
@@ -53,6 +58,8 @@ def read_xlsx(data: bytes) -> tuple[dict[str, list[list[str]]], dict[str, dict[s
     with zf:
         if len(zf.infolist()) > MAX_MEMBERS:
             raise CatalogReadError("too many package members")
+        if sum(i.file_size for i in zf.infolist()) > MAX_TOTAL_BYTES:
+            raise CatalogReadError("package exceeds the total uncompressed size bound")
         names = set(zf.namelist())
         for need in ("xl/workbook.xml", "xl/_rels/workbook.xml.rels"):
             if need not in names:

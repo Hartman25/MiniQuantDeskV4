@@ -8,6 +8,7 @@ the operator (gate release, stage authorization) and with the accepted determini
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -21,6 +22,13 @@ from mqk_research.strategy_factory.scheduler import PassResult, run_pass, run_un
 from mqk_research.strategy_factory.store import FactoryStore, StoreError
 
 GRAMMAR_PROBE = "grammar_v1__sma_trend_gate__window_2"
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Replace a control file atomically so a crash or a concurrent reader never sees a torn declaration."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def detect_grammar(cli_path: Path | None) -> bool:
@@ -83,6 +91,25 @@ class FactoryService:
         return {"result": {k: v for k, v in out.items() if k != "records"}, "ideas_versions_added": added,
                 "ai": {"configured": provider is not None, "conformant": conf, "status_counts": dict(sorted(statuses.items()))}}
 
+    def scout(self, urls: Sequence[str], policy: Mapping[str, Any], *, fetcher: Any = None, clock: Callable[[], float] | None = None) -> dict[str, Any]:
+        """Fetch operator-approved pages into quarantine and import them as a catalog (live fetching is operator-enabled only)."""
+        import time as _time
+        from mqk_research.strategy_factory import scout as scout_mod
+        sc = scout_mod.Scout(scout_mod.SourcePolicy.from_json(policy), fetcher or scout_mod.UrllibFetcher(), clock or _time.time,
+                             self.root / "quarantine")
+        records, refused = [], []
+        for u in urls:
+            try:
+                records.append(sc.scout_url(u))
+            except scout_mod.ScoutError as exc:
+                refused.append({"url": u, "reason": str(exc)})        # a refusal is reported, never dropped
+        out: dict[str, Any] = {"fetched": len(records), "refused": refused}
+        for sid in sorted({r["source_id"] for r in records}):
+            ledger = scout_mod.to_ledger([r for r in records if r["source_id"] == sid], sid)
+            out.setdefault("ledgers", []).append({"ledger_sha256": ledger["ledger_sha256"], "family": ledger["catalog_family"],
+                                                  "new": self.store.record_import(ledger)})
+        return out
+
     # ------------------------------------------------------------------ campaigns
     def compile_campaign(self, spec: Mapping[str, Any]) -> dict[str, Any]:
         ideas = self.store.latest_ideas()
@@ -98,8 +125,8 @@ class FactoryService:
             if campaign_mod.declaration_identity(existing) != compiled.declaration_sha256:
                 raise StoreError(f"{decl_path} exists with a different declaration identity; a predeclaration is immutable")
         else:
-            decl_path.write_text(body, encoding="utf-8")
-        (cdir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True), encoding="utf-8")
+            _atomic_write(decl_path, body)
+        _atomic_write(cdir / "spec.json", json.dumps(spec, indent=1, sort_keys=True))
         created = self.store.create_campaign(campaign_id=cid, spec=spec, declaration_sha256=compiled.declaration_sha256,
                                              declaration_path=str(decl_path).replace("\\", "/"), run_dir=compiled.declaration["run_dir"],
                                              evidence_grade=spec["evidence_grade"], trials=compiled.trials)
@@ -119,7 +146,7 @@ class FactoryService:
                                   "rule": "Released; every effectful stage still requires a signed stage authorization bound to this declaration identity."}
         if campaign_mod.declaration_identity(decl) != c["declaration_sha256"]:
             raise StoreError("gate release would change the declaration identity: refused")
-        path.write_text(json.dumps(decl, indent=1, sort_keys=True), encoding="utf-8")
+        _atomic_write(path, json.dumps(decl, indent=1, sort_keys=True))
         return {"campaign_id": campaign_id, "gate": "RELEASED", "declaration_sha256": c["declaration_sha256"]}
 
     # ------------------------------------------------------------------ execution

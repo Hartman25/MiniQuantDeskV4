@@ -191,6 +191,23 @@ def source_text_of(entry: Mapping[str, Any]) -> str:
     return "\n".join(f"{k}: {v}" for k, v in parts if v)[:MAX_SOURCE_CHARS]
 
 
+def _neutralize(source: str) -> str:
+    """Source text cannot close or reopen the data block: any <source> / </source> tag in it is replaced."""
+    return re.sub(r"<\s*/?\s*source\s*>", "[source-tag]", source, flags=re.I)
+
+
+# A quoted span must look like it states this kind of parameter (a unit, an indicator word or a calendar word): a bare
+# number that happens to occur elsewhere in the text ("50 shares") is not a stated parameter.
+_CUES = ("day", "session", "bar", "week", "month", "year", "sma", "average", "moving", "mean", "%", "percent", "bps", "basis point",
+         "rsi", "high", "low", "atr", "z-score", "zscore", "std", "sigma", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+         "oct", "nov", "dec", "hold", "lookback", "window", "period", "horizon")
+
+
+def _has_cue(span: str) -> bool:
+    s = span.lower()
+    return any(c in s for c in _CUES)
+
+
 def build_prompt(source: str, glossary_block: str = "") -> str:
     vocab = {t.template_id: [p.name for p in t.params] for t in TEMPLATES.values() if t.template_id != "legacy_engine"}
     return (
@@ -205,7 +222,7 @@ def build_prompt(source: str, glossary_block: str = "") -> str:
         "Parameter names per template: " + json.dumps(vocab, sort_keys=True) + ".\n"
         "A parameter value may be non-null ONLY if the text states it, and evidence must be copied verbatim from the text.\n"
         + glossary_block +
-        "<source>\n" + source + "\n</source>\nJSON:")
+        "<source>\n" + _neutralize(source) + "\n</source>\nJSON:")
 
 
 # ------------------------------------------------------------------------------------------------ validation
@@ -282,7 +299,7 @@ def validate_proposal(obj: Mapping[str, Any], source: str) -> dict[str, Any]:
             if isinstance(value, bool) or not isinstance(value, int) or not p.lo <= value <= p.hi:
                 notes.append(f"{name}={value!r} outside [{p.lo}, {p.hi}] or not an integer; discarded")
                 continue
-            if isinstance(evidence, str) and evidence.strip() and _norm(evidence) in norm_source and _value_in_span(name, value, evidence):
+            if isinstance(evidence, str) and evidence.strip() and _norm(evidence) in norm_source and _value_in_span(name, value, evidence) and _has_cue(evidence):
                 verified[name] = {"value": value, "evidence": evidence.strip()}
             else:
                 suggestions[name] = {"value": value, "evidence": evidence if isinstance(evidence, str) else None,

@@ -15,6 +15,7 @@ T_AI = "tests/test_strategy_factory_ai_normalize.py"
 T_ST = "tests/test_strategy_factory_store.py"
 T_KN = "tests/test_strategy_factory_knowledge.py"
 T_CP = "tests/test_strategy_factory_campaign.py"
+T_SC = "tests/test_strategy_factory_scout.py"
 T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
 CARGO = ["cargo:-p", "mqk-strategy", "--lib", "grammar_rule_v1"]
@@ -52,7 +53,7 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
     ],
     "ai": [
         ("AI-1 evidence not verified", SRC + "ai_normalize.py",
-         "if isinstance(evidence, str) and evidence.strip() and _norm(evidence) in norm_source and _value_in_span(name, value, evidence):",
+         "if isinstance(evidence, str) and evidence.strip() and _norm(evidence) in norm_source and _value_in_span(name, value, evidence) and _has_cue(evidence):",
          "if True:", [T_AI]),
         ("AI-2 evidence need not contain the value", SRC + "ai_normalize.py",
          "    return bool(re.search(rf\"(?<!\\d){value}(?!\\d)\", s))", "    return True", [T_AI]),
@@ -75,6 +76,11 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("AI-12 provider fault drops the entry", SRC + "ai_normalize.py",
          "    except ProviderError as exc:\n        rec.update(status=STATUS_FAILED, notes=[str(exc)])\n        return _with_ai(base, rec), rec",
          "    except ProviderError as exc:\n        raise", [T_AI]),
+        ("AI-13 evidence needs no unit cue", SRC + "ai_normalize.py", "and _value_in_span(name, value, evidence) and _has_cue(evidence):", "and _value_in_span(name, value, evidence):", [T_AI]),
+        ("AI-14 source tags not neutralized", SRC + "ai_normalize.py", "return re.sub(r\"<\\s*/?\\s*source\\s*>\", \"[source-tag]\", source, flags=re.I)", "return source", [T_AI]),
+        ("CI-6 package size unbounded", SRC + "xlsx_reader.py", "if sum(i.file_size for i in zf.infolist()) > MAX_TOTAL_BYTES:", "if False:", [T_CAT]),
+        ("CI-7 DTD tolerated", SRC + "xlsx_reader.py", "if b\"<!DOCTYPE\" in data[:4096].upper() or b\"<!ENTITY\" in data.upper():", "if False:", [T_CAT]),
+        ("ST-11 decision ref matched as a pattern", SRC + "store.py", "payload[\"intake_id\"], payload[\"decision_ref\"])).fetchone()\n            if clash:", "payload[\"intake_id\"], payload[\"decision_ref\"][:1])).fetchone()\n            if clash:", [T_ST]),
         ("AD-5 unrecognized text not rejected", SRC + "admission.py", "if kind == \"UNRECOGNIZED\":", "if False:", [T_AI]),
     ],
     "rust": [
@@ -126,6 +132,19 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("RS-1 terminal trials re-evaluated on resume", "experiments/m1_native_trend_campaign/run_batch.py", "if \"economic_eval_id\" in rec or \"failed\" in rec:\n        return True", "if False:\n        return True", T_E2E),
         ("RS-2 orphaned attempt left started", "experiments/m1_native_trend_campaign/run_batch.py", "store.finalize_attempt(a[\"attempt_id\"], status=\"failed\", failure_reason=INTERRUPTED_REASON)", "pass", T_E2E),
         ("RS-3 succeeded attempt re-run when index lacks it", "experiments/m1_native_trend_campaign/run_batch.py", "    if done:\n        a = done[-1]", "    if False:\n        a = done[-1]", T_E2E),
+    ],
+    "scout": [
+        ("SCT-1 robots.txt ignored", SRC + "scout.py", "if not self._allowed_by_robots(src, url):", "if False:", [T_SC]),
+        ("SCT-2 any content type accepted", SRC + "scout.py", "if res.content_type not in ACCEPTED_TYPES:", "if False:", [T_SC]),
+        ("SCT-3 foreign redirect host accepted", SRC + "scout.py", "if urlparse(res.final_url).hostname != src.domain:", "if False:", [T_SC]),
+        ("SCT-4 http accepted", SRC + "scout.py", "if p.scheme != \"https\" or not p.hostname", "if not p.hostname", [T_SC]),
+        ("SCT-5 rate limit ignored", SRC + "scout.py", "if now - self._last.get(src.domain, -1e18) < src.rate_limit_seconds:", "if False:", [T_SC]),
+        ("SCT-6 size cap ignored", SRC + "scout.py", "if len(res.body) > src.max_bytes:", "if False:", [T_SC]),
+        ("SCT-7 subdomain suffix match", SRC + "scout.py", "if p.hostname == a.domain and", "if p.hostname.endswith(a.domain) and", [T_SC]),
+        ("SCT-8 path prefix ignored", SRC + "scout.py", "and (p.path or \"/\").startswith(a.path_prefix):", ":", [T_SC]),
+        ("SCT-9 scripts kept in extracted text", SRC + "scout.py", "SKIP = {\"script\", \"style\", \"iframe\", \"object\", \"embed\", \"noscript\", \"template\", \"svg\", \"canvas\"}", "SKIP = set()", [T_SC]),
+        ("SCT-10 access-controlled robots treated as open", SRC + "scout.py", "rp.disallow_all = True", "rp.parse([])", [T_SC]),
+        ("SCT-11 retrieval time enters identity", SRC + "scout.py", "\"source\": {\"filename\": f\"scout-{source_id}\", \"format\": \"web\", \"sha256\": sha256_bytes(canonical_json([r[\"sha256\"] for r in records]).encode(\"utf-8\")),", "\"source\": {\"filename\": f\"scout-{source_id}\", \"format\": \"web\", \"sha256\": sha256_bytes(canonical_json([r[\"retrieved_at\"] for r in records]).encode(\"utf-8\")),", [T_SC]),
     ],
     "store": [
         ("ST-1 stage order ignored", SRC + "store.py",

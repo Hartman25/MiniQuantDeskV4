@@ -352,3 +352,25 @@ def test_job_budget_ends_the_pass_with_work_remaining(tmp_path):
     st = store_with(tmp_path)
     r = S.run_pass(st, FakeExecutor(), workers=1, max_jobs=3)
     assert r.ended == S.END_BUDGET and r.jobs_run == 3
+
+
+# ------------------------------------------------------------------ architecture boundaries (one canonical Factory, no second engine)
+FACTORY_SRC = Path(__file__).resolve().parents[1] / "src" / "mqk_research" / "strategy_factory"
+
+
+def test_the_factory_never_mints_an_authorization_and_only_the_operator_commands_release_a_gate():
+    for f in FACTORY_SRC.glob("*.py"):
+        text = f.read_text(encoding="utf-8")
+        assert "sa.mint(" not in text and "stage_authorization.mint(" not in text and ".mint(" not in text, f.name
+        if f.name not in ("service.py", "cli.py"):
+            assert "release_gate" not in text and "RELEASED_BY_OPERATOR" not in text, f.name        # scheduler/executor can never release a gate
+
+
+def test_no_second_economic_engine_or_registry_is_imported_by_the_factory():
+    import re
+    forbidden = re.compile(r"mqk_research\.(exp_distributed\.(runner|worker|strategies|scheduler|aggregator|dataset|artifacts)|ml\.(economics|economic_walkforward|weight_to_share|execution_pricing)|scanner\.|portfolio\.)")
+    for f in FACTORY_SRC.glob("*.py"):
+        assert not forbidden.search(f.read_text(encoding="utf-8")), f.name
+    owners = {m for f in FACTORY_SRC.glob("*.py") for m in re.findall(r"from (mqk_research\.[a-z_.]+) import|import (mqk_research\.[a-z_.]+)", f.read_text(encoding="utf-8")) for m in m if m}
+    assert {o for o in owners if not o.startswith("mqk_research.strategy_factory")} <= {"mqk_research.exp_distributed.hashing", "mqk_research.strategy_mining.grammar"}
+

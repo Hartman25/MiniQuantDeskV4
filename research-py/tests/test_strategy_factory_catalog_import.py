@@ -144,3 +144,24 @@ def test_operator_catalogs_import_every_row():
         assert all(e["original"] for e in led["entries"]) and led["trial_registered"] is False
     assert counts == {"academic_xlsx_v1": 121, "shocks_xlsx_v1": 86, "mechanisms_xlsx_v1": 36, "fourarea_xlsx_v1": 48,
                       "psychology_xlsx_v1": 26, "reddit_csv_v1": 147, "reddit_xlsx_v1": 147, "technical_xlsx_v1": 57}
+
+
+def test_zip_bomb_total_size_and_dtd_entities_are_refused(monkeypatch):
+    monkeypatch.setattr(xlsx_reader, "MAX_TOTAL_BYTES", 200)
+    with pytest.raises(ci.CatalogImportError, match="total uncompressed"):
+        imp()
+    monkeypatch.undo()
+    import io
+    import zipfile
+    raw = mini_workbook()
+    zin = zipfile.ZipFile(io.BytesIO(raw))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/workbook.xml":
+                data = data.replace(b"<workbook", b'<!DOCTYPE x [<!ENTITY a "aaaa">]><workbook', 1)
+            zout.writestr(item.filename, data)
+    with pytest.raises(ci.CatalogImportError, match="DTD"):
+        ci.import_catalog(buf.getvalue(), "c.xlsx", profile=TEST_PROFILE)
+

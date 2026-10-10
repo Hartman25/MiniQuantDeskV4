@@ -41,7 +41,8 @@ create table if not exists idea_versions(
   record_sha256 text primary key, intake_id text not null, record_json text not null, seq integer not null);
 create index if not exists idea_versions_intake on idea_versions(intake_id, seq);
 create table if not exists operator_decisions(
-  decision_sha256 text primary key, kind text not null, intake_id text not null, payload_json text not null, seq integer not null);
+  decision_sha256 text primary key, kind text not null, intake_id text not null, payload_json text not null, seq integer not null,
+  decision_ref text not null, unique(kind, intake_id, decision_ref));
 create table if not exists campaigns(
   campaign_id text primary key, spec_sha256 text not null, spec_json text not null, declaration_sha256 text not null,
   declaration_path text not null, run_dir text not null, evidence_grade text not null, state text not null,
@@ -170,13 +171,13 @@ class FactoryStore:
         with self._tx() as con:
             if con.execute("select 1 from operator_decisions where decision_sha256=?", (dsha,)).fetchone():
                 return False
-            clash = con.execute("select 1 from operator_decisions where kind=? and intake_id=? and payload_json like ?",
-                                (kind, payload["intake_id"], f'%"decision_ref":{json.dumps(payload["decision_ref"])}%')).fetchone()
+            clash = con.execute("select 1 from operator_decisions where kind=? and intake_id=? and decision_ref=?",
+                                (kind, payload["intake_id"], payload["decision_ref"])).fetchone()
             if clash:
                 raise StoreError(f"decision_ref {payload['decision_ref']!r} already recorded with different content")
-            con.execute("insert into operator_decisions values(?,?,?,?,?)",
+            con.execute("insert into operator_decisions values(?,?,?,?,?,?)",
                         (dsha, kind, payload["intake_id"], json.dumps(payload, sort_keys=True, separators=(",", ":")),
-                         self._seq(con, "operator_decisions")))
+                         self._seq(con, "operator_decisions"), payload["decision_ref"]))
         return True
 
     def decisions(self, kind: str) -> list[dict[str, Any]]:

@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from mqk_research.strategy_factory import ai_normalize
+from mqk_research.strategy_factory.campaign import CampaignError
+from mqk_research.strategy_factory.scout import ScoutError
 from mqk_research.strategy_factory.catalog_import import CatalogImportError, CatalogProfile
 from mqk_research.strategy_factory.service import FactoryService
 from mqk_research.strategy_factory.store import StoreError
@@ -59,6 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("files", nargs="+", type=Path)
     p.add_argument("--profile", type=Path, help="operator profile JSON for a new schema (otherwise a built-in must match)")
 
+    p = sub.add_parser("scout", help="fetch operator-approved public pages into quarantine and import them (fail-closed policy)")
+    p.add_argument("--policy", type=Path, required=True, help="approved-source policy JSON (the default policy is empty: nothing is fetched)")
+    p.add_argument("urls", nargs="+")
+
     p = sub.add_parser("intake", help="formalize, deduplicate and disposition every imported entry (deterministic; AI optional)")
     p.add_argument("--ollama-model")
     p.add_argument("--ollama-url")
@@ -88,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--once", action="store_true", help="a single pass instead of until idle")
     r.add_argument("--max-jobs", type=int)
 
-    sub.add_parser("status", help="queue and campaign snapshot (read-only)")
+    st = sub.add_parser("status", help="queue and campaign snapshot (read-only; never creates a store)")
+    st.add_argument("--export", type=Path, help="also write the snapshot atomically to this file for an operator surface to poll")
     r = sub.add_parser("retry", help="OPERATOR: retry an infrastructure-failed stage (appends an attempt)")
     r.add_argument("campaign_id")
     r.add_argument("stage")
@@ -112,10 +119,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             _emit({"available": probe.available, "provider": probe.provider, "model": probe.model, "version": probe.version,
                    "conformant": ok, "detail": detail, "label": "FUNCTIONAL" if ok else "BLOCKED_DEPENDENCY"})
             return EXIT_OK if ok else EXIT_BLOCKED
+        if args.cmd == "status":
+            from mqk_research.strategy_factory.status import build_status, write_status
+            db = _root(args) / "factory.sqlite3"
+            snap = build_status(db)
+            if args.export:
+                write_status(db, args.export)
+            _emit(snap)
+            return EXIT_OK if snap["truth_state"] == "active" else EXIT_BLOCKED
         svc = _service(args)
         if args.cmd == "import-catalog":
             prof = CatalogProfile.from_json(json.loads(args.profile.read_text(encoding="utf-8"))) if args.profile else None
             _emit([svc.import_catalog(f, prof) for f in args.files])
+        elif args.cmd == "scout":
+            _emit(svc.scout(args.urls, json.loads(args.policy.read_text(encoding="utf-8"))))
         elif args.cmd == "intake":
             _emit(svc.run_intake(_provider(args), max_calls=args.max_ai_calls))
         elif args.cmd == "ideas":
@@ -145,13 +162,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             res = svc.run(workers=args.workers, until_idle=not args.once, max_jobs=args.max_jobs)
             _emit(res.as_dict())
             return {"NO_ELIGIBLE_WORK": EXIT_OK, "BLOCKED": EXIT_BLOCKED, "FAILED": EXIT_FAILED}.get(res.ended, EXIT_OK)
-        elif args.cmd == "status":
-            _emit(svc.status())
         elif args.cmd == "retry":
             svc.store.retry_failed(args.campaign_id, args.stage, args.reason)
             _emit({"requeued": [args.campaign_id, args.stage]})
         return EXIT_OK
-    except (CatalogImportError, StoreError, ValueError, ai_normalize.ProviderError) as exc:
+    except (CatalogImportError, CampaignError, ScoutError, StoreError, ValueError, ai_normalize.ProviderError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
 

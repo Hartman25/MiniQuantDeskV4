@@ -157,6 +157,12 @@ def test_imports_ideas_and_decisions_are_append_only_and_idempotent(store):
     with pytest.raises(StoreError, match="unknown decision kind"):
         store.record_decision("bogus", d)
     assert store.decisions("parameter") == [d]
+    # refs that look like SQL wildcards are exact strings, never patterns
+    assert store.record_decision("parameter", {**d, "decision_ref": "DA1", "value": 5}) is True
+    assert store.record_decision("parameter", {**d, "decision_ref": "D_1", "value": 6}) is True
+    assert store.record_decision("parameter", {**d, "decision_ref": "D%1", "value": 7}) is True
+    with pytest.raises(StoreError, match="different content"):
+        store.record_decision("parameter", {**d, "decision_ref": "D_1", "value": 8})
     n = {"intake_id": "idea_1", "status": "APPLIED", "provider": {"model": "m"}}
     assert store.record_normalization(n) is True and store.record_normalization(n) is False and store.normalizations("idea_1") == [n]
     store.cache_embedding("h", "nomic", [0.1, 0.2])
