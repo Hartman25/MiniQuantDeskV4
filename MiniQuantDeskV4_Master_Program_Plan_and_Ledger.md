@@ -867,7 +867,8 @@ Branch `strategy-factory/full-completion-01` (baseline `origin/main` `e190cce9`)
 | Executable path | Rust `grammar_v1` (4 stateless exact-integer templates, name-addressed, Research-side registration only); controlled implementation workflow for everything else |
 | Campaign compiler, durable queue, scheduler, recovery, report | `FIXED+PROVEN`; opt-in `run_batch.py --resume`; stage authorization consumed, never minted |
 | Integrated acceptance | E2E-01..12 on the real native engine with synthetic bars; real-data readiness explained, real execution blocked on operator authorization |
-| Mutation proof | 102/102 killed |
+| Mutation proof | 102/102 killed (original); correction sets authority 7, faults 9, history 11, lane 6 also killed |
+| Independent-review correction R1-R5 | `FIXED+PROVEN` on the development branch (scheduler fault containment, grade-derived promotion truth, result-independent prior-search history, strict native CI lane run 38051841844, Factory-scoped status); independent acceptance pending; see the closure record |
 
 Acceptance: see the closure record. No provider, broker, Paper/Live, migration, order/fill or holdout action occurred. M1 `M1_BLOCKED`.
 

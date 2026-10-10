@@ -126,7 +126,7 @@ via the accepted `stage_authorization.mint`, valid <= 7 days, acknowledging any 
 ## 7. Scheduling and unattended operation
 
 `run --until-idle` (default) executes passes until nothing is eligible and exits 0 (no work / all done), 3 (work remains but a
-prerequisite is missing), 4 (a stage failed). Run it from Windows Task Scheduler or cron, for example hourly; a pass with no eligible
+prerequisite is missing), 4 (a stage failed, or the scheduler itself could not complete or record something: `ERROR`, with `errors` and `unresolved_jobs` in the pass result). Run it from Windows Task Scheduler or cron, for example hourly; a pass with no eligible
 work executes nothing. Concurrency: `--workers N` jobs at once across independent campaigns; one stage at a time within a campaign.
 Several `run` processes may share one store: claims are atomic and every job runs exactly once.
 
@@ -135,6 +135,8 @@ Several `run` processes may share one store: claims are atomic and every job run
 * Worker killed: its lease expires; the next `run` records an `interrupted` attempt and re-queues the same stage with `--resume`.
   Orphaned `started` registry attempts are finalized `failed` with `interrupted_before_terminal_result`; completed trials are never
   evaluated again; a genuine failed attempt is terminal (no outcome-dependent retry); prior evidence is never rewritten.
+* An unexpected exception in a stage is recorded as `failed` with its type; if the store cannot record an outcome the job keeps its lease, the pass
+  ends `ERROR`, and lease expiry later re-queues the same job as `interrupted`. A late result from a recovered claim is discarded.
 * `blocked`: supply the prerequisite and run again (blocked work is re-evaluated once per `run`).
 * `failed`: investigate, then `retry <id> <stage> --reason "..."` (appends an attempt; never creates a new trial).
 * A `fail-closed: ... reconcile manually` message means a durable artifact the registry points to is missing; nothing is invented.
@@ -155,6 +157,18 @@ python -m mqk_research.strategy_factory scout --policy approved_sources.json htt
 The default policy is empty, so nothing is fetched. A policy lists approved `domain`, `source_class`, `path_prefix`, rate limit and
 size cap. Fetches are https-only, honour robots.txt, accept text only, and land byte-for-byte in `quarantine/` (never executed). Pages
 enter the ordinary intake as untrusted ideas.
+
+## 10b. Campaign history and compile
+
+`compile` is idempotent: recompiling an existing campaign id verifies its spec and frozen declaration and returns it; a changed spec, or a missing
+or tampered declaration, is refused. A new campaign discloses (and is checked against) every earlier Factory campaign by predeclared strategy name;
+results never influence it. If another campaign is predeclared while a compile is in flight the compile is refused and must simply be re-run.
+
+## 10c. CI evidence for the native path
+
+The `Strategy Factory native lane` workflow builds `mqk-cli` and runs the Factory suite with the native binary REQUIRED; only the machine-local
+optional skips named in `scripts/guards/check_factory_native_lane.py` are tolerated. Locally, set `MQK_FACTORY_CLI` to the built binary
+(and `MQK_FACTORY_REQUIRE_NATIVE=1` to make an absent binary a failure).
 
 ## 11. What stays gated
 

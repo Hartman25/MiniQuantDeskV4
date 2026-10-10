@@ -98,7 +98,7 @@ Integrated acceptance (`tests/test_strategy_factory_e2e*.py`, real entrypoints, 
 | ID | Result |
 |---|---|
 | E2E-01 successful evaluation | one `run` call: 13 stages `succeeded`; 8 trials registered before the first attempt, 8 evaluated; frozen-declaration reproducibility |
-| E2E-02 rejected candidate | all candidates honestly `rejected` (`negative_total_return`); no `paper_candidate`; no promotion artifact; Paper INACTIVE |
+| E2E-02 rejected candidate | all candidates honestly `rejected` (`negative_total_return`); no `paper_candidate`; no promotion artifact; no Paper/Live path touched |
 | E2E-03 unsupported idea | futures/news/under-specified/diagnostic ideas dispositioned, not executable, campaign compile refused, nothing created |
 | E2E-04 complete population | invalid grid combinations excluded visibly; registered = declared; one attempt per trial; judge population = declared; identities unique |
 | E2E-05 concurrency | 3 campaigns, 2 real worker processes: every job exactly once, overlap observed, identical economics across campaigns, distinct experiments/registries |
@@ -149,8 +149,7 @@ never became terminal (terminal evidence is untouched; attempt-unique directorie
 INFORMATIONAL: `grammar_v1` names resolve in the Research CLI/scanner only (daemon registry untouched); the operator `release` command exists
 but no scheduler/executor path can call it (static test); the Factory store is a Research-side SQLite file (no Postgres write path).
 Quality: LOW unused imports and one redundant expression (fixed); mixed CRLF/LF working-copy noise from `core.autocrlf` (content LF).
-Proof: MEDIUM the real-engine E2E suite is skipped without a native binary, so CI does not re-prove it (a CI-visible Python/Rust domain
-parity test and all unit/mutation-backed proofs do run); LOW the mutation harness is local; a live AI intake over the real catalogs was not run.
+Proof: MEDIUM (closed by correction R4) the real-engine E2E suite was skipped without a native binary; the strict native CI lane now proves it; LOW the mutation harness is local; a live AI intake over the real catalogs was not run.
 Counts: contract 0 blocker / 0 high / 1 medium; quality 2 low; proof 1 medium / 2 low.
 
 ## Tooling
@@ -159,3 +158,41 @@ mqk_readonly / srclight: connected, not needed beyond direct reads (graft and na
 (the tool estimated roughly 7.9M tokens avoided versus whole-file reads; an estimate, not a measurement). Context7/Firecrawl/Playwright: not needed (no third-party API ambiguity, no external source required, no GUI change).
 rust-analyzer: not needed (compiler diagnostics sufficed). `cargo` runs were constrained (`-j 2`); no workspace-wide Rust run.
 Full local workspace acceptance: NOT RUN — prohibited by laptop resource-safety rule; broad workspace proof delegated to GitHub CI.
+
+## Independent-review correction (`V4-STRATEGY-FACTORY-INDEPENDENT-REVIEW-CORRECTION-01`)
+
+Original Factory completion HEAD `b1c757e4708e803425724db17adf3facaa12cd49` (the correction start). The independent review (PARTIAL) raised R1-R5; each
+is corrected on the same branch with a red-first test and mutants. Nothing was merged to `main`; pushes were fast-forwards to the development branch only.
+
+| Item | Commit | Corrected semantics | Proof |
+|---|---|---|---|
+| R1 scheduler fail-open (HIGH) | `78885074` | The claim ownership boundary (`scheduler.run_one`) records every unexpected exception (before execution, in the executor, an invalid outcome) as an honest terminal `failed` with the exception type, written with the claim token. A claim lost to lease recovery is fenced (`ClaimLost`; the late result is discarded). If the store cannot record the result the job stays `running`, the pass ends `ERROR` and lists it in `unresolved_jobs`; lease expiry later records an `interrupted` attempt and re-queues the SAME job. A pass can no longer report `NO_ELIGIBLE_WORK` with an unresolved claim or a recorded scheduler error; `run` exits 4 on `ERROR`. No retry creates a job or a trial. | `test_strategy_factory_scheduler_faults.py` (11 tests: before claim, between claim and execution, in execution, at finalization transient/persistent, zombie worker, invalid outcome, cross-process hard crash with `os._exit`, in-process raise); 9/9 mutants (`faults`) |
+| R2 promotion eligibility (HIGH) | `ca8a7f3e` | `contracts.promotion_view(grade)` is the single authority: `promotion_eligible` is false for every grade; readiness is `NOT_ELIGIBLE_SYNTHETIC` (synthetic) or `NOT_ESTABLISHED` (exposed development, anything unknown). Declaration, report and status all derive it from the grade; a stored flag is ignored. No new grade or policy exists. | `test_strategy_factory_authority_truth.py` (every supported grade, tampered stored flag, source scan); 7/7 mutants (`authority`) |
+| R3 prior Factory search accounting | `c24e8dea`, `12c69847`, `c00dcf30` | Durable Factory history now feeds duplicate/adjacent recognition at intake and compile time and the declared `prior_search_disclosure`, using only the PREDECLARED strategy names of earlier campaigns (`store.prior_campaign_strategies` + `known_index.factory_prior_entries`); no attempt, result or verdict is read. A campaign that already exists is verified (spec hash, frozen declaration identity) and returned, never recomputed against newer history; a missing, corrupt or tampered frozen declaration is a `StoreError`. `create_campaign(expected_prior_campaigns=...)` refuses a campaign whose disclosed history is not the store history; the leftover declaration file of a refused attempt (no store row) is safely replaced on retry. | `test_strategy_factory_prior_search.py` (two sequential campaigns, restart, outcome independence, identity includes history, stale-history race and retry, damaged frozen declaration, intake path); 11/11 mutants (`history`) |
+| R4 CI native proof | `55993077`, `916e4482` | `.github/workflows/strategy-factory.yml` (triggers: pushes to `strategy-factory/**`, PRs to `main` touching Factory/engine paths, manual) builds `mqk-cli` with the pinned toolchain, runs the `grammar_v1` engine tests and the whole Factory suite with `MQK_FACTORY_REQUIRE_NATIVE=1` (a missing binary FAILS instead of skipping), and `scripts/guards/check_factory_native_lane.py` fails the job unless every load-bearing E2E test executed and passed. It is bounded: no workspace-wide Rust sweep (that remains `ci.yml`'s `rust` job). | GitHub run 38051841844 on `916e4482` (SUCCESS); `test_strategy_factory_native_lane.py`; 6/6 mutants (`lane`) |
+| R5 status wording | `ca8a7f3e` | `status`/report carry `FACTORY_AUTHORITY`: scope `FACTORY_ACTIONS_ONLY`, `paper` and `live` = `NOT_TOUCHED_BY_FACTORY`, promotion `NOT_REQUESTED_BY_FACTORY`. The Factory does not read or assert the real Paper runtime state. | authority tests above |
+
+### CI skip policy (exact)
+
+The native lane tolerates ONLY these skips, each a proof that needs a machine-local resource a runner never has: E2E-12 (verified local Batch-03
+bars), the live local-Ollama status test, and the two real-operator-catalog tests (catalog files). Every other skip, any failure or error, and
+any absence of the 15 required tests (E2E-01..11 and the lane binary check) fails the lane. Locally, with those resources present, nothing skips.
+
+### Second adversarial sweep over the corrected boundaries
+
+Claim ownership and lease fencing (token per attempt; stale finish/heartbeat refused; recovery never touches earlier attempt rows), exception
+finalization, trial/attempt identity (retries append attempts, never trials), promotion truth, history deduplication, stale-history refusal
+and retry, atomic declaration replacement, CI required-versus-optional skips, cross-platform termination, status authority. Findings (all
+fixed, tested, mutant-covered): the declaration file left by a refused stale-history compile blocked its own retry; a damaged frozen
+declaration surfaced as a raw error on the idempotent compile path; the `run_until_idle` post-loop `ERROR` guard was unreachable (the loop already
+stops on an `ERROR` pass) and was removed; the `SC-2` mutant fragment had gone stale after the R1 rewrite and was repaired. A test-isolation flaw (the
+CLI test inherited `MQK_FACTORY_CLI`) and a timing-dependent assertion in the crash-recovery test were corrected.
+
+### Correction evidence
+
+Final local acceptance at the correction HEAD: `pytest tests -k strategy_factory` with the real native `mqk-cli` and `MQK_FACTORY_REQUIRE_NATIVE=1`:
+**263 passed, 0 skipped** (guard: 0 problems). Mutation harness, all sets at the correction source: intake 20/20, ai 18/18, knowledge 8/8, store 9/9,
+campaign/executor/scheduler 17/17, resume 3/3, impl 5/5, scout 11/11, authority 7/7, lane 6/6, history 11/11, faults 9/9, Rust `grammar_v1` 11/11
+(the Rust sources are unchanged since `b1c757e4`; the engine tests also ran in CI). Full local workspace acceptance: NOT RUN - prohibited by laptop
+resource-safety rule; broad workspace proof delegated to GitHub CI. The native lane (run 38051841844) is NOT a full workspace CI run.
+The 120 `experiments/m1_native_trend_campaign` failures are identical on untouched `origin/main` and are unrelated.
