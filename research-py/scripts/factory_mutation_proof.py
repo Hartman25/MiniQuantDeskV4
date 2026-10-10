@@ -19,6 +19,7 @@ SRC = "src/mqk_research/strategy_factory/"
 T_CAT = "tests/test_strategy_factory_catalog_import.py"
 T_INT = "tests/test_strategy_factory_intake.py"
 T_AI = "tests/test_strategy_factory_ai_normalize.py"
+T_ST = "tests/test_strategy_factory_store.py"
 
 # (id, file relative to research-py, old fragment (must occur exactly once), new fragment, pytest args)
 MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
@@ -77,6 +78,24 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
          "    except ProviderError as exc:\n        rec.update(status=STATUS_FAILED, notes=[str(exc)])\n        return _with_ai(base, rec), rec",
          "    except ProviderError as exc:\n        raise", [T_AI]),
         ("AD-5 unrecognized text not rejected", SRC + "admission.py", "if kind == \"UNRECOGNIZED\":", "if False:", [T_AI]),
+    ],
+    "store": [
+        ("ST-1 stage order ignored", SRC + "store.py",
+         "and not exists (select 1 from jobs p where p.campaign_id=j.campaign_id and p.stage_order<j.stage_order and p.status!='succeeded')", "", [T_ST]),
+        ("ST-3 finish ignores the claim token", SRC + "store.py",
+         "select * from jobs where job_id=? and claim_token=? and status='running'\", (job_id, token)).fetchone()",
+         "select * from jobs where job_id=? and status='running'\", (job_id,)).fetchone()", [T_ST]),
+        ("ST-4 interruption not recorded truthfully", SRC + "store.py", "set status='interrupted'", "set status='failed'", [T_ST]),
+        ("ST-5 predeclaration mutable", SRC + "store.py",
+         "if row[\"spec_sha256\"] != spec_sha or row[\"declaration_sha256\"] != declaration_sha256:", "if False:", [T_ST]),
+        ("ST-6 global concurrency limit ignored", SRC + "store.py",
+         "if con.execute(\"select count(*) from jobs where status='running' and lease_expires >= ?\", (now,)).fetchone()[0] >= max_running:",
+         "if False:", [T_ST]),
+        ("ST-7 any job may be retried", SRC + "store.py", "and stage=? and status='failed'\"", "and stage=? and status in ('failed','succeeded')\"", [T_ST]),
+        ("ST-8 invalid terminal status accepted", SRC + "store.py", "if status not in (\"succeeded\", \"failed\", \"blocked\"):", "if False:", [T_ST]),
+        ("ST-9 duplicate trial keys accepted", SRC + "store.py",
+         "if not trials or len({t[\"trial_key\"] for t in trials}) != len(trials):", "if not trials:", [T_ST]),
+        ("ST-10 population may differ on re-create", SRC + "store.py", "if have != {t[\"trial_key\"] for t in trials}:", "if False:", [T_ST]),
     ],
 }
 
