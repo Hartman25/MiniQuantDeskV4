@@ -652,8 +652,12 @@ def _require_resolved_asof(asof: str) -> str:
     """Fail-closed format check for a caller-RESOLVED asof date (Defect 2):
     must be an explicit YYYY-MM-DD, never None/empty -- this module never
     falls back to Alpaca's implicit current-day default."""
-    if not asof or not _ASOF_RE.match(asof):
+    if not isinstance(asof, str) or not _ASOF_RE.fullmatch(asof):
         raise ValueError(f"asof must be an explicit 'YYYY-MM-DD' date string, got {asof!r}")
+    try:
+        pd.Timestamp(asof)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("asof must be a valid calendar date") from exc
     return asof
 
 

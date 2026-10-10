@@ -710,3 +710,85 @@ def test_cli_revision_identity_selects_new_destination(monkeypatch, tmp_path):
         ah.load_research_extraction_artifacts(b)["bars"]["volume"].tolist()
         == [2000] * 3
     )
+
+
+@pytest.mark.parametrize("asof", ["2024-02-30", "2024-13-01", 20240101, True])
+def test_impossible_mapping_asof_refused_before_transport(asof):
+    http = FakeHttp()
+    with pytest.raises(ValueError, match="asof"):
+        ah.fetch_historical_bars(
+            symbols=["AAA"],
+            start_utc=WINDOW_START,
+            end_utc=WINDOW_END,
+            asof=asof,
+            credentials=_creds(),
+            http_get=http,
+        )
+    assert http.calls == []
+
+
+def test_legacy_attestation_cannot_be_upgraded_to_full_ohlcv_claim(
+    monkeypatch, tmp_path
+):
+    result = extraction(monkeypatch)
+    att = result["manifest"]["source_attestation"]
+    att["extractor_id"] = "mqk_research.data.alpaca_historical.v2"
+    result["manifest"]["source_attestation_id"] = bp.source_attestation_id(att)
+    with pytest.raises(hist.HistoricalDataUnqualified, match="v3|legacy"):
+        qualified_load(tmp_path, result)
+
+
+def test_calendar_query_at_first_coverage_boundary_is_supported(monkeypatch, tmp_path):
+    result = extraction(
+        monkeypatch,
+        days=("2016-01-04",),
+        start="2016-01-01T00:00:00Z",
+        end="2016-01-05T00:00:00Z",
+    )
+    assert len(qualified_load(tmp_path, result)) == 1
+
+
+def test_calendar_exclusive_end_outside_coverage_needs_no_unknown_date(
+    monkeypatch, tmp_path
+):
+    result = extraction(
+        monkeypatch,
+        days=("2026-12-31",),
+        start="2026-12-31T05:00:00Z",
+        end="2027-01-01T05:00:00Z",
+        snapshot="2027-01-02T00:00:00Z",
+    )
+    assert (
+        len(qualified_load(tmp_path, result, decision_time_utc="2027-01-03T00:00:00Z"))
+        == 1
+    )
+
+
+def test_physical_checksum_tamper_with_semantic_identical_bytes_refused(
+    monkeypatch, tmp_path
+):
+    result = extraction(monkeypatch)
+    target = tmp_path / "dataset"
+    paths = ah.write_research_extraction_artifacts(target, result)
+    paths["bars_csv"].write_bytes(paths["bars_csv"].read_bytes() + b"\n")
+    with pytest.raises(ah.AlpacaHistoricalExtractionError, match="artifact checksum"):
+        ah.load_research_extraction_artifacts(target)
+
+
+@pytest.mark.parametrize("manifest", [[], "invalid", 1])
+def test_malformed_qualification_manifest_has_explicit_refusal(
+    monkeypatch, tmp_path, manifest
+):
+    result = extraction(monkeypatch)
+    result["manifest"] = manifest
+    with pytest.raises(
+        hist.HistoricalDataUnqualified, match="manifest must be an object"
+    ):
+        qualified_load(tmp_path, result)
+
+
+def test_ambiguous_manifest_window_timezone_explicitly_refused(monkeypatch, tmp_path):
+    result = extraction(monkeypatch)
+    result["manifest"]["start_utc"] = "2024-11-27T00:00:00"
+    with pytest.raises(hist.HistoricalDataUnqualified, match="timezone"):
+        qualified_load(tmp_path, result)

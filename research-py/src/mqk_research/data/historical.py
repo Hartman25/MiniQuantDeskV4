@@ -127,10 +127,16 @@ def build_historical_contract(bars, *, timeframe, asof):
 def verify_historical_contract(bars, manifest):
     contract = manifest.get("historical_data_contract")
     att = manifest.get("source_attestation") or {}
+    if not isinstance(att, dict):
+        raise HistoricalDataUnqualified("invalid source attestation object")
     if contract is None and att.get("extractor_id") not in V3_EXTRACTORS:
         return  # Legacy manifests keep their original interpretation.
     if not isinstance(contract, dict):
         raise HistoricalDataUnqualified("missing versioned historical_data_contract")
+    if att.get("extractor_id") not in V3_EXTRACTORS:
+        raise HistoricalDataUnqualified(
+            "legacy source attestation cannot authorize a v3 full-OHLCV contract"
+        )
     expected = build_historical_contract(
         bars, timeframe=manifest.get("timeframe"), asof=att.get("asof")
     )
@@ -191,10 +197,17 @@ def _daily_session_check(bars, manifest, snapshot):
     end = utc_instant(manifest.get("end_utc"), "window end")
     if end <= start:
         raise HistoricalDataUnqualified("invalid query window")
-    first, last = (
-        start.tz_convert("America/New_York").date(),
-        end.tz_convert("America/New_York").date(),
+    local_start, local_end = (
+        start.tz_convert("America/New_York"),
+        end.tz_convert("America/New_York"),
     )
+    first_label = local_start.normalize()
+    if first_label < local_start:
+        first_label += pd.DateOffset(days=1)
+    last_label = local_end.normalize()
+    if last_label >= local_end:
+        last_label -= pd.DateOffset(days=1)
+    first, last = first_label.date(), last_label.date()
     if first < coverage[0] or last > coverage[1]:
         raise HistoricalDataUnqualified("query outside calendar authority coverage")
     expected = []
@@ -247,6 +260,12 @@ def require_historical_dataset(
         provenance_identity_fragment_canonical_timeframe,
     )
 
+    if not isinstance(manifest, dict):
+        raise HistoricalDataUnqualified(
+            "historical provenance manifest must be an object"
+        )
+    utc_instant(manifest.get("start_utc"), "window start")
+    utc_instant(manifest.get("end_utc"), "window end")
     if not manifest.get("historical_data_contract"):
         raise HistoricalDataUnqualified(
             "missing historical contract; legacy data is not historically qualified"
