@@ -167,3 +167,21 @@ def test_a_compile_that_lost_the_history_race_can_be_retried_and_then_discloses_
     d = load(out)
     assert d["factory"]["prior_search_disclosure"]["prior_factory_campaigns"] == ["FC-PS-OTHER"]
     assert rel_of(d, W37)["relationship"] == "EXACT_DUPLICATE"
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "tampered"])
+def test_a_damaged_frozen_declaration_is_refused_not_silently_returned_or_recomputed(bars, tmp_path, damage):
+    svc = service(tmp_path / "f")
+    spec = E.make_spec("FC-PS-A", bars, sources=grid(37))
+    out = svc.compile_campaign(spec)
+    path = Path(out["declaration_path"])
+    if damage == "missing":
+        path.unlink()
+    elif damage == "corrupt":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        d["universe"]["symbols"] = ["TAMPERED"]
+        path.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(StoreError, match="frozen declaration|frozen identity"):
+        svc.compile_campaign(spec)

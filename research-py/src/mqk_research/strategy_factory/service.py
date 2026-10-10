@@ -118,7 +118,10 @@ class FactoryService:
         if existing is not None:              # a frozen predeclaration is verified, never recomputed against newer history
             if existing["spec_sha256"] != sha(spec):
                 raise StoreError(f"campaign {cid!r} exists with a different spec; a predeclaration is immutable")
-            frozen = json.loads(Path(existing["declaration_path"]).read_text(encoding="utf-8"))
+            try:
+                frozen = json.loads(Path(existing["declaration_path"]).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise StoreError(f"the frozen declaration of {cid!r} is unreadable ({type(exc).__name__}); nothing is recomputed") from exc
             if campaign_mod.declaration_identity(frozen) != existing["declaration_sha256"]:
                 raise StoreError(f"the declaration of {cid!r} no longer matches its frozen identity")
             return {"campaign_id": cid, "created": False, "declaration_sha256": existing["declaration_sha256"],
