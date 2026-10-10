@@ -725,7 +725,7 @@ export interface OrderTimelineRow {
   provenance_ref: string | null;
 }
 
-export type OrderTimelineTruthState = "active" | "no_fills_yet" | "no_order" | "no_db";
+export type OrderTimelineTruthState = "active" | "filled_without_fill_quality_telemetry" | "no_fills_yet" | "no_order" | "no_db";
 
 /**
  * Per-order execution timeline surface backed by `postgres.fill_quality_telemetry`.

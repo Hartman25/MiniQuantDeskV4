@@ -41,26 +41,26 @@ const FALLBACK_MODEL: SystemModel = {
     riskSafety: { key: "risk_safety", title: "Risk/Safety", description: "", series: [] },
   },
   portfolioSummary: {
-    account_equity: 0,
-    cash: 0,
-    long_market_value: 0,
-    short_market_value: 0,
-    daily_pnl: 0,
-    buying_power: 0,
+    account_equity: null,
+    cash: null,
+    long_market_value: null,
+    short_market_value: null,
+    daily_pnl: null,
+    buying_power: null,
   },
   positions: [],
   openOrders: [],
   fills: [],
   riskSummary: {
-    gross_exposure: 0,
-    net_exposure: 0,
-    concentration_pct: 0,
-    daily_pnl: 0,
-    drawdown_pct: 0,
-    loss_limit_utilization_pct: 0,
+    gross_exposure: null,
+    net_exposure: null,
+    concentration_pct: null,
+    daily_pnl: null,
+    drawdown_pct: null,
+    loss_limit_utilization_pct: null,
     truth_state: "unavailable",
     kill_switch_active: true,
-    active_breaches: 0,
+    active_breaches: null,
   },
   riskDenials: [],
   reconcileSummary: {
@@ -261,19 +261,22 @@ export function useOperatorModel(pollIntervalMs = 5000) {
   const observations = useRef(new LatestRequest());
   const details = useRef(new LatestRequest());
   const selectedScope = useRef<string | null>(null);
-  const scopeOf = (value: SystemModel) => [value.status.daemon_mode, value.status.active_account_id, value.runtimeLeadership.generation_id].join("|");
+  const modelDaemonUrl = useRef<string | null>(null);
+  const scopeOf = (value: SystemModel) => JSON.stringify([value.status.daemon_mode, value.status.active_account_id, value.runtimeLeadership.generation_id]);
 
   const refresh = useCallback(async () => {
     const daemonUrl = getDaemonUrl();
     await observations.current.run(fetchOperatorModel, (next) => {
       if (daemonUrl !== getDaemonUrl()) return;
-      if (selectedScope.current !== null && selectedScope.current !== scopeOf(next)) {
+      const sameDaemon = modelDaemonUrl.current === daemonUrl;
+      modelDaemonUrl.current = daemonUrl;
+      if (selectedScope.current !== null && (!sameDaemon || selectedScope.current !== scopeOf(next))) {
         details.current.invalidate();
         selectedScope.current = null;
         setTimelineLoading(false);
       }
       setModel((current) => {
-        if (scopeOf(current) !== scopeOf(next)) {
+        if (!sameDaemon || scopeOf(current) !== scopeOf(next)) {
           return next;
         }
         return { ...next, selectedTimeline: current.selectedTimeline, executionTrace: current.executionTrace, executionReplay: current.executionReplay, executionChart: current.executionChart, causalityTrace: current.causalityTrace };
@@ -303,6 +306,13 @@ export function useOperatorModel(pollIntervalMs = 5000) {
 
   const selectTimeline = useCallback(async (internalOrderId: string) => {
     const daemonUrl = getDaemonUrl();
+    if (modelDaemonUrl.current !== daemonUrl) {
+      details.current.invalidate();
+      selectedScope.current = null;
+      setTimelineLoading(false);
+      setModel((current) => ({ ...current, selectedTimeline: null, executionTrace: null, executionReplay: null, executionChart: null, causalityTrace: null }));
+      return;
+    }
     const scope = scopeOf(model);
     selectedScope.current = scope;
     setTimelineLoading(true);

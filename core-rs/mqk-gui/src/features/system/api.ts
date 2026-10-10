@@ -1438,16 +1438,14 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 // surface so the screen can render an explicit unavailable-truth notice.
 export async function fetchExecutionTimeline(internalOrderId: string): Promise<OrderTimelineSurface | null> {
   const r = await fetchJsonCandidate<DaemonOrderTimelineResponse>(
-    `/api/v1/execution/orders/${internalOrderId}/timeline`,
+    `/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/timeline`,
   );
   if (!r.ok || r.data == null) return null;
   const d = r.data;
-  const VALID_STATES: OrderTimelineTruthState[] = ["active", "no_fills_yet", "no_order", "no_db"];
-  const truth_state: OrderTimelineTruthState = VALID_STATES.includes(
-    d.truth_state as OrderTimelineTruthState,
-  )
-    ? (d.truth_state as OrderTimelineTruthState)
-    : "no_order";
+  const VALID_STATES: OrderTimelineTruthState[] = ["active", "filled_without_fill_quality_telemetry", "no_fills_yet", "no_order", "no_db"];
+  if (!VALID_STATES.includes(d.truth_state as OrderTimelineTruthState) || d.order_id !== internalOrderId ||
+      !hasRows(d, "rows", ["event_id", "ts_utc", "stage", "source"])) return null;
+  const truth_state = d.truth_state as OrderTimelineTruthState;
   return {
     canonical_route: d.canonical_route,
     truth_state,
@@ -1466,19 +1464,19 @@ export async function fetchExecutionTimeline(internalOrderId: string): Promise<O
 }
 
 export async function fetchExecutionTrace(internalOrderId: string): Promise<OrderTraceResponse | null> {
-  return tryFetchJson<OrderTraceResponse>([`/api/v1/execution/orders/${internalOrderId}/trace`]);
+  return tryFetchJson<OrderTraceResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/trace`]);
 }
 
 export async function fetchExecutionReplay(internalOrderId: string): Promise<OrderReplayResponse | null> {
-  return tryFetchJson<OrderReplayResponse>([`/api/v1/execution/orders/${internalOrderId}/replay`]);
+  return tryFetchJson<OrderReplayResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/replay`]);
 }
 
 export async function fetchExecutionChart(internalOrderId: string): Promise<OrderChartResponse | null> {
-  return tryFetchJson<OrderChartResponse>([`/api/v1/execution/orders/${internalOrderId}/chart`]);
+  return tryFetchJson<OrderChartResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/chart`]);
 }
 
 export async function fetchCausalityTrace(internalOrderId: string): Promise<OrderCausalityResponse | null> {
-  return tryFetchJson<OrderCausalityResponse>([`/api/v1/execution/orders/${internalOrderId}/causality`]);
+  return tryFetchJson<OrderCausalityResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/causality`]);
 }
 
 // ---------------------------------------------------------------------------

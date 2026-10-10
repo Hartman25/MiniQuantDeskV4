@@ -917,6 +917,7 @@ export function fillQualityNotice(surface: FillQualitySurface): string | null {
 
 export function orderTimelineNotice(surface: OrderTimelineSurface): string | null {
   switch (surface.truth_state) {
+    case "filled_without_fill_quality_telemetry": return "OMS reports filled quantity but durable fill telemetry is missing. Do not infer no fills or complete lifecycle history.";
     case "active": return null;
     case "no_fills_yet": return null;
     case "no_order": return null;
