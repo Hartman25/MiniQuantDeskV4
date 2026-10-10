@@ -346,6 +346,8 @@ def import_catalog(data: bytes, filename: str, *, profile: CatalogProfile | None
     for e in ordered:
         e["fields"]["unresolved_source_refs"] = sorted(r for r in e["fields"].get("source_refs", []) if sources and r not in sources)
         e["content_hash"] = sha256_bytes(canonical_json({"f": e["fields"], "o": e["original"]}).encode("utf-8"))
+        e["canonical_hash"] = sha256_bytes(canonical_json(
+            {k: e["fields"].get(k, "") for k in CANONICAL_FIELDS if k not in ("source_refs", "source_urls")}).encode("utf-8"))
     context = {name: {"rows": rows, "formula_cells": formulas.get(name, {})}
                for name, rows in sheets.items() if name not in declared}
     ledger = {
