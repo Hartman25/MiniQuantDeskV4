@@ -202,8 +202,8 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
             <div><span>Loss-limit utilization</span><strong>{formatPercent(riskSummary.loss_limit_utilization_pct)}</strong></div>
             <div><span>Drawdown</span><strong>{formatPercent(riskSummary.drawdown_pct)}</strong></div>
             <div><span>Reconcile status</span><strong>{reconcileSummary.status}</strong></div>
-            <div><span>Mismatched orders</span><strong>{reconcileSummary.mismatched_orders}</strong></div>
-            <div><span>Unmatched broker events</span><strong>{reconcileSummary.unmatched_broker_events}</strong></div>
+            <div><span>Mismatched orders</span><strong>{reconcileSummary.mismatched_orders ?? "Unavailable"}</strong></div>
+            <div><span>Unmatched broker events</span><strong>{reconcileSummary.unmatched_broker_events ?? "Unavailable"}</strong></div>
             <div><span>Kill switch</span><strong>{status.kill_switch_active ? "Active" : "Inactive"}</strong></div>
             <div>
               <span>Deadman watchdog</span>

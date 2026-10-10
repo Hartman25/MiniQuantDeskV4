@@ -10,6 +10,11 @@ import type { SystemModel } from "../system/types";
 export function ReconcileScreen({ model }: { model: SystemModel }) {
   const r = model.reconcileSummary;
   const truthState = panelTruthRenderState(model, "reconcile");
+  const available = (endpoint: string) => model.dataSource.realEndpoints.includes(endpoint);
+  const mismatchAvailable = available("/api/v1/reconcile/mismatches");
+  const chainAvailable = available("/api/v1/execution/replace-cancel-chains");
+  const incidentsAvailable = available("/api/v1/incidents");
+  const activeIncidents = model.incidents.filter((row) => row.status === "open" || row.status === "investigating");
 
   // Hard-block when truth is structurally absent (unavailable, no_snapshot, unimplemented,
   // not_wired). For stale/degraded, data is cached and present — show the domain body with
@@ -26,16 +31,16 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
           title="Reconcile Status"
           value={r.status}
           detail={`Last run ${formatDateTime(r.last_run_at)}`}
-          tone={r.status === "critical" ? "bad" : r.status === "warning" ? "warn" : "good"}
+          tone={r.status === "critical" || r.status === "dirty" ? "bad" : r.status === "warning" || r.status === "stale" ? "warn" : r.status === "ok" ? "good" : "neutral"}
         />
-        <StatCard title="Mismatched Positions" value={String(r.mismatched_positions)} tone={r.mismatched_positions > 0 ? "warn" : "good"} />
-        <StatCard title="Mismatched Orders" value={String(r.mismatched_orders)} tone={r.mismatched_orders > 0 ? "warn" : "good"} />
-        <StatCard title="Unmatched Events" value={String(r.unmatched_broker_events)} tone={r.unmatched_broker_events > 0 ? "warn" : "good"} />
+        <StatCard title="Mismatched Positions" value={String(r.mismatched_positions ?? "Unavailable")} tone={r.mismatched_positions === null ? "neutral" : r.mismatched_positions > 0 ? "warn" : "neutral"} />
+        <StatCard title="Mismatched Orders" value={String(r.mismatched_orders ?? "Unavailable")} tone={r.mismatched_orders === null ? "neutral" : r.mismatched_orders > 0 ? "warn" : "neutral"} />
+        <StatCard title="Unmatched Events" value={String(r.unmatched_broker_events ?? "Unavailable")} tone={r.unmatched_broker_events === null ? "neutral" : r.unmatched_broker_events > 0 ? "warn" : "neutral"} />
       </div>
 
       <div className="desk-panel-grid desk-panel-grid-primary">
         <Panel title="Mismatch grid" subtitle="Primary broker-vs-internal disagreement surface.">
-          <DataTable
+          {!mismatchAvailable ? <div className="unavailable-notice">Mismatch detail unavailable; an empty grid does not establish agreement.</div> : <DataTable
             rows={model.mismatches}
             rowKey={(row) => row.id}
             columns={[
@@ -45,23 +50,23 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
               { key: "broker", title: "Broker", render: (row) => row.broker_value },
               { key: "note", title: "Note", render: (row) => row.note },
             ]}
-          />
+          />}
         </Panel>
 
         <Panel title="Correction / chain state" subtitle="What still needs operator attention right now.">
           <div className="metric-list">
-            <div><span>Mismatched fills</span><strong>{r.mismatched_fills}</strong></div>
-            <div><span>Unmatched events</span><strong>{r.unmatched_broker_events}</strong></div>
-            <div><span>Replace/cancel chains</span><strong>{model.replaceCancelChains.length}</strong></div>
-            <div><span>Active incidents</span><strong>{model.incidents.length}</strong></div>
-            <div><span>Latest runtime generation</span><strong>{model.runtimeLeadership.generation_id}</strong></div>
-            <div><span>Recovery state</span><strong>{model.runtimeLeadership.post_restart_recovery_state}</strong></div>
+            <div><span>Mismatched fills</span><strong>{r.mismatched_fills ?? "Unavailable"}</strong></div>
+            <div><span>Unmatched events</span><strong>{r.unmatched_broker_events ?? "Unavailable"}</strong></div>
+            <div><span>Replace/cancel chains</span><strong>{chainAvailable ? model.replaceCancelChains.length : "Unavailable"}</strong></div>
+            <div><span>Active incidents</span><strong>{incidentsAvailable ? activeIncidents.length : "Unavailable"}</strong></div>
+            <div><span>Latest runtime generation</span><strong>{available("/api/v1/system/runtime-leadership") ? model.runtimeLeadership.generation_id : "Unavailable"}</strong></div>
+            <div><span>Recovery state</span><strong>{available("/api/v1/system/runtime-leadership") ? model.runtimeLeadership.post_restart_recovery_state : "Unavailable"}</strong></div>
           </div>
         </Panel>
       </div>
 
       <Panel title="Replace / cancel chains" compact>
-        <DataTable
+        {!chainAvailable ? <div className="unavailable-notice">Replace/cancel lineage is unavailable from this daemon; no chain status is established.</div> : <DataTable
           rows={model.replaceCancelChains}
           rowKey={(row) => row.chain_id}
           columns={[
@@ -72,13 +77,13 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
             { key: "request", title: "Requested", render: (row) => formatDateTime(row.request_at) },
             { key: "notes", title: "Notes", render: (row) => row.notes },
           ]}
-        />
+        />}
       </Panel>
 
       <div className="reconcile-secondary-grid">
         <Panel title="Drift by domain" subtitle="Mismatch count per domain — which class of disagreement is active.">
-          {model.mismatches.length === 0 ? (
-            <div className="empty-state">No active mismatches. Reconcile is clean across all domains.</div>
+          {!mismatchAvailable ? <div className="unavailable-notice">Domain mismatch evidence unavailable.</div> : model.mismatches.length === 0 ? (
+            <div className="empty-state">No mismatch rows returned in this observation. Reconcile summary status: {r.status}.</div>
           ) : (
             <div className="metric-list">
               {(["position", "order", "fill", "cash", "event"] as const).map((domain) => {
@@ -99,9 +104,9 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
           )}
         </Panel>
 
-        <Panel title="Active incidents" subtitle="Open and investigating incidents with reconcile impact.">
-          {model.incidents.filter((i) => i.status !== "resolved" && i.status !== "contained").length === 0 ? (
-            <div className="empty-state">No active incidents. All incidents resolved or contained.</div>
+        <Panel title="Active incidents" subtitle="Open cases in this deployment. Reconcile-specific impact is not recorded by the incident contract.">
+          {!incidentsAvailable ? <div className="unavailable-notice">Incident source unavailable.</div> : activeIncidents.length === 0 ? (
+            <div className="empty-state">No open cases returned by the durable source. Fault recovery is not established by case status.</div>
           ) : (
             <div className="list-stack">
               {model.incidents

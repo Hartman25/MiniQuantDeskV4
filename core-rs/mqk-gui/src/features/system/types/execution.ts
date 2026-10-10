@@ -95,12 +95,13 @@ export interface TimelineEventRow {
 }
 
 export interface ReconcileSummary {
-  status: HealthState;
+  status: HealthState | "dirty" | "stale" | "unavailable";
+  truth_state?: "active" | "never_run" | "stale";
   last_run_at: string | null;
-  mismatched_positions: number;
-  mismatched_orders: number;
-  mismatched_fills: number;
-  unmatched_broker_events: number;
+  mismatched_positions: number | null;
+  mismatched_orders: number | null;
+  mismatched_fills: number | null;
+  unmatched_broker_events: number | null;
 }
 
 export interface ExecutionTimeline {

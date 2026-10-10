@@ -26,14 +26,14 @@ export function RiskScreen({ model }: { model: SystemModel }) {
         <StatCard
           title="Concentration"
           value={formatPercent(r.concentration_pct)}
-          detail="Largest symbol concentration"
-          tone={r.concentration_pct === null ? "neutral" : r.concentration_pct > 50 ? "bad" : r.concentration_pct > 35 ? "warn" : "good"}
+          detail="Largest symbol concentration; policy threshold unavailable here"
+          tone="neutral"
         />
         <StatCard
           title="Loss Limit Utilization"
           value={formatPercent(r.loss_limit_utilization_pct)}
-          detail="Daily loss budget used"
-          tone={r.loss_limit_utilization_pct === null ? "neutral" : r.loss_limit_utilization_pct > 80 ? "bad" : r.loss_limit_utilization_pct > 60 ? "warn" : "good"}
+          detail="Daily loss budget used; policy threshold unavailable here"
+          tone="neutral"
         />
       </div>
 
@@ -42,7 +42,7 @@ export function RiskScreen({ model }: { model: SystemModel }) {
       <Panel title="Breach and halt posture" subtitle="Risk-triggered hard stops, loss limits, and breach counts. Not system arm state.">
         <div className="metric-list">
           <div><span>Daily PnL</span><strong className={r.daily_pnl === null ? "val-muted" : r.daily_pnl < 0 ? "val-negative" : r.daily_pnl > 0 ? "val-positive" : ""}>{formatMoney(r.daily_pnl)}</strong></div>
-          <div><span>Drawdown</span><strong className={r.drawdown_pct === null ? "val-muted" : r.drawdown_pct > 15 ? "val-critical" : r.drawdown_pct > 8 ? "val-warn" : ""}>{formatPercent(r.drawdown_pct)}</strong></div>
+          <div><span>Drawdown</span><strong>{formatPercent(r.drawdown_pct)}</strong></div>
           <div>
             <span>Kill switch</span>
             {/* OPERATOR-RISK-UNKNOWN-TRUTH-01: never color this green from an

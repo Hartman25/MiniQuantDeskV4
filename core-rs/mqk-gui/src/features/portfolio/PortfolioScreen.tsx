@@ -56,7 +56,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
   return (
     <div className="screen-grid desk-screen-grid">
       <div className="summary-grid summary-grid-four">
-        <StatCard title="Equity" value={formatMoney(p.account_equity)} detail="Account equity" tone="good" />
+        <StatCard title="Equity" value={formatMoney(p.account_equity)} detail="Account equity" tone="neutral" />
         <StatCard title="Cash" value={formatMoney(p.cash)} detail="Available cash" tone="neutral" />
         <StatCard title="Long Market Value" value={formatMoney(p.long_market_value)} detail="Long exposure" tone="neutral" />
         <StatCard title="Daily PnL" value={formatMoney(p.daily_pnl)} detail={p.daily_pnl_unavailable_reason ?? "Change from recorded previous-session-close equity baseline"} tone={p.daily_pnl === null ? "neutral" : p.daily_pnl < 0 ? "bad" : "good"} />
@@ -101,7 +101,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
 
       <div className="desk-panel-grid desk-panel-grid-thirds">
         <Panel title="Open Orders">
-          <DataTable
+          {!model.dataSource.realEndpoints.includes("/api/v1/portfolio/orders/open") ? <div className="unavailable-notice">Open-order snapshot unavailable; order count is unknown.</div> : <DataTable
             rows={model.openOrders}
             rowKey={(row) => row.internal_order_id}
             columns={[
@@ -110,11 +110,11 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
               { key: "status", title: "Status", render: (row) => row.status },
               { key: "qty", title: "Qty", render: (row) => row.filled_qty != null ? `${row.filled_qty}/${row.requested_qty}` : `—/${row.requested_qty}` },
             ]}
-          />
+          />}
         </Panel>
 
         <Panel title="Recent Fills">
-          <DataTable
+          {!model.dataSource.realEndpoints.includes("/api/v1/portfolio/fills") ? <div className="unavailable-notice">Recent-fill snapshot unavailable; no-fill status is unknown.</div> : <DataTable
             rows={model.fills}
             rowKey={(row) => row.fill_id}
             columns={[
@@ -124,14 +124,14 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
               { key: "qty", title: "Qty", render: (row) => row.qty },
               { key: "price", title: "Price", render: (row) => formatMoney(row.price) },
             ]}
-          />
+          />}
         </Panel>
 
         <Panel title="Portfolio notes" compact>
           <div className="metric-list compact-list">
             <div><span>Positions</span><strong>{model.positions.length}</strong></div>
-            <div><span>Open orders</span><strong>{model.openOrders.length}</strong></div>
-            <div><span>Recent fills</span><strong>{model.fills.length}</strong></div>
+            <div><span>Open orders</span><strong>{model.dataSource.realEndpoints.includes("/api/v1/portfolio/orders/open") ? model.openOrders.length : "Unavailable"}</strong></div>
+            <div><span>Recent fills</span><strong>{model.dataSource.realEndpoints.includes("/api/v1/portfolio/fills") ? model.fills.length : "Unavailable"}</strong></div>
             <div><span>Mock sections</span><strong>{model.dataSource.mockSections.length}</strong></div>
           </div>
         </Panel>

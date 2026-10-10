@@ -292,7 +292,7 @@ test("G05: connected model with full status and risk truth — dashboard truth s
           dispatching_orders: 0, reject_count_today: 0, cancel_replace_count_today: null,
           avg_ack_latency_ms: null, stuck_orders: 0 });
       case "/api/v1/reconcile/status":
-        return Response.json({ status: "unknown", last_run_at: null, mismatched_positions: 0,
+        return Response.json({ truth_state: "never_run", status: "unknown", last_run_at: null, mismatched_positions: 0,
           mismatched_orders: 0, mismatched_fills: 0, unmatched_broker_events: 0 });
       default:
         return {

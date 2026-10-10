@@ -1,4 +1,4 @@
-import type { PortfolioSummary, RiskSummary } from "./types";
+import type { PortfolioSummary, RiskSummary, ReconcileSummary } from "./types";
 
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object";
 const measurement = (value: unknown) => value === null || (typeof value === "number" && Number.isFinite(value));
@@ -23,4 +23,14 @@ export function parseRiskSummary(value: unknown): RiskSummary | null {
   // A failed durable risk read cannot prove a clear switch or a zero breach count.
   return { ...value, kill_switch_active: value.truth_state !== "active" || value.kill_switch_active,
     active_breaches: value.truth_state === "active" ? value.active_breaches : null } as unknown as RiskSummary;
+}
+
+export function parseReconcileSummary(value: unknown): ReconcileSummary | null {
+  if (!object(value) || !["active", "never_run", "stale"].includes(String(value.truth_state)) ||
+      !["ok", "dirty", "stale", "unknown", "unavailable"].includes(String(value.status)) ||
+      !(value.last_run_at === null || typeof value.last_run_at === "string" && Number.isFinite(Date.parse(value.last_run_at)))) return null;
+  const keys = ["mismatched_positions", "mismatched_orders", "mismatched_fills", "unmatched_broker_events"];
+  if (keys.some((key) => typeof value[key] !== "number" || !Number.isSafeInteger(value[key]) || (value[key] as number) < 0)) return null;
+  const assessed = value.truth_state === "active" && (value.status === "ok" || value.status === "dirty");
+  return { ...value, ...Object.fromEntries(keys.map((key) => [key, assessed ? value[key] : null])) } as unknown as ReconcileSummary;
 }

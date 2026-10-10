@@ -17,7 +17,7 @@ import { parseMetricsDashboard } from "./metricsContract";
 import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from "./alertContract";
 import { parseEventFeed, parseOperatorTimeline } from "./historyContract";
 import { parseSystemStatus } from "./statusContract";
-import { parsePortfolioSummary, parseRiskSummary } from "./economicContract";
+import { parsePortfolioSummary, parseRiskSummary, parseReconcileSummary } from "./economicContract";
 import { hasRows } from "./rowContract";
 import { parseMarketDataQuality, parseOmsOverview, parseTransport } from "./snapshotContracts";
 import {
@@ -547,7 +547,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       // Only "active" (future: denial accumulator wired and proven) passes through.
       return { ok: true, endpoint: canonical.endpoint, data: data.denials };
     })(),
-    fetchJsonCandidates<ReconcileSummary>(["/api/v1/reconcile/status"]),
+    (async (): Promise<EndpointFetchResult<ReconcileSummary>> => {
+      const result = await fetchJsonCandidate<unknown>("/api/v1/reconcile/status");
+      const data = result.ok ? parseReconcileSummary(result.data) : null;
+      return data ? { ...result, data } : { ...result, ok: false, data: undefined, error: result.error ?? "reconcile_contract_invalid" };
+    })(),
     (async (): Promise<EndpointFetchResult<ReconcileMismatchRow[]>> => {
       const canonical = await fetchJsonCandidate<ReconcileMismatchesResponse>("/api/v1/reconcile/mismatches");
       if (!canonical.ok) {
@@ -1204,10 +1208,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const unavailableReconcileSummary: ReconcileSummary = {
     status: "unknown",
     last_run_at: null,
-    mismatched_positions: 0,
-    mismatched_orders: 0,
-    mismatched_fills: 0,
-    unmatched_broker_events: 0,
+    mismatched_positions: null,
+    mismatched_orders: null,
+    mismatched_fills: null,
+    unmatched_broker_events: null,
   };
   const unavailableMetadata: MetadataSummary = {
     build_version: "unknown",
