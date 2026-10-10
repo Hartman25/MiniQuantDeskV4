@@ -48,7 +48,11 @@ export interface IncidentCase {
   title: string;
   status: "open" | "investigating" | "contained" | "resolved";
   opened_at: string;
-  updated_at: string;
+  updated_at: string | null;
+  opened_by?: string;
+  linked_alert_id?: string | null;
+  /** The durable incident API does not expose impact or action-history fields. */
+  detail_authority?: "summary_only";
   impacted_orders: string[];
   impacted_strategies: string[];
   impacted_subsystems: string[];

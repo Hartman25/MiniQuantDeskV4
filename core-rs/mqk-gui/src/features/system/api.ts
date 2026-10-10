@@ -12,6 +12,7 @@
 //   - actions.ts  — invokeOperatorAction
 
 import { withClassifiedPanelSources } from "./sourceAuthority";
+import { parseIncidents } from "./incidentContract";
 import {
   enforceRunScopeConsistency,
   parseDurablePortfolioPositions,
@@ -608,15 +609,14 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       return { ok: true, endpoint: r.endpoint, data: { updated_at: w.updated_at, services: w.services as ServiceTopology["services"] } };
     })(),
     fetchJsonCandidates<TransportSummary>(["/api/v1/execution/transport"]),
-    // A3: incidents — mounted; truth_state always "not_wired" (no incident manager).
-    // Returns ok:false so "incidents" lands in usedMockSections (honest degraded authority).
+    // Durable incident summaries; unsupported lifecycle detail is never synthesized.
     (async (): Promise<EndpointFetchResult<IncidentCase[]>> => {
       const r = await fetchJsonCandidate<IncidentsWrapper>("/api/v1/incidents");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      const w = r.data as IncidentsWrapper;
-      // "not_wired" = mounted but feature absent; must not render as authoritative empty.
-      if (w.truth_state === "not_wired") return { ok: false, endpoint: r.endpoint, error: "incidents_not_wired" };
-      return { ok: true, endpoint: r.endpoint, data: [] };
+      const rows = parseIncidents(r.data);
+      return rows === null
+        ? { ok: false, endpoint: r.endpoint, error: "incidents_unavailable_or_invalid" }
+        : { ok: true, endpoint: r.endpoint, data: rows };
     })(),
     // A4: replace/cancel chains — mounted; truth_state always "not_wired" (no lineage tracking).
     (async (): Promise<EndpointFetchResult<ReplaceCancelChainRow[]>> => {
