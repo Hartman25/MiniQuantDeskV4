@@ -33,6 +33,24 @@ pub(crate) enum DaemonBroker {
     Alpaca(AlpacaBrokerAdapter),
 }
 
+impl DaemonBroker {
+    /// Bind an Alpaca adapter to the shared account-evidence cell (records
+    /// every `GET /v2/account`, and admits orders only against fresh
+    /// evidence). The Paper variant has no provider account: unchanged.
+    pub(crate) fn with_account_evidence(
+        self,
+        cell: &mqk_broker_alpaca::AccountEvidenceCell,
+    ) -> Self {
+        match self {
+            Self::Alpaca(adapter) => Self::Alpaca(adapter.with_account_evidence(
+                cell.clone(),
+                super::account_entitlement_freshness_bound(),
+            )),
+            other => other,
+        }
+    }
+}
+
 impl fmt::Debug for DaemonBroker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -55,6 +73,19 @@ impl BrokerAdapter for DaemonBroker {
         match self {
             Self::Paper(b) => b.supports_asset_class(asset_class),
             Self::Alpaca(b) => b.supports_asset_class(asset_class),
+        }
+    }
+
+    /// Load-bearing forward: without it the wrapper would fall back to the
+    /// trait's admit-all default and silently drop the Alpaca account
+    /// entitlement authority at the real gateway seam.
+    fn admit_account_entitlement(
+        &self,
+        asset_class: Option<mqk_execution::AssetClass>,
+    ) -> Result<(), mqk_execution::AccountEntitlementRefusal> {
+        match self {
+            Self::Paper(b) => b.admit_account_entitlement(asset_class),
+            Self::Alpaca(b) => b.admit_account_entitlement(asset_class),
         }
     }
 
@@ -129,6 +160,138 @@ mod daemon_broker_capability_tests {
         assert!(!broker.supports_asset_class(AssetClass::Future));
         assert!(!broker.supports_asset_class(AssetClass::Option));
         assert!(!broker.supports_asset_class(AssetClass::Forex));
+    }
+
+    fn account(extra: serde_json::Value) -> mqk_broker_alpaca::AccountEntitlementEvidence {
+        let mut a = serde_json::json!({
+            "id": "904837e3-3b76-47ec-b432-046db621571b",
+            "status": "ACTIVE",
+            "trading_blocked": false,
+            "account_blocked": false,
+            "trade_suspended_by_user": false
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        mqk_broker_alpaca::AccountEntitlementEvidence::from_account_json(&a)
+    }
+
+    /// The enum wrapper must forward the account-entitlement authority: if
+    /// it fell back to the trait's admit-all default, an unbound adapter
+    /// would be admitted here.
+    #[test]
+    fn alpaca_variant_forwards_account_entitlement_authority() {
+        use mqk_execution::AssetClass;
+        let paper = || AlpacaBrokerAdapter::paper("k".to_string(), "s".to_string());
+        let code = |b: &DaemonBroker| {
+            b.admit_account_entitlement(Some(AssetClass::Equity))
+                .map_err(|r| r.code)
+        };
+        assert_eq!(
+            code(&DaemonBroker::Alpaca(paper())),
+            Err("account_evidence_not_bound".to_string())
+        );
+        let cell = mqk_broker_alpaca::AccountEvidenceCell::new();
+        let bound = DaemonBroker::Alpaca(paper()).with_account_evidence(&cell);
+        assert_eq!(
+            code(&bound),
+            Err("account_evidence_unavailable".to_string())
+        );
+        cell.observe(account(serde_json::json!({})), chrono::Utc::now());
+        assert_eq!(code(&bound), Ok(()));
+        cell.observe(
+            account(serde_json::json!({"trading_blocked": true})),
+            chrono::Utc::now(),
+        );
+        assert_eq!(code(&bound), Err("account_trading_blocked".to_string()));
+        // The in-process Paper broker has no provider account.
+        assert_eq!(
+            code(&DaemonBroker::Paper(LockedPaperBroker::new())),
+            Ok(())
+        );
+    }
+
+    struct Armed;
+    impl mqk_execution::IntegrityGate for Armed {
+        fn is_armed(&self) -> bool {
+            true
+        }
+    }
+    struct Allow;
+    impl mqk_execution::RiskGate for Allow {
+        fn evaluate_gate(&self) -> mqk_execution::RiskDecision {
+            mqk_execution::RiskDecision::Allow
+        }
+    }
+    struct Clean;
+    impl mqk_execution::ReconcileGate for Clean {
+        fn is_clean(&self) -> bool {
+            true
+        }
+    }
+
+    fn order() -> mqk_execution::BrokerSubmitRequest {
+        mqk_execution::BrokerSubmitRequest {
+            order_id: "ord-acct-01".to_string(),
+            symbol: "AAPL".to_string(),
+            side: mqk_execution::Side::Buy,
+            quantity: mqk_execution::QtyMicros::from_whole_units(1).unwrap(),
+            order_type: "market".to_string(),
+            limit_price: None,
+            time_in_force: "day".to_string(),
+            asset_class: mqk_execution::AssetClass::Equity,
+        }
+    }
+
+    /// Real gateway over the real DaemonBroker::Alpaca: an unentitled account
+    /// is refused before any HTTP; an entitled one passes every gate and
+    /// reaches the adapter (nothing listens on the port, so the adapter
+    /// reports a connection-level Transport error, proving it was invoked).
+    #[test]
+    fn real_gateway_refuses_unentitled_account_before_any_http() {
+        use mqk_execution::{
+            wiring::build_gateway, BrokerError, GateRefusal, OutboxClaimToken, SubmitError,
+        };
+        let cell = mqk_broker_alpaca::AccountEvidenceCell::new();
+        let adapter = AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key_id: "k".to_string(),
+            api_secret_key: "s".to_string(),
+            crypto_capability_enabled: false,
+            options_mleg_capability_enabled: false,
+        });
+        let gw = build_gateway(
+            DaemonBroker::Alpaca(adapter).with_account_evidence(&cell),
+            Armed,
+            Allow,
+            Clean,
+        );
+        let claim = OutboxClaimToken::for_test(1, "ord-acct-01");
+
+        for (label, evidence, want) in [
+            ("never observed", None, "account_evidence_unavailable"),
+            (
+                "blocked",
+                Some(account(serde_json::json!({"account_blocked": true}))),
+                "account_blocked",
+            ),
+        ] {
+            if let Some(e) = evidence {
+                cell.observe(e, chrono::Utc::now());
+            }
+            match gw.submit(&claim, order()) {
+                Err(SubmitError::Gate(GateRefusal::AccountEntitlementRefused(r))) => {
+                    assert_eq!(r.code, want, "{label}");
+                }
+                other => panic!("{label}: expected entitlement refusal, got {other:?}"),
+            }
+        }
+
+        cell.observe(account(serde_json::json!({})), chrono::Utc::now());
+        match gw.submit(&claim, order()) {
+            Err(SubmitError::Broker(BrokerError::Transport { .. })) => {}
+            other => panic!("entitled order must reach the adapter, got {other:?}"),
+        }
     }
 
     /// LockedPaperBroker does not override the trait default; the Paper
@@ -657,6 +820,7 @@ impl BrokerSnapshotFetcher for AlpacaSnapshotFetcher {
 pub(super) fn build_snapshot_fetcher_from_env(
     broker_kind: Option<BrokerKind>,
     deployment_mode: DeploymentMode,
+    account_evidence: &mqk_broker_alpaca::AccountEvidenceCell,
 ) -> Option<Arc<dyn BrokerSnapshotFetcher>> {
     match broker_kind {
         Some(BrokerKind::Alpaca) => {}
@@ -684,15 +848,19 @@ pub(super) fn build_snapshot_fetcher_from_env(
         Err(_) => return None,
     };
 
-    Some(Arc::new(AlpacaSnapshotFetcher(AlpacaBrokerAdapter::new(
-        AlpacaConfig {
+    Some(Arc::new(AlpacaSnapshotFetcher(
+        AlpacaBrokerAdapter::new(AlpacaConfig {
             base_url,
             api_key_id: key_id,
             api_secret_key: secret,
             crypto_capability_enabled: false,
             options_mleg_capability_enabled: false,
-        },
-    ))))
+        })
+        .with_account_evidence(
+            account_evidence.clone(),
+            super::account_entitlement_freshness_bound(),
+        ),
+    )))
 }
 
 // ---------------------------------------------------------------------------

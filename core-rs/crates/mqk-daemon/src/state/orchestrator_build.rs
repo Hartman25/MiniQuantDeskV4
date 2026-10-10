@@ -117,6 +117,80 @@ impl RuntimeAccountAuthority for DaemonAccountAuthority {
 }
 
 impl AppState {
+    /// Run-start broker-account step (Alpaca only): one `GET /v2/account`
+    /// recorded into the shared evidence cell, then the provider account is
+    /// registered against Paper mode in the durable authority registry (an
+    /// account already registered under a Live mode refuses a Paper start)
+    /// and this run's admission is pinned to that account id.
+    ///
+    /// A failed probe does not refuse the start: evidence simply stays absent
+    /// or stale, and every submit is refused at the gateway until a fresh
+    /// observation exists.
+    async fn observe_and_bind_broker_account(
+        &self,
+        broker: &DaemonBroker,
+        db: &PgPool,
+    ) -> Result<(), RuntimeLifecycleError> {
+        let DaemonBroker::Alpaca(adapter) = broker else {
+            return Ok(());
+        };
+        let now = Utc::now();
+        let evidence = match tokio::task::block_in_place(|| adapter.fetch_account_entitlement(now))
+        {
+            Ok(evidence) => evidence,
+            Err(err) => {
+                tracing::warn!(
+                    "broker_account_probe_failed: submissions stay refused until a fresh account observation exists; error={err}"
+                );
+                return Ok(());
+            }
+        };
+        let Some(provider_account_id) = evidence.provider_account_id.as_deref() else {
+            return Ok(());
+        };
+        let identity_conflict = |detail: String| {
+            RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.broker_account_identity_conflict",
+                "broker_account_identity",
+                detail,
+            )
+        };
+        // Registry binding is Paper-only: it stops Paper credentials from
+        // driving an account already registered under a Live mode. Live modes
+        // are not registered here (a one-mode-per-account registry would
+        // block the shadow -> capital transition on the same live account).
+        if self.deployment_mode() == super::DeploymentMode::Paper {
+            let authority = mqk_db::BrokerAccountAuthority::new(
+                "alpaca",
+                provider_account_id,
+                self.deployment_mode().as_api_label(),
+            )
+            .map_err(|err| identity_conflict(err.to_string()))?;
+            mqk_db::verify_or_register_broker_account_authority(db, &authority, now)
+                .await
+                .map_err(|err| identity_conflict(err.to_string()))?;
+        }
+        self.broker_account_evidence
+            .pin_provider_account_id(provider_account_id);
+        // A definite provider denial (blocked / suspended / not ACTIVE) refuses
+        // the start: every order would be refused at the gateway anyway, and
+        // preflight reports the same state. Unknown or malformed evidence does
+        // not refuse the start; it only keeps submissions refused.
+        if let Err(refusal) = mqk_broker_alpaca::evaluate_account_entitlement(
+            &evidence,
+            Some(mqk_execution::AssetClass::Equity),
+        ) {
+            if mqk_broker_alpaca::account_entitlement::is_provider_denial_code(&refusal.code) {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.broker_account_not_entitled",
+                    "broker_account_entitlement",
+                    format!("[{}] {}", refusal.code, refusal.detail),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// B2: `generation` (and therefore the derived run_id) is counted and
     /// hashed per `execution_domain`. Before this parameter existed, the
     /// COUNT query and the v5 hash input were scoped only to
@@ -342,7 +416,11 @@ impl AppState {
                     self.runtime_selection.deployment_mode,
                 )
             })?
+            .with_account_evidence(&self.broker_account_evidence)
         };
+
+        self.observe_and_bind_broker_account(&daemon_broker, &db)
+            .await?;
 
         let broker_seed = match self.broker_snapshot_source {
             BrokerSnapshotTruthSource::Synthetic => {
@@ -425,8 +503,12 @@ impl AppState {
                     });
                     match refresh_result {
                         Ok(DaemonBroker::Alpaca(refresh_alpaca)) => {
-                            *self.external_snapshot_refresher.write().await =
-                                Some(Arc::new(refresh_alpaca));
+                            *self.external_snapshot_refresher.write().await = Some(Arc::new(
+                                refresh_alpaca.with_account_evidence(
+                                    self.broker_account_evidence.clone(),
+                                    super::account_entitlement_freshness_bound(),
+                                ),
+                            ));
                         }
                         Ok(_) => {
                             tracing::warn!(

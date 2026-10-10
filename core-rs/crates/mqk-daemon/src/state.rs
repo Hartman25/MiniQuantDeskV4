@@ -286,6 +286,13 @@ const EXTERNAL_SNAPSHOT_REFRESH_TICKS: u32 = 60;
 /// behavior, not a false halt.
 const ACCOUNT_RISK_FRESHNESS_BOUND_SECS: i64 =
     (EXTERNAL_SNAPSHOT_REFRESH_TICKS as i64 + 1) * EXECUTION_LOOP_INTERVAL.as_secs() as i64;
+
+/// Maximum age of a broker-account entitlement observation that may admit a
+/// new order. Deliberately the same bound as account-level risk freshness:
+/// both are refreshed by the same periodic `GET /v2/account` fetch.
+pub(crate) fn account_entitlement_freshness_bound() -> chrono::Duration {
+    chrono::Duration::seconds(ACCOUNT_RISK_FRESHNESS_BOUND_SECS)
+}
 /// AUTON-SIGNAL-CONTEXT-01: DB timeframe string for loading completed bars for
 /// autonomous strategy context (e.g. "1D", "5m").  Must match the `timeframe`
 /// column value in `md_bars` for the configured symbol.  If absent, the daemon
@@ -1207,6 +1214,11 @@ pub struct AppState {
     /// `None` when credentials are absent or broker kind is not Alpaca.
     /// Tests inject a fake implementation via `set_snapshot_fetcher_for_test`.
     pub snapshot_fetcher: Option<Arc<dyn BrokerSnapshotFetcher>>,
+    /// Latest `GET /v2/account` entitlement observation and the provider
+    /// account this process's run is bound to. Shared with every Alpaca
+    /// adapter the daemon builds; empty after a restart, so a restarted
+    /// daemon admits no order until a fresh account observation exists.
+    pub broker_account_evidence: mqk_broker_alpaca::AccountEvidenceCell,
     /// SHORT-SIDE-EXTERNAL-SIGNAL-WIRING-01: read-only broker asset shortability
     /// preflight fetcher.
     ///
@@ -2331,9 +2343,11 @@ impl AppState {
 
         // BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: on-demand snapshot fetcher for
         // the adopt-broker-position-baseline route when the cache is absent at idle.
+        let broker_account_evidence = mqk_broker_alpaca::AccountEvidenceCell::new();
         let snapshot_fetcher = build_snapshot_fetcher_from_env(
             runtime_selection.broker_kind,
             runtime_selection.deployment_mode,
+            &broker_account_evidence,
         );
         let asset_shortable_preflight_fetcher = build_asset_shortable_preflight_fetcher_from_env(
             runtime_selection.broker_kind,
@@ -2509,6 +2523,7 @@ impl AppState {
             )),
             broker_baseline: Arc::new(RwLock::new(None)),
             snapshot_fetcher,
+            broker_account_evidence,
             asset_shortable_preflight_fetcher,
             b5_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             day_limit_alert_fired: Arc::new(AtomicBool::new(false)),
@@ -7374,21 +7389,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ap06_paper_alpaca_readiness_is_allowed() {
-        let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
-        assert!(
-            readiness.start_allowed,
-            "paper+alpaca must be allowed after AP-06; got: {:?}",
-            readiness.blocker
-        );
-        assert!(readiness.blocker.is_none(), "no blocker expected");
-    }
-
-    #[test]
-    fn pt_truth_01_paper_paper_is_fail_closed() {
-        // PT-TRUTH-01: paper+paper is not an honest paper trading path.
-        // LockedPaperBroker requires an external bar-feed (on_bar) that is not
     /// Paper credentials must never be bound to a non-Paper endpoint by an
     /// environment override (environment identity: parsed host, not label).
     #[test]
@@ -7427,6 +7427,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ap06_paper_alpaca_readiness_is_allowed() {
+        let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "paper+alpaca must be allowed after AP-06; got: {:?}",
+            readiness.blocker
+        );
+        assert!(readiness.blocker.is_none(), "no blocker expected");
+    }
+
+    #[test]
+    fn pt_truth_01_paper_paper_is_fail_closed() {
+        // PT-TRUTH-01: paper+paper is not an honest paper trading path.
+        // LockedPaperBroker requires an external bar-feed (on_bar) that is not
         // wired in the daemon runtime.  The real paper route is paper+alpaca.
         let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
         assert!(

@@ -198,6 +198,44 @@ fn lifecycle_legacy_freshness_max_age_secs(latest_bar_end_ts: i64) -> i64 {
     (real_now - latest_bar_end_ts).max(0) + 3600
 }
 
+/// Body served for `GET /v2/account` by the mock; `None` => 404 (the default,
+/// so every pre-existing test keeps seeing no provider account). Tests run
+/// serially (`--test-threads=1`) and reset it themselves.
+static MOCK_ACCOUNT_BODY: std::sync::Mutex<Option<serde_json::Value>> =
+    std::sync::Mutex::new(None);
+
+fn set_mock_account(body: Option<serde_json::Value>) {
+    *MOCK_ACCOUNT_BODY.lock().unwrap() = body;
+}
+
+/// Resets the mock account on drop so a failing assertion cannot leak a
+/// provider account into later tests.
+struct MockAccountGuard;
+impl Drop for MockAccountGuard {
+    fn drop(&mut self) {
+        set_mock_account(None);
+    }
+}
+
+/// Wire-shape fixture for GET /v2/account (in-process mock; proves daemon
+/// plumbing, not that any real provider account is entitled).
+fn mock_account(id: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut a = serde_json::json!({
+        "id": id,
+        "status": "ACTIVE",
+        "trading_blocked": false,
+        "account_blocked": false,
+        "trade_suspended_by_user": false,
+        "currency": "USD",
+        "equity": "100000",
+        "cash": "100000"
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        a[k] = v.clone();
+    }
+    a
+}
+
 /// Spawn a minimal in-process HTTP server that satisfies the Alpaca paper REST
 /// surface needed by lifecycle tests.  Returns the `http://127.0.0.1:{port}`
 /// base URL to set as `ALPACA_PAPER_BASE_URL`.
@@ -205,10 +243,21 @@ fn lifecycle_legacy_freshness_max_age_secs(latest_bar_end_ts: i64) -> i64 {
 /// Handled routes:
 /// - `GET /v2/account/activities/FILL` → `[]`  (fetch_events polling, always empty)
 async fn start_mock_alpaca_server() -> String {
-    let app = axum::Router::new().route(
-        "/v2/account/activities/FILL",
-        axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
-    );
+    let app = axum::Router::new()
+        .route(
+            "/v2/account/activities/FILL",
+            axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
+        )
+        .route(
+            "/v2/account",
+            axum::routing::get(|| async {
+                use axum::response::IntoResponse;
+                match MOCK_ACCOUNT_BODY.lock().unwrap().clone() {
+                    Some(body) => axum::Json(body).into_response(),
+                    None => StatusCode::NOT_FOUND.into_response(),
+                }
+            }),
+        );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -1556,5 +1605,143 @@ async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provena
     }
     let _ = std::fs::remove_dir_all(&artifact_dir);
 
+    st.stop_for_shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Broker-account entitlement at run start (probe, identity registry, refusal)
+// ---------------------------------------------------------------------------
+
+const ACCT_ID_ENTITLED: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+const ACCT_ID_BLOCKED: &str = "aaaaaaaa-0000-4000-8000-000000000002";
+const ACCT_ID_LIVE_REGISTERED: &str = "aaaaaaaa-0000-4000-8000-000000000003";
+
+async fn start_expecting_refusal(st: &Arc<state::AppState>) -> (StatusCode, serde_json::Value) {
+    let req = authed(Request::builder())
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    (status, parse_json(body))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn start_probes_account_registers_identity_and_binds_admission() {
+    let _guard = MockAccountGuard;
+    set_mock_account(Some(mock_account(ACCT_ID_ENTITLED, serde_json::json!({}))));
+    let st = daemon_state().await;
+    arm(&st).await;
+    start(&st).await;
+
+    let latest = st
+        .broker_account_evidence
+        .latest()
+        .expect("start must record a fresh account observation");
+    assert_eq!(
+        latest.evidence.provider_account_id.as_deref(),
+        Some(ACCT_ID_ENTITLED)
+    );
+    assert_eq!(
+        st.broker_account_evidence.pinned_provider_account_id().as_deref(),
+        Some(ACCT_ID_ENTITLED)
+    );
+    assert!(st
+        .broker_account_evidence
+        .admit(
+            Utc::now(),
+            chrono::Duration::seconds(61),
+            Some(mqk_execution::AssetClass::Equity)
+        )
+        .is_ok());
+
+    // Positive DB signal: the provider account is registered for THIS mode.
+    let registered = mqk_db::fetch_broker_account_authority(
+        st.db.as_ref().unwrap(),
+        &format!("alpaca:{ACCT_ID_ENTITLED}"),
+    )
+    .await
+    .unwrap()
+    .expect("authority row must exist after start");
+    assert_eq!(
+        registered.deployment_mode(),
+        state::DeploymentMode::Paper.as_api_label()
+    );
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn start_refused_when_provider_reports_trading_blocked() {
+    let _guard = MockAccountGuard;
+    set_mock_account(Some(mock_account(
+        ACCT_ID_BLOCKED,
+        serde_json::json!({"trading_blocked": true}),
+    )));
+    let st = daemon_state().await;
+    arm(&st).await;
+    let (status, body) = start_expecting_refusal(&st).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["fault_class"],
+        "runtime.start_refused.broker_account_not_entitled"
+    );
+    assert!(body["error"].as_str().unwrap().contains("account_trading_blocked"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn start_refused_when_account_is_registered_under_another_deployment_mode() {
+    let _guard = MockAccountGuard;
+    set_mock_account(Some(mock_account(
+        ACCT_ID_LIVE_REGISTERED,
+        serde_json::json!({}),
+    )));
+    let st = daemon_state().await;
+    let live = mqk_db::BrokerAccountAuthority::new(
+        "alpaca",
+        ACCT_ID_LIVE_REGISTERED,
+        state::DeploymentMode::LiveShadow.as_api_label(),
+    )
+    .unwrap();
+    mqk_db::verify_or_register_broker_account_authority(
+        st.db.as_ref().unwrap(),
+        &live,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    arm(&st).await;
+    let (status, body) = start_expecting_refusal(&st).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["fault_class"],
+        "runtime.start_refused.broker_account_identity_conflict"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn failed_probe_does_not_refuse_start_and_leaves_admission_unavailable() {
+    let _guard = MockAccountGuard;
+    set_mock_account(None);
+    let st = daemon_state().await;
+    arm(&st).await;
+    start(&st).await;
+    assert!(
+        st.broker_account_evidence.latest().is_none(),
+        "no provider observation may be fabricated when the probe fails"
+    );
+    let refusal = st
+        .broker_account_evidence
+        .admit(
+            Utc::now(),
+            chrono::Duration::seconds(61),
+            Some(mqk_execution::AssetClass::Equity),
+        )
+        .unwrap_err();
+    assert_eq!(refusal.code, "account_evidence_unavailable");
     st.stop_for_shutdown().await;
 }

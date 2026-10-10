@@ -193,13 +193,28 @@ fn lsf02_flatten_on_halt_bypasses_sticky_max_drawdown_halt_via_real_alpaca_adapt
     // AlpacaBrokerAdapter standing in for LiveShadow's real Alpaca-live-
     // base-URL connection -- hermetic: base_url points at the local mock
     // server, never a real Alpaca host.
+    let evidence = mqk_broker_alpaca::AccountEvidenceCell::new();
+    evidence.observe(
+        mqk_broker_alpaca::AccountEntitlementEvidence::from_account_json(&serde_json::json!({
+            "id": "904837e3-3b76-47ec-b432-046db621571b",
+            "status": "ACTIVE",
+            "trading_blocked": false,
+            "account_blocked": false,
+            "trade_suspended_by_user": false
+        })),
+        Utc::now(),
+    );
     let broker = AlpacaBrokerAdapter::new(AlpacaConfig {
         base_url: server.base_url(),
         api_key_id: "test-key".to_string(),
         api_secret_key: "test-secret".to_string(),
         crypto_capability_enabled: false,
         options_mleg_capability_enabled: false,
-    });
+    })
+    // The real adapter admits only against fresh, entitled account evidence.
+    // This in-process fixture stands in for a prior GET /v2/account
+    // observation; it proves gateway plumbing, not real-account entitlement.
+    .with_account_evidence(evidence.clone(), chrono::Duration::seconds(61));
     let gateway = BrokerGateway::for_test(broker, PassGate, risk_gate, PassGate);
 
     // Establish a peak, then breach the configured 10% max-drawdown
