@@ -192,6 +192,4 @@ def run_until_idle(store: FactoryStore, executor: StageExecutor, *, workers: int
             break
         if poll_seconds:
             time.sleep(poll_seconds)
-    if total.errors or total.unresolved_jobs:
-        total.ended = END_ERROR
     return total
