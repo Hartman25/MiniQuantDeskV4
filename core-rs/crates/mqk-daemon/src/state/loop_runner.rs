@@ -1194,11 +1194,11 @@ pub(super) fn spawn_execution_loop(
                                 .unwrap_or_default()
                         };
                         crate::pre_event_flatten::enqueue_pre_event_flatten_closes(
+                            &state_arc,
                             state_arc.deployment_mode(),
                             pool,
                             run_id,
                             &positions_to_check,
-                            &|symbol| crate::decision::flatten_refusal_for_symbol(&state_arc, symbol),
                         )
                         .await;
                     }

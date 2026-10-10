@@ -23,6 +23,8 @@
 //! `MQK_DATABASE_URL=postgres://.../mqk_test cargo test -p mqk-daemon \
 //!  --test scenario_multiasset_flatten_position_class_01 -- --include-ignored --test-threads=1`
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -55,7 +57,11 @@ fn definition(symbol: &str, asset_class: &str) -> InstrumentDefinitionV2 {
         venue: Some("GLOBAL".to_string()),
         currency: "USD".to_string(),
         quote_currency: crypto.then(|| "USD".to_string()),
-        provider_symbols: BTreeMap::new(),
+        provider_symbols: if crypto {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("twelvedata".to_string(), symbol.to_string())])
+        },
         broker_symbols: if crypto {
             BTreeMap::from([("alpaca".to_string(), symbol.to_string())])
         } else {
@@ -116,8 +122,10 @@ async fn db_pool() -> sqlx::PgPool {
 }
 
 async fn state_with(pool: sqlx::PgPool, v2: Option<String>) -> Arc<AppState> {
-    let mut st =
-        AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    let mut st = common::with_canonical_equity_registry(AppState::new_with_db_and_operator_auth(
+        pool,
+        OperatorAuthMode::ExplicitDevNoToken,
+    ));
     st.trading_instrument_registry_v2_path = v2;
     Arc::new(st)
 }
@@ -362,17 +370,15 @@ async fn fl05_pre_event_flatten_skips_a_refused_position_only() {
         ("AAPL".to_string(), QtyMicros::from_whole_units(10).unwrap()),
     ];
 
-    // The production refusal rule, evaluated against a registry-v2 that lists
-    // BTC/USD as crypto, drives the loop's closure.
+    // The production decision, against a registry-v2 that lists BTC/USD as
+    // crypto and the canonical registry that proves AAPL.
     let st = state_with(
         pool.clone(),
         Some(registry_file(vec![definition("BTC/USD", "crypto")])),
     )
     .await;
-    let refuse = |symbol: &str| mqk_daemon::decision::flatten_refusal_for_symbol(&st, symbol);
     let n =
-        enqueue_pre_event_flatten_closes(DeploymentMode::Paper, &pool, run, &positions, &refuse)
-            .await;
+        enqueue_pre_event_flatten_closes(&st, DeploymentMode::Paper, &pool, run, &positions).await;
 
     assert_eq!(n, 1, "only the Equity close is enqueued");
     assert_eq!(outbox_symbols(&pool, run).await, vec!["AAPL".to_string()]);

@@ -660,38 +660,126 @@ pub(crate) fn prove_equity_order_identity(
     )))
 }
 
-/// Why a flatten close for `symbol` cannot be an Equity close, or `None`.
+/// Decide whether `symbol` may receive an Equity-shaped flatten close.
 ///
 /// A flatten close is an Equity-shaped order on the Equity domain's run (no
-/// `asset_class`, `day` time-in-force, whole shares). That is wrong for any
-/// instrument the trading registry-v2 positively lists as non-Equity, so such
-/// a position is refused with a reason instead of being enqueued as a
-/// mislabelled Equity close that the dispatch parser quarantines (fractional
-/// quantity) or the broker rejects. A symbol the registry does not list, or no
-/// readable registry-v2, keeps the historical close, so liquidating an
-/// ordinary Equity position never depends on this registry being available.
-pub fn flatten_refusal_for_symbol(state: &AppState, symbol: &str) -> Option<String> {
-    let path = state
+/// `asset_class`, `day` time-in-force, whole shares), so it is permitted only
+/// on positive proof, never on the absence of a refusal:
+///
+/// 1. When the trading registry-v2 is configured it must be readable, valid
+///    (`validate_registry_v2`), free of the test-only enablement bypass, and
+///    must not list the symbol (compared ignoring case, over every row) as
+///    anything but a single Equity row. Unreadable, invalid or contradictory
+///    content is `Unproven`; a non-Equity listing is `NotEquity`.
+/// 2. The canonical legacy Equity registry (loaded and validated here) must list the
+///    symbol exactly once as an enabled Equity; a non-Equity, disabled, duplicate,
+///    differently-cased, or absent listing, or an unreadable/invalid registry, is
+///    `Unproven` (`NotEquity` when the one listing is a different class).
+///
+/// A symbol's spelling is never used to infer its class.
+pub fn decide_equity_flatten_close(
+    state: &AppState,
+    symbol: &str,
+) -> crate::pre_event_flatten::FlattenCloseDecision {
+    use crate::pre_event_flatten::FlattenCloseDecision;
+
+    let symbol = symbol.trim();
+    let unproven = |reason: String| FlattenCloseDecision::Unproven { reason };
+    if symbol.is_empty() {
+        return unproven("blank position symbol".to_string());
+    }
+
+    if let Some(path) = state
         .trading_instrument_registry_v2_path
         .as_deref()
         .map(str::trim)
-        .filter(|path| !path.is_empty())?;
-    let registry =
-        mqk_md::instrument_registry_v2::load_instrument_registry_v2(std::path::Path::new(path))
-            .ok()?;
-    let symbol = symbol.trim();
-    let instrument = registry
-        .instruments
+        .filter(|path| !path.is_empty())
+    {
+        let registry = match mqk_md::instrument_registry_v2::load_instrument_registry_v2(
+            std::path::Path::new(path),
+        ) {
+            Ok(registry) => registry,
+            Err(err) => {
+                return unproven(format!(
+                    "the configured trading registry-v2 could not be read: {err}"
+                ))
+            }
+        };
+        if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&registry) {
+            return unproven(format!(
+                "the configured trading registry-v2 is invalid: {err}"
+            ));
+        }
+        if registry
+            .instruments
+            .iter()
+            .any(|instrument| instrument.allow_enabled_non_equity_for_testing)
+        {
+            return unproven(
+                "the configured trading registry-v2 carries the test-only enablement bypass"
+                    .to_string(),
+            );
+        }
+        let listed: Vec<_> = registry
+            .instruments
+            .iter()
+            .filter(|instrument| instrument.symbol.trim().eq_ignore_ascii_case(symbol))
+            .collect();
+        match listed.as_slice() {
+            [] => {}
+            [only] if only.asset_class.trim() == "equity" => {}
+            [only] => {
+                return FlattenCloseDecision::NotEquity {
+                    asset_class: only.asset_class.trim().to_string(),
+                }
+            }
+            _ => {
+                return unproven(
+                    "the configured trading registry-v2 lists the symbol more than once"
+                        .to_string(),
+                )
+            }
+        }
+    }
+
+    // The canonical registry is the positive proof. Every row for the symbol
+    // (ignoring case) is inspected so a contradictory second listing can
+    // never be hidden behind a first row that says Equity.
+    let path = &state.instrument_registry_path;
+    let instruments =
+        match mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(path)) {
+            Ok(instruments) => instruments,
+            Err(err) => {
+                return unproven(format!(
+                    "the canonical instrument registry could not be read: {err}"
+                ))
+            }
+        };
+    if let Err(err) = mqk_md::instrument_registry::validate_registry(&instruments) {
+        return unproven(format!(
+            "the canonical instrument registry is invalid: {err}"
+        ));
+    }
+    let listed: Vec<_> = instruments
         .iter()
-        .find(|instrument| instrument.symbol.trim() == symbol)?;
-    let class = instrument.asset_class.trim();
-    (class != "equity").then(|| {
-        format!(
-            "position '{symbol}' is a '{class}' instrument; the flatten close path addresses \
-             the Equity domain run and builds an Equity-shaped order, so it is refused rather \
-             than enqueued as a mislabelled Equity close"
-        )
-    })
+        .filter(|instrument| instrument.symbol.trim().eq_ignore_ascii_case(symbol))
+        .collect();
+    match listed.as_slice() {
+        [] => unproven("it is not listed in the canonical instrument registry".to_string()),
+        [only] if only.asset_class.trim() != "equity" => FlattenCloseDecision::NotEquity {
+            asset_class: only.asset_class.trim().to_string(),
+        },
+        [only] if !only.enabled => unproven(
+            "it is listed in the canonical instrument registry but not enabled".to_string(),
+        ),
+        [only] if only.symbol.trim() != symbol => unproven(
+            "its spelling differs in case from the canonical instrument registry entry".to_string(),
+        ),
+        [_] => FlattenCloseDecision::ProvenEquity,
+        _ => unproven(
+            "the canonical instrument registry lists the symbol more than once".to_string(),
+        ),
+    }
 }
 
 /// The execution domain that owns an order, from its registry-resolved asset
