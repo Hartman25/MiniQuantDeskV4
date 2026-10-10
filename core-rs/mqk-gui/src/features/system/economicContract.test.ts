@@ -37,7 +37,7 @@ test("production economic payloads render without null crashes or false-clear ri
     "/api/v1/portfolio/summary": portfolio,
     "/api/v1/risk/summary": risk,
     "/api/v1/risk/denials": { truth_state: "durable_history", denials: [] },
-    "/api/v1/execution/summary": { has_snapshot: true, active_orders: 0, pending_orders: 0, stuck_orders: 0 },
+    "/api/v1/execution/summary": { has_snapshot: true, active_orders: 0, pending_orders: 0, dispatching_orders: 0, reject_count_today: 0, cancel_replace_count_today: null, avg_ack_latency_ms: null, stuck_orders: 0 },
     "/api/v1/reconcile/status": { truth_state: "never_run", status: "unknown", last_run_at: null, mismatched_positions: 0, mismatched_fills: 0, mismatched_orders: 0, unmatched_broker_events: 0 },
   };
   globalThis.fetch = (async (input) => {

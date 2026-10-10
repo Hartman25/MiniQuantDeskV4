@@ -152,7 +152,7 @@ export function ExecutionScreen({
               { key: "strategy", title: "Strategy", render: (row) => row.strategy_id ?? "—" },
               { key: "status", title: "Status", render: (row) => row.current_status },
               { key: "stage", title: "Stage", render: (row) => row.current_stage },
-              { key: "qty", title: "Qty", render: (row) => `${row.filled_qty}/${row.requested_qty}` },
+              { key: "qty", title: "Qty", render: (row) => `${row.filled_qty ?? "Unavailable"}/${row.requested_qty ?? "Unavailable"}` },
               { key: "age", title: "Age", render: (row) => formatDurationMs(row.age_ms ?? null) },
               { key: "updated", title: "Updated", render: (row) => formatDateTime(row.updated_at) },
               {

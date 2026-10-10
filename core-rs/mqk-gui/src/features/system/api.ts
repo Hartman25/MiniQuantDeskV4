@@ -19,6 +19,7 @@ import { parseEventFeed, parseOperatorTimeline } from "./historyContract";
 import { parseSystemStatus } from "./statusContract";
 import { parsePortfolioSummary, parseRiskSummary, parseReconcileSummary } from "./economicContract";
 import { hasRows } from "./rowContract";
+import { validOperationalPayload } from "./operationalContract";
 import { parseMarketDataQuality, parseOmsOverview, parseTransport } from "./snapshotContracts";
 import {
   enforceRunScopeConsistency,
@@ -424,7 +425,12 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     const status = parseSystemStatus(statusProbe.data);
     statusProbe = status === null ? { ...statusProbe, ok: false, data: undefined, error: "system_status_contract_invalid" } : { ...statusProbe, data: status };
   }
-  const healthProbe = await fetchJsonCandidates<MetadataSummary>(["/api/v1/system/metadata"]);
+  const operationalProbe = async <T,>(kind: Parameters<typeof validOperationalPayload>[0], path: string): Promise<EndpointFetchResult<T>> => {
+    const result = await fetchJsonCandidate<T>(path);
+    if (kind === "executionSummary" && result.ok && (result.data as ExecutionSummary | null)?.has_snapshot === false) return { ...result, ok: false, data: undefined, error: "no_execution_snapshot" };
+    return result.ok && validOperationalPayload(kind, result.data) ? result : { ...result, ok: false, data: undefined, error: result.error ?? `${kind}_contract_invalid` };
+  };
+  const healthProbe = await operationalProbe<MetadataSummary>("metadata", "/api/v1/system/metadata");
 
   // Extract legacy status only when the statusProbe itself resolved via the
   // legacy path.  Do NOT fire a second fetch — canonical is preferred and if
@@ -441,7 +447,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const [probes, autonomousReadinessR, multiSymbolDispatchSummaryR, dryRunStrategyStatusR] = await Promise.all([
     Promise.all([
     fetchJsonCandidates<PreflightStatus>(["/api/v1/system/preflight"]),
-    fetchJsonCandidates<ExecutionSummary>(["/api/v1/execution/summary"]),
+    operationalProbe<ExecutionSummary>("executionSummary", "/api/v1/execution/summary"),
     // Execution orders: two-step fetch to distinguish "no snapshot" from "not mounted".
     // HTTP 503 = OMS loop has no snapshot → keep canonical path as missing (record in
     //   missingEndpoints) so isMissingPanelTruth fires and the execution panel blocks.
@@ -449,7 +455,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // HTTP 404 / network error = canonical not mounted → fall through to /v1/trading/orders.
     (async (): Promise<EndpointFetchResult<ExecutionOrderRow[] | LegacyTradingOrdersResponse>> => {
       const canonical = await fetchJsonCandidate<ExecutionOrderRow[]>("/api/v1/execution/orders");
-      if (canonical.ok) return canonical;
+      if (canonical.ok) return validOperationalPayload("executionOrders", canonical.data) ? canonical : { ...canonical, ok: false, data: undefined, error: "execution_orders_contract_invalid" };
       if (!canTryLegacyRead(canonical)) return canonical;
       return fetchJsonCandidate<LegacyTradingOrdersResponse>("/v1/trading/orders");
     })(),
@@ -648,7 +654,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       const r = await fetchJsonCandidate<SystemTopologyWrapper>("/api/v1/system/topology");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
       const w = r.data as SystemTopologyWrapper;
-      if (w.truth_state !== "active") return { ok: false, endpoint: r.endpoint, error: "topology_unavailable" };
+      if (!validOperationalPayload("topology", w)) return { ok: false, endpoint: r.endpoint, error: "topology_unavailable_or_invalid" };
       return { ok: true, endpoint: r.endpoint, data: { updated_at: w.updated_at, services: w.services as ServiceTopology["services"] } };
     })(),
     (async (): Promise<EndpointFetchResult<TransportSummary>> => {
@@ -681,14 +687,14 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       const data = parseAlertTriage(r.data);
       return data === null ? { ok: false, endpoint: r.endpoint, error: "alert_triage_contract_invalid" } : { ok: true, endpoint: r.endpoint, data };
     })(),
-    fetchJsonCandidates<SessionStateSummary>(["/api/v1/system/session"]),
-    fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
+    operationalProbe<SessionStateSummary>("session", "/api/v1/system/session"),
+    operationalProbe<ConfigFingerprintSummary>("config", "/api/v1/system/config-fingerprint"),
     (async (): Promise<EndpointFetchResult<MarketDataQualitySummary>> => {
       const result = await fetchJsonCandidate<unknown>("/api/v1/market-data/quality");
       const data = result.ok ? parseMarketDataQuality(result.data) : null;
       return data ? { ...result, data } : { ...result, ok: false, data: undefined, error: result.error ?? "market_data_quality_contract_invalid" };
     })(),
-    fetchJsonCandidates<RuntimeLeadershipSummary>(["/api/v1/system/runtime-leadership"]),
+    operationalProbe<RuntimeLeadershipSummary>("runtime", "/api/v1/system/runtime-leadership"),
     // audit/artifacts: daemon returns {canonical_route, truth_state, backend, rows}
     // where each row is one run from the runs table. "backend_unavailable" means
     // durable artifact history is unavailable and must fail closed.

@@ -258,7 +258,7 @@ export interface ControlStationPortfolioSection {
   /** Active-session execution truth (execution panel authority) — a distinct source from the broker snapshot above. */
   activeSessionOrderCount: number;
   pendingSessionOrderCount: number;
-  stuckSessionOrderCount: number;
+  stuckSessionOrderCount: number | null;
 }
 
 function buildPortfolioSection(model: SystemModel): ControlStationPortfolioSection {
@@ -269,7 +269,7 @@ function buildPortfolioSection(model: SystemModel): ControlStationPortfolioSecti
     brokerOpenOrderCount: model.openOrders.length,
     activeSessionOrderCount: model.executionSummary.active_orders,
     pendingSessionOrderCount: model.executionSummary.pending_orders,
-    stuckSessionOrderCount: model.executionSummary.stuck_orders,
+    stuckSessionOrderCount: model.omsOverview.stuck_orders,
   };
 }
 

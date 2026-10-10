@@ -164,7 +164,7 @@ export function ControlStationScreen({ model }: { model: SystemModel }) {
               <div className="metric-list compact-list">
                 <div><span>Active orders</span><strong>{vm.portfolio.activeSessionOrderCount}</strong></div>
                 <div><span>Pending orders</span><strong>{vm.portfolio.pendingSessionOrderCount}</strong></div>
-                <div><span>Stuck orders</span><strong className={vm.portfolio.stuckSessionOrderCount > 0 ? "val-warn" : "val-ok"}>{vm.portfolio.stuckSessionOrderCount}</strong></div>
+                <div><span>Stuck orders</span><strong className={vm.portfolio.stuckSessionOrderCount === null ? "val-muted" : vm.portfolio.stuckSessionOrderCount > 0 ? "val-warn" : ""}>{vm.portfolio.stuckSessionOrderCount ?? "Unavailable"}</strong></div>
               </div>
             </TruthGatedSection>
           </div>

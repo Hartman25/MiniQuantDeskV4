@@ -26,7 +26,7 @@ const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequireme
   // The 503→missingEndpoints path resolves that ambiguity; only execution_orders being
   // absent should fire no_snapshot.  A single-item hint collapses every() to a simple
   // "is this endpoint missing?" check.
-  execution: { hints: ["/execution/orders"] },
+  execution: { hints: ["/execution/orders", "/execution/summary"], missingMode: "any" },
   // risk_denials IIFE returns ok: false when truth_state === "no_snapshot"
   // (execution loop not running), landing /risk/denials in missingEndpoints.
   // /risk/summary always returns HTTP 200 (even has_snapshot=false), so it

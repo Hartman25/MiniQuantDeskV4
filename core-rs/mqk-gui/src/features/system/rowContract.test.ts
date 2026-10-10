@@ -7,7 +7,9 @@ test("malformed row wrappers fail their own probes without erasing independent a
   const original = globalThis.fetch;
   const paths = ["/api/v1/audit/operator-actions", "/api/v1/audit/artifacts", "/api/v1/strategy/summary",
     "/api/v1/strategy/suppressions", "/api/v1/system/config-diffs", "/api/v1/risk/denials", "/api/v1/reconcile/mismatches",
-    "/api/v1/portfolio/positions", "/api/v1/portfolio/orders/open", "/api/v1/portfolio/fills"];
+    "/api/v1/portfolio/positions", "/api/v1/portfolio/orders/open", "/api/v1/portfolio/fills",
+    "/api/v1/execution/summary", "/api/v1/execution/orders", "/api/v1/system/session", "/api/v1/system/config-fingerprint",
+    "/api/v1/system/metadata", "/api/v1/system/runtime-leadership", "/api/v1/system/topology"];
   try {
     for (const malformed of [null, {}, { truth_state: "active", rows: {} }, { truth_state: "future", rows: [], denials: [] },
       { truth_state: "active", snapshot_state: "active", rows: [{ symbol: {} }], denials: [{}] }]) {

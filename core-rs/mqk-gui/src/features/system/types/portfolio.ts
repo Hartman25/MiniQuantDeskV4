@@ -29,9 +29,9 @@ export interface OpenOrderRow {
   side: string;
   status: string;
   broker_order_id: string | null;
-  requested_qty: number;
+  requested_qty: number | null;
   /** null — partial fill quantity is not tracked in the broker snapshot. */
-  filled_qty?: number;
+  filled_qty?: number | null;
   entered_at: string;
 }
 

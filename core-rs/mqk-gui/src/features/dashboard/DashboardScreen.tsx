@@ -273,7 +273,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
                     <div key={order.internal_order_id} className="list-row">
                       <strong>{order.symbol}</strong>
                       <span>{order.status}</span>
-                      <span>{order.filled_qty}/{order.requested_qty}</span>
+                      <span>{order.filled_qty ?? "Unavailable"}/{order.requested_qty ?? "Unavailable"}</span>
                     </div>
                   ))}
                 </div>

@@ -5,13 +5,14 @@
 import type { EnvironmentMode, HealthState, OmsState, Severity } from "./core";
 
 export interface ExecutionSummary {
+  has_snapshot?: boolean;
   active_orders: number;
   pending_orders: number;
   dispatching_orders: number;
   reject_count_today: number;
-  cancel_replace_count_today: number;
+  cancel_replace_count_today: number | null;
   avg_ack_latency_ms: number | null;
-  stuck_orders: number;
+  stuck_orders: number | null;
 }
 
 export interface ExecutionOrderRow {
@@ -24,8 +25,8 @@ export interface ExecutionOrderRow {
   side?: "buy" | "sell";
   /** null — order type is not captured at OMS snapshot level. */
   order_type?: "market" | "limit" | "stop" | "stop_limit";
-  requested_qty: number;
-  filled_qty: number;
+  requested_qty: number | null;
+  filled_qty: number | null;
   current_status: string;
   current_stage: string;
   /** null — per-order creation time is not in the OMS snapshot. */
