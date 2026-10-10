@@ -111,7 +111,10 @@ def formalize_entry(entry: Mapping[str, Any], ledger: Mapping[str, Any]) -> dict
     matches = extract(corpus)
     direction, dcls = parse_direction(f.get("direction", ""))
     asset, acls = parse_asset_class(f.get("assets", ""))
-    tags = data_tags(f.get("data_needed", ""), corpus)
+    # The catalog's own data column is the declared requirement. Free-text keywords decide only when no data column exists
+    # (a diagnostic that merely MENTIONS news is not thereby a news-dependent strategy).
+    declared = f.get("data_needed", "")
+    tags = data_tags(declared) if declared.strip() else data_tags(corpus)
     is_control = entry["entry_kind"] == "control"
     has_diag = bool(_DIAGNOSTIC.search(_text(hyp, rule) or title))
     has_rule = bool(_RULE.search(rule))

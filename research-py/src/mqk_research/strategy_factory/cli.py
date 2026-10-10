@@ -101,6 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("stage")
     r.add_argument("--reason", required=True)
 
+    im = sub.add_parser("implementation", help="controlled implementation workflow (never generates or admits code)")
+    isub = im.add_subparsers(dest="icmd", required=True)
+    x = isub.add_parser("request", help="deterministic implementation request for a recognized, fully specified idea that has no engine")
+    x.add_argument("intake_id")
+    x = isub.add_parser("check", help="evidence-based admission readiness of a named native strategy")
+    x.add_argument("strategy_id")
+
     a = sub.add_parser("ai", help="AI backend checks")
     asub = a.add_subparsers(dest="acmd", required=True)
     x = asub.add_parser("probe", help="probe a local Ollama model and run the golden extraction conformance check")
@@ -131,6 +138,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.cmd == "import-catalog":
             prof = CatalogProfile.from_json(json.loads(args.profile.read_text(encoding="utf-8"))) if args.profile else None
             _emit([svc.import_catalog(f, prof) for f in args.files])
+        elif args.cmd == "implementation":
+            from mqk_research.strategy_factory import implementation
+            if args.icmd == "request":
+                idea = svc.store.latest_ideas().get(args.intake_id)
+                req = implementation.build_request(idea) if idea else None
+                if req is None:
+                    raise ValueError("no implementation request: the idea is unknown, not NEEDS_IMPLEMENTATION, or not fully specified")
+                _emit(req)
+            else:
+                rep = implementation.admission_checklist(_repo_root(), args.strategy_id)
+                _emit(rep)
+                return EXIT_OK if rep["ready"] else EXIT_BLOCKED
         elif args.cmd == "scout":
             _emit(svc.scout(args.urls, json.loads(args.policy.read_text(encoding="utf-8"))))
         elif args.cmd == "intake":

@@ -16,6 +16,7 @@ T_ST = "tests/test_strategy_factory_store.py"
 T_KN = "tests/test_strategy_factory_knowledge.py"
 T_CP = "tests/test_strategy_factory_campaign.py"
 T_SC = "tests/test_strategy_factory_scout.py"
+T_IM = "tests/test_strategy_factory_implementation.py"
 T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
 CARGO = ["cargo:-p", "mqk-strategy", "--lib", "grammar_rule_v1"]
@@ -132,6 +133,13 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("RS-1 terminal trials re-evaluated on resume", "experiments/m1_native_trend_campaign/run_batch.py", "if \"economic_eval_id\" in rec or \"failed\" in rec:\n        return True", "if False:\n        return True", T_E2E),
         ("RS-2 orphaned attempt left started", "experiments/m1_native_trend_campaign/run_batch.py", "store.finalize_attempt(a[\"attempt_id\"], status=\"failed\", failure_reason=INTERRUPTED_REASON)", "pass", T_E2E),
         ("RS-3 succeeded attempt re-run when index lacks it", "experiments/m1_native_trend_campaign/run_batch.py", "    if done:\n        a = done[-1]", "    if False:\n        a = done[-1]", T_E2E),
+    ],
+    "impl": [
+        ("IM-1 request issued for an under-specified idea", SRC + "implementation.py", "if tid is None or tpl.get(\"missing_params\"):", "if tid is None:", [T_IM]),
+        ("IM-2 operator authorization not required", SRC + "implementation.py", "put(\"explicit_operator_authorization\", ok_auth,", "put(\"explicit_operator_authorization\", True,", [T_IM]),
+        ("IM-3 request claims to be executable", SRC + "implementation.py", "\"executable_now\": False", "\"executable_now\": True", [T_IM]),
+        ("IM-4 rust registration not required", SRC + "implementation.py", "put(\"registered_in_rust\", registered,", "put(\"registered_in_rust\", True,", [T_IM]),
+        ("IM-5 request issued for any disposition", SRC + "implementation.py", "if idea.get(\"disposition\") != \"NEEDS_IMPLEMENTATION\":", "if False:", [T_IM]),
     ],
     "scout": [
         ("SCT-1 robots.txt ignored", SRC + "scout.py", "if not self._allowed_by_robots(src, url):", "if False:", [T_SC]),
