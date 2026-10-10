@@ -926,3 +926,86 @@ def test_duplicate_trade_id_via_csv_loading_path_fails_closed(tmp_path: Path):
         write_sizing_drawdown_report(
             strategy_equity_csv=eq_path, account_equity_csv=None, trades_csv=trades_path, out_json=out_path,
         )
+
+
+# Independent-review completion: UTC, finite evidence, and active-fill accounting.
+def test_ir_underwater_sorts_by_utc_instant_not_local_timestamp_text():
+    eq = pd.DataFrame({
+        "ts": ["2026-01-01T10:00:00-05:00", "2026-01-01T11:00:00Z", "2026-01-01T12:00:00Z"],
+        "equity": [110.0, 100.0, 90.0],
+    })
+    assert sdr._time_underwater_seconds(eq) == 4 * 3600.0
+    normalized = eq.assign(ts=pd.to_datetime(eq["ts"], utc=True))
+    assert sdr._time_underwater_seconds(normalized) == 4 * 3600.0
+
+
+def test_ir_equivalent_timezone_offsets_do_not_change_economic_evidence_identity():
+    curve_utc = pd.DataFrame({"ts": ["2026-01-01T11:00:00Z", "2026-01-01T12:00:00Z"], "equity": [100., 90.]})
+    curve_offset = pd.DataFrame({"ts": ["2026-01-01T12:00:00+01:00", "2026-01-01T13:00:00+01:00"], "equity": [100., 90.]})
+    r1 = compute_sizing_drawdown_report(strategy_equity=curve_utc, account_equity=None, trades=[])
+    r2 = compute_sizing_drawdown_report(strategy_equity=curve_offset, account_equity=None, trades=[])
+    assert r1["input_evidence_hash"]["strategy_equity"] == r2["input_evidence_hash"]["strategy_equity"]
+    assert r1["report_id"] == r2["report_id"]
+
+
+def test_ir_derived_notional_overflow_must_not_serialize_infinity():
+    eq = _curve([100., 90.])
+    with pytest.raises(SizingReportError, match="non-finite|overflow|finite positive"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[_trade(qty=1e308, entry_price=100.)])
+
+
+def test_ir_aggregate_of_individually_finite_values_cannot_overflow_report():
+    eq = _curve([100., 90.])
+    a = _trade(trade_id="A1", qty=1e308, entry_price=1.0)
+    b = _trade(trade_id="B1", qty=1e308, entry_price=1.0)
+    with pytest.raises(SizingReportError, match="non-finite|overflow|finite positive"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[a, b])
+
+
+def test_ir_tiny_positive_notional_still_counts_as_open_position():
+    eq = _curve([100., 90.])
+    rep = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None,
+        trades=[_trade(qty=1e-12, entry_price=100.)])
+    assert rep["trades"]["max_concurrent_positions"] == 1
+    assert rep["trades"]["concentration_pct_at_max_concurrency"] == 1.0
+
+
+def test_ir_zero_duration_fill_cannot_remain_open_after_batched_events():
+    eq = _curve([100., 90.])
+    rep = compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None,
+        trades=[_trade(entry_ts="2026-01-01T00:00:00Z", exit_ts="2026-01-01T00:00:00Z", exit_price=100.)])
+    assert rep["trades"]["max_concurrent_positions"] == 0
+
+
+def test_ir_cyclic_partial_fill_group_reference_is_rejected():
+    eq = _curve([100., 90.])
+    a = _trade(trade_id="A", partial_fill_of="B")
+    b = _trade(trade_id="B", partial_fill_of="A")
+    with pytest.raises(SizingReportError, match="root fill"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[a, b])
+
+
+def test_ir_nested_partial_fill_chain_is_rejected_not_double_counted():
+    eq = _curve([100., 90.])
+    root = _trade(trade_id="A")
+    child = _trade(trade_id="B", partial_fill_of="A")
+    grandchild = _trade(trade_id="C", partial_fill_of="B")
+    with pytest.raises(SizingReportError, match="root fill"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[root, child, grandchild])
+
+
+def test_ir_true_is_not_a_valid_unit_multiplier():
+    with pytest.raises(SizingReportError, match="multiplier"):
+        _trade(multiplier=True).validate()
+
+
+@pytest.mark.parametrize("field,value", [("trade_id", 123), ("symbol", 456)])
+def test_ir_non_string_trade_identifiers_are_controlled_refusals(field, value):
+    with pytest.raises(SizingReportError, match="non-empty string"):
+        _trade(**{field: value}).validate()
+
+
+def test_ir_invalid_equity_numeric_type_raises_report_specific_error():
+    eq = pd.DataFrame({"ts": ["2026-01-01T00:00:00Z"], "equity": ["not-a-number"]})
+    with pytest.raises(SizingReportError, match="non-numeric equity"):
+        compute_sizing_drawdown_report(strategy_equity=eq, account_equity=None, trades=[])

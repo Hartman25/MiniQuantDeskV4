@@ -148,14 +148,14 @@ class TradeRecord:
                 f"trade {self.trade_id}: unsupported currency {self.currency!r}; "
                 f"only {_SUPPORTED_CURRENCY!r} is supported (no conversion)"
             )
-        if self.multiplier != _SUPPORTED_MULTIPLIER:
+        if isinstance(self.multiplier, bool) or not isinstance(self.multiplier, (int, float)) or not math.isfinite(float(self.multiplier)) or self.multiplier != _SUPPORTED_MULTIPLIER:
             raise SizingReportError(
                 f"trade {self.trade_id}: unsupported instrument multiplier {self.multiplier!r}; "
                 f"only {_SUPPORTED_MULTIPLIER!r} is supported"
             )
-        if not self.trade_id or not self.trade_id.strip():
+        if not isinstance(self.trade_id, str) or not self.trade_id.strip():
             raise SizingReportError("trade_id must be a non-empty string")
-        if not self.symbol or not self.symbol.strip():
+        if not isinstance(self.symbol, str) or not self.symbol.strip():
             raise SizingReportError(f"trade {self.trade_id}: symbol must be a non-empty string")
         if self.side not in ("long", "short"):
             raise SizingReportError(f"trade {self.trade_id}: unsupported side {self.side!r}")
@@ -229,7 +229,10 @@ def _require_equity_columns(eq: pd.DataFrame, *, label: str) -> None:
         raise SizingReportError(f"{label} equity curve must contain 'ts' and 'equity' columns")
     if len(eq) == 0:
         raise SizingReportError(f"{label} equity curve has zero rows — at least one observation is required")
-    equity_values = eq["equity"].to_numpy(dtype=np.float64)
+    try:
+        equity_values = eq["equity"].to_numpy(dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SizingReportError(f"{label} equity curve has non-numeric equity values: {exc}") from exc
     if not np.all(np.isfinite(equity_values)):
         raise SizingReportError(f"{label} equity curve contains NaN/Infinity — every observation must be finite")
 
@@ -249,16 +252,18 @@ def _require_equity_columns(eq: pd.DataFrame, *, label: str) -> None:
 
 
 def _time_underwater_seconds(eq: pd.DataFrame) -> Optional[float]:
-    """Longest span between a new equity peak and the point equity recovers to
-    (or exceeds) that peak — measured through the recovery observation
-    itself, not just the last strictly-underwater sample before it.
-    Still-underwater-at-series-end counts up to the last observation;
-    recovery is never assumed."""
+    """Longest time from a prior equity peak until recovery, or the last
+    available observation when still underwater. Compare UTC instants,
+    never lexical timestamp strings: valid offsets need not sort by local
+    clock display order.
+    """
     if len(eq) < 2:
         return None
-    e = eq.sort_values("ts", kind="mergesort").reset_index(drop=True)
+    e = eq.copy()
+    e["ts"] = pd.to_datetime(e["ts"], utc=True)
+    e = e.sort_values("ts", kind="mergesort").reset_index(drop=True)
     curve = e["equity"].to_numpy(dtype=np.float64)
-    ts = pd.to_datetime(e["ts"], utc=True).to_numpy()
+    ts = e["ts"].to_numpy()
 
     peak = curve[0]
     peak_ts = ts[0]
@@ -267,9 +272,6 @@ def _time_underwater_seconds(eq: pd.DataFrame) -> Optional[float]:
     for i in range(1, len(curve)):
         if curve[i] >= peak:
             if was_underwater:
-                # Recovery instant: the full episode ran from the prior peak
-                # to THIS observation — not just the last strictly-underwater
-                # sample seen before it.
                 worst_seconds = max(worst_seconds, float((ts[i] - peak_ts) / np.timedelta64(1, "s")))
             peak = curve[i]
             peak_ts = ts[i]
@@ -291,25 +293,32 @@ def _aggregate_partial_fills(trades: List[TradeRecord]) -> Dict[str, float]:
 
 
 def _validate_trade_groups(trades: List[TradeRecord]) -> None:
-    """Fail-closed structural checks the mathematical functions below rely
-    on silently: unique fill ids, no orphan `partial_fill_of` reference,
-    and internally-consistent symbol/side within one logical position."""
+    """Each fill id is unique and each partial fill references an actual
+    root fill, not a second child or a cycle. The root's symbol and side
+    define the logical position for every child.
+    """
     seen_ids: Dict[str, TradeRecord] = {}
-    for t in trades:
-        if t.trade_id in seen_ids:
-            raise SizingReportError(f"duplicate trade_id {t.trade_id!r}: fill ids must be unique")
-        seen_ids[t.trade_id] = t
+    for trade in trades:
+        if trade.trade_id in seen_ids:
+            raise SizingReportError(f"duplicate trade_id {trade.trade_id!r}: fill ids must be unique")
+        seen_ids[trade.trade_id] = trade
 
-    all_ids = set(seen_ids.keys())
     groups: Dict[str, List[TradeRecord]] = {}
-    for t in trades:
-        if t.partial_fill_of is not None and t.partial_fill_of not in all_ids:
-            raise SizingReportError(
-                f"trade {t.trade_id}: partial_fill_of={t.partial_fill_of!r} does not reference any "
-                "existing trade_id in this trade list (orphan group)"
-            )
-        key = t.partial_fill_of or t.trade_id
-        groups.setdefault(key, []).append(t)
+    for trade in trades:
+        if trade.partial_fill_of is not None:
+            root = seen_ids.get(trade.partial_fill_of)
+            if root is None:
+                raise SizingReportError(
+                    f"trade {trade.trade_id}: partial_fill_of={trade.partial_fill_of!r} "
+                    "does not reference an existing trade_id (orphan group)"
+                )
+            if root.partial_fill_of not in (None, root.trade_id):
+                raise SizingReportError(
+                    f"trade {trade.trade_id}: partial_fill_of must reference a root fill, "
+                    f"not a nested/cyclic group member {trade.partial_fill_of!r}"
+                )
+        key = trade.partial_fill_of or trade.trade_id
+        groups.setdefault(key, []).append(trade)
 
     for key, fills in groups.items():
         symbols = {f.symbol for f in fills}
@@ -321,74 +330,72 @@ def _validate_trade_groups(trades: List[TradeRecord]) -> None:
 
 
 def _concentration_and_concurrency(trades: List[TradeRecord]) -> Dict[str, Any]:
-    """Max concurrent open LOGICAL positions (partial fills of the same
-    position collapse to one, via `partial_fill_of`), and the largest
-    single-position share of total open notional *at the moment(s)
-    concurrency peaks* — not the global max share, which is trivially 1.0
-    whenever a lone position ever exists.
-
-    CAUSAL per-fill accumulation (FW-B3-R2): a logical position's exposure
-    is a running sum of its OWN fills, each contributing its own notional
-    only from its own entry_ts onward (and removing it again at its own
-    exit_ts, if closed) — never the group's full eventual notional
-    backdated to the group's earliest fill. A later add to an existing
-    position does not retroactively inflate its exposure at an earlier
-    point in time. Entry-notional-based throughout (this is explicitly NOT
-    a mark-to-market valuation).
-
-    Events at the exact same timestamp are applied as one batch before a
-    snapshot is taken (never one snapshot per individual event at a single
-    instant); within a batch, closes are applied before opens, matching
-    the existing tie-break convention. A logical position with any fill
-    still open never drops out of `open_notional` (partial closes reduce
-    its running notional but do not end it)."""
+    """Peak number of simultaneously active *logical positions* and their
+    maximum entry-notional share at that peak. Each fill contributes only
+    from its entry instant until its exit. Track active fill IDs instead
+    of subtracting floating deltas: tiny positive positions never disappear
+    under an arbitrary epsilon and cancellation cannot create ghost fills.
+    A zero-duration fill does not occupy any positive time interval.
+    """
     if not trades:
         return {"max_concurrent_positions": 0, "concentration_pct_at_max_concurrency": None}
 
-    # (timestamp, kind, key, delta)  kind: 0=remove (close), 1=add (open) —
-    # close sorts before open at an identical timestamp, same convention
-    # as before.
+    # (UTC timestamp, kind, group id, fill id, entry notional)
+    # 0=close, 1=open; same-time actions form a single atomic snapshot.
     events: List[Any] = []
-    for t in trades:
-        key = t.partial_fill_of or t.trade_id
-        events.append((pd.Timestamp(t.entry_ts), 1, key, t.notional_usd))
-        if t.is_closed:
-            events.append((pd.Timestamp(t.exit_ts), 0, key, -t.notional_usd))
-    events.sort(key=lambda e: (e[0], e[1]))
+    for trade in trades:
+        start = pd.Timestamp(trade.entry_ts).tz_convert("UTC")
+        end = pd.Timestamp(trade.exit_ts).tz_convert("UTC") if trade.is_closed else None
+        if end is not None and end == start:
+            continue  # no exposure during any positive-duration interval
+        key = trade.partial_fill_of or trade.trade_id
+        events.append((start, 1, key, trade.trade_id, trade.notional_usd))
+        if end is not None:
+            events.append((end, 0, key, trade.trade_id, trade.notional_usd))
+    events.sort(key=lambda ev: (ev[0], ev[1], ev[2], ev[3]))
 
-    _EPS = 1e-9
-    open_notional: Dict[str, float] = {}
+    active: Dict[str, Dict[str, float]] = {}
     max_concurrent = 0
     best_share_at_max: Optional[float] = None
-
     i = 0
     while i < len(events):
-        batch_ts = events[i][0]
+        instant = events[i][0]
         j = i
-        while j < len(events) and events[j][0] == batch_ts:
-            _, _, key, delta = events[j]
-            open_notional[key] = open_notional.get(key, 0.0) + delta
-            if abs(open_notional[key]) <= _EPS:
-                del open_notional[key]
+        while j < len(events) and events[j][0] == instant:
+            _, kind, key, fill_id, notional = events[j]
+            if kind == 0:
+                group = active.get(key)
+                if group is not None:
+                    group.pop(fill_id, None)
+                    if not group:
+                        del active[key]
+            else:
+                active.setdefault(key, {})[fill_id] = notional
             j += 1
         i = j
 
-        concurrency = len(open_notional)
-        if concurrency > 0:
-            total = sum(open_notional.values())
-            share = (max(open_notional.values()) / total) if total > 0 else None
-        else:
-            share = None
-
+        concurrency = len(active)
+        if concurrency == 0:
+            continue
+        try:
+            group_amounts = [math.fsum(group.values()) for group in active.values()]
+            total = math.fsum(group_amounts)
+        except OverflowError as exc:
+            raise SizingReportError("concurrent entry notionals overflow finite arithmetic") from exc
+        if not math.isfinite(total) or total <= 0:
+            raise SizingReportError("concurrent entry notionals must have a finite positive total")
+        share = max(group_amounts) / total
+        if not math.isfinite(share):
+            raise SizingReportError("concurrent concentration is non-finite")
         if concurrency > max_concurrent:
             max_concurrent = concurrency
             best_share_at_max = share
-        elif concurrency == max_concurrent and concurrency > 0 and share is not None:
-            best_share_at_max = share if best_share_at_max is None else max(best_share_at_max, share)
+        elif concurrency == max_concurrent:
+            best_share_at_max = max(best_share_at_max, share)
 
     return {
         "max_concurrent_positions": max_concurrent,
-        "concentration_pct_at_max_concurrency": float(best_share_at_max) if best_share_at_max is not None else None,
+        "concentration_pct_at_max_concurrency": best_share_at_max,
     }
 
 
@@ -421,15 +428,19 @@ def _trade_content_hash(trades: List[TradeRecord]) -> Optional[str]:
 
 
 def _equity_curve_content_hash(eq: Optional[pd.DataFrame]) -> Optional[str]:
-    """Canonical over normalized UTC instant/value pairs, sorted by
-    timestamp — independent of the incoming row order and of superficial
-    timestamp string-format differences that represent the identical
-    instant (e.g. a trailing "Z" vs "+00:00")."""
+    """Canonical hash over UTC instants and equity values. Row order,
+    superficial timestamp syntax, and an equivalent timezone-offset
+    representation do not manufacture different economic evidence.
+    """
     if eq is None or not len(eq):
         return None
     records = sorted(
-        ({"ts": pd.Timestamp(row["ts"]).isoformat(), "equity": float(row["equity"])} for _, row in eq.iterrows()),
-        key=lambda r: r["ts"],
+        (
+            {"ts": pd.Timestamp(row["ts"]).tz_convert("UTC").isoformat(),
+             "equity": float(row["equity"])}
+            for _, row in eq.iterrows()
+        ),
+        key=lambda row: row["ts"],
     )
     return sha256_json(records)
 
@@ -538,6 +549,13 @@ def compute_sizing_drawdown_report(
             "reason": "requires a multi-instrument joint price history; not computed from a single-strategy trade list",
         },
     }
+    # Individual finite inputs can overflow when multiplied/aggregated;
+    # a report with a NaN/Infinity economic value is not credible evidence.
+    # The not_evaluable metric markers above remain legitimate JSON objects.
+    try:
+        json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (ValueError, OverflowError, TypeError) as exc:
+        raise SizingReportError(f"report contains non-finite or non-serializable derived evidence: {exc}") from exc
     report["report_id"] = sha256_json({k: v for k, v in report.items() if k != "report_id"})
     return report
 
