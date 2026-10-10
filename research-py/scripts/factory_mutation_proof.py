@@ -17,6 +17,7 @@ T_KN = "tests/test_strategy_factory_knowledge.py"
 T_CP = "tests/test_strategy_factory_campaign.py"
 T_SC = "tests/test_strategy_factory_scout.py"
 T_SF = "tests/test_strategy_factory_scheduler_faults.py"
+T_AU = "tests/test_strategy_factory_authority_truth.py"
 T_IM = "tests/test_strategy_factory_implementation.py"
 T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
@@ -153,6 +154,15 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("SCT-9 scripts kept in extracted text", SRC + "scout.py", "SKIP = {\"script\", \"style\", \"iframe\", \"object\", \"embed\", \"noscript\", \"template\", \"svg\", \"canvas\"}", "SKIP = set()", [T_SC]),
         ("SCT-10 access-controlled robots treated as open", SRC + "scout.py", "rp.disallow_all = True", "rp.parse([])", [T_SC]),
         ("SCT-11 retrieval time enters identity", SRC + "scout.py", "\"source\": {\"filename\": f\"scout-{source_id}\", \"format\": \"web\", \"sha256\": sha256_bytes(canonical_json([r[\"sha256\"] for r in records]).encode(\"utf-8\")),", "\"source\": {\"filename\": f\"scout-{source_id}\", \"format\": \"web\", \"sha256\": sha256_bytes(canonical_json([r[\"retrieved_at\"] for r in records]).encode(\"utf-8\")),", [T_SC]),
+    ],
+    "authority": [
+        ("AU-1 exposed development declared promotion-eligible", SRC + "contracts.py", "return {\"promotion_eligible\": False, \"promotion_readiness\": \"NOT_ESTABLISHED\"}", "return {\"promotion_eligible\": True, \"promotion_readiness\": \"NOT_ESTABLISHED\"}", [T_AU]),
+        ("AU-2 synthetic declared promotion-eligible", SRC + "contracts.py", "return {\"promotion_eligible\": False, \"promotion_readiness\": \"NOT_ELIGIBLE_SYNTHETIC\"}", "return {\"promotion_eligible\": True, \"promotion_readiness\": \"NOT_ELIGIBLE_SYNTHETIC\"}", [T_AU]),
+        ("AU-3 report trusts a stored flag", SRC + "reporting.py", "**promotion_view(decl[\"evidence_grade\"][\"grade\"]),", "\"promotion_eligible\": decl[\"factory\"][\"promotion_eligible\"], \"promotion_readiness\": decl[\"factory\"][\"promotion_readiness\"],", [T_AU]),
+        ("AU-4 status reads not-synthetic as eligible", SRC + "status.py", "**promotion_view(c[\"evidence_grade\"]), \"declaration_sha256\"", "\"promotion_eligible\": c[\"evidence_grade\"] != \"SYNTHETIC_DIAGNOSTIC\", \"promotion_readiness\": \"x\", \"declaration_sha256\"", [T_AU]),
+        ("AU-5 declaration eligibility hard-coded true", SRC + "campaign.py", "**promotion_view(spec[\"evidence_grade\"]),", "\"promotion_eligible\": True,", [T_AU]),
+        ("AU-6 Factory claims the Paper runtime state", SRC + "contracts.py", "\"paper\": \"NOT_TOUCHED_BY_FACTORY\",", "\"paper\": \"INACTIVE\",", [T_AU]),
+        ("AU-7 authority scope dropped", SRC + "contracts.py", "\"scope\": \"FACTORY_ACTIONS_ONLY: the actual MQD Promotion, Paper and Live runtime state is not read or asserted here\",", "\"scope\": \"global\",", [T_AU]),
     ],
     "faults": [
         ("FT-1 executor exception escapes with a live claim", SRC + "scheduler.py", "    except BaseException as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", "    except KeyboardInterrupt as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", [T_SF]),

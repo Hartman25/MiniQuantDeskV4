@@ -13,6 +13,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from mqk_research.strategy_factory.contracts import FACTORY_AUTHORITY, promotion_view
+
 SCHEMA = "factory_status_v1"
 
 
@@ -29,7 +31,7 @@ def build_status(db_path: Path) -> dict[str, Any]:
             spec = json.loads(c["spec_json"])
             campaigns.append({
                 "campaign_id": c["campaign_id"], "state": c["state"], "state_reason": c["state_reason"], "evidence_grade": c["evidence_grade"],
-                "promotion_eligible": c["evidence_grade"] != "SYNTHETIC_DIAGNOSTIC", "declaration_sha256": c["declaration_sha256"],
+                **promotion_view(c["evidence_grade"]), "declaration_sha256": c["declaration_sha256"],
                 "trials": con.execute("select count(*) from campaign_trials where campaign_id=?", (c["campaign_id"],)).fetchone()[0],
                 "population_symbols": sorted(spec["population"]["symbols"]),
                 "stages": [{"stage": j["stage"], "status": j["status"], "attempts": j["attempt_count"], "reason": j["last_reason"]} for j in jobs]})
@@ -53,7 +55,7 @@ def build_status(db_path: Path) -> dict[str, Any]:
         con.close()
     return {"schema": SCHEMA, "truth_state": "active", "event_seq": last_event, "campaigns": campaigns, "job_counts": dict(sorted(counts.items())),
             "ideas_by_disposition": dict(sorted(ideas.items())), "ai_normalizations_by_status": dict(sorted(ai.items())),
-            "authority": {"promotion": "none created by the Factory", "paper": "INACTIVE", "live": "NOT_TOUCHED"}}
+            "authority": dict(FACTORY_AUTHORITY)}
 
 
 def write_status(db_path: Path, out: Path) -> Path:

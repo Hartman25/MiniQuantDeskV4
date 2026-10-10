@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mqk_research.strategy_factory.campaign import EXPERIMENTS_REL
-from mqk_research.strategy_factory.contracts import sha
+from mqk_research.strategy_factory.contracts import FACTORY_AUTHORITY, promotion_view, sha
 
 REPORT_SCHEMA = "strategy_factory_campaign_report_v1"
 PRESENT, EMPTY, UNAVAILABLE = "PRESENT", "EMPTY", "UNAVAILABLE"
@@ -138,7 +138,7 @@ def build_report(campaign: Mapping[str, Any], repo_root: Path, store: Any = None
     report = {
         "schema": REPORT_SCHEMA,
         "campaign": {"campaign_id": campaign["campaign_id"], "state": campaign["state"], "evidence_grade": decl["evidence_grade"]["grade"],
-                     "evidence_statement": decl["evidence_grade"]["statement"], "promotion_eligible": decl["factory"]["promotion_eligible"],
+                     "evidence_statement": decl["evidence_grade"]["statement"], **promotion_view(decl["evidence_grade"]["grade"]),
                      "declaration_sha256": campaign["declaration_sha256"], "spec_sha256": decl["factory"]["spec_sha256"],
                      "protocol_profile": decl["factory"]["protocol_profile"], "protocol_profile_pin": decl["factory"]["protocol_profile_pin"]},
         "idea_sources_and_hypotheses": _section(PRESENT, [
@@ -172,8 +172,7 @@ def build_report(campaign: Mapping[str, Any], repo_root: Path, store: Any = None
         "restart_and_retry_history": _section(PRESENT if history else UNAVAILABLE, history,
                                               None if history else "no job store attached to this report"),
         "unknown_or_unsupported_requirements": _section(PRESENT, decl["factory"]["population_report"]["excluded"] or []),
-        "authority": {"promotion": "NOT_REQUESTED: a Factory campaign creates no Promotion record",
-                      "paper": "INACTIVE", "live": "NOT_TOUCHED", "holdout": "RESERVED_NOT_CONSUMED_BY_THIS_CAMPAIGN"},
+        "authority": {**FACTORY_AUTHORITY, "holdout": "RESERVED_NOT_CONSUMED_BY_THIS_CAMPAIGN"},
         "summary_stage": {"ok": summary_ok, "note": summary_note},
     }
     report["report_sha256"] = sha({k: v for k, v in report.items() if k != "restart_and_retry_history"})
@@ -187,7 +186,7 @@ def write_campaign_report(campaign: Mapping[str, Any], repo_root: Path, store: A
     (out / "report.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
     c = report["campaign"]
     lines = [f"# Campaign {c['campaign_id']} — {c['state']}", "", f"Evidence grade: **{c['evidence_grade']}** — {c['evidence_statement']}", "",
-             f"Declaration `{c['declaration_sha256'][:16]}…` · profile `{c['protocol_profile']}` · promotion eligible: {c['promotion_eligible']}", ""]
+             f"Declaration `{c['declaration_sha256'][:16]}…` · profile `{c['protocol_profile']}` · promotion readiness: {c['promotion_readiness']}", ""]
     for k, v in report.items():
         if isinstance(v, dict) and "truth_state" in v:
             lines.append(f"- **{k}**: {v['truth_state']}" + (f" — {v['reason']}" if v.get("reason") else ""))

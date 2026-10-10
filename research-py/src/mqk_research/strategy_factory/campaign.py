@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from mqk_research.strategy_factory.contracts import sha
+from mqk_research.strategy_factory.contracts import promotion_view, sha
 from mqk_research.strategy_factory.dedup import classify_template
 from mqk_research.strategy_factory.known_index import build_index
 from mqk_research.strategy_factory.templates import (
@@ -324,7 +324,7 @@ def compile_campaign(spec: Mapping[str, Any], *, repo_root: Path, run_root: Path
                                     "relationship_to_known": _relationship(s, known)}
                                    for s in slots],
                     "prior_search_disclosure": dict(prior_search or {}),
-                    "promotion_eligible": spec["evidence_grade"] != "SYNTHETIC_DIAGNOSTIC",
+                    **promotion_view(spec["evidence_grade"]),
                     "paper_live": "NOT_AUTHORIZED: a Factory campaign grants no Promotion, Paper or Live authority"},
     }
     trial_rows = [{"trial_key": f"{t['strategy_id']}/{t['symbol']}", "strategy_name": t["strategy_id"], "symbol": t["symbol"],

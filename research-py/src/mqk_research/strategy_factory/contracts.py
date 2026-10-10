@@ -91,6 +91,29 @@ BLOCKERS = {
 BLOCKER_ORDER = "FLDPSXU"
 
 
+SYNTHETIC_GRADE = "SYNTHETIC_DIAGNOSTIC"
+
+
+def promotion_view(evidence_grade: str) -> dict[str, object]:
+    """What a Factory output may say about Promotion readiness, from the evidence grade ALONE.
+
+    No Factory evidence grade proves independent out-of-sample readiness: EXPOSED_DEVELOPMENT is declared-exposed
+    development data and SYNTHETIC_DIAGNOSTIC is not market evidence. So `promotion_eligible` is always False and the
+    readiness is never inferred from "not synthetic". A stored value in an older declaration is never trusted."""
+    if evidence_grade == SYNTHETIC_GRADE:
+        return {"promotion_eligible": False, "promotion_readiness": "NOT_ELIGIBLE_SYNTHETIC"}
+    return {"promotion_eligible": False, "promotion_readiness": "NOT_ESTABLISHED"}
+
+
+# Scoped to what Factory actions did. It is NOT a reading of the actual MQD Paper/Live runtime or of Promotion state.
+FACTORY_AUTHORITY = {
+    "scope": "FACTORY_ACTIONS_ONLY: the actual MQD Promotion, Paper and Live runtime state is not read or asserted here",
+    "promotion": "NOT_REQUESTED_BY_FACTORY: a Factory campaign creates no Promotion record",
+    "paper": "NOT_TOUCHED_BY_FACTORY",
+    "live": "NOT_TOUCHED_BY_FACTORY",
+}
+
+
 def sha(obj) -> str:
     return sha256_bytes(canonical_json(obj).encode("utf-8"))
 

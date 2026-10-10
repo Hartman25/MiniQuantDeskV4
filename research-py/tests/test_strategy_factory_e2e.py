@@ -85,7 +85,7 @@ def test_e2e_01_and_10_unattended_campaign_runs_every_stage_on_the_real_engine(w
     assert rep["registry"]["data"]["registered_trials"] == 8 and rep["registry"]["data"]["attempts_by_status"] == {"succeeded": 8}
     for k in ("registry", "trial_execution", "economic_and_benchmark_results", "statistical_judge", "data_identity", "oos_and_holdout", "candidate_review"):
         assert rep[k]["truth_state"] == "PRESENT", k
-    assert rep["campaign"]["evidence_grade"] == "SYNTHETIC_DIAGNOSTIC" and rep["campaign"]["promotion_eligible"] is False
+    assert rep["campaign"]["evidence_grade"] == "SYNTHETIC_DIAGNOSTIC" and rep["campaign"]["promotion_eligible"] is False and rep["campaign"]["promotion_readiness"] == "NOT_ELIGIBLE_SYNTHETIC"
     assert all(a["sha256"] for a in rep["artifacts"].values())
 
 
@@ -105,7 +105,7 @@ def test_e2e_02_losing_candidates_are_honestly_rejected_and_nothing_is_promoted(
     assert "paper_candidate" not in states and sum(states.values()) == 8 and states.get("rejected", 0) >= 1
     run_dir = world.root / "factory" / "campaigns" / "FC-E2E-A"
     assert not [p for p in run_dir.rglob("*") if p.is_file() and "promotion" in p.name.lower()]
-    assert rep["authority"]["promotion"].startswith("NOT_REQUESTED") and rep["authority"]["paper"] == "INACTIVE"
+    assert rep["authority"]["promotion"].startswith("NOT_REQUESTED_BY_FACTORY") and rep["authority"]["paper"] == "NOT_TOUCHED_BY_FACTORY"
 
 
 # ------------------------------------------------------------------ E2E-07

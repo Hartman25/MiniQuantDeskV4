@@ -66,7 +66,7 @@ def test_import_intake_ideas_decide_and_export_status_end_to_end(tmp_path, workb
     exp = tmp_path / "status.json"
     snap = json.loads(cli(root, "status", "--export", str(exp), expect=0).stdout)
     assert snap["truth_state"] == "active" and snap["ideas_by_disposition"] == {"DEFERRED_ASSET_CLASS": 1, "NEEDS_IMPLEMENTATION": 2}
-    assert json.loads(exp.read_text(encoding="utf-8")) == snap and snap["authority"]["live"] == "NOT_TOUCHED"
+    assert json.loads(exp.read_text(encoding="utf-8")) == snap and snap["authority"]["live"] == "NOT_TOUCHED_BY_FACTORY" and snap["authority"]["scope"].startswith("FACTORY_ACTIONS_ONLY")
     assert status_mod.build_status(root / "factory.sqlite3") == snap
 
 
