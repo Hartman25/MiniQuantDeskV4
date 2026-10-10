@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -601,7 +602,7 @@ def test_distributed_exact_rerun_doubles_attempts_not_trials(tmp_path):
     assert summary["attempts"] == 8  # one new attempt per candidate per invocation, not per window
 
 
-def test_distributed_rerun_failed_jobs_groups_by_candidate_one_new_attempt(tmp_path):
+def test_distributed_rerun_failed_jobs_groups_by_candidate_one_new_attempt(tmp_path, monkeypatch):
     root = tmp_path
     dataset_path = _write_exp_dataset(root)
     windows = [
@@ -616,6 +617,20 @@ def test_distributed_rerun_failed_jobs_groups_by_candidate_one_new_attempt(tmp_p
     payload["parameter_grid"] = {"lookback_days": [2], "top_n": [1]}  # single candidate, 3 window slices
     spec_path.write_text(json.dumps(payload), encoding="utf-8")
 
+    real_worker = exp_runner.run_job_worker
+    call_count = {"n": 0}
+
+    def _fail_first_two(payload_dict, root_dir):
+        call_count["n"] += 1
+        raw = real_worker(payload_dict, root_dir)
+        if call_count["n"] <= 2:
+            raw = dict(raw)
+            raw["status"] = "failed"
+            raw["failure_reason"] = "forced: partial retry setup"
+            raw["metrics"] = {}
+        return raw
+
+    monkeypatch.setattr(exp_runner, "run_job_worker", _fail_first_two)
     result = run_batch(spec_path, root=root / "research_out", max_workers=1)
     batch_id = result["batch_id"]
 
@@ -628,12 +643,9 @@ def test_distributed_rerun_failed_jobs_groups_by_candidate_one_new_attempt(tmp_p
     )[0]["trial_id"]
     original_attempt_id = store.list_attempts(trial_id_before)[0]["attempt_id"]
 
-    # simulate 2 of the 3 window jobs having failed after the fact, as
-    # rerun_failed_jobs would find them (status="failed" in exp_jobs)
     all_jobs = store.list_jobs(batch_id)
     assert len(all_jobs) == 3
-    for row in all_jobs[:2]:
-        store.set_job_status(row["job_id"], "failed")
+    assert [row["status"] for row in all_jobs] == ["failed", "failed", "succeeded"]
 
     rerun_result = rerun_failed_jobs(batch_id, root=root / "research_out", max_workers=1)
     assert rerun_result["rerun_count"] == 2
@@ -660,13 +672,11 @@ def test_distributed_rerun_failed_jobs_groups_by_candidate_one_new_attempt(tmp_p
     assert attempts[0]["attempt_id"] != retry_attempt["attempt_id"]
 
     # REQUIRED TEST 4 (partial retry) — attempt 1's immutable slice snapshots
-    # preserve exactly what attempt 1 actually observed (all 3 succeeded — the
-    # exp_jobs "failed" status above is a post-hoc simulation of a later
-    # operational state change and must NOT retroactively alter attempt 1's
-    # durable evidence). Attempt 2's snapshots cover only the 2 retried slices.
+    # preserve exactly what attempt 1 actually observed. Attempt 2's snapshots
+    # cover only the 2 retried slices.
     original_slices = store.list_attempt_slices(original_attempt_id)
     assert len(original_slices) == 3
-    assert all(s["status"] == "succeeded" for s in original_slices)
+    assert sorted(s["status"] for s in original_slices) == ["failed", "failed", "succeeded"]
 
     retry_slices = store.list_attempt_slices(retry_attempt["attempt_id"])
     assert len(retry_slices) == 2
@@ -982,12 +992,14 @@ def test_rerun_failed_jobs_without_registration_fails_closed(tmp_path):
         root, dataset_path, symbol_groups=[["AAA", "BBB"]], windows=windows,
         hypothesis_id="", allow_unregistered_diagnostic=True,
     )
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["parameter_grid"] = {"lookback_days": [0], "top_n": [1]}
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
     result = run_batch(spec_path, root=root / "research_out", max_workers=1)
     batch_id = result["batch_id"]
 
     store = ResearchResultStore(default_db_path(root / "research_out"))
-    all_jobs = store.list_jobs(batch_id)
-    store.set_job_status(all_jobs[0]["job_id"], "failed")
+    assert result["status"] == "failed"
 
     # simulate a legacy/corrupted stored spec that lost its explicit diagnostic
     # opt-in (spec_json no longer says allow_unregistered_diagnostic=True) —
@@ -995,9 +1007,12 @@ def test_rerun_failed_jobs_without_registration_fails_closed(tmp_path):
     batch_row = store.get_batch(batch_id)
     tampered_spec = json.loads(batch_row["spec_json"])
     tampered_spec["allow_unregistered_diagnostic"] = False
-    store.upsert_batch(
-        batch_id, tampered_spec, root_dir=root / "research_out", job_count=batch_row["job_count"], status=batch_row["status"],
-    )
+    with sqlite3.connect(default_db_path(root / "research_out")) as connection:
+        connection.execute(
+            "update exp_batches set spec_json=? where batch_id=?",
+            (json.dumps(tampered_spec, sort_keys=True), batch_id),
+        )
+        connection.commit()
 
     with pytest.raises(ValueError, match="hypothesis_id"):
         rerun_failed_jobs(batch_id, root=root / "research_out", max_workers=1)
@@ -1407,7 +1422,11 @@ def test_pool_interruption_preserves_observed_results_and_marks_only_unobserved_
         "batch_label": "pool-interruption",
     }
     store.upsert_batch("batch-1", spec, root, len(jobs), status="queued")
-    store.upsert_jobs(jobs, {job.job_id: root / f"{job.job_id}.json" for job in jobs}, status="queued")
+    spec_paths = {job.job_id: root / f"{job.job_id}.json" for job in jobs}
+    store.upsert_jobs(jobs, spec_paths, status="queued")
+    execution_claim = store.claim_batch_for_execution(
+        "batch-1", spec, root, len(jobs), jobs, spec_paths
+    )
 
     def _observed_result(payload, _root_dir):
         job = JobSpec.from_dict(payload)
@@ -1433,7 +1452,9 @@ def test_pool_interruption_preserves_observed_results_and_marks_only_unobserved_
     monkeypatch.setattr(exp_runner, "_run_job_safely", _observed_result)
     monkeypatch.setattr(exp_runner, "ProcessPoolExecutor", lambda max_workers: _PartialPool())
 
-    results = exp_runner._run_jobs(jobs, root, store, max_workers=2, batch_id="batch-1")
+    results = exp_runner._run_jobs(
+        jobs, root, store, max_workers=2, batch_id="batch-1", execution_claim=execution_claim
+    )
 
     assert [result.status for result in results] == ["succeeded", "failed"]
     assert results[0].metrics == {"observed": 1}
@@ -1469,7 +1490,12 @@ def test_run_batch_refuses_unresolved_execution_residue(tmp_path, residue):
     if residue == "started_attempt":
         store.begin_attempt(trial_id=trial["trial_id"], metadata={"batch_id": result["batch_id"]})
     else:
-        store.set_job_status(store.list_jobs(result["batch_id"])[0]["job_id"], "running")
+        with sqlite3.connect(default_db_path(root / "research_out")) as connection:
+            connection.execute(
+                "update exp_jobs set status='running' where job_id=?",
+                (store.list_jobs(result["batch_id"])[0]["job_id"],),
+            )
+            connection.commit()
 
     with pytest.raises(RuntimeError, match="refusing batch execution claim"):
         run_batch(spec_path, root=root / "research_out", max_workers=1)
@@ -1602,6 +1628,200 @@ def test_planning_preserves_active_and_terminal_batch_authority(tmp_path):
     )
 
 
+def test_terminal_execution_writers_and_planning_upserts_preserve_rows(tmp_path):
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    windows = [{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}]
+
+    def _assert_terminal_immutable(spec_path, expected_status):
+        result = run_batch(spec_path, root=root / expected_status, max_workers=1)
+        assert result["status"] == expected_status
+        db_path = default_db_path(root / expected_status)
+        store = ResearchResultStore(db_path)
+        batch_id = result["batch_id"]
+        batch_before = store.get_batch(batch_id)
+        jobs_before = store.list_jobs(batch_id)
+        assert len(jobs_before) == 1
+        job_before = jobs_before[0]
+        result_to_persist = JobExecutionResult(
+            job_id=job_before["job_id"],
+            batch_id=batch_id,
+            status="succeeded",
+            metrics={"tampered": True},
+            artifact_paths={"artifact_dir": "tampered"},
+            failure_reason=None,
+            runtime_seconds=999.0,
+        )
+        db_before = db_path.read_bytes()
+
+        with pytest.raises(RuntimeError):
+            store.set_job_status(job_before["job_id"], "queued")
+        with pytest.raises(RuntimeError):
+            store.persist_job_result(result_to_persist)
+        with pytest.raises(RuntimeError):
+            store.finalize_batch(batch_id, "failed", {"tampered": "1"}, {"tampered": True})
+
+        batch_spec = json.loads(batch_before["spec_json"])
+        with pytest.raises(RuntimeError):
+            store.upsert_batch(batch_id, batch_spec, root / expected_status, job_count=1)
+        job = JobSpec(
+            job_id=job_before["job_id"],
+            batch_id=batch_id,
+            job_index=job_before["job_index"],
+            experiment_id=job_before["experiment_id"],
+            strategy_id=job_before["strategy_id"],
+            params=json.loads(job_before["params_json"]),
+            symbols=json.loads(job_before["symbols_json"]),
+            window=WindowSpec(
+                start_utc=job_before["window_start_utc"],
+                end_utc=job_before["window_end_utc"],
+            ),
+            dataset_fingerprint=DatasetFingerprint(**json.loads(job_before["dataset_fingerprint_json"])),
+        )
+        with pytest.raises(RuntimeError):
+            store.upsert_jobs([job], {job.job_id: Path(job_before["job_spec_path"])})
+
+        assert store.get_batch(batch_id) == batch_before
+        assert store.list_jobs(batch_id) == jobs_before
+        assert db_path.read_bytes() == db_before
+
+    success_spec = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=windows,
+        hypothesis_id="",
+        allow_unregistered_diagnostic=True,
+        out_name="success.json",
+    )
+    success_payload = json.loads(success_spec.read_text(encoding="utf-8"))
+    success_payload["parameter_grid"] = {"lookback_days": [2], "top_n": [1]}
+    success_spec.write_text(json.dumps(success_payload), encoding="utf-8")
+    _assert_terminal_immutable(success_spec, "succeeded")
+
+    failed_spec = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=windows,
+        hypothesis_id="",
+        allow_unregistered_diagnostic=True,
+        out_name="failed.json",
+    )
+    failed_payload = json.loads(failed_spec.read_text(encoding="utf-8"))
+    failed_payload["parameter_grid"] = {"lookback_days": [0], "top_n": [1]}
+    failed_spec.write_text(json.dumps(failed_payload), encoding="utf-8")
+    _assert_terminal_immutable(failed_spec, "failed")
+
+
+def test_execution_writers_fail_closed_for_null_and_stale_claims(tmp_path):
+    from mqk_research.exp_distributed.runner import create_batch, load_batch_spec
+    from mqk_research.exp_distributed.scheduler import build_batch_plan
+
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    spec_path = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=[{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}],
+        hypothesis_id="",
+        allow_unregistered_diagnostic=True,
+        out_name="claims.json",
+    )
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["parameter_grid"] = {"lookback_days": [2], "top_n": [1]}
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    planned = create_batch(spec_path, root=root / "research_out")
+    store = ResearchResultStore(default_db_path(root / "research_out"))
+    job_path = Path(next(iter(planned["job_spec_paths"].values())))
+    job = JobSpec.from_dict(json.loads(job_path.read_text(encoding="utf-8")))
+    spec = load_batch_spec(spec_path)
+    claim = store.claim_batch_for_execution(
+        planned["batch_id"],
+        spec.to_dict(),
+        root / "research_out",
+        1,
+        [job],
+        {job.job_id: job_path},
+    )
+    result = JobExecutionResult(
+        job_id=job.job_id,
+        batch_id=job.batch_id,
+        status="succeeded",
+        metrics={"ok": True},
+        artifact_paths={},
+    )
+    before = (store.get_batch(job.batch_id), store.list_jobs(job.batch_id))
+    with pytest.raises(RuntimeError):
+        store.set_job_status(job.job_id, "running", execution_claim=claim + ":stale")
+    with pytest.raises(RuntimeError):
+        store.persist_job_result(result, execution_claim=claim + ":stale")
+    with pytest.raises(RuntimeError):
+        store.finalize_batch(job.batch_id, "succeeded", {}, {}, execution_claim=claim + ":stale")
+    assert (store.get_batch(job.batch_id), store.list_jobs(job.batch_id)) == before
+
+    with sqlite3.connect(default_db_path(root / "research_out")) as connection:
+        connection.execute(
+            "update exp_batches set status='running', execution_claim=null where batch_id=?",
+            (job.batch_id,),
+        )
+        connection.commit()
+    before_null_claim = (store.get_batch(job.batch_id), store.list_jobs(job.batch_id))
+    with pytest.raises(RuntimeError):
+        store.set_job_status(job.job_id, "running")
+    with pytest.raises(RuntimeError):
+        store.persist_job_result(result)
+    with pytest.raises(RuntimeError):
+        store.finalize_batch(job.batch_id, "succeeded", {}, {})
+    assert (store.get_batch(job.batch_id), store.list_jobs(job.batch_id)) == before_null_claim
+
+
+def test_claimed_execution_writers_allow_legal_transitions(tmp_path):
+    from mqk_research.exp_distributed.runner import create_batch, load_batch_spec
+
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    spec_path = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=[{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}],
+        hypothesis_id="",
+        allow_unregistered_diagnostic=True,
+    )
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["parameter_grid"] = {"lookback_days": [2], "top_n": [1]}
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
+    planned = create_batch(spec_path, root=root / "research_out")
+    store = ResearchResultStore(default_db_path(root / "research_out"))
+    job_path = Path(next(iter(planned["job_spec_paths"].values())))
+    job = JobSpec.from_dict(json.loads(job_path.read_text(encoding="utf-8")))
+    claim = store.claim_batch_for_execution(
+        planned["batch_id"],
+        load_batch_spec(spec_path).to_dict(),
+        root / "research_out",
+        1,
+        [job],
+        {job.job_id: job_path},
+    )
+    store.set_job_status(job.job_id, "running", execution_claim=claim)
+    store.persist_job_result(
+        JobExecutionResult(
+            job_id=job.job_id,
+            batch_id=job.batch_id,
+            status="succeeded",
+            metrics={"ok": True},
+            artifact_paths={},
+        ),
+        execution_claim=claim,
+    )
+    store.finalize_batch(job.batch_id, "succeeded", {}, {"ok": True}, execution_claim=claim)
+    assert store.get_batch(job.batch_id)["status"] == "succeeded"
+    assert store.list_jobs(job.batch_id)[0]["status"] == "succeeded"
+
+
 def test_single_job_is_fail_closed_or_isolated_diagnostic(tmp_path):
     from mqk_research.exp_distributed.runner import create_batch, run_single_job
 
@@ -1664,7 +1884,7 @@ def test_single_worker_unexpected_runner_exception_becomes_terminal_failure(tmp_
     import mqk_research.exp_distributed.runner as exp_runner
 
     jobs, _ = _mixed_slice_finalize_inputs(["succeeded"])
-    jobs = [replace(job, batch_id="batch-unexpected-single-worker") for job in jobs]
+    jobs = [replace(jobs[0], batch_id="batch-unexpected-single-worker")]
     root = tmp_path / "research_out"
     store = ResearchResultStore(root / "state" / "exp_research.sqlite3")
     spec = {
@@ -1679,6 +1899,14 @@ def test_single_worker_unexpected_runner_exception_becomes_terminal_failure(tmp_
         {job.job_id: root / f"{job.job_id}.json" for job in jobs},
         status="queued",
     )
+    execution_claim = store.claim_batch_for_execution(
+        "batch-unexpected-single-worker",
+        spec,
+        root,
+        len(jobs),
+        jobs,
+        {job.job_id: root / f"{job.job_id}.json" for job in jobs},
+    )
 
     def _unexpected(_payload, _root_dir):
         raise RuntimeError("unexpected single-worker transport failure")
@@ -1690,6 +1918,7 @@ def test_single_worker_unexpected_runner_exception_becomes_terminal_failure(tmp_
         store,
         max_workers=1,
         batch_id="batch-unexpected-single-worker",
+        execution_claim=execution_claim,
     )
     assert len(results) == 1
     assert results[0].status == "failed"
@@ -1932,6 +2161,8 @@ def _force_job_execution_to_report_content_diverging_failure(runner_module, *, o
                 positions=pd.DataFrame(columns=["ts_utc"] + list(job.symbols)),
                 trade_events=pd.DataFrame(columns=["ts_utc", "symbol", "event_type", "old_weight", "new_weight"]),
                 failure_reason=failure_reason,
+                execution_claim=payload_dict.get("_execution_claim"),
+                registry_db_path=payload_dict.get("_registry_db_path"),
             )
             raw = dict(raw)
             raw["status"] = "failed"
