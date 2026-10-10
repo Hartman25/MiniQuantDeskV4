@@ -11,6 +11,7 @@
 //   - Data source derivation (deriveDataSourceDetail)
 
 import type { EndpointFetchResult } from "./http";
+import { hasRows } from "./rowContract";
 import type {
   AdmissionCheckSurface,
   AutonomousDailyOperationApiRow,
@@ -413,7 +414,7 @@ export function legacyActionPaths(actionKey: string): string[] {
 // ---------------------------------------------------------------------------
 
 export function mapLegacyPositionsResponse(response: LegacyTradingPositionsResponse | null): PositionRow[] | null {
-  if (!response) return null;
+  if (!response || !hasRows(response, "positions", ["symbol", "qty", "avg_price"])) return null;
   return response.positions.map((position) => {
     const qty = parseNumber(position.qty);
     const avgPrice = parseNumber(position.avg_price);
@@ -422,11 +423,7 @@ export function mapLegacyPositionsResponse(response: LegacyTradingPositionsRespo
       strategy_id: "broker_snapshot",
       qty,
       avg_price: avgPrice,
-      mark_price: avgPrice,
-      unrealized_pnl: 0,
-      realized_pnl_today: 0,
       broker_qty: qty,
-      drift: false,
     };
   });
 }
@@ -442,15 +439,15 @@ export function mapLegacyPortfolioSummary(
   return {
     account_equity: equity,
     cash,
-    long_market_value: 0,
-    short_market_value: 0,
-    daily_pnl: 0,
-    buying_power: cash,
+    long_market_value: null,
+    short_market_value: null,
+    daily_pnl: null,
+    buying_power: null,
   };
 }
 
 export function mapLegacyTradingOrdersToExecutionOrders(response: LegacyTradingOrdersResponse | null): ExecutionOrderRow[] | null {
-  if (!response) return null;
+  if (!response || !hasRows(response, "orders", ["broker_order_id", "client_order_id", "symbol", "side", "type", "status", "qty", "created_at_utc"])) return null;
 
   return response.orders.map((order) => {
     const status = normalizeOrderStatus(order.status);
@@ -498,7 +495,7 @@ export function mapLegacyTradingOrdersToOpenOrders(response: LegacyTradingOrders
 }
 
 export function mapLegacyTradingFillsToRows(response: LegacyTradingFillsResponse | null): FillRow[] | null {
-  if (!response) return null;
+  if (!response || !hasRows(response, "fills", ["broker_fill_id", "broker_order_id", "client_order_id", "symbol", "side", "qty", "price", "ts_utc"])) return null;
 
   return response.fills.map((fill) => ({
     fill_id: fill.broker_fill_id,
@@ -870,7 +867,7 @@ export function mapEventsFeedResponse(wrapper: EventsFeedWrapper): FeedEvent[] {
 const OUTBOX_VALID_STATES: ExecutionOutboxSurface["truth_state"][] = ["active", "no_active_run", "no_db"];
 
 export function mapExecutionOutboxWrapper(wrapper: ExecutionOutboxWrapper | null | undefined): ExecutionOutboxSurface {
-  if (wrapper == null) return { truth_state: "unavailable", run_id: null, rows: [] };
+  if (wrapper == null || !hasRows(wrapper, "rows", [])) return { truth_state: "unavailable", run_id: null, rows: [] };
   const ts = OUTBOX_VALID_STATES.includes(wrapper.truth_state as ExecutionOutboxSurface["truth_state"])
     ? (wrapper.truth_state as ExecutionOutboxSurface["truth_state"])
     : "unavailable";
@@ -895,7 +892,7 @@ export function executionOutboxNotice(surface: ExecutionOutboxSurface): string |
 const FQ_VALID_STATES: FillQualitySurface["truth_state"][] = ["active", "no_active_run", "no_db"];
 
 export function mapFillQualityWrapper(wrapper: FillQualityWrapper | null | undefined): FillQualitySurface {
-  if (wrapper == null) return { truth_state: "unavailable", rows: [] };
+  if (wrapper == null || !hasRows(wrapper, "rows", [])) return { truth_state: "unavailable", rows: [] };
   const ts = FQ_VALID_STATES.includes(wrapper.truth_state as FillQualitySurface["truth_state"])
     ? (wrapper.truth_state as FillQualitySurface["truth_state"])
     : "unavailable";
@@ -935,7 +932,7 @@ export function orderTimelineNotice(surface: OrderTimelineSurface): string | nul
 const PJ_VALID_STATES: PaperJournalSurface["fills_truth_state"][] = ["active", "no_active_run", "no_db"];
 
 export function mapPaperJournalWrapper(wrapper: PaperJournalWrapper | null | undefined): PaperJournalSurface {
-  if (wrapper == null) {
+  if (wrapper == null || !hasRows(wrapper.fills_lane, "rows", []) || !hasRows(wrapper.admissions_lane, "rows", [])) {
     return { run_id: null, fills_truth_state: "unavailable", fills: [], admissions_truth_state: "unavailable", admissions: [] };
   }
   const fts = PJ_VALID_STATES.includes(wrapper.fills_lane.truth_state as PaperJournalSurface["fills_truth_state"])

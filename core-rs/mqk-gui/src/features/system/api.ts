@@ -18,6 +18,7 @@ import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from ".
 import { parseEventFeed, parseOperatorTimeline } from "./historyContract";
 import { parseSystemStatus } from "./statusContract";
 import { parsePortfolioSummary, parseRiskSummary } from "./economicContract";
+import { hasRows } from "./rowContract";
 import { parseMarketDataQuality, parseOmsOverview, parseTransport } from "./snapshotContracts";
 import {
   enforceRunScopeConsistency,
@@ -476,6 +477,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     (async (): Promise<EndpointFetchResult<PortfolioPositionsResponse | LegacyTradingPositionsResponse>> => {
       const canonical = await fetchJsonCandidate<PortfolioPositionsResponse>("/api/v1/portfolio/positions");
       if (canonical.ok) {
+        if (!hasRows(canonical.data, "rows", ["symbol"], ["qty", "avg_price", "broker_qty"]) || canonical.data?.snapshot_state !== "active") {
+          return { ...canonical, ok: false, error: "portfolio_positions_unavailable_or_invalid" };
+        }
         if ((canonical.data as PortfolioPositionsResponse).snapshot_state === "no_snapshot") {
           return { ...canonical, ok: false, error: "no_broker_snapshot" };
         }
@@ -488,6 +492,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     (async (): Promise<EndpointFetchResult<PortfolioOpenOrdersResponse | LegacyTradingOrdersResponse>> => {
       const canonical = await fetchJsonCandidate<PortfolioOpenOrdersResponse>("/api/v1/portfolio/orders/open");
       if (canonical.ok) {
+        if (!hasRows(canonical.data, "rows", ["internal_order_id", "symbol", "side", "status", "entered_at"], ["requested_qty"]) || canonical.data?.snapshot_state !== "active") {
+          return { ...canonical, ok: false, error: "portfolio_orders_unavailable_or_invalid" };
+        }
         if ((canonical.data as PortfolioOpenOrdersResponse).snapshot_state === "no_snapshot") {
           return { ...canonical, ok: false, error: "no_broker_snapshot" };
         }
@@ -500,6 +507,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     (async (): Promise<EndpointFetchResult<PortfolioFillsResponse | LegacyTradingFillsResponse>> => {
       const canonical = await fetchJsonCandidate<PortfolioFillsResponse>("/api/v1/portfolio/fills");
       if (canonical.ok) {
+        if (!hasRows(canonical.data, "rows", ["fill_id", "internal_order_id", "symbol", "side", "broker_exec_id", "at"], ["qty", "price"]) || canonical.data?.snapshot_state !== "active") {
+          return { ...canonical, ok: false, error: "portfolio_fills_unavailable_or_invalid" };
+        }
         if ((canonical.data as PortfolioFillsResponse).snapshot_state === "no_snapshot") {
           return { ...canonical, ok: false, error: "no_broker_snapshot" };
         }
@@ -525,7 +535,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         return { ok: false, endpoint: canonical.endpoint, error: canonical.error ?? "fetch_failed" };
       }
       const data = canonical.data as RiskDenialsResponse;
-      if (data.truth_state === "no_snapshot" || data.truth_state === "not_wired") {
+      if (!data || !["active", "active_session_only", "durable_history"].includes(data.truth_state) ||
+          !hasRows(data, "denials", ["id", "at", "symbol", "rule", "message", "severity"])) {
         // "no_snapshot": execution loop not running — denial truth entirely absent.
         // "not_wired":   execution loop running but denial accumulator not yet
         //   implemented; [] would falsely claim authoritative zero denials.
@@ -546,7 +557,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       // Reconcile mismatch rows are a live derived truth surface, not a durable
       // table read. `no_snapshot` / `stale` must therefore fail closed so empty
       // rows never masquerade as authoritative zero mismatches.
-      if (data.truth_state === "no_snapshot" || data.truth_state === "stale") {
+      if (!data || data.truth_state !== "active" || !hasRows(data, "rows", ["id", "domain", "symbol", "internal_value", "broker_value", "status", "note"])) {
         return { ok: false, endpoint: canonical.endpoint, error: "no_reconcile_detail_truth" };
       }
       return { ok: true, endpoint: canonical.endpoint, data: data.rows };
@@ -560,7 +571,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       const r = await fetchJsonCandidate<StrategySummaryWrapper>("/api/v1/strategy/summary");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
       const wrapper = r.data as StrategySummaryWrapper;
-      if (wrapper.truth_state === "no_db") {
+      if (!["active", "registry", "not_wired"].includes(wrapper.truth_state) || !hasRows(wrapper, "rows", ["strategy_id", "admission_state", "health", "universe"])) {
         // DB unavailable → fail-closed: endpoint lands in missingEndpoints so
         // isMissingPanelTruth fires and the strategy panel blocks with no_snapshot.
         return { ok: false, endpoint: r.endpoint, error: "strategy_registry_unavailable" };
@@ -611,7 +622,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
 
       const wrapper = r.data as DaemonAuditActionsWrapper;
-      if (wrapper.truth_state !== "active") {
+      if (wrapper.truth_state !== "active" || !hasRows(wrapper, "rows", ["audit_event_id", "ts_utc", "requested_action", "disposition", "provenance_ref"])) {
         return { ok: false, endpoint: r.endpoint, error: "operator_history_backend_unavailable" };
       }
 
@@ -682,7 +693,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
 
       const wrapper = r.data as DaemonArtifactsWrapper;
-      if (wrapper.truth_state !== "active") {
+      if (wrapper.truth_state !== "active" || !hasRows(wrapper, "rows", ["artifact_id", "artifact_type", "run_id", "created_at_utc", "provenance_ref"])) {
         return { ok: false, endpoint: r.endpoint, error: "operator_artifact_backend_unavailable" };
       }
 
@@ -713,6 +724,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     (async (): Promise<EndpointFetchResult<StrategySuppressionsWrapper>> => {
       const r = await fetchJsonCandidate<StrategySuppressionsWrapper>("/api/v1/strategy/suppressions");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      if (!["active", "no_db", "not_wired"].includes(r.data.truth_state) || !hasRows(r.data, "rows", ["suppression_id", "strategy_id", "state", "trigger_domain", "trigger_reason", "started_at", "note"])) return { ...r, ok: false, data: undefined, error: "suppression_contract_invalid" };
       return { ok: true, endpoint: r.endpoint, data: r.data as StrategySuppressionsWrapper };
     })(),
     // system/config-diffs: preserve the daemon wrapper so the GUI can render
@@ -720,6 +732,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     (async (): Promise<EndpointFetchResult<ConfigDiffsWrapper>> => {
       const r = await fetchJsonCandidate<ConfigDiffsWrapper>("/api/v1/system/config-diffs");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      if (!["active", "not_wired"].includes(r.data.truth_state) || !hasRows(r.data, "rows", ["diff_id", "changed_at", "changed_domain", "before_version", "after_version", "summary"])) return { ...r, ok: false, data: undefined, error: "config_diff_contract_invalid" };
       return { ok: true, endpoint: r.endpoint, data: r.data as ConfigDiffsWrapper };
     })(),
     // ops/operator-timeline: daemon returns {canonical_route, truth_state, backend, rows}

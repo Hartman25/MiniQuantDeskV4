@@ -132,6 +132,7 @@ test("explicit not_wired truth wrappers stay mounted and render honest GUI copy"
         });
       case "/api/v1/risk/summary":
         return jsonResponse({
+          has_snapshot: true,
           gross_exposure: 0,
           net_exposure: 0,
           concentration_pct: 0,
@@ -232,6 +233,7 @@ test("authoritative active-empty truth stays distinct from not_wired wrappers", 
         });
       case "/api/v1/risk/summary":
         return jsonResponse({
+          has_snapshot: true,
           gross_exposure: 0,
           net_exposure: 0,
           concentration_pct: 0,
