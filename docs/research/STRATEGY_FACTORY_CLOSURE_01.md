@@ -168,7 +168,7 @@ is corrected on the same branch with a red-first test and mutants. Nothing was m
 |---|---|---|---|
 | R1 scheduler fail-open (HIGH) | `78885074` | The claim ownership boundary (`scheduler.run_one`) records every unexpected exception (before execution, in the executor, an invalid outcome) as an honest terminal `failed` with the exception type, written with the claim token. A claim lost to lease recovery is fenced (`ClaimLost`; the late result is discarded). If the store cannot record the result the job stays `running`, the pass ends `ERROR` and lists it in `unresolved_jobs`; lease expiry later records an `interrupted` attempt and re-queues the SAME job. A pass can no longer report `NO_ELIGIBLE_WORK` with an unresolved claim or a recorded scheduler error; `run` exits 4 on `ERROR`. No retry creates a job or a trial. | `test_strategy_factory_scheduler_faults.py` (11 tests: before claim, between claim and execution, in execution, at finalization transient/persistent, zombie worker, invalid outcome, cross-process hard crash with `os._exit`, in-process raise); 9/9 mutants (`faults`) |
 | R2 promotion eligibility (HIGH) | `ca8a7f3e` | `contracts.promotion_view(grade)` is the single authority: `promotion_eligible` is false for every grade; readiness is `NOT_ELIGIBLE_SYNTHETIC` (synthetic) or `NOT_ESTABLISHED` (exposed development, anything unknown). Declaration, report and status all derive it from the grade; a stored flag is ignored. No new grade or policy exists. | `test_strategy_factory_authority_truth.py` (every supported grade, tampered stored flag, source scan); 7/7 mutants (`authority`) |
-| R3 prior Factory search accounting | `c24e8dea`, `12c69847`, `c00dcf30` | Durable Factory history now feeds duplicate/adjacent recognition at intake and compile time and the declared `prior_search_disclosure`, using only the PREDECLARED strategy names of earlier campaigns (`store.prior_campaign_strategies` + `known_index.factory_prior_entries`); no attempt, result or verdict is read. A campaign that already exists is verified (spec hash, frozen declaration identity) and returned, never recomputed against newer history; a missing, corrupt or tampered frozen declaration is a `StoreError`. `create_campaign(expected_prior_campaigns=...)` refuses a campaign whose disclosed history is not the store history; the leftover declaration file of a refused attempt (no store row) is safely replaced on retry. | `test_strategy_factory_prior_search.py` (two sequential campaigns, restart, outcome independence, identity includes history, stale-history race and retry, damaged frozen declaration, intake path); 11/11 mutants (`history`) |
+| R3 prior Factory search accounting | `c24e8dea`, `12c69847`, `c00dcf30` | Durable Factory history now feeds duplicate/adjacent recognition at intake and compile time and the declared `prior_search_disclosure`, using only the PREDECLARED strategy names of earlier campaigns (`store.prior_campaign_strategies` + `known_index.factory_prior_entries`); no attempt, result or verdict is read. A campaign that already exists is verified (spec hash, frozen declaration identity) and returned, never recomputed against newer history; a missing, corrupt or tampered frozen declaration is a `StoreError`. `create_campaign(expected_prior_campaigns=...)` refuses a campaign whose disclosed history is not the store history; the leftover declaration file of a refused attempt (no store row) is safely replaced on retry. | `test_strategy_factory_prior_search.py` (two sequential campaigns, restart, outcome independence, identity includes history, stale-history race and retry, damaged frozen declaration, intake path); 10/10 mutants (`history`; the PS-9 orphan-replace mutant was retired when that logic moved into the registry-published write, where mutant DC-4 covers it) |
 | R4 CI native proof | `55993077`, `916e4482` | `.github/workflows/strategy-factory.yml` (triggers: pushes to `strategy-factory/**`, PRs to `main` touching Factory/engine paths, manual) builds `mqk-cli` with the pinned toolchain, runs the `grammar_v1` engine tests and the whole Factory suite with `MQK_FACTORY_REQUIRE_NATIVE=1` (a missing binary FAILS instead of skipping), and `scripts/guards/check_factory_native_lane.py` fails the job unless every load-bearing E2E test executed and passed. It is bounded: no workspace-wide Rust sweep (that remains `ci.yml`'s `rust` job). | GitHub run 38051841844 on `916e4482` (SUCCESS); `test_strategy_factory_native_lane.py`; 6/6 mutants (`lane`) |
 | R5 status wording | `ca8a7f3e` | `status`/report carry `FACTORY_AUTHORITY`: scope `FACTORY_ACTIONS_ONLY`, `paper` and `live` = `NOT_TOUCHED_BY_FACTORY`, promotion `NOT_REQUESTED_BY_FACTORY`. The Factory does not read or assert the real Paper runtime state. | authority tests above |
 
@@ -192,7 +192,43 @@ CLI test inherited `MQK_FACTORY_CLI`) and a timing-dependent assertion in the cr
 
 Final local acceptance at the correction HEAD: `pytest tests -k strategy_factory` with the real native `mqk-cli` and `MQK_FACTORY_REQUIRE_NATIVE=1`:
 **263 passed, 0 skipped** (guard: 0 problems). Mutation harness, all sets at the correction source: intake 20/20, ai 18/18, knowledge 8/8, store 9/9,
-campaign/executor/scheduler 17/17, resume 3/3, impl 5/5, scout 11/11, authority 7/7, lane 6/6, history 11/11, faults 9/9, Rust `grammar_v1` 11/11
+campaign/executor/scheduler 17/17, resume 3/3, impl 5/5, scout 11/11, authority 7/7, lane 6/6, history 10/10, faults 9/9, Rust `grammar_v1` 11/11
 (the Rust sources are unchanged since `b1c757e4`; the engine tests also ran in CI). Full local workspace acceptance: NOT RUN - prohibited by laptop
 resource-safety rule; broad workspace proof delegated to GitHub CI. The native lane (run 38051841844) is NOT a full workspace CI run.
 The 120 `experiments/m1_native_trend_campaign` failures are identical on untouched `origin/main` and are unrelated.
+
+## Declaration concurrency closure (`V4-STRATEGY-FACTORY-DECLARATION-CONCURRENCY-CLOSURE-01`)
+
+Starting HEAD `692f3649d49334e640d4096111708e4b9f8c25cb`. An independent review reproduced an identity mismatch: `FactoryService.compile_campaign`
+wrote `declaration.json` / `spec.json` BEFORE `FactoryStore.create_campaign` froze the identity, so two processes compiling one campaign id could
+both see "not registered"; the later writer replaced the registered winner's file and then received the legitimate conflict refusal, leaving the
+frozen row and its file inconsistent. The shared `.tmp` name made concurrent writers collide as well.
+
+**Exact reproduction (red before the fix):** worker A and worker B (real processes, file handshakes, no sleeps) both stop at the moment of
+registration; A registers, then B proceeds. On the unfixed code B's file write had already replaced A's; after the fix the registered row, the
+file identity and `spec.json` are byte-for-byte A's and B receives `exists with a different predeclaration`.
+
+**Corrected ownership boundary.** The registry write transaction is the single ordering point. `create_campaign(..., publish=...)` runs `publish`
+(atomic write of `declaration.json` and `spec.json`) INSIDE the transaction, after every refusal check (existing row, stale prior history,
+case alias) and the inserts, before the commit. Consequences, each proven by a test:
+
+* a losing or refused compile never touches the winner's frozen files, and a stale-history loser leaves no files at all;
+* identical concurrent compiles are idempotent (one population, one set of jobs); different campaign ids stay independent;
+* an exception in `publish`, or a hard process death after the files are written and before the commit, rolls the registration back: the state
+  is unregistered and the next compile simply replaces the leftover files (an unregistered orphan is never read, so a corrupt orphan cannot block it);
+* a death right after the commit leaves a complete, verifiable registered campaign; recompiling returns it unchanged;
+* a REGISTERED declaration that is corrupt, tampered or missing fails closed (`compile` and `release_gate`) and is never rewritten.
+
+**Directly connected defects found by the caller/callee census and sweep (all fixed with red-first tests and mutants):**
+campaign ids that differ only by case (one directory on Windows), end with `.`, or are reserved device names (`CON`, `NUL`, `COM1`, ...) are
+refused; the status export and the report files used a fixed `.tmp` name / in-place writes and now use the shared unique-temp, fsync, atomic
+`contracts.atomic_write_text`; `release_gate` raised a raw error on an unreadable declaration (now `StoreError`); the generated xlsx test
+fixture embedded the wall-clock zip timestamp, which made an unrelated AI-normalization test fail intermittently across a second boundary.
+
+**Evidence.** `test_strategy_factory_declaration_concurrency.py` (23 tests); mutant set `owner` 11/11 killed (publish not in the registry, publish
+before the refusal checks, shared temp name, orphan kept, case alias, reserved names, trailing dot, no rollback, status/report in place, wall-clock fixture).
+Full Factory suite with the real native `mqk-cli` and `MQK_FACTORY_REQUIRE_NATIVE=1`: **287 passed, 0 skipped**, lane guard 0 problems. All earlier
+mutant sets were re-run against the changed sources (intake 20, ai 18, knowledge 8, store 9, campaign 17, resume 3, impl 5, scout 11,
+authority 7, lane 6, history 10, faults 9, owner 11, Rust 11: all killed, byte-exact restores). Protected scope unchanged: no GUI file, Paper, Live, holdout, broker, migration or
+trial-identity change; R1-R5 behaviour preserved. Full local workspace acceptance: NOT RUN - prohibited by laptop resource-safety rule; broad
+workspace proof delegated to GitHub CI.

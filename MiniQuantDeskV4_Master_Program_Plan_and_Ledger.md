@@ -869,6 +869,7 @@ Branch `strategy-factory/full-completion-01` (baseline `origin/main` `e190cce9`)
 | Integrated acceptance | E2E-01..12 on the real native engine with synthetic bars; real-data readiness explained, real execution blocked on operator authorization |
 | Mutation proof | 102/102 killed (original); correction sets authority 7, faults 9, history 11, lane 6 also killed |
 | Independent-review correction R1-R5 | `FIXED+PROVEN` on the development branch (scheduler fault containment, grade-derived promotion truth, result-independent prior-search history, strict native CI lane run 38051841844, Factory-scoped status); independent acceptance pending; see the closure record |
+| Declaration concurrency closure | `FIXED+PROVEN` (registry-ordered publish of declaration/spec files, orphan recovery, fail-closed registered damage, atomic status/report writers, directory-aliasing ids refused; 11/11 owner mutants); independent acceptance pending |
 
 Acceptance: see the closure record. No provider, broker, Paper/Live, migration, order/fill or holdout action occurred. M1 `M1_BLOCKED`.
 

@@ -163,6 +163,10 @@ enter the ordinary intake as untrusted ideas.
 `compile` is idempotent: recompiling an existing campaign id verifies its spec and frozen declaration and returns it; a changed spec, or a missing
 or tampered declaration, is refused. A new campaign discloses (and is checked against) every earlier Factory campaign by predeclared strategy name;
 results never influence it. If another campaign is predeclared while a compile is in flight the compile is refused and must simply be re-run.
+The declaration and spec files are published inside the registry transaction, so two processes compiling the same id cannot disturb the winner's
+frozen files; a compile that died before committing leaves only an unregistered leftover that the next `compile` replaces. A registered
+declaration that is damaged is never rewritten: restore it from the review package/Git or investigate; `compile` and `release` refuse it.
+Campaign ids may not differ only by case, end with `.`, or be reserved device names.
 
 ## 10c. CI evidence for the native path
 

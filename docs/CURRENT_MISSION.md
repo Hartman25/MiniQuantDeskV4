@@ -15,6 +15,7 @@ Dedicated branch `strategy-factory/full-completion-01` (baseline `origin/main` `
 - Unchanged and enforced by test: no Promotion/Paper/Live path, no minted authorization, reserved holdout unread, synthetic data never graded as market evidence.
 - Paper/Live NOT TOUCHED by the Factory; no provider, broker, migration or order action. Full local workspace acceptance NOT RUN (laptop rule); broad proof delegated to GitHub CI.
 - Independent-review correction (`V4-STRATEGY-FACTORY-INDEPENDENT-REVIEW-CORRECTION-01`, R1-R5): scheduler claim ownership and false-idle fixed, promotion readiness derived from the grade only (never eligible), Factory history feeds novelty and disclosure (result-independent), strict native CI lane (run 38051841844, SUCCESS), Factory status scoped to Factory actions. `FACTORY_INDEPENDENT_ACCEPTANCE_PENDING`; M1 stays `M1_BLOCKED`. Record: the "Independent-review correction" section of `docs/research/STRATEGY_FACTORY_CLOSURE_01.md`.
+- Declaration concurrency closure (`V4-STRATEGY-FACTORY-DECLARATION-CONCURRENCY-CLOSURE-01`): the registry transaction now publishes the declaration/spec files, so competing compilers cannot disturb a frozen campaign; same-class writers (status, report) made atomic; directory-aliasing campaign ids refused. See the closure record's last section.
 
 ## -40. Distributed Research independent-review correction-02 (2026-10-09, `V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-02`)
 
