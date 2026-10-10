@@ -374,7 +374,7 @@ export interface OrderTraceRow {
  */
 export interface OrderTraceResponse {
   canonical_route: string;
-  truth_state: "active" | "no_fills_yet" | "no_order" | "no_db";
+  truth_state: "active" | "filled_without_fill_quality_telemetry" | "no_fills_yet" | "no_order" | "no_db";
   backend: string;
   order_id: string;
   broker_order_id: string | null;

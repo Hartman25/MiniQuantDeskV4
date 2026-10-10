@@ -20,6 +20,7 @@ import { parseSystemStatus } from "./statusContract";
 import { parsePortfolioSummary, parseRiskSummary, parseReconcileSummary } from "./economicContract";
 import { hasRows } from "./rowContract";
 import { validOperationalPayload } from "./operationalContract";
+import { parseOrderDetail } from "./orderDetailContract";
 import { parseMarketDataQuality, parseOmsOverview, parseTransport } from "./snapshotContracts";
 import {
   enforceRunScopeConsistency,
@@ -1476,19 +1477,19 @@ export async function fetchExecutionTimeline(internalOrderId: string): Promise<O
 }
 
 export async function fetchExecutionTrace(internalOrderId: string): Promise<OrderTraceResponse | null> {
-  return tryFetchJson<OrderTraceResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/trace`]);
+  return parseOrderDetail("trace", await tryFetchJson<unknown>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/trace`]), internalOrderId);
 }
 
 export async function fetchExecutionReplay(internalOrderId: string): Promise<OrderReplayResponse | null> {
-  return tryFetchJson<OrderReplayResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/replay`]);
+  return parseOrderDetail("replay", await tryFetchJson<unknown>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/replay`]), internalOrderId);
 }
 
 export async function fetchExecutionChart(internalOrderId: string): Promise<OrderChartResponse | null> {
-  return tryFetchJson<OrderChartResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/chart`]);
+  return parseOrderDetail("chart", await tryFetchJson<unknown>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/chart`]), internalOrderId);
 }
 
 export async function fetchCausalityTrace(internalOrderId: string): Promise<OrderCausalityResponse | null> {
-  return tryFetchJson<OrderCausalityResponse>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/causality`]);
+  return parseOrderDetail("causality", await tryFetchJson<unknown>([`/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/causality`]), internalOrderId);
 }
 
 // ---------------------------------------------------------------------------

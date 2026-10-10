@@ -30,11 +30,10 @@ export function ExecutionReplayViewer({ replay, selectedFrameIndex, onSelectFram
       )}
 
       <div className="replay-toolbar">
-        <button className="action-button small ghost" type="button">◀ Step</button>
-        <button className="action-button small" type="button">Play</button>
-        <button className="action-button small ghost" type="button">Pause</button>
-        <button className="action-button small ghost" type="button">Jump to anomaly</button>
+        <button className="action-button small ghost" type="button" disabled={selectedFrameIndex <= 0 || replay.frames.length === 0} onClick={() => onSelectFrame(selectedFrameIndex - 1)}>Previous frame</button>
+        <button className="action-button small ghost" type="button" disabled={selectedFrameIndex >= replay.frames.length - 1} onClick={() => onSelectFrame(selectedFrameIndex + 1)}>Next frame</button>
       </div>
+      <div className="summary-detail">Bounded fill-event history. OMS, execution, and queue states reflect the request-time snapshot, not historical frame state. Cumulative/open quantities are unavailable because this replay contract can omit fractional contributions.</div>
 
       <div className="timeline-meta-grid">
         <div><span>Truth state</span><strong>{replay.truth_state}</strong></div>
@@ -62,7 +61,7 @@ export function ExecutionReplayViewer({ replay, selectedFrameIndex, onSelectFram
                   <span>{formatDateTime(frame.timestamp)}</span>
                 </div>
                 <div className="summary-detail">{frame.state_delta} · {frame.message_digest}</div>
-                <div className="summary-detail">Qty {frame.filled_qty} filled / {frame.open_qty ?? "—"} open · Queue {frame.queue_status}</div>
+                <div className="summary-detail">Queue at request time: {frame.queue_status}</div>
                 {frame.anomaly_tags.length > 0 ? <div className="summary-detail">Anomalies: {frame.anomaly_tags.join(", ")}</div> : null}
                 {frame.boundary_tags.length > 0 ? <div className="summary-detail">Boundaries: {frame.boundary_tags.join(", ")}</div> : null}
               </button>

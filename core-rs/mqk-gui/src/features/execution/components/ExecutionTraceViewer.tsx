@@ -5,6 +5,8 @@ import type { OrderTraceResponse } from "../../system/types";
 
 function traceUnavailableNotice(trace: OrderTraceResponse): string | null {
   switch (trace.truth_state) {
+    case "filled_without_fill_quality_telemetry":
+      return "OMS reports filled quantity, but durable fill telemetry is missing. This does not mean the order has no fills.";
     case "no_db":
       return "No database connection — trace unavailable. Connect a DB to view fill telemetry.";
     case "no_order":

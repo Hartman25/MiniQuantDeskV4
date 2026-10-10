@@ -80,7 +80,7 @@ export function CausalityTraceViewer({ trace }: { trace: OrderCausalityResponse 
 
       {/* Fill-derived execution nodes */}
       {trace.nodes.length > 0 && (
-        <Panel title="Execution-fill causality nodes" compact>
+        <Panel title="Available causality evidence nodes" compact>
           <div className="causality-node-grid">
             {trace.nodes.map((node) => (
               <div key={node.node_key} className="causality-node-card severity-info">
