@@ -7,12 +7,13 @@ import assert from "node:assert/strict";
 import type { FeedEvent, SystemModel } from "./types.ts";
 import { deriveLatestHaltSummary, selectHaltEvents } from "./haltSummary.ts";
 
-type MinimalModel = Pick<SystemModel, "connected" | "status" | "feed" | "autonomousPaperStatus">;
+type MinimalModel = Pick<SystemModel, "connected" | "status" | "feed" | "autonomousPaperStatus" | "dataSource">;
 
 function buildModel(overrides: Partial<MinimalModel> = {}): SystemModel {
   const base: MinimalModel = {
     connected: true,
     status: {
+      daemon_reachable: true,
       runtime_status: "running",
       kill_switch_active: false,
       integrity_halt_active: false,
@@ -21,13 +22,14 @@ function buildModel(overrides: Partial<MinimalModel> = {}): SystemModel {
       deadman_status: "ok",
     } as SystemModel["status"],
     feed: [],
+    dataSource: { state: "real", reachable: true, realEndpoints: ["/api/v1/system/status", "/api/v1/events/feed"], missingEndpoints: [], mockSections: [] },
     autonomousPaperStatus: {
       reconcile_status: "ok",
       next_operator_action: null,
     } as SystemModel["autonomousPaperStatus"],
   };
 
-  return { ...base, ...overrides } as SystemModel;
+  return { ...base, ...overrides, status: { ...base.status, ...overrides.status } } as SystemModel;
 }
 
 function haltEvent(overrides: Partial<FeedEvent> = {}): FeedEvent {
@@ -120,6 +122,16 @@ test("deriveLatestHaltSummary: no halt — quiet system reports no_halt with inf
   assert.equal(summary.integrity_halt_active, false);
   assert.equal(summary.risk_halt_active, false);
   assert.equal(summary.severity, "info");
+});
+
+test("deriveLatestHaltSummary: absent feed is unknown history and missing status cannot prove a clear halt", () => {
+  const model = buildModel();
+  model.dataSource.realEndpoints = [];
+  assert.equal(deriveLatestHaltSummary(model).status, "unknown");
+  model.status.runtime_status = "halted";
+  assert.equal(deriveLatestHaltSummary(model).status, "active_halt");
+  model.status.daemon_reachable = false;
+  assert.equal(deriveLatestHaltSummary(model).status, "unknown");
 });
 
 test("deriveLatestHaltSummary: live_routing_enabled=true forces critical/anomaly tone even with no_halt", () => {

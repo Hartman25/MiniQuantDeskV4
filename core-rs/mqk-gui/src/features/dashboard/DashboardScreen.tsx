@@ -18,8 +18,8 @@ const TABS: { key: DashTab; label: string }[] = [
 
 const HALT_STATUS_LABELS: Record<HaltSummaryStatus, string> = {
   active_halt: "Active halt",
-  recent_halt: "Recent halt (not currently halted)",
-  no_halt: "No halt",
+  recent_halt: "Historical halt (no current halt reported)",
+  no_halt: "No halt in returned events",
   unknown: "Unknown",
 };
 
@@ -68,6 +68,8 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
   } = model;
 
   const haltSummary = deriveLatestHaltSummary(model);
+  const available = (path: string) => model.dataSource.realEndpoints.includes(path);
+  const alertsAvailable = available("/api/v1/alerts/active");
 
   return (
     <div className="screen-grid desk-screen-grid">
@@ -96,9 +98,9 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
         />
         <StatCard
           title="Open Alerts"
-          value={String(alerts.length)}
-          detail={`${alerts.filter((a) => a.severity === "critical").length} critical`}
-          tone={alerts.some((a) => a.severity === "critical") ? "bad" : alerts.length > 0 ? "warn" : "good"}
+          value={alertsAvailable ? String(alerts.length) : "Unavailable"}
+          detail={alertsAvailable ? `${alerts.filter((a) => a.severity === "critical").length} critical` : "Active fault source unavailable"}
+          tone={!alertsAvailable ? "neutral" : alerts.some((a) => a.severity === "critical") ? "bad" : alerts.length > 0 ? "warn" : "good"}
         />
         <StatCard
           title="Preflight"
@@ -111,15 +113,15 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
       {/* Halt cause & timeline — always visible. Derived from system/status,
           autonomous/paper-status, and events/feed; never fabricates a
           healthy/closed state when halt fields are missing or unknown. */}
-      <Panel title="Halt cause & timeline" subtitle="Latest halt reason, run, and recovery posture.">
+      <Panel title="Halt cause & timeline" subtitle="Current halt flags and latest recorded event. The feed does not prove linkage to the current halt or complete run history.">
         <div className="metric-list">
           <div>
             <span>Halt status</span>
             <strong className={severityToneClass(haltSummary.severity)}>{HALT_STATUS_LABELS[haltSummary.status]}</strong>
           </div>
-          <div><span>Reason</span><strong>{haltSummary.reason ?? "—"}</strong></div>
+          <div><span>Latest recorded reason (current-halt linkage unproven)</span><strong>{haltSummary.reason ?? "—"}</strong></div>
           <div><span>Event time</span><strong>{formatDateTime(haltSummary.timestamp)}</strong></div>
-          <div><span>Run ID</span><strong>{haltSummary.run_id ?? "—"}</strong></div>
+          <div><span>Event run ID</span><strong>{haltSummary.run_id ?? "—"}</strong></div>
           <div><span>Audit event ID</span><strong>{haltSummary.audit_event_id ?? "—"}</strong></div>
           <div><span>Source event</span><strong>{haltSummary.source_event ?? "—"}</strong></div>
           <div>
@@ -167,13 +169,12 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
         )}
         {haltSummary.status === "recent_halt" && (
           <p className="panel-notice panel-notice-warn">
-            A halt event was recorded for this run. The system is not currently halted, but review the halt recovery
-            workflow before treating this run as clean.
+            A halt event is present in the bounded feed. No current halt is reported. Run linkage and recovery are not proven by this observation.
           </p>
         )}
-        {haltSummary.status === "no_halt" && <p className="panel-notice">No halt recorded for this run.</p>}
+        {haltSummary.status === "no_halt" && <p className="panel-notice">No halt in returned events. Older events may be omitted; this does not prove a clean run history.</p>}
         {haltSummary.status === "unknown" && (
-          <p className="panel-notice panel-notice-warn">Halt status unavailable — no daemon connection established.</p>
+          <p className="panel-notice panel-notice-warn">Halt status or history source unavailable. Do not infer no prior halt.</p>
         )}
       </Panel>
 
@@ -236,19 +237,19 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
           {activeTab === "posture" && (
             <div className="two-column-grid">
               <Panel title="Session posture" compact>
-                <div className="metric-list compact-list">
+                {!available("/api/v1/system/session") ? <p>Session authority unavailable.</p> : <div className="metric-list compact-list">
                   <div><span>Market session</span><strong>{model.sessionState.market_session}</strong></div>
                   <div><span>Trading window</span><strong>{model.sessionState.system_trading_window}</strong></div>
                   <div><span>Next change</span><strong>{formatDateTime(model.sessionState.next_session_change_at)}</strong></div>
-                </div>
+                </div>}
               </Panel>
 
               <Panel title="Config fingerprint" compact>
-                <div className="metric-list compact-list">
+                {!available("/api/v1/system/config-fingerprint") ? <p>Configuration authority unavailable.</p> : <div className="metric-list compact-list">
                   <div><span>Config hash</span><strong>{model.configFingerprint.config_hash}</strong></div>
                   <div><span>Runtime generation</span><strong>{model.configFingerprint.runtime_generation_id}</strong></div>
                   <div><span>Risk policy</span><strong>{model.configFingerprint.risk_policy_version}</strong></div>
-                </div>
+                </div>}
               </Panel>
             </div>
           )}
@@ -257,7 +258,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
             <div className="three-column-grid">
               <Panel title="Positions snapshot">
                 <div className="list-stack compact-list">
-                  {positions.slice(0, 5).map((position) => (
+                  {!available("/api/v1/portfolio/positions") ? <p>Positions unavailable.</p> : positions.slice(0, 5).map((position) => (
                     <div key={`${position.strategy_id}-${position.symbol}`} className="list-row">
                       <strong>{position.symbol}</strong>
                       <span>{position.strategy_id}</span>
@@ -269,7 +270,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
 
               <Panel title="Open orders snapshot">
                 <div className="list-stack compact-list">
-                  {openOrders.slice(0, 5).map((order) => (
+                  {!available("/api/v1/portfolio/orders/open") ? <p>Open orders unavailable.</p> : openOrders.slice(0, 5).map((order) => (
                     <div key={order.internal_order_id} className="list-row">
                       <strong>{order.symbol}</strong>
                       <span>{order.status}</span>
@@ -281,7 +282,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
 
               <Panel title="Recent fills snapshot">
                 <div className="list-stack compact-list">
-                  {fills.slice(0, 5).map((fill) => (
+                  {!available("/api/v1/portfolio/fills") ? <p>Fills unavailable.</p> : fills.slice(0, 5).map((fill) => (
                     <div key={fill.fill_id} className="list-row">
                       <strong>{fill.symbol}</strong>
                       <span>{fill.qty} @ {fill.price}</span>

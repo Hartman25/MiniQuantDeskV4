@@ -14,6 +14,7 @@ import { TopologyScreen } from "../topology/TopologyScreen";
 import { TransportScreen } from "../transport/TransportScreen";
 import { AuditScreen } from "../audit/AuditScreen";
 import { ArtifactsScreen } from "../artifacts/ArtifactsScreen";
+import { DashboardScreen } from "../dashboard/DashboardScreen";
 import { DataTable } from "../../components/common/DataTable";
 import type { SystemModel } from "./types";
 
@@ -83,4 +84,20 @@ test("a missing required endpoint cannot be downgraded to a stale or degraded ev
     assert.match(html, /No snapshot/);
     assert.doesNotMatch(html, /No active alerts|Active alerts and diagnostics/);
   }
+});
+
+test("dashboard cannot clear alerts or halt history from missing secondary sources", () => {
+  const model = { ...MOCK_MODEL, connected: true, alerts: [], feed: [],
+    status: { ...MOCK_MODEL.status, daemon_reachable: true, runtime_status: "idle", kill_switch_active: false, risk_halt_active: false, integrity_halt_active: false,
+      last_heartbeat: new Date().toISOString() },
+    runtimeLeadership: { ...MOCK_MODEL.runtimeLeadership, post_restart_recovery_state: "complete" },
+    panelSources: { ...MOCK_MODEL.panelSources, dashboard: "mixed" },
+    dataSource: { ...MOCK_MODEL.dataSource, state: "partial", reachable: true, realEndpoints: [],
+      missingEndpoints: ["/api/v1/alerts/active", "/api/v1/events/feed", "/api/v1/system/session", "/api/v1/system/config-fingerprint"] } } as SystemModel;
+  const html = renderToStaticMarkup(React.createElement(DashboardScreen, { model }));
+  assert.match(html, /Active fault source unavailable/);
+  assert.match(html, /Halt status or history source unavailable/);
+  assert.match(html, /Session authority unavailable/);
+  assert.match(html, /Configuration authority unavailable/);
+  assert.doesNotMatch(html, /No halt recorded for this run/);
 });

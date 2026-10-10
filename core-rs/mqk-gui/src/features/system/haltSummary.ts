@@ -47,7 +47,7 @@ const UNKNOWN_SUMMARY: HaltSummary = {
 };
 
 export function deriveLatestHaltSummary(model: SystemModel): HaltSummary {
-  if (!model.connected) {
+  if (!model.connected || !model.status.daemon_reachable) {
     return UNKNOWN_SUMMARY;
   }
 
@@ -58,7 +58,8 @@ export function deriveLatestHaltSummary(model: SystemModel): HaltSummary {
   const riskHaltActive = status.risk_halt_active;
   const activeHalt = killSwitchActive || integrityHaltActive || riskHaltActive || status.runtime_status === "halted";
 
-  const latestHaltEvent = (feed ?? [])
+  const historyAvailable = model.dataSource.realEndpoints.includes("/api/v1/events/feed");
+  const latestHaltEvent = (historyAvailable ? feed : [])
     .filter((event) => event.source === ORCHESTRATOR_HALT_SOURCE)
     .reduce<(typeof feed)[number] | null>((latest, event) => {
       if (!latest) return event;
@@ -74,14 +75,14 @@ export function deriveLatestHaltSummary(model: SystemModel): HaltSummary {
     summaryStatus = "recent_halt";
     reason = latestHaltEvent.text;
   } else {
-    summaryStatus = "no_halt";
+    summaryStatus = historyAvailable ? "no_halt" : "unknown";
     reason = null;
   }
 
   const liveRoutingEnabled = status.live_routing_enabled;
   const reconcileStatus = autonomousPaperStatus.reconcile_status;
 
-  let severity: Severity = "info";
+  let severity: Severity = summaryStatus === "unknown" ? "warning" : "info";
   if (activeHalt) {
     severity = "critical";
   } else if (summaryStatus === "recent_halt") {
