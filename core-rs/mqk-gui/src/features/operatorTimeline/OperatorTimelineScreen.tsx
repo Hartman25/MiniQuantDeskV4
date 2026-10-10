@@ -2,7 +2,7 @@ import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import { canonicalHistory } from "../system/historyContract";
 import type { SystemModel } from "../system/types";
 import type { OperatorTimelineCategory } from "../system/types/core";
@@ -55,7 +55,7 @@ const CATEGORY_ORDER: readonly OperatorTimelineCategory[] = [
 export function OperatorTimelineScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "operatorTimeline");
 
-  if (truthState !== null) {
+  if (truthState !== null && isTruthHardBlock(truthState)) {
     return <TruthStateNotice state={truthState} />;
   }
 
@@ -102,6 +102,7 @@ export function OperatorTimelineScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
 
       {/* Category posture — which domains are dominating the current chronology.
           This is the first question Timeline owns: not "were there alerts?" but

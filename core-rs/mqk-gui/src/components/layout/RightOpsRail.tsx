@@ -1,10 +1,13 @@
 import { Panel } from "../common/Panel";
 import { formatDateTime, formatMoney } from "../../lib/format";
 import type { SystemModel } from "../../features/system/types";
+import { panelTruthRenderState } from "../../features/system/truthRendering";
 
 export function RightOpsRail({ model }: { model: SystemModel }) {
-  const topAlerts = model.alerts.slice(0, 4);
-  const topIncidents = model.incidents.slice(0, 3);
+  const topAlerts = [...model.alerts].sort((a, b) => ({ critical: 0, warning: 1, info: 2 }[a.severity] - { critical: 0, warning: 1, info: 2 }[b.severity]) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 4);
+  const topIncidents = model.incidents.filter((row) => row.status !== "resolved").slice(0, 3);
+  const available = (endpoint: string) => model.connected && model.dataSource.realEndpoints.includes(endpoint);
+  const portfolioAvailable = panelTruthRenderState(model, "portfolio") === null && available("/api/v1/portfolio/summary");
 
   return (
     <aside className="right-rail">
@@ -18,16 +21,16 @@ export function RightOpsRail({ model }: { model: SystemModel }) {
       </Panel>
 
       <Panel title="Portfolio snapshot" compact>
-        <div className="metric-list compact-list">
+        {portfolioAvailable ? <div className="metric-list compact-list">
           <div><span>Equity</span><strong>{formatMoney(model.portfolioSummary.account_equity)}</strong></div>
           <div><span>Cash</span><strong>{formatMoney(model.portfolioSummary.cash)}</strong></div>
           <div><span>Buying power</span><strong>{formatMoney(model.portfolioSummary.buying_power)}</strong></div>
           <div><span>Positions</span><strong>{model.positions.length}</strong></div>
-        </div>
+        </div> : <div className="unavailable-notice">Portfolio snapshot unavailable or compromised.</div>}
       </Panel>
 
       <Panel title="Alerts" compact>
-        {topAlerts.length > 0 ? (
+        {!available("/api/v1/alerts/active") ? <div className="unavailable-notice">Active alert source unavailable.</div> : topAlerts.length > 0 ? (
           <div className="list-stack compact-list">
             {topAlerts.map((alert) => (
               <div key={alert.id} className="list-row">
@@ -42,7 +45,7 @@ export function RightOpsRail({ model }: { model: SystemModel }) {
       </Panel>
 
       <Panel title="Incidents" compact>
-        {topIncidents.length > 0 ? (
+        {!available("/api/v1/incidents") ? <div className="unavailable-notice">Incident source unavailable.</div> : topIncidents.length > 0 ? (
           <div className="list-stack compact-list">
             {topIncidents.map((incident) => (
               <div key={incident.incident_id} className="list-row">
@@ -57,12 +60,12 @@ export function RightOpsRail({ model }: { model: SystemModel }) {
       </Panel>
 
       <Panel title="Runtime markers" compact>
-        <div className="metric-list compact-list">
+        {available("/api/v1/system/runtime-leadership") ? <div className="metric-list compact-list">
           <div><span>Generation</span><strong>{model.runtimeLeadership.generation_id}</strong></div>
           <div><span>Leader</span><strong>{model.runtimeLeadership.leader_node}</strong></div>
           <div><span>Last restart</span><strong>{formatDateTime(model.runtimeLeadership.last_restart_at)}</strong></div>
           <div><span>Recovery</span><strong>{model.runtimeLeadership.post_restart_recovery_state}</strong></div>
-        </div>
+        </div> : <div className="unavailable-notice">Runtime marker source unavailable.</div>}
       </Panel>
     </aside>
   );

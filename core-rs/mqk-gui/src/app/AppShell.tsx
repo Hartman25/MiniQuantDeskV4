@@ -434,7 +434,7 @@ function ControlWorkstationShell() {
               }}
             />
 
-            {showBottomRail ? <BottomEventRail events={model.feed} /> : null}
+            {showBottomRail ? <BottomEventRail events={model.feed} available={model.connected && model.dataSource.realEndpoints.includes("/api/v1/events/feed")} /> : null}
           </main>
 
           {rightDrawerOpen ? (

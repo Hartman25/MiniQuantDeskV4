@@ -90,7 +90,7 @@ export interface ScreenDefinition {
 export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
   operator:    ["controlStation", "dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "dailyOperations", "config", "marketData", "ingest", "settings"],
   execution:   ["execution"],
-  diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "strategyScanner", "risk"],
+  diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "evidence", "strategyScanner", "risk"],
 };
 
 /**

@@ -3,13 +3,13 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function IncidentsScreen({ model }: { model: SystemModel }) {
   const [query, setQuery] = useState("");
   const truthState = panelTruthRenderState(model, "incidents");
-  if (truthState !== null) return <TruthStateNotice state={truthState} />;
+  if (truthState !== null && isTruthHardBlock(truthState)) return <TruthStateNotice state={truthState} />;
   const active = model.incidents.filter((row) => row.status === "open" || row.status === "investigating");
   const critical = active.filter((row) => row.severity === "critical");
   const rows = model.incidents.filter((row) =>
@@ -17,6 +17,7 @@ export function IncidentsScreen({ model }: { model: SystemModel }) {
       .join(" ").toLowerCase().includes(query.toLowerCase()));
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
       <div className="summary-grid summary-grid-four">
         <StatCard title="Open incidents" value={String(active.length)} detail="Durable case status" tone={critical.length ? "bad" : active.length ? "warn" : "neutral"} />
         <StatCard title="Critical open" value={String(critical.length)} detail="Requires investigation" tone={critical.length ? "bad" : "neutral"} />

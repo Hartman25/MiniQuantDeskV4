@@ -4,15 +4,16 @@ import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
 import type { SystemModel } from "../system/types";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 
 export function MetricsScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "metrics");
-  if (truthState !== null) return <TruthStateNotice state={truthState} />;
+  if (truthState !== null && isTruthHardBlock(truthState)) return <TruthStateNotice state={truthState} />;
   const { metrics } = model;
   const sections = [metrics.runtime, metrics.execution, metrics.portfolio, metrics.fillQuality, metrics.reconciliation, metrics.riskSafety].filter((section) => section !== undefined);
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
       <Panel title="Operational metric evidence" subtitle="GET /api/v1/metrics/dashboards · current snapshot only">
         <p>Browser observation: {formatDateTime(model.lastUpdatedAt)}. Snapshot capture time and historical samples are unavailable from this endpoint.</p>
         <p>Missing measurements remain unavailable. A measured count or a clear kill switch does not establish subsystem readiness.</p>

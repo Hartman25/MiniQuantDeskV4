@@ -5,7 +5,7 @@ import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
 import { selectHaltEvents } from "../system/haltSummary";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 const PRIORITY: Record<string, number> = { critical: 0, warning: 1, info: 2 };
@@ -13,7 +13,7 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
   const [query, setQuery] = useState("");
   const [severity, setSeverity] = useState("all");
   const truthState = panelTruthRenderState(model, "alerts");
-  if (truthState !== null) return <TruthStateNotice state={truthState} />;
+  if (truthState !== null && isTruthHardBlock(truthState)) return <TruthStateNotice state={truthState} />;
   const triageAvailable = model.alertTriageTruth?.truth_state === "active";
   const triage = new Map(model.alertTriage.map((row) => [row.alert_id, row]));
   const alerts = model.alerts.filter((row) => (severity === "all" || row.severity === severity) &&
@@ -23,6 +23,7 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
   const feedAvailable = model.dataSource.realEndpoints.includes("/api/v1/events/feed");
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateNotice state={truthState} />}
       <div className="summary-grid summary-grid-four">
         <StatCard title="Active fault signals" value={String(model.alerts.length)} detail="Acknowledged alerts remain active until the fault clears" tone={model.alerts.some((row) => row.severity === "critical") ? "bad" : model.alerts.length ? "warn" : "neutral"} />
         <StatCard title="Critical" value={String(model.alerts.filter((row) => row.severity === "critical").length)} tone="neutral" />

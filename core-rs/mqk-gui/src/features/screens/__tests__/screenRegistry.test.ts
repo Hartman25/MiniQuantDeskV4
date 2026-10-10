@@ -8,6 +8,13 @@ import { MONITOR_GROUPS, SCREEN_REGISTRY } from "../screenRegistry.tsx";
 
 const ALL_LEFT_RAIL = [...LEFT_RAIL_PRIMARY, ...LEFT_RAIL_SECONDARY];
 
+test("every registered screen is reachable from its monitor group and left rail", () => {
+  for (const [key, screen] of Object.entries(SCREEN_REGISTRY)) {
+    assert.ok(MONITOR_GROUPS[screen.monitorGroup].includes(key as keyof typeof SCREEN_REGISTRY), key);
+    assert.ok(ALL_LEFT_RAIL.includes(key as keyof typeof SCREEN_REGISTRY), key);
+  }
+});
+
 // 1. Live left-rail secondary includes ingest.
 test("LEFT_RAIL_SECONDARY includes ingest", () => {
   assert.ok(
