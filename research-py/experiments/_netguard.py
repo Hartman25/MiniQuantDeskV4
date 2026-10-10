@@ -8,15 +8,18 @@ swallowed exception still fails the test and the session summary reports attempt
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -33,13 +36,14 @@ DIAG_ENV = "MQK_NETGUARD_DIAG"
 LAUNCH_ENV = "MQK_NETGUARD_LAUNCH"
 PARENT_ENV = "MQK_NETGUARD_PARENT"
 # Sink rows that are bookkeeping, not attempts: a guard announcing itself, and a parent announcing a child it launched.
-NON_ATTEMPT_KINDS = frozenset({"guard_ready", "child_launched"})
+NON_ATTEMPT_KINDS = frozenset({"guard_ready", "child_launched", "child_exited", "sink_failure"})
 CHILD_SINK_EXIT = 97
 
 # `root`/`root_id`: the immutable root audit sink (fixed by the first install; the authority the session audits).
 # `diag`: diagnostic copies [(path, file id)]; they only ever receive copies of what the root also receives.
 _state: dict = {"installed": False, "attempts": [], "expect_depth": 0, "allowed": {}, "root": None, "root_id": None,
-                "owns_root": False, "diag": [], "ready": False, "token": uuid.uuid4().hex, "parent_token": None, "sink_errors": 0}
+                "owns_root": False, "diag": [], "ready": False, "token": uuid.uuid4().hex, "parent_token": None, "sink_errors": 0,
+                "tracked": [], "integrity": [], "loss_depth": 0}
 _in_guarded_popen = threading.local()
 _in_sink_io = threading.local()
 SINK_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_TRUNC | os.O_CREAT
@@ -159,10 +163,50 @@ def _sinks_usable() -> bool:
     return True
 
 
+def _marker_dir() -> str | None:
+    return None if _state["root"] is None else _state["root"] + ".failed"
+
+
+def failure_markers() -> list[str]:
+    """Tokens of processes that reported losing their audit evidence by creating an EMPTY file (creating a file
+    needs no bytes, so it survives a full disk, RLIMIT_FSIZE=0 and a replaced root)."""
+    d = _marker_dir()
+    if d is None:
+        return []
+    try:
+        with _sink_io():
+            return sorted(n.split(".")[0] for n in os.listdir(d))
+    except OSError as exc:
+        if _state["owns_root"]:
+            raise SinkCorrupt(f"audit failure-marker directory {d} is unreadable: {exc}") from exc
+        return []
+
+
+def _report_failure(subject: str, reason: str) -> None:
+    """Best-effort durable report that `subject` lost (or may have lost) audit evidence: a row, and an empty marker."""
+    wrote = _write_all({"kind": "sink_failure", "proc": _state["token"], "subject": subject, "reason": reason,
+                        "pid": os.getpid()})
+    marked = False
+    d = _marker_dir()
+    if d is not None:
+        with _sink_io():
+            try:
+                os.close(os.open(os.path.join(d, f"{subject}.{reason}"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+                marked = True
+            except FileExistsError:
+                marked = True
+            except OSError:
+                pass
+    if not (wrote or marked):
+        _state["sink_errors"] += 1
+
+
 def _is_sink(target) -> bool:
     if not isinstance(target, (str, bytes, os.PathLike)):
         return False
     real = os.path.realpath(os.fsdecode(target))
+    if _state["root"] is not None and real.startswith(os.path.realpath(_state["root"] + ".failed") + os.sep):
+        return True  # the failure markers are evidence too
     return any(real == os.path.realpath(sk) for sk in [_state["root"], *[d[0] for d in _state["diag"]]] if sk)
 
 
@@ -174,6 +218,8 @@ def _record(kind: str, detail: str) -> None:
         _state["sink_errors"] += 1
         if _state.get("child_fatal"):
             # The denial stands, but its evidence could not be collected: a child that cannot report must not go on.
+            # Tell the parent through a channel that needs no bytes in the sink (an empty marker file) before leaving.
+            _report_failure(_state["token"], "post_ready_sink_loss")
             os.write(2, b"offline guard: audit sink unwritable; child terminated\n")
             os._exit(CHILD_SINK_EXIT)
 
@@ -246,6 +292,9 @@ def _hook(event: str, args: tuple) -> None:
 def _set_root(path, *, owns: bool) -> None:
     real, file_id = _validated(path, create=owns)
     _state["root"], _state["root_id"], _state["owns_root"] = real, file_id, owns
+    if owns:
+        with _sink_io():
+            os.makedirs(real + ".failed", exist_ok=True)
 
 
 def _publish_env() -> None:
@@ -297,6 +346,7 @@ def install_child() -> None:
     try:
         install()
     except SinkError as exc:
+        _report_failure(_state["token"], "install_failed")
         os.write(2, f"offline guard: {exc}; refusing to run\n".encode())
         os._exit(CHILD_SINK_EXIT)
     if _state["ready"]:
@@ -304,9 +354,11 @@ def install_child() -> None:
     row = {"kind": "guard_ready", "proc": _state["token"], "parent_proc": _state["parent_token"],
            "pid": os.getpid(), "ppid": os.getppid()}
     if _state["root"] is None or not _write_all(row):
+        _report_failure(_state["token"], "ready_failed")
         os.write(2, b"offline guard: no writable audit sink in the child; refusing to run\n")
         os._exit(CHILD_SINK_EXIT)
     _state["ready"] = True
+    atexit.register(finalize_children, 0, 2.0)  # a child records the fate of the children it launched
 
 
 @contextlib.contextmanager
@@ -349,44 +401,111 @@ def sink_rows(path) -> list[dict]:
     return rows
 
 
-def audit(rows: list[dict], me: str, *, start: int = 0, owner: bool = False) -> dict:
-    """What the session owned by process `me` must account for in `rows[start:]`.
-
-    Lineage is rebuilt from the sink itself (launch ids, not pids): an edge `parent -> child` comes from each
-    `child_launched` row (expected when the parent launched it inside `expect_denied`) and each `guard_ready` row.
-    A descendant is expected only if every path to it passed through an expected launch. Returns
-    `unexpected` (attempt rows by descendants), `uninitialized` (launch ids of guarded children that never wrote
-    `guard_ready`) and, for the owner of the root, `orphans` (attempts by processes outside any known lineage)."""
-    pairs: dict[tuple, bool] = {}  # (parent, child) -> launched inside expect_denied; the same edge is seen twice
-    ready = set()
-    for r in rows:
-        if r["kind"] == "child_launched":
-            key = (r.get("proc"), r.get("launch"))
-            pairs[key] = pairs.get(key, False) or bool(r.get("expected"))
-        elif r["kind"] == "guard_ready":
-            ready.add(r.get("proc"))
-            if r.get("parent_proc"):
-                pairs.setdefault((r["parent_proc"], r.get("proc")), False)
+def _reach(me: str, pairs: dict, attr: str) -> dict:
+    """Descendants of `me` -> True only if EVERY path to them passed through a launch carrying `attr`."""
     edges: dict[str, list[tuple[str, bool]]] = {}
-    for (parent, child), expected in pairs.items():
-        edges.setdefault(parent, []).append((child, expected))
+    for (parent, child), flags in pairs.items():
+        edges.setdefault(parent, []).append((child, flags[attr]))
     reach = {me: False}
     changed = True
     while changed:
         changed = False
         for parent in list(reach):
-            for child, expected in edges.get(parent, []):
-                via = reach[parent] or expected
+            for child, flagged in edges.get(parent, []):
+                via = reach[parent] or flagged
                 if child not in reach or (reach[child] and not via):
                     reach[child], changed = via, True
+    return reach
+
+
+def audit(rows: list[dict], me: str, *, start: int = 0, owner: bool = False, markers=(), known_failures=()) -> dict:
+    """What the session owned by process `me` must account for in `rows[start:]`.
+
+    Lineage is rebuilt from the sink itself (launch ids, not pids): an edge `parent -> child` comes from each
+    `child_launched` row (`expected` when the parent launched it inside `expect_denied`, `loss_expected` inside
+    `expect_evidence_loss`) and each `guard_ready` row. A descendant is deliberate only if every path to it passed
+    through such a launch; a writer's own flags are ignored. Returns
+    `unexpected` (attempt rows by descendants), `uninitialized` (launch ids that never wrote `guard_ready`),
+    `integrity` (tokens of descendants that LOST audit evidence after or before becoming ready, from their own
+    row/marker or the parent's finalization of their exit; also launches whose exit was never recorded),
+    `expected_losses` (the same, excused by `expect_evidence_loss`) and, for the owner of the root, `orphans`.
+    `expect_denied` never excuses a lost-evidence finding: it excuses only denied probes whose evidence arrived."""
+    pairs: dict[tuple, dict] = {}  # (parent, child) -> flags; the same edge is seen twice (launched + ready)
+    ready, exited = set(), set()
+    for r in rows:
+        if r["kind"] == "child_launched":
+            f = pairs.setdefault((r.get("proc"), r.get("launch")), {"expected": False, "loss": False})
+            f["expected"] = f["expected"] or bool(r.get("expected"))
+            f["loss"] = f["loss"] or bool(r.get("loss_expected"))
+        elif r["kind"] == "guard_ready":
+            ready.add(r.get("proc"))
+            if r.get("parent_proc"):
+                pairs.setdefault((r["parent_proc"], r.get("proc")), {"expected": False, "loss": False})
+        elif r["kind"] == "child_exited":
+            exited.add(r.get("launch"))
+    reach, reach_loss = _reach(me, pairs, "expected"), _reach(me, pairs, "loss")
     new = rows[start:]
     # A row's own `expected` flag is the writer's claim and is ignored: only a launch made inside the owner's
     # `expect_denied` (an edge above) can mark a descendant's attempts as deliberate.
     attempts = [r for r in new if r["kind"] not in NON_ATTEMPT_KINDS and r.get("proc") != me]
+    failed = {r.get("subject") or r.get("proc") for r in new if r["kind"] == "sink_failure"} | set(markers) | set(known_failures)
+    failed |= {r["launch"] for r in new if r["kind"] == "child_launched" and r.get("proc") in reach and r.get("guarded")
+               and r.get("launch") not in exited}      # a launch whose final state nobody recorded is indeterminate
+    failed.discard(me)
+    in_tree = [t for t in sorted(failed) if t in reach]
+    outside = [t for t in sorted(failed) if t not in reach] if owner else []
     return {"unexpected": [r for r in attempts if r.get("proc") in reach and not reach[r["proc"]]],
             "orphans": [r for r in attempts if r.get("proc") not in reach] if owner else [],
             "uninitialized": sorted({str(r.get("launch")) for r in new if r["kind"] == "child_launched" and r.get("guarded")
-                                     and r.get("proc") in reach and r.get("launch") not in ready})}
+                                     and r.get("proc") in reach and r.get("launch") not in ready}),
+            "integrity": [t for t in in_tree if not reach_loss[t]] + outside,
+            "expected_losses": [t for t in in_tree if reach_loss[t]]}
+
+
+def finalize_children(since: int = 0, timeout: float = 5.0) -> list[dict]:
+    """Establish the final state of the guarded children THIS process launched (`since` = index into the launch list),
+    whether or not their launcher ever looked at the result: reap or wait (bounded; a child still running when the
+    bound ends is killed and counts as lost evidence), record a `child_exited` row, and report as lost evidence any
+    child that exited with the sink-failure code, died of SIGXFSZ (a write past RLIMIT_FSIZE), or had no outcome.
+    Returns the failure descriptors. Idempotent per child."""
+    failures = []
+    deadline = time.monotonic() + timeout
+    for entry in _state["tracked"][since:]:
+        if entry["finalized"] or entry["owner_pid"] != os.getpid():
+            continue  # a forked copy of this process must not judge (or wait for) its parent's children
+        proc = entry["popen"]
+        rc = proc.poll()
+        if rc is None:
+            try:
+                rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                rc = None
+        entry["finalized"] = True
+        reason = ("outstanding" if rc is None else "exit_sink_failure" if rc == CHILD_SINK_EXIT
+                  else "sigxfsz" if rc == -signal.SIGXFSZ else None)
+        _write_all({"kind": "child_exited", "proc": _state["token"], "launch": entry["launch"], "returncode": rc,
+                    "pid": os.getpid()})
+        if reason:
+            _report_failure(entry["launch"], reason)
+            failures.append({"launch": entry["launch"], "reason": reason, "returncode": rc,
+                             "loss_expected": entry["loss_expected"]})
+            _state["integrity"].append(failures[-1])
+    return failures
+
+
+@contextlib.contextmanager
+def expect_evidence_loss():
+    """A test that deliberately makes a child lose its audit evidence says so HERE, for the launches inside the block.
+    The loss is reported as `expected_losses` instead of `integrity`; denied probes need `expect_denied` separately,
+    and `expect_denied` never covers a loss."""
+    install()
+    _state["loss_depth"] += 1
+    try:
+        yield
+    finally:
+        _state["loss_depth"] -= 1
 
 
 @contextlib.contextmanager
@@ -529,8 +648,12 @@ def install_subprocess_guard() -> None:
         finally:
             _in_guarded_popen.depth -= 1
         if _state["root"] is not None:  # the child must later announce `guard_ready`; the session audit enforces it
+            loss = _state["loss_depth"] > 0
             row = {"kind": "child_launched", "proc": _state["token"], "launch": launch, "child_pid": self.pid,
-                   "guarded": python_child, "expected": _state["expect_depth"] > 0, "pid": os.getpid()}
+                   "guarded": python_child, "expected": _state["expect_depth"] > 0, "loss_expected": loss,
+                   "pid": os.getpid()}
+            _state["tracked"].append({"launch": launch, "popen": self, "finalized": False, "loss_expected": loss,
+                                      "owner_pid": os.getpid()})
             if not _write_all(row):
                 self.kill()
                 self.wait()
@@ -559,9 +682,13 @@ def run_guarded(script: Path, argv: list[str], *, env: dict, cwd: Path, log: Pat
     is an error. Deliberate probes need an explicit `expect_denied()` around the call."""
     install_subprocess_guard()
     log = Path(log)
+    first = len(_state["tracked"])
     with sink_to(log):
         proc = subprocess.run([sys.executable, "-c", _BOOT, str(Path(__file__).resolve().parent), str(script), *argv],
                               capture_output=True, text=True, env=env, cwd=cwd)
+        lost = [f for f in finalize_children(first) if not f["loss_expected"]]
+    if lost:
+        raise NetworkDenied(f"offline guard: child launch(es) {[f['launch'] for f in lost]} lost their audit evidence")
     all_rows = sink_rows(log)
     missing = audit(all_rows, _state["token"])["uninitialized"]
     if missing:

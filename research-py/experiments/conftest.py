@@ -51,13 +51,17 @@ def _rows() -> list[dict]:
     return _netguard.sink_rows(_SESSION_CHILD_LOG)
 
 
-def _audit(rows: list[dict] | None = None, start: int = 0, *, wait: bool = False) -> dict:
+def _audit(rows: list[dict] | None = None, start: int = 0, *, wait: bool = False, markers_before=frozenset(),
+           integrity_before: int = 0) -> dict:
     """The lineage audit of this session's subtree (polled briefly for `guard_ready`: a child announces itself
-    before it runs any of its own code). An unreadable or malformed root sink raises `SinkCorrupt`."""
+    before it runs any of its own code). An unreadable or malformed root sink raises `SinkCorrupt`. Lost-evidence
+    findings come from the children's own reports AND this process's finalization of their exits."""
     deadline = time.monotonic() + (READY_GRACE_SECONDS if wait else 0)
     while True:
+        known = {f["launch"] for f in _netguard._state["integrity"][integrity_before:]}
         result = _netguard.audit(_rows() if rows is None else rows, _netguard.process_token(), start=start,
-                                 owner=_netguard._state["owns_root"])
+                                 owner=_netguard._state["owns_root"],
+                                 markers=set(_netguard.failure_markers()) - set(markers_before), known_failures=known)
         if not result["uninitialized"] or time.monotonic() >= deadline:
             return result
         time.sleep(0.05)
@@ -66,28 +70,37 @@ def _audit(rows: list[dict] | None = None, start: int = 0, *, wait: bool = False
 @pytest.fixture(autouse=True)
 def _no_external_attempt_in_this_test():
     before, rows_before = len(_netguard.unexpected_attempts()), len(_rows())
+    tracked_before, integrity_before = len(_netguard._state["tracked"]), len(_netguard._state["integrity"])
+    markers_before = frozenset(_netguard.failure_markers())
     yield
     new = _netguard.unexpected_attempts()[before:]
     assert not new, f"offline guard: external network/secret access attempted: {new}"
-    found = _audit(start=rows_before, wait=True)
+    # Every guarded child launched by this test is brought to a final state first, whether or not the test looked
+    # at its return code; a child still running is stopped (bounded) and counts as lost evidence.
+    _netguard.finalize_children(tracked_before, READY_GRACE_SECONDS)
+    found = _audit(start=rows_before, wait=True, markers_before=markers_before, integrity_before=integrity_before)
     bad = found["unexpected"] + found["orphans"]
     assert not bad, f"offline guard: a spawned child attempted external network/secret access: {bad}"
     assert not found["uninitialized"], (f"offline guard: spawned Python child launch(es) {found['uninitialized']} never "
                                         "initialized the guard (attempts invisible)")
+    assert not found["integrity"], (f"offline guard: guarded process(es) {found['integrity']} lost audit evidence or had no "
+                                    "recorded outcome (a denied attempt may be invisible)")
 
 
 def pytest_sessionfinish(session, exitstatus):
     errors = _netguard._state["sink_errors"]
+    _netguard.finalize_children(0, READY_GRACE_SECONDS)
     try:
         found = _audit(wait=True)
     except _netguard.SinkError:
-        found, errors = {"unexpected": [], "orphans": [], "uninitialized": []}, errors + 1
+        found, errors = {"unexpected": [], "orphans": [], "uninitialized": [], "integrity": [], "expected_losses": []}, errors + 1
+    errors += len(found["integrity"])
     children = found["unexpected"] + found["orphans"]
     unexpected = _netguard.unexpected_attempts()
     summary = {"attempted_total": len(_netguard.attempts()),
                "unexpected_attempts": len(unexpected) + len(children) + len(found["uninitialized"]) + errors,
                "unexpected_child_attempts": len(children), "uninitialized_children": len(found["uninitialized"]),
-               "sink_integrity_errors": errors}
+               "sink_integrity_errors": errors, "expected_evidence_losses": len(found["expected_losses"])}
     path = os.environ.get(SUMMARY_ENV)
     if path:
         Path(path).write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")

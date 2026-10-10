@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
@@ -493,6 +494,10 @@ def test_a_child_that_cannot_write_its_ready_record_refuses_to_run(tmp_path, bre
         env.pop(_netguard.LOG_ENV)
     else:
         env[_netguard.DIAG_ENV] = str(directory)
+    launch = uuid.uuid4().hex                          # give the hand-launched child the lineage the wrapper would
+    env[_netguard.LAUNCH_ENV], env[_netguard.PARENT_ENV] = launch, _netguard.process_token()
+    _netguard._write_all({"kind": "child_launched", "proc": _netguard.process_token(), "launch": launch, "child_pid": 0,
+                          "guarded": False, "expected": False, "loss_expected": True, "pid": os.getpid()})
     proc = subprocess.Popen.__new__(subprocess.Popen)
     _netguard._in_guarded_popen.depth = 1   # the test stands in for the wrapper: only the child's own check is under test
     try:
@@ -500,7 +505,11 @@ def test_a_child_that_cannot_write_its_ready_record_refuses_to_run(tmp_path, bre
     finally:
         _netguard._in_guarded_popen.depth = 0
     _, err = proc.communicate()
+    _netguard._write_all({"kind": "child_exited", "proc": _netguard.process_token(), "launch": launch,
+                          "returncode": proc.returncode, "pid": os.getpid()})
     assert proc.returncode == _netguard.CHILD_SINK_EXIT and b"refusing to run" in err and not marker.exists(), err
+    if break_it == "diagnostic_is_a_directory":     # the child could reach the root, so it left an empty failure marker
+        assert os.path.exists(os.path.join(_netguard._marker_dir(), f"{launch}.install_failed"))
     assert _netguard.sink_rows(good) == [r for r in _netguard.sink_rows(good)]  # the root sink is still readable
 
 
@@ -569,6 +578,8 @@ def test_a_child_that_never_initialized_the_guard_fails_its_test_and_the_session
                            "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
     # the synthetic launch is also visible to THIS session (it is the nested session's parent): reconcile it
     _netguard._write_all({"kind": "guard_ready", "proc": "ghost-launch-0001", "parent_proc": None, "pid": 0, "ppid": 0})
+    _netguard._write_all({"kind": "child_exited", "proc": _netguard.process_token(), "launch": "ghost-launch-0001",
+                          "returncode": 0, "pid": 0})
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0 and "never initialized the guard" in out, out[-800:]
     got = json.loads(summary.read_text(encoding="utf-8"))

@@ -428,7 +428,7 @@ def test_a_child_whose_own_evidence_can_no_longer_be_written_terminates_instead_
     plant_env_local(tmp_path)
     code = ("import _netguard\n_netguard._state['root_id'] = (0, 0)      # simulate the root having been replaced under it\n"
             + SWALLOWED_READ + "print('CONTINUED')\n")
-    with _netguard.expect_denied():
+    with _netguard.expect_denied(), _netguard.expect_evidence_loss():
         proc = run_child(code, tmp_path)
     assert proc.returncode == _netguard.CHILD_SINK_EXIT and "CONTINUED" not in proc.stdout, proc.stdout + proc.stderr
     assert "audit sink unwritable" in proc.stderr
