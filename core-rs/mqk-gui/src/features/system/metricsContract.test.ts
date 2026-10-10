@@ -16,6 +16,7 @@ const snapshot = {
 };
 test("snapshot metrics never promote absent snapshots to zero or healthy, and omit fabricated reject telemetry", () => {
   const metrics = parseMetricsDashboard(snapshot)!;
+  assert.equal(parseMetricsDashboard({ ...snapshot, reconcile_last_run_at: "2026-10-10T12:00:00" }), null);
   assert.equal(metrics.execution.series[0].current_value, null);
   assert.equal(metrics.reconciliation.series[0].current_value, null);
   assert.equal(metrics.riskSafety.operational_state, "HALTED");

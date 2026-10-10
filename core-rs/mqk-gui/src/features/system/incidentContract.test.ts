@@ -11,7 +11,8 @@ const incident = { incident_id: "case-7", opened_at_utc: "2026-10-10T12:00:00Z",
 test("durable incident contract rejects unavailable, malformed and duplicate rows", () => {
   for (const body of [null, {}, { truth_state: "no_db", rows: [] }, { truth_state: "future", rows: [] },
     { truth_state: "active", rows: [{}] }, { truth_state: "active", rows: [incident, incident] },
-    { truth_state: "active", rows: [{ ...incident, status: "healthy" }] }]) assert.equal(parseIncidents(body), null);
+    { truth_state: "active", rows: [{ ...incident, status: "healthy" }] },
+    { truth_state: "active", rows: [{ ...incident, opened_at_utc: "2026-10-10T12:00:00" }] }]) assert.equal(parseIncidents(body), null);
   assert.deepEqual(parseIncidents({ truth_state: "active", rows: [] }), []);
 });
 

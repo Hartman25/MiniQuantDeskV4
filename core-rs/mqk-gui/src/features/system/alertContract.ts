@@ -1,5 +1,6 @@
 import type { AlertTriageRow, OperatorAlert } from "./types";
 import { mapActiveAlertsResponse, type ActiveAlertsWrapper } from "./legacy";
+import { isSourceTimestamp } from "./historyContract";
 
 const severity = (value: unknown) => ["info", "warning", "critical"].includes(String(value));
 const nullableString = (value: unknown) => value === null || typeof value === "string";
@@ -33,7 +34,7 @@ export function parseAlertTriage(value: unknown): AlertTriageSnapshot | null {
         typeof row.title !== "string" || typeof row.domain !== "string" ||
         !nullableString(row.linked_incident_id) || !nullableString(row.linked_order_id) || !nullableString(row.linked_strategy_id) ||
         !nullableString(row.assigned_to) || !nullableString(row.created_at) ||
-        (row.created_at !== null && !Number.isFinite(Date.parse(row.created_at as string))) ||
+        (row.created_at !== null && !isSourceTimestamp(row.created_at)) ||
         !(row.linked_incident_status === null || row.linked_incident_status === "open" || row.linked_incident_status === "resolved")) return null;
     if (row.status === "acked" && (value.truth_state !== "active" || row.created_at === null)) return null;
     ids.add(row.alert_id);

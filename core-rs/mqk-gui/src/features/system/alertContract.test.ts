@@ -16,6 +16,7 @@ test("alert contracts fail closed on unknown states, malformed rows, duplicates 
   assert.equal(parseActiveAlerts({ truth_state: "future", alert_count: 0, rows: [] }), null);
   assert.equal(parseAlertTriage({ truth_state: "no_db", triage_note: "Unavailable", rows: [triageRow] }), null);
   assert.equal(parseAlertTriage({ truth_state: "active", triage_note: "Available", rows: [{ ...triageRow, created_at: null }] }), null);
+  assert.equal(parseAlertTriage({ truth_state: "active", triage_note: "Available", rows: [{ ...triageRow, created_at: "2026-10-10T10:00:00" }] }), null);
 });
 
 for (const truth of ["active", "no_db", "invalid"] as const) test(`active fault remains visible with ${truth} acknowledgement source`, async () => {

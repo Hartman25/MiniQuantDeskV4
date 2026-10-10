@@ -65,6 +65,7 @@ test("never-run reconcile and unavailable detail lanes cannot render clean count
   const parsed = parseReconcileSummary(summary)!;
   assert.equal(parsed.mismatched_orders, null);
   assert.equal(parseReconcileSummary({ ...summary, truth_state: "future" }), null);
+  assert.equal(parseReconcileSummary({ ...summary, last_run_at: "2026-10-10T12:00:00" }), null);
   assert.equal(parseReconcileSummary({ ...summary, mismatched_orders: -1 }), null);
   const model = { ...MOCK_MODEL, connected: true, status: DEFAULT_STATUS, reconcileSummary: parsed,
     runtimeLeadership: { ...MOCK_MODEL.runtimeLeadership, post_restart_recovery_state: "complete" },

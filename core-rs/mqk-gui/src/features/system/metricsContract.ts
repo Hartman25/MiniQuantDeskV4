@@ -1,4 +1,5 @@
 import type { MetricsSection, MetricSeries, SystemMetrics } from "./types";
+import { isSourceTimestamp } from "./historyContract";
 
 // Mirrors MetricsDashboardResponse in mqk-daemon/src/api_types.rs.
 // This endpoint supplies snapshots, not timestamped metric history.
@@ -18,7 +19,7 @@ export function parseMetricsDashboard(value: unknown): SystemMetrics | null {
   for (const key of ["active_order_count", "pending_order_count", "dispatching_order_count", "active_breaches", "reconcile_total_mismatches"]) {
     if (typeof row[key] !== "number" || !Number.isSafeInteger(row[key]) || row[key] < 0) return null;
   }
-  if (!(row.reconcile_last_run_at === null || typeof row.reconcile_last_run_at === "string" && Number.isFinite(Date.parse(row.reconcile_last_run_at)))) return null;
+  if (!(row.reconcile_last_run_at === null || isSourceTimestamp(row.reconcile_last_run_at))) return null;
 
   const metric = (key: string, label: string, unit: MetricSeries["unit"], available: boolean): MetricSeries => ({
     key, label, unit, window: "1d", points: [],

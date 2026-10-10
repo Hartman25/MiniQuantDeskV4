@@ -1,4 +1,5 @@
 import type { IncidentCase } from "./types";
+import { isSourceTimestamp } from "./historyContract";
 
 export function parseIncidents(value: unknown): IncidentCase[] | null {
   if (!value || typeof value !== "object") return null;
@@ -10,7 +11,7 @@ export function parseIncidents(value: unknown): IncidentCase[] | null {
     if (!value || typeof value !== "object") return null;
     const row = value as Record<string, unknown>;
     if (typeof row.incident_id !== "string" || !row.incident_id || ids.has(row.incident_id) ||
-        typeof row.opened_at_utc !== "string" || !Number.isFinite(Date.parse(row.opened_at_utc)) ||
+        !isSourceTimestamp(row.opened_at_utc) ||
         typeof row.title !== "string" || typeof row.opened_by !== "string" ||
         !["info", "warning", "critical"].includes(String(row.severity)) ||
         !["open", "resolved"].includes(String(row.status)) ||
