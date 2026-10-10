@@ -59,23 +59,35 @@ fn paper_state_with_db(pool: &PgPool) -> Arc<AppState> {
     Arc::new(state)
 }
 
+/// Seed one completed 5m bar.
+async fn seed_5m_one(pool: &PgPool, symbol: &str, end_ts: i64, close: i64) {
+    sqlx::query(
+        r#"insert into md_bars (symbol, timeframe, end_ts, open_micros, high_micros,
+           low_micros, close_micros, volume, is_complete, provider_id, provider_source,
+           provider_symbol, ingest_mode, ingested_at)
+           values ($1,'5m',$2,$3,$3,$3,$3,1000,true,'m2rt_test','m2rt_test',$1,
+                   'historical_sync',now())
+           on conflict do nothing"#,
+    )
+    .bind(symbol)
+    .bind(end_ts)
+    .bind(close)
+    .execute(pool)
+    .await
+    .expect("seed bar");
+}
+
 /// Seed `closes` as consecutive 5m completed bars ending at `last_end_ts`.
 async fn seed_5m(pool: &PgPool, symbol: &str, last_end_ts: i64, closes: &[i64]) {
     let n = closes.len() as i64;
     for (i, close) in closes.iter().enumerate() {
-        let end_ts = last_end_ts - (n - 1 - i as i64) * FIVE_MIN;
-        sqlx::query(
-            "insert into md_bars (symbol, timeframe, end_ts, open_micros, high_micros, \
-             low_micros, close_micros, volume, is_complete, provider_id, provider_source, \
-             provider_symbol, ingest_mode, ingested_at) values ($1,'5m',$2,$3,$3,$3,$3,1000,\
-             true,'m2rt_test','m2rt_test',$1,'historical_sync',now()) on conflict do nothing",
+        seed_5m_one(
+            pool,
+            symbol,
+            last_end_ts - (n - 1 - i as i64) * FIVE_MIN,
+            *close,
         )
-        .bind(symbol)
-        .bind(end_ts)
-        .bind(close)
-        .execute(pool)
-        .await
-        .expect("seed bar");
+        .await;
     }
 }
 
@@ -349,16 +361,22 @@ async fn one_bar_fans_out_to_every_authorized_binding_deterministically_and_is_c
 }
 
 #[tokio::test]
-async fn binding_without_bars_yields_no_result_is_recorded_and_does_not_affect_siblings() {
+async fn unusable_bindings_yield_no_result_are_attributable_and_do_not_affect_siblings() {
     let Some(pool) = db_or_skip("M2RT-ISOLATE-01").await else {
         return;
     };
-    let (ok, bare) = ("M2RTISOOK", "M2RTISOBARE");
-    cleanup(&pool, &[ok, bare]).await;
+    let (ok, bare, stale) = ("M2RTISOOK", "M2RTISOBARE", "M2RTISOSTALE");
+    cleanup(&pool, &[ok, bare, stale]).await;
     let ts = Utc::now().timestamp() - 60;
     seed_5m(&pool, ok, ts, &BUY_SPIKE).await;
+    // A buy-shaped window that is ten days old: stale, must never trade.
+    seed_5m(&pool, stale, ts - 10 * 86_400, &BUY_SPIKE).await;
 
-    let bindings = vec![binding(bare, SCALPER), binding(ok, SCALPER)];
+    let bindings = vec![
+        binding(bare, SCALPER),
+        binding(stale, SCALPER),
+        binding(ok, SCALPER),
+    ];
     let mut host_pool = DynamicSelectionHostPool::build(&keys(&bindings)).expect("pool");
     let state = paper_state_with_db(&pool);
     state.deposit_strategy_bar_input(trigger(ts)).await;
@@ -369,16 +387,20 @@ async fn binding_without_bars_yields_no_result_is_recorded_and_does_not_affect_s
             &mut host_pool,
         )
         .await
-        .expect("a binding without bars is skipped, not a tick fault");
+        .expect("unusable bindings are skipped, not a tick fault");
 
     let rows = mqk_db::fetch_recent_strategy_signal_evaluations(&pool, 200)
         .await
         .expect("evaluations");
-    let bare_row = rows.iter().find(|r| r.symbol == bare).cloned();
-    let ok_row = rows.iter().find(|r| r.symbol == ok).cloned();
-    cleanup(&pool, &[ok, bare]).await;
+    let row_for = |sym: &str| rows.iter().find(|r| r.symbol == sym).cloned();
+    let (bare_row, stale_row, ok_row) = (row_for(bare), row_for(stale), row_for(ok));
+    cleanup(&pool, &[ok, bare, stale]).await;
 
-    assert_eq!(results.len(), 1, "no result may be manufactured for {bare}");
+    assert_eq!(
+        results.len(),
+        1,
+        "no result may be manufactured: {results:?}"
+    );
     assert_eq!(results[0].0.symbol, ok);
     assert!(results[0]
         .1
@@ -387,10 +409,62 @@ async fn binding_without_bars_yields_no_result_is_recorded_and_does_not_affect_s
         .targets
         .iter()
         .any(|t| t.qty.raw() > 0));
-    let bare_row = bare_row.expect("the skipped binding must be durably attributable");
-    assert!(!bare_row.signal_generated);
-    assert_eq!(bare_row.decision_stage, "pre_dispatch_gate");
-    assert!(ok_row.is_some_and(|r| r.signal_generated || r.decision_stage != "pre_dispatch_gate"));
+    let bare_row = bare_row.expect("a binding without bars must be durably attributable");
+    let stale_row = stale_row.expect("a stale binding must be durably attributable");
+    for row in [&bare_row, &stale_row] {
+        assert!(!row.signal_generated);
+        assert_eq!(row.decision_stage, "pre_dispatch_gate");
+    }
+    assert_eq!(
+        bare_row.reason_code,
+        crate::market_data_freshness::REASON_CODE_INTRADAY_BAR_NOT_CURRENT
+    );
+    assert_eq!(
+        stale_row.reason_code,
+        crate::market_data_freshness::REASON_CODE_INTRADAY_BAR_STALE
+    );
+    assert!(ok_row.is_some_and(|r| r.decision_stage != "pre_dispatch_gate"));
+}
+
+/// Bars inserted newest-first must not change which bar is evaluated: the
+/// evaluated bar is the latest by `end_ts`, and the signal is computed over
+/// the chronologically ordered window.
+#[tokio::test]
+async fn bar_insertion_order_cannot_change_the_evaluated_bar_or_signal() {
+    let Some(pool) = db_or_skip("M2RT-ORDER-01").await else {
+        return;
+    };
+    let sym = "M2RTORDER1";
+    cleanup(&pool, &[sym]).await;
+    let ts = Utc::now().timestamp() - 60;
+    let n = BUY_SPIKE.len() as i64;
+    for (i, close) in BUY_SPIKE.iter().enumerate().rev() {
+        seed_5m_one(&pool, sym, ts - (n - 1 - i as i64) * FIVE_MIN, *close).await;
+    }
+
+    let bindings = vec![binding(sym, SCALPER)];
+    let mut host_pool = DynamicSelectionHostPool::build(&keys(&bindings)).expect("pool");
+    let state = paper_state_with_db(&pool);
+    state.deposit_strategy_bar_input(trigger(ts)).await;
+    let results = state
+        .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+            run_id("order"),
+            &bindings,
+            &mut host_pool,
+        )
+        .await
+        .expect("tick");
+    cleanup(&pool, &[sym]).await;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].2.as_ref().map(|f| f.bar_end_ts), Some(ts));
+    assert!(results[0]
+        .1
+        .intents
+        .output
+        .targets
+        .iter()
+        .any(|t| t.qty.raw() > 0));
 }
 
 // ---------------------------------------------------------------------------
