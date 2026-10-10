@@ -21,6 +21,8 @@ _DIAGNOSTIC = re.compile(r"\b(compare|test|study|event study|measure|evaluate|ob
                          r"can|whether|estimate|screen|examine|investigate|determine|quantify)\b|\?", re.I)
 _RULE = re.compile(r"\b(enter|exit|hold|buy|sell|go long|go short|trade|rebalance|long|short|close the position)\b", re.I)
 
+_BENCHMARK = re.compile(r"\s*(?:buy[- ]and[- ]hold|equal[- ]weight\b.*\bbasket|fixed periodic rebalanc|benchmark)", re.I)
+
 _DATA_TAGS: tuple[tuple[str, str], ...] = (
     ("INTRADAY", r"intraday|minute|\b1m\b|\b5m\b|vwap|opening range|first \d+ minutes|\borb\b"),
     ("ORDER_FLOW", r"tick|order book|order[- ]flow|footprint|volume profile|volume delta|market depth|funding|value[- ]area|point of control"),
@@ -115,6 +117,8 @@ def formalize_entry(entry: Mapping[str, Any], ledger: Mapping[str, Any]) -> dict
     has_rule = bool(_RULE.search(rule))
     if is_control:
         kind = "GOVERNANCE_CONTROL"
+    elif _BENCHMARK.match(title) and not matches:
+        kind = "BENCHMARK"
     elif len(matches) > 1:
         kind = "COMPOSITE_RULE"
     elif len(matches) == 1:
@@ -161,7 +165,8 @@ def formalize_entry(entry: Mapping[str, Any], ledger: Mapping[str, Any]) -> dict
         "provenance": {"catalog_ledger_sha256": ledger["ledger_sha256"], "catalog_file_sha256": ledger["source"]["sha256"],
                        "profile_id": ledger["profile_id"], "sheet": entry["sheet"], "row_number": entry["row_number"],
                        "entry_content_hash": entry["content_hash"], "entry_canonical_hash": entry["canonical_hash"], "source_refs": f.get("source_refs", []),
-                       "source_urls": f.get("source_urls", []), "catalog_labels": entry["labels"]},
+                       "source_urls": f.get("source_urls", []), "catalog_labels": entry["labels"],
+                       "source_composite_refs": f.get("source_composite_refs", [])},
         "source_text": {"title": title, "hypothesis": hyp, "mechanism": mech, "rule_text": rule, "assets": f.get("assets", ""),
                         "horizon": f.get("horizon", ""), "direction": f.get("direction", ""), "data_needed": f.get("data_needed", "")},
         "economic_hypothesis": _fv(mech or hyp or title, FieldClass.EXPLICIT_SOURCE_RULE if (mech or hyp) else FieldClass.UNDERSPECIFIED,

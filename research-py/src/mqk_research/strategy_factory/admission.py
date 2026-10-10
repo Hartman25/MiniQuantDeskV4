@@ -38,6 +38,9 @@ def decide(idea: Mapping[str, Any], dedup: Mapping[str, Any], *, grammar_availab
     if kind == "GOVERNANCE_CONTROL":
         reasons.append("control/guardrail row, not a tradable idea")
         return out(Admission.REJECTED_INSUFFICIENTLY_SPECIFIED, Disposition.GOVERNANCE_CONTROL)
+    if kind == "BENCHMARK":
+        reasons.append("comparison baseline (buy-and-hold / rebalance benchmark), not a candidate trial")
+        return out(Admission.REJECTED_INSUFFICIENTLY_SPECIFIED, Disposition.BENCHMARK_NOT_STRATEGY)
     if "F" in blockers:
         reasons.append("asset class, derivative structure or rates/FX carry outside the operational equity/ETF scope")
         return out(Admission.REQUIRES_UNSUPPORTED_DATA_OR_ECONOMICS, Disposition.DEFERRED_ASSET_CLASS)

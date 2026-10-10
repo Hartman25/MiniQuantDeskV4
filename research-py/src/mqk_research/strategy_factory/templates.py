@@ -54,7 +54,7 @@ TEMPLATES: dict[str, Template] = {t.template_id: t for t in (
     Template("abs_momentum_sessions", F.MOMENTUM, (P("lookback", 2, 1000),), grammar_v1=True),
     Template("near_high_proximity", F.MOMENTUM, (P("window", 20, 1000), P("proximity_bps", 1, 5000),
                                                  P("trend_window", 0, 1000)), grammar_v1=True),
-    Template("month_window", F.SEASONAL, (P("start_month", 1, 12), P("end_month", 1, 12)), grammar_v1=True),
+    Template("month_window", F.SEASONAL, (P("start_month", 1, 12), P("end_month", 1, 12))),
     Template("close_channel", F.BREAKOUT, (P("entry_window", 2, 500), P("exit_window", 2, 500)), stateful=True),
     Template("fixed_hold_breakout", F.BREAKOUT, (P("window", 2, 500), P("hold", 1, 60)), stateful=True),
     Template("rsi_reversion", F.PULLBACK_MEAN_REVERSION, (P("rsi_window", 2, 50), P("entry_below", 1, 49),
@@ -122,6 +122,20 @@ NATIVE_CARDS: tuple[NativeCard, ...] = (
     _c("intraday_short_scalper", "legacy_engine", direction="short_flat"),
 )
 CARD_BY_ID = {c.strategy_id: c for c in NATIVE_CARDS}
+
+
+def required_history_bars(template_id: str, params: Mapping[str, int]) -> int:
+    """Completed daily closes a grammar_v1 strategy needs; mirrors `RuleSpec::required_history` in grammar_rule_v1.rs
+    (a parity test compares it with the native CLI)."""
+    if template_id == "sma_trend_gate":
+        return params["window"]
+    if template_id == "dual_sma_cross":
+        return params["slow"]
+    if template_id == "abs_momentum_sessions":
+        return params["lookback"] + 1
+    if template_id == "near_high_proximity":
+        return max(params["window"], params["trend_window"])
+    raise ValueError(f"{template_id} is not executable by grammar_v1")
 
 
 # ---- grammar names: the full spec is the name, so nothing outside the name is needed to reproduce a strategy ----

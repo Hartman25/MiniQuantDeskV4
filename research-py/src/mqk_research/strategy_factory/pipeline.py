@@ -10,7 +10,7 @@ from collections import Counter
 from typing import Any, Iterable, Mapping, Sequence
 
 from mqk_research.strategy_factory.admission import decide
-from mqk_research.strategy_factory.contracts import sha
+from mqk_research.strategy_factory.contracts import COARSE_DISPOSITION, proposal_kind, sha
 from mqk_research.strategy_factory.dedup import apply_novelty_review, dedup_population
 from mqk_research.strategy_factory.formalize import apply_decision, apply_field_decision, formalize_ledger
 from mqk_research.strategy_factory.known_index import KnownEntry
@@ -43,7 +43,9 @@ def process(ledgers: Sequence[Mapping[str, Any]], known: Sequence[KnownEntry], *
     for iid in sorted(ideas):
         idea = ideas[iid]
         verdict = decide(idea, rel[iid], grammar_available=grammar_available)
-        records.append({**idea, "dedup": rel[iid], **{k: verdict[k] for k in ("admission", "disposition", "execution_path", "reasons")}})
+        records.append({**idea, "dedup": rel[iid], **{k: verdict[k] for k in ("admission", "disposition", "execution_path", "reasons")},
+                        "proposal_kind": proposal_kind(idea["kind"], idea["blockers"]),
+                        "coarse_disposition": COARSE_DISPOSITION[verdict["disposition"]]})
     counts = Counter(r["disposition"] for r in records)
     if sum(counts.values()) != len(records) or len(records) + len(copies) != submitted:
         raise AssertionError("disposition accounting does not cover the submitted population")
@@ -55,6 +57,8 @@ def process(ledgers: Sequence[Mapping[str, Any]], known: Sequence[KnownEntry], *
         "disposition_counts": dict(sorted(counts.items())),
         "relationship_counts": dict(sorted(Counter(r["dedup"]["relationship"] for r in records).items())),
         "admission_counts": dict(sorted(Counter(r["admission"] for r in records).items())),
+        "proposal_kind_counts": dict(sorted(Counter(r["proposal_kind"] for r in records).items())),
+        "coarse_disposition_counts": dict(sorted(Counter(r["coarse_disposition"] for r in records).items())),
         "records": records,
         "result_sha256": sha([{k: r[k] for k in ("intake_id", "disposition", "admission", "execution_path")} for r in records]),
     }

@@ -48,7 +48,34 @@ class Disposition(str, Enum):
     DEFERRED_ASSET_CLASS = "DEFERRED_ASSET_CLASS"          # futures/options/FX/crypto: seam preserved, not operational
     DIAGNOSTIC_NOT_STRATEGY = "DIAGNOSTIC_NOT_STRATEGY"    # an event-study / phenomenon question, not a tradable rule
     GOVERNANCE_CONTROL = "GOVERNANCE_CONTROL"              # a control/guardrail row, not an idea
+    BENCHMARK_NOT_STRATEGY = "BENCHMARK_NOT_STRATEGY"      # a comparison baseline, never a candidate trial
     REJECTED_UNDERSPECIFIED = "REJECTED_UNDERSPECIFIED"    # nothing computable can be recovered from the text
+
+
+# The seven coarse dispositions of the reference intake plan (docs/research/knowledge), for reporting only.
+COARSE_DISPOSITION = {
+    "ADMITTED_NATIVE": "RESEARCH_ELIGIBLE_AWAITING_PREDECLARATION", "ADMITTED_GRAMMAR": "RESEARCH_ELIGIBLE_AWAITING_PREDECLARATION",
+    "DUPLICATE_OF_KNOWN": "DUPLICATE_CANDIDATE", "NEEDS_FORMALIZATION": "NEEDS_FORMALIZATION",
+    "NEEDS_OPERATOR_POLICY": "NEEDS_FORMALIZATION", "NEEDS_IMPLEMENTATION": "REQUIRES_NEW_NATIVE_IMPLEMENTATION",
+    "UNSUPPORTED_DATA": "REQUIRES_UNAVAILABLE_DATA", "DEFERRED_ASSET_CLASS": "REQUIRES_UNAVAILABLE_DATA",
+    "DIAGNOSTIC_NOT_STRATEGY": "REFERENCE_ONLY", "GOVERNANCE_CONTROL": "REFERENCE_ONLY", "BENCHMARK_NOT_STRATEGY": "REFERENCE_ONLY",
+    "REJECTED_UNDERSPECIFIED": "REJECTED",
+}
+
+
+def proposal_kind(idea_kind: str, blockers: str) -> str:
+    """Reference-plan proposal kinds. Controls, benchmarks and diagnostics are never counted as candidate hypotheses."""
+    if idea_kind == "GOVERNANCE_CONTROL":
+        return "RESEARCH_CONTROL"
+    if idea_kind == "BENCHMARK":
+        return "BENCHMARK"
+    if "F" in blockers:
+        return "FUTURE_ASSET"
+    if idea_kind == "DIAGNOSTIC_QUESTION":
+        return "MECHANISM_DIAGNOSTIC"
+    if idea_kind in ("RULE_STRATEGY", "COMPOSITE_RULE"):
+        return "STRATEGY_HYPOTHESIS"
+    return "INSUFFICIENT_RULES"
 
 
 # Blocker letters are the vocabulary of experiments/external_idea_intake/disposition.py (kept identical on purpose).

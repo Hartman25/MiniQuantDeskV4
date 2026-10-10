@@ -343,7 +343,10 @@ def import_catalog(data: bytes, filename: str, *, profile: CatalogProfile | None
         _, sbody = _table(sheets[profile.source_sheet], sspec, profile.source_sheet)
         for n, original, sid in sbody:
             sources[sid] = {"row_number": n, **{c: original.get(c, "") for c in profile.source_columns}}
+    file_key = sha256_bytes(data)[:16]
     for e in ordered:
+        # Short ids such as P01 collide across workbooks: the composite key is family + file hash + local id.
+        e["fields"]["source_composite_refs"] = [f"{profile.catalog_family}:{file_key}:{r}" for r in e["fields"].get("source_refs", [])]
         e["fields"]["unresolved_source_refs"] = sorted(r for r in e["fields"].get("source_refs", []) if sources and r not in sources)
         e["content_hash"] = sha256_bytes(canonical_json({"f": e["fields"], "o": e["original"]}).encode("utf-8"))
         e["canonical_hash"] = sha256_bytes(canonical_json(

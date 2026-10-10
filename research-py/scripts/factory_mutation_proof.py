@@ -20,6 +20,9 @@ T_CAT = "tests/test_strategy_factory_catalog_import.py"
 T_INT = "tests/test_strategy_factory_intake.py"
 T_AI = "tests/test_strategy_factory_ai_normalize.py"
 T_ST = "tests/test_strategy_factory_store.py"
+T_KN = "tests/test_strategy_factory_knowledge.py"
+RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
+CARGO = ["cargo:-p", "mqk-strategy", "--lib", "grammar_rule_v1"]
 
 # (id, file relative to research-py, old fragment (must occur exactly once), new fragment, pytest args)
 MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
@@ -79,6 +82,32 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
          "    except ProviderError as exc:\n        raise", [T_AI]),
         ("AD-5 unrecognized text not rejected", SRC + "admission.py", "if kind == \"UNRECOGNIZED\":", "if False:", [T_AI]),
     ],
+    "rust": [
+        ("R-1 sma gate non-strict", RS, "window as i128 * last > sum(win)", "window as i128 * last >= sum(win)", CARGO),
+        ("R-2 dual cross non-strict", RS, "slow as i128 * sum(&win[win.len() - f..]) > fast as i128 * sum(&win[win.len() - s..])",
+         "slow as i128 * sum(&win[win.len() - f..]) >= fast as i128 * sum(&win[win.len() - s..])", CARGO),
+        ("R-3 momentum non-strict", RS, "RuleSpec::AbsMomentum { lookback } => last > close(", "RuleSpec::AbsMomentum { lookback } => last >= close(", CARGO),
+        ("R-4 near-high boundary excluded", RS, "let near = 10_000 * last >= (10_000 - proximity_bps as i128) * high;",
+         "let near = 10_000 * last > (10_000 - proximity_bps as i128) * high;", CARGO),
+        ("R-5 trend filter non-strict", RS, "|| trend_window as i128 * last > sum(", "|| trend_window as i128 * last >= sum(", CARGO),
+        ("R-6 non-canonical spelling accepted", RS, "if spec.canonical_name() != name {", "if false {", CARGO),
+        ("R-7 fast>=slow accepted", RS, "if fast >= slow {", "if false {", CARGO),
+        ("R-8 momentum history off by one", RS, "RuleSpec::AbsMomentum { lookback } => lookback as usize + 1,", "RuleSpec::AbsMomentum { lookback } => lookback as usize,", CARGO),
+        ("R-9 short window goes long", RS, "            return 0;\n        };\n        let close = |b: &BarStub|", "            return 1;\n        };\n        let close = |b: &BarStub|", CARGO),
+        ("R-10 fingerprint ignores the symbol", RS, ".push_str(&self.symbol)\n            .push_i64(TIMEFRAME_SECS)", ".push_i64(TIMEFRAME_SECS)", CARGO),
+        ("R-12 parameter bounds not enforced", RS, "if (lo..=hi).contains(&v) {", "if true {", CARGO),
+    ],
+    "knowledge": [
+        ("KN-1 executable claim tolerated", SRC + "knowledge.py", "if e.get(\"executable_rule\") is not False or", "if False or", [T_KN]),
+        ("KN-2 byte pin removed", SRC + "knowledge.py", "if digest != expected_sha256:", "if False:", [T_KN]),
+        ("KN-3 default parameters tolerated", SRC + "knowledge.py", "or e.get(\"default_parameters\") not in (None, {})", "or False", [T_KN]),
+        ("KN-4 status not checked", SRC + "knowledge.py", "or data.get(\"status\") != EXPECTED_STATUS:", "or False:", [T_KN]),
+        ("KN-5 benchmark counted as a candidate", SRC + "formalize.py", "elif _BENCHMARK.match(title) and not matches:", "elif False:", [T_KN]),
+        ("KN-6 composite source id dropped", SRC + "catalog_import.py", "f\"{profile.catalog_family}:{file_key}:{r}\"", "f\"{r}\"", [T_KN]),
+        ("KN-7 glossary never reaches the prompt", SRC + "ai_normalize.py", "prompt = build_prompt(source, knowledge.prompt_block(terms) if terms else \"\")",
+         "prompt = build_prompt(source, \"\")", [T_KN]),
+        ("KN-8 control counted as strategy kind", SRC + "contracts.py", "if idea_kind == \"GOVERNANCE_CONTROL\":", "if False:", [T_KN]),
+    ],
     "store": [
         ("ST-1 stage order ignored", SRC + "store.py",
          "and not exists (select 1 from jobs p where p.campaign_id=j.campaign_id and p.stage_order<j.stage_order and p.status!='succeeded')", "", [T_ST]),
@@ -118,8 +147,14 @@ def run_set(name: str) -> int:
             continue
         try:
             path.write_bytes(text.replace(old, new).encode("utf-8"))
-            proc = subprocess.run([sys.executable, "-m", "pytest", *tests, "-q", "-x", "--tb=no", "-p", "no:cacheprovider"],
-                                  cwd=ROOT, capture_output=True, text=True)
+            if tests[0].startswith("cargo:"):
+                import os
+                env = {**os.environ, "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", "C:/tmp/mqk-target-factory")}
+                proc = subprocess.run(["cargo", "test", tests[0][6:], *tests[1:], "-j", "2"], cwd=ROOT.parent / "core-rs",
+                                      capture_output=True, text=True, env=env)
+            else:
+                proc = subprocess.run([sys.executable, "-m", "pytest", *tests, "-q", "-x", "--tb=no", "-p", "no:cacheprovider"],
+                                      cwd=ROOT, capture_output=True, text=True)
             killed = proc.returncode != 0
         finally:
             path.write_bytes(orig)
