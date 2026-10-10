@@ -36,6 +36,7 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
           <option value="all">All</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option>
         </select></label>
         <p>{model.alertTriageTruth?.note ?? "Acknowledgement authority unavailable."}</p>
+        {triageAvailable && <p>Annotation storage read success is not independently reported by this backend. Missing acknowledgement or incident linkage does not prove that no stored annotation exists.</p>}
         <p>First/latest occurrence, retention, and execution domain/account are not recorded by the active alert contract. Disappearance from this poll does not establish recovery.</p>
         {alerts.length === 0 ? <div className="empty-state">{query || severity !== "all" ? "No matching active alerts." : "No current fault signals returned by the active source."}</div> :
           <div className="operator-timeline-stack">{alerts.map((alert) => {

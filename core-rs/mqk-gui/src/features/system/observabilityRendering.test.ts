@@ -101,3 +101,17 @@ test("dashboard cannot clear alerts or halt history from missing secondary sourc
   assert.match(html, /Configuration authority unavailable/);
   assert.doesNotMatch(html, /No halt recorded for this run/);
 });
+
+test("backend-active empty triage never establishes successful annotation storage reads", () => {
+  const model = { ...MOCK_MODEL, connected: true, alertTriage: [],
+    alertTriageTruth: { truth_state: "active", note: "Backend-reported annotations" },
+    status: { ...MOCK_MODEL.status, runtime_status: "halted", last_heartbeat: new Date().toISOString() },
+    panelSources: { ...MOCK_MODEL.panelSources, alerts: "mixed" },
+    dataSource: { ...MOCK_MODEL.dataSource, state: "real", reachable: true, missingEndpoints: [] } } as SystemModel;
+  const html = renderToStaticMarkup(React.createElement(AlertsScreen, { model }));
+  assert.match(html, /Annotation storage read success is not independently reported/);
+  assert.match(html, /does not prove that no stored annotation exists/);
+  assert.match(html, /Unavailable for this alert/);
+  assert.match(html, /Present in the current active alert snapshot/);
+  assert.doesNotMatch(html, /No stored annotations|Never acknowledged/);
+});
