@@ -6,6 +6,14 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -38. Accepted-branch integration and M1 closure census (2026-10-09, `V4-M1-ACCEPTED-BRANCHES-ALPHA-REUSE-AND-CLOSURE-CENSUS-01`)
+
+Local isolated integration only, **not pushed**: branch `integration/m1-alpha-reuse-closure-01`, based on verified `origin/main` `a49cae1f9a2849c769707d239a61e10cb0f39903`, with accepted four-way merge `5144aa7` and accepted EXT-032 merge `722a04a`. Full finite matrix: [`docs/research/M1_REMAINING_GATES_CENSUS_01.md`](research/M1_REMAINING_GATES_CENSUS_01.md).
+
+- Status `OPEN`: the named runner aggregate-status shadowing defect is repaired in this tree with focused mixed-slice tests added; the provisioned runtime needed to execute the Python test suite is unavailable here (`pytest` and `PyYAML` absent), so execution proof remains open.
+- M1 remains `M1_BLOCKED`: no qualified candidate, EXT-032 remains rejected archival evidence, pooled DSR/PBO remains unsupported, the holdout incident remains `ACCESS_INCIDENT_PENDING_ADJUDICATION`, real Paper DB schema/lifecycle proof is unavailable, and M1.10's 10-session + 5-clean count has not started.
+- Alpha Lab remains read-only reference. Its active `lab.py`/`cli.py`/launcher/orchestration and independent schema are not copied into canonical authority. No provider, broker, Paper DB, migration, order, fill, or holdout call occurred.
+
 ## -37. M1 KISS campaign: calendar v2, EXT-032 engine and non-executable predeclaration (2026-10-09, `V4-M1-KISS-CALENDAR-CAMPAIGN-PREDECLARATION-AND-ENGINE-01`)
 
 Seven local commits on top of `a49cae1f` (CI #637 green), **not pushed**. Records: `docs/research/M1_KISS_EXT032_CLOSEOUT.md` (census, sweep, proof), `M1_KISS_EXT032_CAMPAIGN_DESIGN.md`, `M1_KISS_EXT032_SEARCH_ACCOUNTING.md`, `M1_KISS_EXT032_RESULTS_REVIEW_FRAMEWORK.md`; ledger G2.24.
