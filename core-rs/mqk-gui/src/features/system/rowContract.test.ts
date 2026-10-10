@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fetchOperatorModel } from "./api";
 import { DEFAULT_STATUS } from "./types";
+import { mapExecutionOutboxWrapper, mapFillQualityWrapper, mapPaperJournalWrapper,
+  mapLegacyPositionsResponse, mapLegacyPortfolioSummary, mapLegacyTradingOrdersToExecutionOrders, mapLegacyTradingFillsToRows } from "./legacy";
 
 test("malformed row wrappers fail their own probes without erasing independent alerts", async () => {
   const original = globalThis.fetch;
@@ -26,4 +28,24 @@ test("malformed row wrappers fail their own probes without erasing independent a
       assert.equal(model.paperJournal.fills_truth_state, "unavailable");
     }
   } finally { globalThis.fetch = original; }
+});
+
+test("durable lane row validation fails independently and legacy conversions never repair missing economics", () => {
+  for (const rows of [{}, [{}], [{ symbol: {} }]]) {
+    assert.equal(mapExecutionOutboxWrapper({ truth_state: "active", rows } as never).truth_state, "unavailable");
+    assert.equal(mapFillQualityWrapper({ truth_state: "active", rows } as never).truth_state, "unavailable");
+    const journal = mapPaperJournalWrapper({ run_id: "run-1", fills_lane: { truth_state: "active", rows },
+      admissions_lane: { truth_state: "active", rows: [] } } as never);
+    assert.equal(journal.fills_truth_state, "unavailable");
+    assert.equal(journal.admissions_truth_state, "active");
+  }
+  assert.equal(mapLegacyPortfolioSummary({ account: { equity: "", cash: "garbage" } } as never), null);
+  assert.equal(mapLegacyPositionsResponse({ positions: [{ symbol: "SIM", qty: "garbage", avg_price: "10" }] } as never), null);
+  const order = { broker_order_id: "broker-1", client_order_id: "order-1", symbol: "SIM", side: "buy", type: "limit", status: "filled", qty: "2", created_at_utc: "2026-10-10T10:00:00Z" };
+  assert.equal(mapLegacyTradingOrdersToExecutionOrders({ orders: [order] } as never)![0].filled_qty, null);
+  for (const invalid of [{ side: "future" }, { qty: "NaN" }, { created_at_utc: "not a date" }, { type: "future" }]) {
+    assert.equal(mapLegacyTradingOrdersToExecutionOrders({ orders: [{ ...order, ...invalid }] } as never), null);
+  }
+  assert.equal(mapLegacyTradingFillsToRows({ fills: [{ broker_fill_id: "fill-1", broker_order_id: "broker-1", client_order_id: "order-1",
+    symbol: "SIM", side: "buy", qty: "1", price: "10", ts_utc: "not a date" }] } as never), null);
 });

@@ -410,8 +410,8 @@ function isStructurallyValidPreflight(data: unknown): data is PreflightStatus {
     typeof p["strategy_disarmed"] === "boolean" &&
     typeof p["execution_disarmed"] === "boolean" &&
     typeof p["live_routing_disabled"] === "boolean" &&
-    Array.isArray(p["blockers"]) &&
-    Array.isArray(p["warnings"])
+    Array.isArray(p["blockers"]) && p["blockers"].every((value) => typeof value === "string") &&
+    Array.isArray(p["warnings"]) && p["warnings"].every((value) => typeof value === "string")
   );
 }
 

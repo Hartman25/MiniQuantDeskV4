@@ -413,8 +413,15 @@ export function legacyActionPaths(actionKey: string): string[] {
 // Legacy mapper functions
 // ---------------------------------------------------------------------------
 
+const validLegacyDecimal = (value: unknown): boolean => typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value));
+const validEvidenceTime = (value: unknown): boolean => typeof value === "string" && /(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
+const nullableEvidenceTime = (value: unknown): boolean => value === null || validEvidenceTime(value);
+const nullableFinite = (value: unknown): boolean => value === null || typeof value === "number" && Number.isFinite(value);
+const nullableString = (value: unknown): boolean => value === null || typeof value === "string";
+
 export function mapLegacyPositionsResponse(response: LegacyTradingPositionsResponse | null): PositionRow[] | null {
-  if (!response || !hasRows(response, "positions", ["symbol", "qty", "avg_price"])) return null;
+  if (!response || !hasRows(response, "positions", ["symbol", "qty", "avg_price"]) ||
+    !response.positions.every((row) => validLegacyDecimal(row.qty) && validLegacyDecimal(row.avg_price))) return null;
   return response.positions.map((position) => {
     const qty = parseNumber(position.qty);
     const avgPrice = parseNumber(position.avg_price);
@@ -431,7 +438,7 @@ export function mapLegacyPositionsResponse(response: LegacyTradingPositionsRespo
 export function mapLegacyPortfolioSummary(
   accountResponse: LegacyTradingAccountResponse | null,
 ): PortfolioSummary | null {
-  if (!accountResponse) return null;
+  if (!accountResponse || !validLegacyDecimal(accountResponse.account?.equity) || !validLegacyDecimal(accountResponse.account?.cash)) return null;
 
   const equity = parseNumber(accountResponse.account?.equity);
   const cash = parseNumber(accountResponse.account?.cash);
@@ -447,7 +454,9 @@ export function mapLegacyPortfolioSummary(
 }
 
 export function mapLegacyTradingOrdersToExecutionOrders(response: LegacyTradingOrdersResponse | null): ExecutionOrderRow[] | null {
-  if (!response || !hasRows(response, "orders", ["broker_order_id", "client_order_id", "symbol", "side", "type", "status", "qty", "created_at_utc"])) return null;
+  if (!response || !hasRows(response, "orders", ["broker_order_id", "client_order_id", "symbol", "side", "type", "status", "qty", "created_at_utc"]) ||
+    !response.orders.every((row) => validLegacyDecimal(row.qty) && ["buy", "sell", "long", "short"].includes(row.side) &&
+      ["market", "limit", "stop", "stop_limit"].includes(row.type) && validEvidenceTime(row.created_at_utc))) return null;
 
   return response.orders.map((order) => {
     const status = normalizeOrderStatus(order.status);
@@ -463,13 +472,13 @@ export function mapLegacyTradingOrdersToExecutionOrders(response: LegacyTradingO
       side: normalizeSide(order.side),
       order_type: normalizeOrderType(order.type),
       requested_qty: parseNumber(order.qty),
-      filled_qty: 0,
+      filled_qty: null,
       current_status: status,
       current_stage: deriveExecutionStage(status),
       age_ms: ageMs,
       has_warning: hasWarning,
       has_critical: hasCritical,
-      updated_at: parseIsoTimestamp(order.created_at_utc) ?? nowIso(),
+      updated_at: parseIsoTimestamp(order.created_at_utc)!,
     };
   });
 }
@@ -495,7 +504,9 @@ export function mapLegacyTradingOrdersToOpenOrders(response: LegacyTradingOrders
 }
 
 export function mapLegacyTradingFillsToRows(response: LegacyTradingFillsResponse | null): FillRow[] | null {
-  if (!response || !hasRows(response, "fills", ["broker_fill_id", "broker_order_id", "client_order_id", "symbol", "side", "qty", "price", "ts_utc"])) return null;
+  if (!response || !hasRows(response, "fills", ["broker_fill_id", "broker_order_id", "client_order_id", "symbol", "side", "qty", "price", "ts_utc"]) ||
+    !response.fills.every((row) => validLegacyDecimal(row.qty) && validLegacyDecimal(row.price) &&
+      ["buy", "sell", "long", "short"].includes(row.side) && validEvidenceTime(row.ts_utc))) return null;
 
   return response.fills.map((fill) => ({
     fill_id: fill.broker_fill_id,
@@ -507,7 +518,7 @@ export function mapLegacyTradingFillsToRows(response: LegacyTradingFillsResponse
     price: parseNumber(fill.price),
     broker_exec_id: fill.broker_fill_id,
     applied: true,
-    at: parseIsoTimestamp(fill.ts_utc) ?? nowIso(),
+    at: parseIsoTimestamp(fill.ts_utc)!,
   }));
 }
 
@@ -867,7 +878,10 @@ export function mapEventsFeedResponse(wrapper: EventsFeedWrapper): FeedEvent[] {
 const OUTBOX_VALID_STATES: ExecutionOutboxSurface["truth_state"][] = ["active", "no_active_run", "no_db"];
 
 export function mapExecutionOutboxWrapper(wrapper: ExecutionOutboxWrapper | null | undefined): ExecutionOutboxSurface {
-  if (wrapper == null || !hasRows(wrapper, "rows", [])) return { truth_state: "unavailable", run_id: null, rows: [] };
+  if (wrapper == null || !nullableString(wrapper.run_id) || !hasRows(wrapper, "rows", ["idempotency_key", "run_id", "status", "lifecycle_stage", "created_at_utc"]) ||
+    !wrapper.rows.every((row) => [row.symbol, row.side, row.order_type, row.strategy_id, row.signal_source].every(nullableString) &&
+      nullableFinite(row.qty) && validEvidenceTime(row.created_at_utc) &&
+      [row.claimed_at_utc, row.dispatching_at_utc, row.sent_at_utc].every(nullableEvidenceTime))) return { truth_state: "unavailable", run_id: null, rows: [] };
   const ts = OUTBOX_VALID_STATES.includes(wrapper.truth_state as ExecutionOutboxSurface["truth_state"])
     ? (wrapper.truth_state as ExecutionOutboxSurface["truth_state"])
     : "unavailable";
@@ -892,11 +906,17 @@ export function executionOutboxNotice(surface: ExecutionOutboxSurface): string |
 const FQ_VALID_STATES: FillQualitySurface["truth_state"][] = ["active", "no_active_run", "no_db"];
 
 export function mapFillQualityWrapper(wrapper: FillQualityWrapper | null | undefined): FillQualitySurface {
-  if (wrapper == null || !hasRows(wrapper, "rows", [])) return { truth_state: "unavailable", rows: [] };
+  if (!validFillQualityRows(wrapper)) return { truth_state: "unavailable", rows: [] };
   const ts = FQ_VALID_STATES.includes(wrapper.truth_state as FillQualitySurface["truth_state"])
     ? (wrapper.truth_state as FillQualitySurface["truth_state"])
     : "unavailable";
   return { truth_state: ts, rows: wrapper.rows ?? [] };
+}
+
+function validFillQualityRows(wrapper: FillQualityWrapper | null | undefined): wrapper is FillQualityWrapper {
+  return wrapper != null && hasRows(wrapper, "rows", ["telemetry_id", "run_id", "internal_order_id", "symbol", "side", "fill_kind", "fill_received_at_utc"], ["ordered_qty", "fill_qty", "fill_price_micros"]) &&
+    wrapper.rows.every((row) => validEvidenceTime(row.fill_received_at_utc) && nullableString(row.broker_order_id) &&
+      [row.reference_price_micros, row.slippage_bps, row.submit_to_fill_ms].every(nullableFinite));
 }
 
 export function fillQualityNotice(surface: FillQualitySurface): string | null {
@@ -933,21 +953,24 @@ export function orderTimelineNotice(surface: OrderTimelineSurface): string | nul
 const PJ_VALID_STATES: PaperJournalSurface["fills_truth_state"][] = ["active", "no_active_run", "no_db"];
 
 export function mapPaperJournalWrapper(wrapper: PaperJournalWrapper | null | undefined): PaperJournalSurface {
-  if (wrapper == null || !hasRows(wrapper.fills_lane, "rows", []) || !hasRows(wrapper.admissions_lane, "rows", [])) {
+  if (wrapper == null) {
     return { run_id: null, fills_truth_state: "unavailable", fills: [], admissions_truth_state: "unavailable", admissions: [] };
   }
-  const fts = PJ_VALID_STATES.includes(wrapper.fills_lane.truth_state as PaperJournalSurface["fills_truth_state"])
+  const fillsValid = validFillQualityRows(wrapper.fills_lane as FillQualityWrapper);
+  const admissionsValid = hasRows(wrapper.admissions_lane, "rows", ["event_id", "ts_utc", "signal_id", "strategy_id", "symbol", "side", "run_id"], ["qty"]) &&
+    wrapper.admissions_lane.rows.every((row) => validEvidenceTime(row.ts_utc));
+  const fts = fillsValid && PJ_VALID_STATES.includes(wrapper.fills_lane.truth_state as PaperJournalSurface["fills_truth_state"])
     ? (wrapper.fills_lane.truth_state as PaperJournalSurface["fills_truth_state"])
     : "unavailable";
-  const ats = PJ_VALID_STATES.includes(wrapper.admissions_lane.truth_state as PaperJournalSurface["admissions_truth_state"])
+  const ats = admissionsValid && PJ_VALID_STATES.includes(wrapper.admissions_lane.truth_state as PaperJournalSurface["admissions_truth_state"])
     ? (wrapper.admissions_lane.truth_state as PaperJournalSurface["admissions_truth_state"])
     : "unavailable";
   return {
     run_id: wrapper.run_id ?? null,
     fills_truth_state: fts,
-    fills: wrapper.fills_lane.rows ?? [],
+    fills: fts === "active" ? wrapper.fills_lane.rows : [],
     admissions_truth_state: ats,
-    admissions: wrapper.admissions_lane.rows ?? [],
+    admissions: ats === "active" ? wrapper.admissions_lane.rows : [],
   };
 }
 
