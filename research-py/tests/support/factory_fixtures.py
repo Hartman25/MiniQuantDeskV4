@@ -19,17 +19,22 @@ def _col(i: int) -> str:
     return s
 
 
+def _put(z: zipfile.ZipFile, name: str, data: str) -> None:
+    """Fixed entry timestamp: the workbook bytes (and so the catalog file hash) must not depend on the wall clock."""
+    z.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), data, compress_type=zipfile.ZIP_DEFLATED)
+
+
 def make_xlsx(sheets: dict[str, list[list[str]]], formulas: dict[str, dict[str, str]] | None = None) -> bytes:
     formulas = formulas or {}
     names = list(sheets)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        _put(z, "[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
         wb = "".join(f'<sheet name="{escape(n)}" sheetId="{i+1}" r:id="rId{i+1}"/>' for i, n in enumerate(names))
-        z.writestr("xl/workbook.xml", '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        _put(z, "xl/workbook.xml", '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
                    f'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{wb}</sheets></workbook>')
         rels = "".join(f'<Relationship Id="rId{i+1}" Type="x" Target="worksheets/sheet{i+1}.xml"/>' for i in range(len(names)))
-        z.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rels + "</Relationships>")
+        _put(z, "xl/_rels/workbook.xml.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rels + "</Relationships>")
         for i, n in enumerate(names):
             rows = []
             for r, row_ in enumerate(sheets[n], start=1):
@@ -40,7 +45,7 @@ def make_xlsx(sheets: dict[str, list[list[str]]], formulas: dict[str, dict[str, 
                     fx = f"<f>{escape(f)}</f>" if f is not None else ""
                     cells.append(f'<c r="{ref}" t="inlineStr">{fx}<is><t xml:space="preserve">{escape(val)}</t></is></c>')
                 rows.append(f'<row r="{r}">{"".join(cells)}</row>')
-            z.writestr(f"xl/worksheets/sheet{i+1}.xml", '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            _put(z, f"xl/worksheets/sheet{i+1}.xml", '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
                        f'<sheetData>{"".join(rows)}</sheetData></worksheet>')
     return buf.getvalue()
 

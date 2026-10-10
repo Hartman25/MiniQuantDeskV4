@@ -165,3 +165,12 @@ def test_zip_bomb_total_size_and_dtd_entities_are_refused(monkeypatch):
     with pytest.raises(ci.CatalogImportError, match="DTD"):
         ci.import_catalog(buf.getvalue(), "c.xlsx", profile=TEST_PROFILE)
 
+
+def test_the_xlsx_fixture_bytes_do_not_depend_on_the_wall_clock(monkeypatch):
+    sheets = {"IDEAS": [HEADER, row("D-1", "Deterministic", rule="Hold above the 50-day SMA, else cash")], "VIEW": [["ID", "Note"], ["D-1", "x"]],
+              "CONTROLS": [HEADER], "SOURCES": [["SID", "Title"], ["S1", "P"]]}
+    import time
+    monkeypatch.setattr(time, "time", lambda: 1_000_000_000.0)
+    first = make_xlsx(sheets)
+    monkeypatch.setattr(time, "time", lambda: 1_100_000_000.0)
+    assert make_xlsx(sheets) == first
