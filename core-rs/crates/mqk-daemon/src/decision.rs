@@ -660,6 +660,40 @@ pub(crate) fn prove_equity_order_identity(
     )))
 }
 
+/// Why a flatten close for `symbol` cannot be an Equity close, or `None`.
+///
+/// A flatten close is an Equity-shaped order on the Equity domain's run (no
+/// `asset_class`, `day` time-in-force, whole shares). That is wrong for any
+/// instrument the trading registry-v2 positively lists as non-Equity, so such
+/// a position is refused with a reason instead of being enqueued as a
+/// mislabelled Equity close that the dispatch parser quarantines (fractional
+/// quantity) or the broker rejects. A symbol the registry does not list, or no
+/// readable registry-v2, keeps the historical close, so liquidating an
+/// ordinary Equity position never depends on this registry being available.
+pub fn flatten_refusal_for_symbol(state: &AppState, symbol: &str) -> Option<String> {
+    let path = state
+        .trading_instrument_registry_v2_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    let registry =
+        mqk_md::instrument_registry_v2::load_instrument_registry_v2(std::path::Path::new(path))
+            .ok()?;
+    let symbol = symbol.trim();
+    let instrument = registry
+        .instruments
+        .iter()
+        .find(|instrument| instrument.symbol.trim() == symbol)?;
+    let class = instrument.asset_class.trim();
+    (class != "equity").then(|| {
+        format!(
+            "position '{symbol}' is a '{class}' instrument; the flatten close path addresses \
+             the Equity domain run and builds an Equity-shaped order, so it is refused rather \
+             than enqueued as a mislabelled Equity close"
+        )
+    })
+}
+
 /// The execution domain that owns an order, from its registry-resolved asset
 /// class. Only a positively resolved Crypto instrument belongs to
 /// `Crypto24_7`; every other outcome (Equity, or an unresolved/refused symbol

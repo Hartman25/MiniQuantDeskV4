@@ -1198,6 +1198,7 @@ pub(super) fn spawn_execution_loop(
                             pool,
                             run_id,
                             &positions_to_check,
+                            &|symbol| crate::decision::flatten_refusal_for_symbol(&state_arc, symbol),
                         )
                         .await;
                     }

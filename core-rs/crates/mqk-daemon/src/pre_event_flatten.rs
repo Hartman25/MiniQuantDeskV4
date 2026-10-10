@@ -489,6 +489,11 @@ pub fn build_operator_flatten_close_order_json(
 /// into the outbox. Idempotent per (run, symbol, minute); enqueue failure is
 /// non-fatal and retried next tick. Returns the number of newly enqueued rows.
 ///
+/// The close is an Equity-shaped order for this run. `refusal_for` returns
+/// `Some(reason)` for a position that is positively not an Equity: it is
+/// logged and skipped, never enqueued as a mislabelled Equity close that the
+/// dispatch parser would quarantine (fractional) or the broker would reject.
+///
 /// A flatten close is a NEW economic order: a deployment mode that may not
 /// create one (LiveShadow) enqueues nothing, and the mode-fenced durable
 /// enqueue independently refuses.
@@ -497,6 +502,7 @@ pub async fn enqueue_pre_event_flatten_closes(
     pool: &sqlx::PgPool,
     run_id: uuid::Uuid,
     positions_to_check: &[(String, QtyMicros)],
+    refusal_for: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> usize {
     if !mode.allows_new_economic_order() {
         return 0;
@@ -506,6 +512,15 @@ pub async fn enqueue_pre_event_flatten_closes(
         let ts_secs = chrono::Utc::now().timestamp();
         let outcome = evaluate_flatten_trigger_from_env(symbol, ts_secs, DEFAULT_FLATTEN_LEAD_SECS);
         if outcome.is_flatten_required() || outcome.is_unavailable() {
+            if let Some(reason) = refusal_for(symbol) {
+                tracing::error!(
+                    run_id = %run_id,
+                    symbol = %symbol,
+                    reason = %reason,
+                    "pre_event_flatten_close_unsupported_position: no close order enqueued"
+                );
+                continue;
+            }
             let (key, order_json) =
                 build_flatten_close_order_json(symbol, *net_qty, ts_secs, run_id);
             match mqk_db::outbox_enqueue_new_order_for_running_run(pool, run_id, &key, order_json)

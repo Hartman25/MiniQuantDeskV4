@@ -138,6 +138,7 @@ async fn t2_pre_event_flatten_never_creates_an_order_under_live_shadow() {
             &pool,
             shadow_run,
             &positions,
+            &|_| None,
         )
         .await;
         assert_eq!(n, 0);
@@ -145,18 +146,28 @@ async fn t2_pre_event_flatten_never_creates_an_order_under_live_shadow() {
 
         // Durable seam alone: a Paper-configured caller against a LIVE-SHADOW
         // run is refused by the run-row mode fence.
-        let n =
-            enqueue_pre_event_flatten_closes(DeploymentMode::Paper, &pool, shadow_run, &positions)
-                .await;
+        let n = enqueue_pre_event_flatten_closes(
+            DeploymentMode::Paper,
+            &pool,
+            shadow_run,
+            &positions,
+            &|_| None,
+        )
+        .await;
         assert_eq!(n, 0);
         assert_eq!(outbox_rows(&pool).await, 0);
 
         // Positive control: the identical fixture under Paper enqueues one row.
         let paper_run =
             seed_running_run(&pool, "ls-no-order.t2.paper", DeploymentMode::Paper).await;
-        let n =
-            enqueue_pre_event_flatten_closes(DeploymentMode::Paper, &pool, paper_run, &positions)
-                .await;
+        let n = enqueue_pre_event_flatten_closes(
+            DeploymentMode::Paper,
+            &pool,
+            paper_run,
+            &positions,
+            &|_| None,
+        )
+        .await;
         assert_eq!(n, 1);
         let row: (Uuid, String) = sqlx::query_as("SELECT run_id, status FROM oms_outbox")
             .fetch_one(&pool)

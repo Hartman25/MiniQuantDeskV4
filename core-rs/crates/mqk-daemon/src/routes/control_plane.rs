@@ -2106,6 +2106,17 @@ pub(crate) async fn ops_action(
             let mut warnings: Vec<String> = vec![];
 
             for (symbol, net_qty) in &positions_to_flatten {
+                if let Some(reason) = crate::decision::flatten_refusal_for_symbol(&st, symbol) {
+                    tracing::warn!(
+                        run_id = %active_run_id,
+                        symbol = %symbol,
+                        reason = %reason,
+                        "operator_flatten_close_unsupported_position"
+                    );
+                    failed_symbols.push(symbol.clone());
+                    warnings.push(format!("unsupported_position: symbol={symbol} {reason}"));
+                    continue;
+                }
                 let (key, order_json) =
                     crate::pre_event_flatten::build_operator_flatten_close_order_json(
                         symbol,
