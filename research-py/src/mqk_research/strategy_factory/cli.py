@@ -160,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                    | {"title": i["source_text"]["title"]} for i in ideas if not args.disposition or i["disposition"] == args.disposition])
         elif args.cmd == "decide":
             payload = json.loads(args.file.read_text(encoding="utf-8"))
-            _emit({"recorded": svc.store.record_decision(args.kind if args.kind != "novelty" else "novelty", payload)})
+            _emit({"recorded": svc.store.record_decision(args.kind, payload)})
         elif args.cmd == "campaign":
             if args.ccmd == "compile":
                 _emit(svc.compile_campaign(json.loads(args.spec.read_text(encoding="utf-8"))))

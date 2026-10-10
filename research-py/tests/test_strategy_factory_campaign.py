@@ -41,7 +41,7 @@ def test_population_is_complete_deterministic_and_content_addressed(bars, tmp_pa
     a, b = compile_(spec, tmp_path), compile_(copy.deepcopy(spec), tmp_path)
     assert a.declaration == b.declaration and a.declaration_sha256 == b.declaration_sha256
     keys = [t["trial_key"] for t in a.trials]
-    assert keys == sorted(keys) or len(keys) == 6
+    assert keys == sorted(keys) and len(set(keys)) == 6
     assert len(a.trials) == 3 * 2 == a.declaration["universe"]["max_trials"]
     assert [t["order"] for t in a.declaration["universe"]["trials"]] == [1, 2, 3, 4, 5, 6]
     changed = copy.deepcopy(spec)
@@ -64,7 +64,7 @@ def test_invalid_grid_combinations_are_excluded_visibly_not_silently(bars, tmp_p
     spec = spec_of(bars, sources=[{"kind": "grammar_grid", "template": "dual_sma_cross", "grid": {"fast": [20, 100], "slow": [50, 100]}}])
     out = compile_(spec, tmp_path)
     ex = out.population_report["excluded"]
-    assert [(e["params"]["fast"], e["params"]["slow"]) for e in ex] == [(100, 50), (100, 100)] or len(ex) == 2
+    assert [(e["params"]["fast"], e["params"]["slow"]) for e in ex] == [(100, 50), (100, 100)]
     assert len({t["strategy_name"] for t in out.trials}) == 2                     # (20,50) and (20,100) remain
     assert out.declaration["factory"]["population_report"]["excluded"] == ex
 
@@ -72,7 +72,8 @@ def test_invalid_grid_combinations_are_excluded_visibly_not_silently(bars, tmp_p
 def test_overlapping_sources_never_duplicate_a_trial_slot(bars, tmp_path):
     spec = spec_of(bars, sources=[GRID, {"kind": "grammar_grid", "template": "sma_trend_gate", "grid": {"window": [50, 100]}}])
     out = compile_(spec, tmp_path)
-    assert sorted({t["strategy_name"] for t in out.trials}) == [f"grammar_v1__sma_trend_gate__window_{w}" for w in (100, 20, 50)] or len(out.trials) == 6
+    assert sorted({t["strategy_name"] for t in out.trials}) == [f"grammar_v1__sma_trend_gate__window_{w}" for w in (100, 20, 50)]
+    assert len(out.trials) == 6
     s50 = next(s for s in out.declaration["factory"]["strategies"] if s["params"].get("window") == 50)
     assert len(s50["population_sources"]) == 2 and len(out.trials) == 6
 

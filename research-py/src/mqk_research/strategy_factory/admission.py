@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from mqk_research.strategy_factory.contracts import Admission, Disposition, Relationship
-from mqk_research.strategy_factory.templates import CARD_BY_ID, NATIVE_CARDS, TEMPLATES, grammar_strategy_name
+from mqk_research.strategy_factory.templates import NATIVE_CARDS, TEMPLATES, grammar_strategy_name
 
 OPERATIONAL_ASSET = "equity"
 OPERATIONAL_DIRECTIONS = ("long_flat", "long_only")

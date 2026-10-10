@@ -8,11 +8,11 @@ Census-02 short mirrors, and ideas the Factory itself already admitted. The inde
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Iterable, Mapping
 
-from mqk_research.strategy_factory.templates import CARD_BY_ID, NATIVE_CARDS, TEMPLATES
+from mqk_research.strategy_factory.templates import NATIVE_CARDS, TEMPLATES
 
 CADENCE_DAILY = "daily"
 

@@ -287,3 +287,19 @@ def test_operator_decision_flows_through_to_admission():
     assert rec["disposition"] == Disposition.ADMITTED_GRAMMAR.value
     assert rec["execution_path"]["strategy_name"] == "grammar_v1__dual_sma_cross__fast_30__slow_120"
     assert rec["decisions"] and rec["template"]["params"]["fast"]["class"] == FieldClass.INFERRED_RULE.value
+
+
+def test_python_template_domains_equal_the_rust_grammar_engine_domains():
+    """CI-visible parity (no binary needed): every bound the Rust name parser enforces equals the Python ParamSpec."""
+    src = (REPO / "core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs").read_text(encoding="utf-8")
+    rust = re.findall(r'bounded\("(\w+)", get\("\w+"\)\?, (\d+), (\d+)\)', src)
+    expected = [(p.name, p.lo, p.hi) for tid in ("sma_trend_gate", "dual_sma_cross", "abs_momentum_sessions", "near_high_proximity")
+                for p in templates.TEMPLATES[tid].params]
+    assert [(n, int(lo), int(hi)) for n, lo, hi in rust] == expected
+    assert {t.template_id for t in templates.TEMPLATES.values() if t.grammar_v1} == {"sma_trend_gate", "dual_sma_cross", "abs_momentum_sessions", "near_high_proximity"}
+    for tid, rust_expr in (("sma_trend_gate", "window as usize"), ("dual_sma_cross", "slow as usize"), ("abs_momentum_sessions", "lookback as usize + 1"),
+                           ("near_high_proximity", "window.max(trend_window) as usize")):
+        assert rust_expr in src                                  # the history formulas Python mirrors in required_history_bars
+    assert templates.required_history_bars("abs_momentum_sessions", {"lookback": 63}) == 64
+    assert templates.required_history_bars("near_high_proximity", {"window": 100, "proximity_bps": 300, "trend_window": 150}) == 150
+

@@ -6,6 +6,15 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -41. Strategy Factory completion (2026-10-10, `V4-STRATEGY-FACTORY-RESEARCH-BACKTEST-FULL-COMPLETION-01`)
+
+Dedicated branch `strategy-factory/full-completion-01` (baseline `origin/main` `e190cce9`); guarded checkpoint pushes to that branch only, **not merged to `main`**. Record: [`docs/research/STRATEGY_FACTORY_CLOSURE_01.md`](research/STRATEGY_FACTORY_CLOSURE_01.md); operator runbook: [`docs/runbooks/strategy_factory_operator.md`](runbooks/strategy_factory_operator.md).
+
+- `FACTORY_CODE_COMPLETE` (disclosed deferrals), `FACTORY_E2E_PROVEN` and `FACTORY_UNATTENDED_PROVEN` on SYNTHETIC data with the real native engine; `FACTORY_EXTERNAL_DEPENDENCY_BLOCKED` (real-data execution needs the operator's secret + released gate + signed authorization; live scouting, paid AI, GUI route are not exercised/owned elsewhere); `FACTORY_INDEPENDENT_ACCEPTANCE_PENDING`. M1 remains `M1_BLOCKED`.
+- New: typed idea intake with explicit dispositions, deterministic dedup, executable admission, Rust `grammar_v1` (Research/Backtest-only), frozen campaign predeclaration, durable queue/scheduler/recovery, report and read-only status export, optional local-AI normalization (AI proposes, deterministic code decides).
+- Unchanged and enforced by test: no Promotion/Paper/Live path, no minted authorization, reserved holdout unread, synthetic data never graded as market evidence.
+- Paper INACTIVE; Live NOT TOUCHED; no provider, broker, migration or order action. Full local workspace acceptance NOT RUN (laptop rule); broad proof delegated to GitHub CI.
+
 ## -40. Distributed Research independent-review correction-02 (2026-10-09, `V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-02`)
 
 Local correction on the isolated integration branch, **not pushed**. Code/test commit `3a21eff1`; full record and M1 matrix: [`docs/research/M1_REMAINING_GATES_CENSUS_01.md`](research/M1_REMAINING_GATES_CENSUS_01.md).

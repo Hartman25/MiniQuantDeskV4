@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import subprocess
 import sys
 import time
@@ -116,16 +117,26 @@ def test_e2e_06_killed_mid_trials_recovers_truthfully_without_rewriting_prior_ev
     env = {**world.env, "PYTHONPATH": str(REPO / "research-py" / "src"), "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.Popen([sys.executable, "-m", "mqk_research.strategy_factory", "--root", str(world.root / "factory"), "--cli", str(E.DEFAULT_CLI),
                              "run", "--workers", "1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline, first = time.time() + 900, None
-    while time.time() < deadline:
+    deadline, durable = time.time() + 900, None
+    reg = run_dir / "registry" / "research.sqlite3"
+    while time.time() < deadline and durable is None:
         running = [j for j in world.svc.store.list_jobs(cid) if j["stage"] == "trials" and j["status"] == "running"]
-        done = sorted(run_dir.glob("trials/*/*/run/eval/economic_walk_forward.json"))
-        if running and done:
-            first = done[0]
-            break
+        if running and reg.is_file():
+            con = sqlite3.connect(f"file:{reg}?mode=ro", uri=True)
+            try:
+                rows = con.execute("select artifact_paths_json from research_attempts where status='succeeded'").fetchall()
+            except sqlite3.Error:
+                rows = []
+            finally:
+                con.close()
+            if rows and len(rows) < 4:                                  # at least one trial is durably complete, not all
+                durable = rows
         time.sleep(0.05)
-    assert first is not None, "the trials stage never reached a completed trial"
-    before = {str(p): sha(p) for p in run_dir.glob("trials/*/*/run/eval/*.json")}
+    assert durable is not None, "the trials stage never had a durably completed trial mid-stage"
+    # Only DURABLY completed trials (registry says succeeded) carry the immutability guarantee: a trial whose attempt had
+    # not reached a terminal state is legitimately re-run, and its same-path partial artifacts are replaced.
+    before = {path: sha(Path(path)) for row in durable for path in json.loads(row[0]).values() if Path(path).is_file()}
+    assert before
     subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
     proc.wait(timeout=60)
     st = world.svc.store
@@ -190,7 +201,8 @@ REAL_RUN = Path(r"C:\Users\Zacha\Desktop\MiniQuantDeskV4\research-py\experiments
 
 
 @pytest.mark.skipif(not (REAL_RUN / "data" / "research_bars_provenance.json").is_file(), reason="no verified local historical bars on this machine")
-def test_e2e_12_real_data_readiness_explains_exactly_why_a_real_campaign_cannot_start(world):
+def test_e2e_12_real_data_readiness_explains_exactly_why_a_real_campaign_cannot_start(tmp_path):
+    world = World(tmp_path)                                    # own store: earlier scenarios leave FAILED/BLOCKED campaigns in the shared one
     man = json.loads((REAL_RUN / "data" / "research_bars_provenance.json").read_text(encoding="utf-8"))
     data_dir = REAL_RUN / "data"
     before = {p.name: sha(p) for p in data_dir.iterdir() if p.is_file()}

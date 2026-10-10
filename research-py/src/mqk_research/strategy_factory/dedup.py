@@ -9,7 +9,7 @@ preserved: a duplicate is labelled, never removed from the accounting.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from mqk_research.strategy_factory.contracts import Relationship, sha
 from mqk_research.strategy_factory.known_index import SEMANTIC_NEIGHBORS, KnownEntry

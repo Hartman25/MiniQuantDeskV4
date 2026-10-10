@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from mqk_research.strategy_factory import ai_normalize, campaign as campaign_mod, catalog_import, knowledge as knowledge_mod, pipeline
-from mqk_research.strategy_factory.contracts import sha
 from mqk_research.strategy_factory.executor import StageExecutor
 from mqk_research.strategy_factory.formalize import formalize_entry
 from mqk_research.strategy_factory.known_index import build_index

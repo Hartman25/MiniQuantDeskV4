@@ -24,7 +24,7 @@ from mqk_research.strategy_factory.contracts import sha
 from mqk_research.strategy_factory.dedup import classify_template
 from mqk_research.strategy_factory.known_index import build_index
 from mqk_research.strategy_factory.templates import (
-    CARD_BY_ID, GRAMMAR_PREFIX, TEMPLATES, grammar_strategy_name, parse_grammar_name, required_history_bars)
+    CARD_BY_ID, TEMPLATES, grammar_strategy_name, parse_grammar_name, required_history_bars)
 
 SPEC_SCHEMA = "factory_campaign_spec_v1"
 DECL_SCHEMA = "factory_campaign_declaration_v1"
