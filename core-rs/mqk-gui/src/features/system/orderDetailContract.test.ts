@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fetchExecutionTimeline, fetchExecutionTrace, fetchExecutionReplay, fetchExecutionChart, fetchCausalityTrace } from "./api";
+import { fetchExecutionTimeline, fetchExecutionTrace, fetchExecutionReplay, fetchExecutionChart, fetchCausalityTrace, fetchExecutionFlow } from "./api";
 import { orderTimelineNotice } from "./legacy";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -29,6 +29,23 @@ test("per-order reads encode identity and reject unknown truth, wrong order and 
       payload = { ...payload, ...invalid };
       assert.equal(await fetchExecutionTimeline(orderId), null);
       payload = previous;
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test("execution flow validates scope and row contracts instead of accepting connected JSON as evidence", async () => {
+  const original = globalThis.fetch;
+  const row = { row_id: "outbox:1", ts_utc: "2026-10-10T10:00:00Z", stage: "broker_sent", severity: "info", run_id: "run-1",
+    internal_order_id: "order-1", broker_order_id: null, symbol: "SIM", message: "Sent", source_table: "oms_outbox" };
+  let payload: unknown = { canonical_route: "/api/v1/execution/flow", truth_state: "active", backend: "postgres", run_id: "run-1", rows: [row] };
+  globalThis.fetch = (async (input, init) => { assert.equal(init?.method, "GET"); return Response.json(payload); }) as typeof fetch;
+  try {
+    assert.equal((await fetchExecutionFlow({ runId: "run-1", orderId: "order-1" }))!.rows[0].row_id, row.row_id);
+    assert.equal(await fetchExecutionFlow({ runId: "other-run" }), null);
+    assert.equal(await fetchExecutionFlow({ orderId: "other-order" }), null);
+    for (const invalid of [{}, { ...(payload as object), rows: [{}] }, { ...(payload as object), truth_state: "future" }]) {
+      payload = invalid;
+      assert.equal(await fetchExecutionFlow(), null);
     }
   } finally { globalThis.fetch = original; }
 });

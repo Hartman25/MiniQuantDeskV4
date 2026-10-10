@@ -1,4 +1,5 @@
-import type { OrderTraceResponse, OrderReplayResponse, OrderChartResponse, OrderCausalityResponse } from "./types";
+import type { OrderTraceResponse, OrderReplayResponse, OrderChartResponse, OrderCausalityResponse, ExecutionFlowSurface } from "./types";
+import { canonicalHistory } from "./historyContract";
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): value is RecordValue => !!value && typeof value === "object" && !Array.isArray(value);
@@ -56,4 +57,17 @@ export function parseOrderDetail(kind: "trace" | "replay" | "chart" | "causality
       nullableText(row.linked_id) && nullableTime(row.timestamp) && nullableNumber(row.elapsed_from_prev_ms) && texts(row.anomaly_tags)) ||
     value.truth_state !== "partial" && ((value.nodes as unknown[]).length !== 0 || (value.proven_lanes as string[]).length !== 0)) return null;
   return value as unknown as OrderCausalityResponse;
+}
+
+export function parseExecutionFlow(value: unknown, scope?: { runId?: string; orderId?: string }): ExecutionFlowSurface | null {
+  if (!object(value) || value.canonical_route !== "/api/v1/execution/flow" || !text(value.backend) || !nullableText(value.run_id) ||
+    !["active", "no_active_run", "no_db"].includes(String(value.truth_state)) ||
+    !rows(value.rows, "row_id", (row) => time(row.ts_utc) && fields(row, ["stage", "run_id", "message", "source_table"], text) &&
+      ["info", "warn", "error"].includes(String(row.severity)) && fields(row, ["internal_order_id", "broker_order_id", "symbol"], nullableText) &&
+      row.run_id === value.run_id && (!scope?.orderId || row.internal_order_id === scope.orderId)) ||
+    value.truth_state === "active" && (!text(value.run_id) || scope?.runId !== undefined && scope.runId !== value.run_id) ||
+    value.truth_state !== "active" && (value.rows as unknown[]).length !== 0) return null;
+  const surface = value as unknown as ExecutionFlowSurface;
+  const ordered = canonicalHistory(surface.rows, (row) => row.row_id, (row) => row.ts_utc);
+  return ordered === null ? null : { ...surface, rows: ordered.reverse() };
 }

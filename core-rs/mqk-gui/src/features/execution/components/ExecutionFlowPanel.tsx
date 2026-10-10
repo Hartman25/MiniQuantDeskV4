@@ -18,6 +18,7 @@ import { Panel } from "../../../components/common/Panel";
 import { formatDateTime } from "../../../lib/format";
 import { fetchExecutionFlow } from "../../system/api";
 import type { ExecutionFlowRow, ExecutionFlowSurface } from "../../system/types";
+import { getDaemonUrl } from "../../../config";
 
 // ---------------------------------------------------------------------------
 // Truth state notice
@@ -83,6 +84,7 @@ export function ExecutionFlowPanel({
   orderId?: string | null;
 }) {
   const [surface, setSurface] = useState<ExecutionFlowSurface | null>(null);
+  const daemonUrl = getDaemonUrl();
   const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState<FlowFilters>({
     orderId: externalOrderId ?? "",
@@ -100,6 +102,7 @@ export function ExecutionFlowPanel({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setSurface(null);
 
     const params: { runId?: string; orderId?: string; limit?: number } = {
       limit: filters.limit,
@@ -108,16 +111,16 @@ export function ExecutionFlowPanel({
     if (filters.orderId.trim()) params.orderId = filters.orderId.trim();
 
     fetchExecutionFlow(params).then((result) => {
-      if (!cancelled) {
+      if (!cancelled && daemonUrl === getDaemonUrl()) {
         setSurface(result);
         setLoading(false);
       }
-    });
+    }).catch(() => { if (!cancelled) { setSurface(null); setLoading(false); } });
 
     return () => {
       cancelled = true;
     };
-  }, [runId, filters.orderId, filters.limit]);
+  }, [daemonUrl, runId, filters.orderId, filters.limit]);
 
   // ---------------------------------------------------------------------------
   // Render

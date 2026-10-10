@@ -20,7 +20,7 @@ import { parseSystemStatus } from "./statusContract";
 import { parsePortfolioSummary, parseRiskSummary, parseReconcileSummary } from "./economicContract";
 import { hasRows } from "./rowContract";
 import { validOperationalPayload } from "./operationalContract";
-import { parseOrderDetail } from "./orderDetailContract";
+import { parseOrderDetail, parseExecutionFlow } from "./orderDetailContract";
 import { parseMarketDataQuality, parseOmsOverview, parseTransport } from "./snapshotContracts";
 import {
   enforceRunScopeConsistency,
@@ -1523,7 +1523,7 @@ export async function fetchExecutionFlow(params?: {
   if (params?.limit != null) search.set("limit", String(params.limit));
   const qs = search.toString();
   const url = qs ? `/api/v1/execution/flow?${qs}` : "/api/v1/execution/flow";
-  return tryFetchJson<ExecutionFlowSurface>([url]);
+  return parseExecutionFlow(await tryFetchJson<unknown>([url]), params);
 }
 
 // requestSystemModeTransition was removed (H-7 / PC-1):
