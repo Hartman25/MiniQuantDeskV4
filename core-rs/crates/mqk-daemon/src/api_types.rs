@@ -676,6 +676,14 @@ pub struct PreflightStatusResponse {
     // PROJECTION: additive compact daily-operation outcome summary. Fails
     // soft independently of every other field on this response.
     pub daily_operation: AutonomousDailyOperationSummary,
+
+    /// Broker-account entitlement readiness for the Equity order path, from
+    /// the same evidence and `admit` logic the gateway enforces at submit.
+    /// `state`: `not_observed` | `entitled` | `denied` | `stale` | `unknown`.
+    /// `null` when the selected broker has no provider account (not Alpaca).
+    /// A `denied` state is a blocker and refuses the next start; the others
+    /// are warnings (a start performs a fresh account probe).
+    pub broker_account_entitlement: Option<mqk_broker_alpaca::account_entitlement::AccountEntitlementReadiness>,
 }
 
 // ---------------------------------------------------------------------------

@@ -517,6 +517,51 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     if status.notes.is_some() {
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
     }
+    // Broker-account entitlement: same evidence and admit logic as the
+    // gateway; `denied` is a blocker (the next start refuses it), the other
+    // non-entitled states are warnings (a start probes the account afresh).
+    let broker_account_entitlement = (st.runtime_selection().broker_kind
+        == Some(crate::state::BrokerKind::Alpaca))
+    .then(|| {
+        st.broker_account_evidence.readiness(
+            Utc::now(),
+            crate::state::account_entitlement_freshness_bound(),
+            mqk_execution::AssetClass::Equity,
+        )
+    });
+    let mut autonomous_blockers = autonomous_blockers;
+    let mut entitlement_blockers = Vec::new();
+    if let Some(ent) = broker_account_entitlement.as_ref() {
+        let text = format!(
+            "broker account entitlement is '{}'{}",
+            ent.state,
+            ent.code
+                .as_deref()
+                .map(|c| format!(" [{c}]"))
+                .unwrap_or_default()
+        );
+        match ent.state.as_str() {
+            "entitled" => {}
+            "denied" if is_paper_alpaca => autonomous_blockers.push(text),
+            "denied" => entitlement_blockers.push(text),
+            _ => warnings.push(text),
+        }
+    }
+    // Shared-capital consequence: with several strategies configured and the
+    // allocator effectively off, broker buying power is not an allocation
+    // regime across them. Advisory only; never changes a gate or a default.
+    {
+        let fleet_len = st.strategy_fleet_snapshot().await.map_or(0, |f| f.len());
+        let allocation = crate::runtime_opportunity_mode::effective_mode(
+            &crate::runtime_opportunity_mode::resolve_runtime_opportunity_allocation_mode_from_env(),
+            st.deployment_mode(),
+            st.runtime_selection().broker_kind,
+        );
+        warnings.extend(shared_capital_allocator_preflight_warning(
+            fleet_len,
+            allocation.effective_mode,
+        ));
+    }
     // MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01: advisory-only warning when any
     // of caps #2/#3/#5 are unset. Strictly additive — never affects
     // deployment_start_allowed or any blocker; reuses the exact existing
@@ -536,7 +581,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         )
         .await;
 
-    let mut blockers = Vec::new();
+    let mut blockers = entitlement_blockers;
     if db_reachable == Some(false) {
         blockers.push("Database is not reachable.".to_string());
     }
@@ -599,6 +644,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
                     Utc::now(),
                 )
                 .await,
+            broker_account_entitlement,
         }),
     )
         .into_response()
@@ -672,6 +718,36 @@ struct SessionWindowDiagnostics {
 /// derived UTC times are `None` (NYSE seam, time varies by calendar day).
 /// Raw env values are always returned verbatim so the operator can see what was
 /// configured even when parsing fails.
+/// Advisory preflight warning: more than one configured strategy while the
+/// shared-capital allocator is not enforcing. Pure; never a blocker.
+fn shared_capital_allocator_preflight_warning(
+    fleet_len: usize,
+    effective_mode: crate::runtime_opportunity_mode::RuntimeOpportunityAllocationMode,
+) -> Option<String> {
+    use crate::runtime_opportunity_mode::RuntimeOpportunityAllocationMode as Mode;
+    (fleet_len >= 2 && effective_mode != Mode::PaperEnforced).then(|| {
+        format!(
+            "{fleet_len} strategies are configured but the shared-capital allocator is '{}'; broker buying power is not a multi-strategy allocation regime and strategies are not capital-coordinated (operator capital-allocation policy decision required).",
+            effective_mode.as_str()
+        )
+    })
+}
+
+#[cfg(test)]
+mod shared_capital_warning_tests {
+    use super::*;
+    use crate::runtime_opportunity_mode::RuntimeOpportunityAllocationMode as Mode;
+
+    #[test]
+    fn warns_for_multi_strategy_unless_enforced() {
+        assert!(shared_capital_allocator_preflight_warning(2, Mode::Off).is_some());
+        assert!(shared_capital_allocator_preflight_warning(3, Mode::Shadow).is_some());
+        assert!(shared_capital_allocator_preflight_warning(2, Mode::PaperEnforced).is_none());
+        assert!(shared_capital_allocator_preflight_warning(1, Mode::Off).is_none());
+        assert!(shared_capital_allocator_preflight_warning(0, Mode::Off).is_none());
+    }
+}
+
 /// MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01: advisory (non-blocking) preflight
 /// warnings for any of caps #2/#3/#5 that are unset/disabled.
 ///
