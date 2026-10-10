@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 mqk-research = "mqk_research.cli:main"
 mqk-exp-dist = "mqk_research.exp_distributed.cli:main"
+mqk-factory = "mqk_research.strategy_factory.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]

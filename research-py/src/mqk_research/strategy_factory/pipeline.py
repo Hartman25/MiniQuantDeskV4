@@ -7,7 +7,7 @@ output exactly once; the disposition counts always sum to the submitted-entry co
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from mqk_research.strategy_factory.admission import decide
 from mqk_research.strategy_factory.contracts import COARSE_DISPOSITION, proposal_kind, sha
@@ -17,12 +17,13 @@ from mqk_research.strategy_factory.known_index import KnownEntry
 
 
 def process(ledgers: Sequence[Mapping[str, Any]], known: Sequence[KnownEntry], *, grammar_available: bool,
-            decisions: Iterable[Mapping[str, Any]] = (), reviews: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+            decisions: Iterable[Mapping[str, Any]] = (), reviews: Iterable[Mapping[str, Any]] = (),
+            formalizer: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
     ideas: dict[str, dict[str, Any]] = {}
     submitted = 0
     copies: list[dict[str, str]] = []
     for ledger in sorted(ledgers, key=lambda l: (l["catalog_family"], l["source"]["sha256"])):
-        for idea in formalize_ledger(ledger):
+        for idea in ([formalizer(e, ledger) for e in ledger["entries"]] if formalizer else formalize_ledger(ledger)):
             submitted += 1
             prior = ideas.get(idea["intake_id"])
             if prior is None:

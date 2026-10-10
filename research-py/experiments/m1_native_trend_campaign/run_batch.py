@@ -66,6 +66,12 @@ CAPITAL_BASIS = "native_backtest.initial_cash_micros"
 _ACTIVE = {"stage": None, "auth": None}
 
 
+def _resume(args) -> bool:
+    """`--resume` opts a stage into crash-safe convergence (skip what is already terminal). Without it every stage keeps
+    its historical single-pass behaviour exactly."""
+    return bool(getattr(args, "resume", False))
+
+
 def _require_active_stage() -> None:
     """Effectful helpers (`_run_cli`, `_save_index`) run only inside an authorized stage of a non-historical
     declaration, so importing this module and calling a helper directly cannot bypass the stage gate."""
@@ -143,7 +149,9 @@ def _save_index(index: dict) -> None:
     if not stage_authorization.is_frozen_historical(DECL):
         stage_authorization.reverify_active_stage(DECL, _ACTIVE["stage"], _ACTIVE["auth"])
     INDEX.parent.mkdir(parents=True, exist_ok=True)
-    INDEX.write_text(json.dumps(index, indent=1, sort_keys=True), encoding="utf-8")
+    tmp = INDEX.with_suffix(".json.tmp")  # atomic replace: a crash never leaves a torn index
+    tmp.write_text(json.dumps(index, indent=1, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, INDEX)
 
 
 def _require_exact_target_protocol() -> None:
@@ -588,8 +596,10 @@ def stage_register(_args) -> None:
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     store = ResearchResultStore(REGISTRY)
-    if store.list_trials(experiment_id=EXPERIMENT):
+    if store.list_trials(experiment_id=EXPERIMENT) and not _resume(_args):
         raise SystemExit("fail-closed: the batch registry already holds trials; registration runs once")
+    # Under --resume registration converges: trial ids are deterministic, register_trial is idempotent for identical
+    # content, and the exact-set / zero-attempt checks below refuse any foreign trial or any attempt.
     index = {}
     for strategy, sym in TRIALS:
         h = HYP[strategy]
@@ -619,6 +629,38 @@ def stage_register(_args) -> None:
     print("registered_unique_trials", len(registered), "attempts", attempts)
 
 
+INTERRUPTED_REASON = "interrupted_before_terminal_result"
+
+
+def _reconcile_trial(store, rec: dict) -> bool:
+    """Resume semantics for one trial. True = a terminal result is already durable (do NOT evaluate again). A genuine
+    failed attempt is terminal (no outcome-dependent retry); a succeeded attempt missing from the index is recovered
+    from the registry; a 'started' attempt orphaned by a crash is finalized `failed` with an explicit interruption
+    reason (nothing is fabricated) and the trial is then evaluated again as a new attempt of the SAME trial."""
+    if "economic_eval_id" in rec or "failed" in rec:
+        return True
+    attempts = store.list_attempts(rec["trial_id"])
+    done = [a for a in attempts if a["status"] == "succeeded"]
+    if done:
+        a = done[-1]
+        paths = json.loads(a["artifact_paths_json"]) if a.get("artifact_paths_json") else {}
+        econ_path = paths.get("economic_walk_forward")
+        if not econ_path or not Path(econ_path).exists():
+            raise SystemExit(f"fail-closed: {rec['trial_id']} has a succeeded attempt whose economic artifact is missing; reconcile manually")
+        econ = json.loads(Path(econ_path).read_text(encoding="utf-8"))
+        rec.update({"economic_eval_id": a["result_id"], "economic_path": econ_path, "attempt_index": a["attempt_index"],
+                    "execution_fidelity": econ["registry"]["execution_fidelity"]})
+        return True
+    for a in attempts:
+        if a["status"] == "started":
+            store.finalize_attempt(a["attempt_id"], status="failed", failure_reason=INTERRUPTED_REASON)
+    genuine = [a for a in store.list_attempts(rec["trial_id"]) if a["status"] == "failed" and a.get("failure_reason") != INTERRUPTED_REASON]
+    if genuine:
+        rec["failed"] = genuine[-1].get("failure_reason") or "failed attempt"
+        return True
+    return False
+
+
 @staged("trials")
 def stage_trials(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
@@ -635,6 +677,8 @@ def stage_trials(_args) -> None:
     index = _load_index()
     for strategy, sym in TRIALS:  # frozen order; failures never stop the batch
         h, sdir, rec = HYP[strategy], tdir(strategy, sym), index[key(strategy, sym)]
+        if _resume(_args) and _reconcile_trial(store, rec):
+            continue
         sdir.mkdir(parents=True, exist_ok=True)
         hold = native_holdout_start(BARS, sym, part["holdout_months"], fixed_holdout_boundary(DECL))
         bt = research_bars_to_backtest_csv(BARS, sym, sdir / "bt_bars.csv", end_exclusive_utc=hold)
@@ -660,6 +704,8 @@ def stage_trials(_args) -> None:
         except NativeSignalError as exc:  # the failed attempt is already durable
             rec["failed"] = str(exc)
             print(key(strategy, sym), "FAILED attempt kept:", str(exc)[:200])
+            if _resume(_args):
+                _save_index(index)
             continue
         econ = json.loads(out.read_text(encoding="utf-8"))
         if econ["registry"]["trial_id"] != rec["trial_id"]:
@@ -668,11 +714,16 @@ def stage_trials(_args) -> None:
                     "attempt_index": econ["registry"]["attempt_index"],
                     "execution_fidelity": econ["registry"]["execution_fidelity"]})
         print(key(strategy, sym), rec["trial_id"], "attempt", rec["attempt_index"])
+        if _resume(_args):
+            _save_index(index)
     _save_index(index)
 
 
 @staged("judge")
 def stage_judge(_args) -> None:
+    if _resume(_args) and (RUN / "judge" / "judge_sha256.txt").exists() and (RUN / "judge" / "judge.json").exists():
+        print("judge already complete (sha file written last); not recomputed")
+        return
     from mqk_research.exp_distributed.hashing import canonical_json, sha256_bytes
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge
@@ -697,6 +748,8 @@ def stage_backtest(_args) -> None:
         if "failed" in rec:
             print(key(strategy, sym), "no succeeded trial; rejected, no backtest evidence")
             continue
+        if _resume(_args) and rec.get("backtest_run_id"):
+            continue
         out = _run_cli("backtest", "csv", "--bars", str(tdir(strategy, sym) / "bt_bars.csv"), "--strategy", strategy,
                        "--symbol", sym, "--timeframe-secs", str(nb["timeframe_secs"]),
                        "--initial-cash-micros", str(nb["initial_cash_micros"]),
@@ -705,6 +758,8 @@ def stage_backtest(_args) -> None:
         rec["backtest_run_id"] = _parse(out, "run_id")
         rec["execution_blocked"] = _parse(out, "execution_blocked")
         print(key(strategy, sym), rec["backtest_run_id"], "execution_blocked", rec["execution_blocked"])
+        if _resume(_args):
+            _save_index(index)
     _save_index(index)
 
 
@@ -736,7 +791,7 @@ def stage_finalize(_args) -> None:
     py = sys.executable
     for strategy, sym in TRIALS:
         rec = index[key(strategy, sym)]
-        if "failed" in rec:
+        if "failed" in rec or (_resume(_args) and rec.get("finalized")):
             continue
         common = ["--artifact-root", str(RUN / "backtest" / strategy / sym), "--run-id", rec["backtest_run_id"],
                   "--registry-db", str(REGISTRY), "--trial-id", rec["trial_id"]]
@@ -760,6 +815,9 @@ def stage_finalize(_args) -> None:
                  "--research-py-root", str(REPO / "research-py"), "--python", py,
                  "--placebo-out-dir", str(RUN / "placebo" / strategy / sym))
         print(key(strategy, sym), "finalized")
+        if _resume(_args):
+            rec["finalized"] = True
+            _save_index(index)
 
 
 SCAN_REGISTRY_SUPPLEMENT = {
@@ -783,6 +841,8 @@ def stage_review(_args) -> None:
     assert sorted(i["symbol"] for i in sub) == symbols
     for strategy in STRATEGIES:
         base = RUN / "scan" / strategy
+        if _resume(_args) and any((base / "reviews").rglob("review_decisions.json")):
+            continue
         base.mkdir(parents=True, exist_ok=True)
         reg_path = base / "registry.json"
         reg_path.write_text(json.dumps(sub, indent=1, sort_keys=True), encoding="utf-8")
@@ -833,6 +893,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=sorted(STAGES))
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--resume", action="store_true", help="crash-safe convergence: skip what is already terminal")
     args = ap.parse_args()
     require_executable_declaration(DECL)
     STAGES[args.stage](args)

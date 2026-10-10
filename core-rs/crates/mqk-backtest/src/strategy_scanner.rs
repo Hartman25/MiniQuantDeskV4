@@ -1427,6 +1427,14 @@ pub fn execute_strategy_scan_with_policy(
         let mut reg = PluginRegistry::new();
         register_builtin_strategies_with_sizing(&mut reg, symbol.as_str(), 1, None, None)
             .map_err(|e| format!("register_builtin_strategies failed for symbol={symbol}: {e}"))?;
+        for strategy_id in &req.strategies {
+            mqk_strategy::engines::register_grammar_strategy_if_named(
+                &mut reg,
+                symbol.as_str(),
+                strategy_id,
+            )
+            .map_err(|e| format!("grammar_v1 registration failed for {strategy_id}: {e}"))?;
+        }
 
         let bars_path = timeframe_dir.join(format!("{symbol}_{}.csv", req.timeframe));
         // A malformed local bars file is reported the same as a missing one
