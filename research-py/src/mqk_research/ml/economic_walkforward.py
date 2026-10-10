@@ -691,7 +691,7 @@ def load_bars(
     bars_csv = Path(bars_csv)
     if not bars_csv.exists():
         raise FileNotFoundError(f"Fail-closed: missing economic bars file: {bars_csv}")
-    bars = pd.read_csv(bars_csv)
+    bars = pd.read_csv(bars_csv, float_precision="round_trip")
     required = ["symbol", "end_ts", "close"]
     if require_pricing_columns:
         required = required + ["high", "low"]

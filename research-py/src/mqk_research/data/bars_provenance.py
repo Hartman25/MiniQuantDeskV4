@@ -1006,6 +1006,9 @@ def provenance_identity_fragment(manifest: Dict[str, Any]) -> Dict[str, Any]:
         fragment["historical_data_contract_id"] = manifest[
             "historical_data_contract_id"
         ]
+        if manifest.get("timeframe") in _DAILY_TRANSPORT_LABELS:
+            fragment["timeframe"] = DAILY_SEMANTIC_TIMEFRAME
+            fragment["timeframe_identity"] = TIMEFRAME_IDENTITY_CANONICAL_SEMANTIC_V1
     return fragment
 
 

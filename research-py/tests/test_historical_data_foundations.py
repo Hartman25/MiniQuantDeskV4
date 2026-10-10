@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mqk_research.data import alpaca_historical as ah
@@ -469,3 +471,242 @@ def test_naive_csv_timestamp_cannot_be_hidden_by_legacy_utc_conversion(
     )
     with pytest.raises(hist.HistoricalDataUnqualified, match="timezone"):
         qualified_load(tmp_path, result)
+
+
+def test_repeat_publication_idempotent_and_revision_never_overwrites(
+    monkeypatch, tmp_path
+):
+    result = extraction(monkeypatch)
+    target = tmp_path / "dataset"
+    paths = ah.write_research_extraction_artifacts(target, result)
+    before = {
+        key: (path.read_bytes(), path.stat().st_mtime_ns) for key, path in paths.items()
+    }
+    assert ah.write_research_extraction_artifacts(target, result) == paths
+    assert before == {
+        key: (path.read_bytes(), path.stat().st_mtime_ns) for key, path in paths.items()
+    }
+    revised = extraction(
+        monkeypatch,
+        rows=[
+            _bar(pd.Timestamp(d).tz_localize("America/New_York").isoformat(), v=2000)
+            for d in ("2024-11-27", "2024-11-29", "2024-12-02")
+        ],
+    )
+    with pytest.raises(
+        ah.AlpacaHistoricalExtractionError, match="different|revision|immutable"
+    ):
+        ah.write_research_extraction_artifacts(target, revised)
+    assert before == {
+        key: (path.read_bytes(), path.stat().st_mtime_ns) for key, path in paths.items()
+    }
+
+
+def test_failed_publish_has_no_visible_dataset_and_retry_recovers(
+    monkeypatch, tmp_path
+):
+    result = extraction(monkeypatch)
+    target = tmp_path / "dataset"
+    original = Path.write_text
+
+    def crash(path, *args, **kwargs):
+        if path.name == "corporate_actions.json":
+            raise OSError("injected crash before CA artifact")
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "write_text", crash)
+        with pytest.raises(OSError, match="injected crash"):
+            ah.write_research_extraction_artifacts(target, result)
+    assert not target.exists()
+    paths = ah.write_research_extraction_artifacts(target, result)
+    assert all(path.is_file() for path in paths.values())
+
+
+def test_corrupt_existing_dataset_refuses_reuse(monkeypatch, tmp_path):
+    result = extraction(monkeypatch)
+    target = tmp_path / "dataset"
+    paths = ah.write_research_extraction_artifacts(target, result)
+    paths["bars_csv"].write_text(
+        paths["bars_csv"].read_text().replace("100.5", "100.6")
+    )
+    with pytest.raises(
+        (
+            ah.AlpacaHistoricalExtractionError,
+            bp.BarsProvenanceContentMismatch,
+            hist.HistoricalDataUnqualified,
+        )
+    ):
+        ah.write_research_extraction_artifacts(target, result)
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "bars_provenance_json",
+        "corporate_actions_json",
+        "corporate_actions_provenance_json",
+        "bars_csv",
+    ],
+)
+def test_corrupt_artifact_set_refused_without_repair(monkeypatch, tmp_path, artifact):
+    result = extraction(monkeypatch)
+    target = tmp_path / "dataset"
+    paths = ah.write_research_extraction_artifacts(target, result)
+    paths[artifact].write_bytes(paths[artifact].read_bytes() + b"corrupt")
+    corrupt = paths[artifact].read_bytes()
+    with pytest.raises(
+        ah.AlpacaHistoricalExtractionError, match="checksum|invalid|integrity"
+    ):
+        ah.load_research_extraction_artifacts(target)
+    with pytest.raises(ah.AlpacaHistoricalExtractionError):
+        ah.write_research_extraction_artifacts(target, result)
+    assert paths[artifact].read_bytes() == corrupt
+
+
+def test_equivalent_layout_daily_alias_and_retrieval_preserve_publication(
+    monkeypatch, tmp_path
+):
+    first = extraction(monkeypatch)
+    later = extraction(monkeypatch, timeframe="1D", snapshot="2024-12-05T00:00:00Z")
+    later["bars"] = later["bars"].iloc[::-1][list(reversed(later["bars"].columns))]
+    assert bp.provenance_identity_fragment(
+        first["manifest"]
+    ) == bp.provenance_identity_fragment(later["manifest"])
+    target = tmp_path / "dataset"
+    paths = ah.write_research_extraction_artifacts(target, first)
+    before = {k: p.read_bytes() for k, p in paths.items()}
+    ah.write_research_extraction_artifacts(target, later)
+    assert before == {k: p.read_bytes() for k, p in paths.items()}
+    loaded = ah.load_research_extraction_artifacts(
+        target, historical_requirements={"decision_time_utc": "2024-12-06T00:00:00Z"}
+    )
+    assert loaded["qualification"]["point_in_time_qualified"] is False
+    assert loaded["qualification"]["expected_sessions_per_symbol"] == 3
+
+
+def test_rename_failure_never_publishes_partial_and_retry_recovers(
+    monkeypatch, tmp_path
+):
+    result = extraction(monkeypatch)
+    target = tmp_path / "dataset"
+
+    def crash(*args):
+        raise OSError("injected rename crash")
+
+    with monkeypatch.context() as m:
+        m.setattr(ah.os, "rename", crash)
+        with pytest.raises(OSError, match="rename crash"):
+            ah.write_research_extraction_artifacts(target, result)
+    assert not target.exists()
+    assert (tmp_path / ".dataset.staging").is_dir()
+    ah.write_research_extraction_artifacts(target, result)
+    assert ah.load_research_extraction_artifacts(target)["manifest"]["row_count"] == 3
+
+
+def test_real_process_crash_releases_lock_and_retry_recovers(monkeypatch, tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    result = extraction(monkeypatch)
+    payload = {**result, "bars": result["bars"].to_dict("records")}
+    source = tmp_path / "offline_result.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    target = tmp_path / "dataset"
+    script = r"""
+import json, os, sys
+from pathlib import Path
+import pandas as pd
+from mqk_research.data.alpaca_historical import write_research_extraction_artifacts
+result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+result["bars"] = pd.DataFrame(result["bars"])
+original = Path.write_text
+def crash(path, *args, **kwargs):
+    value = original(path, *args, **kwargs)
+    if path.name == "corporate_actions_provenance.json":
+        os._exit(17)
+    return value
+Path.write_text = crash
+write_research_extraction_artifacts(Path(sys.argv[2]), result)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(target)],
+        capture_output=True,
+        timeout=30,
+    )
+    assert completed.returncode == 17, completed.stderr.decode()
+    assert not target.exists()
+    assert (tmp_path / ".dataset.staging").is_dir()
+    ah.write_research_extraction_artifacts(target, result)
+    assert ah.load_research_extraction_artifacts(target)["manifest"]["row_count"] == 3
+
+
+def test_publication_lock_contention_refuses_and_retries(monkeypatch, tmp_path):
+    result = extraction(monkeypatch)
+    target = tmp_path / "dataset"
+    with ah._extraction_publish_lock(target):
+        with pytest.raises(ah.AlpacaHistoricalExtractionError, match="busy"):
+            ah.write_research_extraction_artifacts(target, result)
+    assert not target.exists()
+    assert ah.write_research_extraction_artifacts(target, result)["bars_csv"].exists()
+
+
+def test_float_roundtrip_preserves_exact_content_identity(monkeypatch, tmp_path):
+    rows = [
+        _bar(
+            "2024-11-27T05:00:00Z",
+            o=100.12345678901235,
+            h=101.12345678901235,
+            l=99.12345678901235,
+            c=100.12345678901235,
+            v=123.12345678901235,
+        )
+    ]
+    result = extraction(
+        monkeypatch, rows=rows, start="2024-11-27T00:00:00Z", end="2024-11-28T00:00:00Z"
+    )
+    paths = ah.write_research_extraction_artifacts(tmp_path / "dataset", result)
+    loaded = load_bars(
+        paths["bars_csv"],
+        provenance_manifest=result["manifest"],
+        historical_requirements={"decision_time_utc": "2024-12-05T00:00:00Z"},
+    )
+    assert hist.full_ohlcv_hash(loaded) == hist.full_ohlcv_hash(result["bars"])
+
+
+def test_cli_revision_identity_selects_new_destination(monkeypatch, tmp_path):
+    from mqk_research.cli import run_alpaca_research_extraction
+
+    first = extraction(monkeypatch)
+    later = extraction(
+        monkeypatch,
+        rows=[
+            _bar(pd.Timestamp(d).tz_localize("America/New_York").isoformat(), v=2000)
+            for d in ("2024-11-27", "2024-11-29", "2024-12-02")
+        ],
+    )
+
+    def run(result):
+        monkeypatch.setattr(
+            ah, "extract_research_bars_with_provenance", lambda **kwargs: result
+        )
+        return run_alpaca_research_extraction(
+            symbols_csv="AAA",
+            start_utc=pd.Timestamp("2024-11-27T00:00:00Z"),
+            end_utc=pd.Timestamp("2024-12-03T00:00:00Z"),
+            timeframe="1Day",
+            asof="2024-12-04",
+            out_root=tmp_path,
+        )
+
+    a, repeated, b = run(first), run(first), run(later)
+    assert a == repeated and a != b
+    assert (
+        ah.load_research_extraction_artifacts(a)["bars"]["volume"].tolist()
+        == [1000] * 3
+    )
+    assert (
+        ah.load_research_extraction_artifacts(b)["bars"]["volume"].tolist()
+        == [2000] * 3
+    )
