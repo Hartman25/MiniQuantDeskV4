@@ -198,12 +198,14 @@ export interface MetricSeries {
   unit: "count" | "ms" | "pct" | "rate" | "usd";
   window: "5m" | "15m" | "1h" | "4h" | "1d";
   points: MetricPoint[];
-  current_value: number;
+  current_value: number | null;
   threshold_warning: number | null;
   threshold_critical: number | null;
 }
 
 export interface MetricsSection {
+  truth_state?: "active" | "no_snapshot" | "not_wired" | "unknown";
+  operational_state?: string;
   key: string;
   title: string;
   description: string;
@@ -211,6 +213,7 @@ export interface MetricsSection {
 }
 
 export interface SystemMetrics {
+  portfolio?: MetricsSection;
   runtime: MetricsSection;
   execution: MetricsSection;
   fillQuality: MetricsSection;

@@ -13,6 +13,7 @@
 
 import { withClassifiedPanelSources } from "./sourceAuthority";
 import { parseIncidents } from "./incidentContract";
+import { parseMetricsDashboard } from "./metricsContract";
 import {
   enforceRunScopeConsistency,
   parseDurablePortfolioPositions,
@@ -447,7 +448,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       return fetchJsonCandidate<LegacyTradingOrdersResponse>("/v1/trading/orders");
     })(),
     fetchJsonCandidates<OmsOverview>(["/api/v1/oms/overview"]),
-    fetchJsonCandidates<SystemMetrics>(["/api/v1/metrics/dashboards"]),
+    (async (): Promise<EndpointFetchResult<SystemMetrics>> => {
+      const result = await fetchJsonCandidate<unknown>("/api/v1/metrics/dashboards");
+      const data = result.ok ? parseMetricsDashboard(result.data) : null;
+      return data === null ? { ...result, ok: false, data: undefined, error: result.error ?? "metrics_contract_invalid" } : { ...result, ok: true, data };
+    })(),
     fetchJsonCandidates<PortfolioSummary | LegacyTradingAccountResponse>(["/api/v1/portfolio/summary", "/v1/trading/account"]),
     // Portfolio positions: canonical route returns snapshot_state wrapper.
     // "active" → rows are real broker truth; "no_snapshot" → broker snapshot absent.

@@ -8,7 +8,7 @@ export function MetricStripChart({ series }: { series: MetricSeries }) {
     <div className="metric-strip-card">
       <div className="metric-strip-header">
         <div>
-          <div className="eyebrow">{series.window}</div>
+          <div className="eyebrow">{series.points.length ? series.window : "Snapshot · history unavailable"}</div>
           <strong>{series.label}</strong>
         </div>
         <span>{formatMetricValue(series)}</span>

@@ -48,6 +48,7 @@ export function formatPercent(value: number | null): string {
 }
 
 export function formatMetricValue(series: MetricSeries): string {
+  if (series.current_value == null || !Number.isFinite(series.current_value)) return "Unavailable";
   switch (series.unit) {
     case "ms":
       return formatLatency(series.current_value);
