@@ -17,7 +17,8 @@ const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequireme
   // when truth_state === "no_snapshot" or "not_wired") — risk numbers are zeros-not-truth,
   // not zeros-because-all-gates-are-healthy.  Block the entire dashboard when risk truth
   // is absent, consistent with the hard-close comment in DashboardScreen.tsx.
-  dashboard: { hints: ["/risk/denials"] },
+  dashboard: { hints: ["/system/status", "/risk/summary", "/risk/denials", "/execution/summary", "/reconcile/status"], missingMode: "any" },
+  controlStation: { hints: ["/system/status"] },
   // execution_orders (HTTP 503) is the definitive "no OMS truth" signal.
   // execution_summary can return HTTP 200 with has_snapshot=false and zero counts —
   // those zeros are honest (there are zero active orders because no loop is running).
@@ -31,7 +32,7 @@ const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequireme
   // /risk/summary always returns HTTP 200 (even has_snapshot=false), so it
   // never lands in missingEndpoints and cannot drive this gate.
   // A single-item hint collapses every() to a simple "is this endpoint missing?" check.
-  risk: { hints: ["/risk/denials"] },
+  risk: { hints: ["/system/status", "/risk/summary", "/risk/denials"], missingMode: "any" },
   // Daemon mounts /reconcile/status — not /reconcile/summary.
   // "all" mode: block only when BOTH status and mismatches are absent.
   // When status is authoritative (reconcile_status ok, mismatch counts known) but
@@ -95,7 +96,7 @@ function hasExternalBrokerContinuityGap(model: SystemModel): boolean {
   if (source !== "external") return false;
   // "not_applicable" cannot coexist with "external" source but guard defensively.
   // Only "live" indicates proven continuity — all other states fail-closed.
-  return continuity !== "live" && continuity !== "not_applicable";
+  return continuity !== "live";
 }
 
 function isMissingPanelTruth(model: SystemModel, panel: CorePanelKey): boolean {

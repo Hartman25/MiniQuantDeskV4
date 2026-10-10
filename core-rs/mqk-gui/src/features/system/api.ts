@@ -17,6 +17,7 @@ import { parseMetricsDashboard } from "./metricsContract";
 import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from "./alertContract";
 import { parseEventFeed, parseOperatorTimeline } from "./historyContract";
 import { parseSystemStatus } from "./statusContract";
+import { parsePortfolioSummary, parseRiskSummary } from "./economicContract";
 import { parseMarketDataQuality, parseOmsOverview, parseTransport } from "./snapshotContracts";
 import {
   enforceRunScopeConsistency,
@@ -461,7 +462,12 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       const data = result.ok ? parseMetricsDashboard(result.data) : null;
       return data === null ? { ...result, ok: false, data: undefined, error: result.error ?? "metrics_contract_invalid" } : { ...result, ok: true, data };
     })(),
-    fetchJsonCandidates<PortfolioSummary | LegacyTradingAccountResponse>(["/api/v1/portfolio/summary", "/v1/trading/account"]),
+    (async (): Promise<EndpointFetchResult<PortfolioSummary | LegacyTradingAccountResponse>> => {
+      const result = await fetchJsonCandidates<unknown>(["/api/v1/portfolio/summary", "/v1/trading/account"]);
+      if (result.endpoint !== "/api/v1/portfolio/summary") return result as EndpointFetchResult<LegacyTradingAccountResponse>;
+      const data = result.ok ? parsePortfolioSummary(result.data) : null;
+      return data ? { ...result, data } : { ...result, ok: false, data: undefined, error: result.error ?? "portfolio_contract_invalid" };
+    })(),
     // Portfolio positions: canonical route returns snapshot_state wrapper.
     // "active" → rows are real broker truth; "no_snapshot" → broker snapshot absent.
     // no_snapshot is returned as a failed probe (ok: false) so the endpoint lands in
@@ -502,7 +508,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       if (!canTryLegacyRead(canonical)) return canonical;
       return fetchJsonCandidate<LegacyTradingFillsResponse>("/v1/trading/fills");
     })(),
-    fetchJsonCandidates<RiskSummary>(["/api/v1/risk/summary"]),
+    (async (): Promise<EndpointFetchResult<RiskSummary>> => {
+      const result = await fetchJsonCandidate<unknown>("/api/v1/risk/summary");
+      const data = result.ok ? parseRiskSummary(result.data) : null;
+      return data ? { ...result, data } : { ...result, ok: false, data: undefined, error: result.error ?? "risk_contract_invalid" };
+    })(),
     // Risk denials: truth_state === "no_snapshot" means the execution loop is not
     // running — denial truth is unavailable and must not render as "zero denials."
     // The IIFE returns ok: false in that case so the endpoint lands in
@@ -1157,26 +1167,26 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     riskSafety: { key: "risk_safety", title: "Risk/Safety", description: "Backend truth unavailable", series: [] },
   };
   const unavailablePortfolioSummary: PortfolioSummary = {
-    account_equity: 0,
-    cash: 0,
-    long_market_value: 0,
-    short_market_value: 0,
-    daily_pnl: 0,
-    buying_power: 0,
+    account_equity: null,
+    cash: null,
+    long_market_value: null,
+    short_market_value: null,
+    daily_pnl: null,
+    buying_power: null,
   };
   const unavailableRiskSummary: RiskSummary = {
-    gross_exposure: 0,
-    net_exposure: 0,
-    concentration_pct: 0,
-    daily_pnl: 0,
-    drawdown_pct: 0,
-    loss_limit_utilization_pct: 0,
+    gross_exposure: null,
+    net_exposure: null,
+    concentration_pct: null,
+    daily_pnl: null,
+    drawdown_pct: null,
+    loss_limit_utilization_pct: null,
     // OPERATOR-RISK-UNKNOWN-TRUTH-01: mirrors the DESKTOP-10 preflight
     // fail-closed rule above -- when the fetch itself failed, kill-switch
     // truth is unconfirmed and must not render as a confirmed-clear "false".
     truth_state: "unavailable",
     kill_switch_active: true,
-    active_breaches: 0,
+    active_breaches: null,
   };
   const unavailableReconcileSummary: ReconcileSummary = {
     status: "unknown",

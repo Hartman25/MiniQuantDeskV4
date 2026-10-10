@@ -27,13 +27,13 @@ export function RiskScreen({ model }: { model: SystemModel }) {
           title="Concentration"
           value={formatPercent(r.concentration_pct)}
           detail="Largest symbol concentration"
-          tone={r.concentration_pct > 50 ? "bad" : r.concentration_pct > 35 ? "warn" : "good"}
+          tone={r.concentration_pct === null ? "neutral" : r.concentration_pct > 50 ? "bad" : r.concentration_pct > 35 ? "warn" : "good"}
         />
         <StatCard
           title="Loss Limit Utilization"
           value={formatPercent(r.loss_limit_utilization_pct)}
           detail="Daily loss budget used"
-          tone={r.loss_limit_utilization_pct > 80 ? "bad" : r.loss_limit_utilization_pct > 60 ? "warn" : "good"}
+          tone={r.loss_limit_utilization_pct === null ? "neutral" : r.loss_limit_utilization_pct > 80 ? "bad" : r.loss_limit_utilization_pct > 60 ? "warn" : "good"}
         />
       </div>
 
@@ -41,8 +41,8 @@ export function RiskScreen({ model }: { model: SystemModel }) {
           Armed/disarmed and live routing are on Ops; runtime health is on Dashboard. */}
       <Panel title="Breach and halt posture" subtitle="Risk-triggered hard stops, loss limits, and breach counts. Not system arm state.">
         <div className="metric-list">
-          <div><span>Daily PnL</span><strong className={r.daily_pnl < 0 ? "val-negative" : r.daily_pnl > 0 ? "val-positive" : ""}>{formatMoney(r.daily_pnl)}</strong></div>
-          <div><span>Drawdown</span><strong className={r.drawdown_pct > 15 ? "val-critical" : r.drawdown_pct > 8 ? "val-warn" : ""}>{formatPercent(r.drawdown_pct)}</strong></div>
+          <div><span>Daily PnL</span><strong className={r.daily_pnl === null ? "val-muted" : r.daily_pnl < 0 ? "val-negative" : r.daily_pnl > 0 ? "val-positive" : ""}>{formatMoney(r.daily_pnl)}</strong></div>
+          <div><span>Drawdown</span><strong className={r.drawdown_pct === null ? "val-muted" : r.drawdown_pct > 15 ? "val-critical" : r.drawdown_pct > 8 ? "val-warn" : ""}>{formatPercent(r.drawdown_pct)}</strong></div>
           <div>
             <span>Kill switch</span>
             {/* OPERATOR-RISK-UNKNOWN-TRUTH-01: never color this green from an
@@ -55,7 +55,7 @@ export function RiskScreen({ model }: { model: SystemModel }) {
               {r.truth_state !== "active" ? "Unknown" : r.kill_switch_active ? "Active" : "Inactive"}
             </strong>
           </div>
-          <div><span>Active breaches</span><strong className={r.active_breaches > 0 ? "val-critical" : "val-ok"}>{r.active_breaches}</strong></div>
+          <div><span>Active breaches</span><strong className={r.active_breaches === null ? "val-muted" : r.active_breaches > 0 ? "val-critical" : "val-ok"}>{r.active_breaches ?? "Unavailable"}</strong></div>
           <div><span>Risk halt</span><strong className={model.status.risk_halt_active ? "val-critical" : "val-ok"}>{model.status.risk_halt_active ? "Active" : "Clear"}</strong></div>
           <div><span>Integrity halt</span><strong className={model.status.integrity_halt_active ? "val-critical" : "val-ok"}>{model.status.integrity_halt_active ? "Active" : "Clear"}</strong></div>
         </div>

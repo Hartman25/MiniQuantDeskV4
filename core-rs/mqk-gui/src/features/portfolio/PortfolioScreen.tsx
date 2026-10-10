@@ -59,7 +59,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
         <StatCard title="Equity" value={formatMoney(p.account_equity)} detail="Account equity" tone="good" />
         <StatCard title="Cash" value={formatMoney(p.cash)} detail="Available cash" tone="neutral" />
         <StatCard title="Long Market Value" value={formatMoney(p.long_market_value)} detail="Long exposure" tone="neutral" />
-        <StatCard title="Daily PnL" value={formatMoney(p.daily_pnl)} detail="Realized + unrealized" tone={p.daily_pnl < 0 ? "bad" : "good"} />
+        <StatCard title="Daily PnL" value={formatMoney(p.daily_pnl)} detail={p.daily_pnl_unavailable_reason ?? "Change from recorded previous-session-close equity baseline"} tone={p.daily_pnl === null ? "neutral" : p.daily_pnl < 0 ? "bad" : "good"} />
       </div>
 
       <div className="desk-panel-grid desk-panel-grid-primary">

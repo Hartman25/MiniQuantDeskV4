@@ -3,7 +3,7 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import type { SystemModel } from "../system/types";
-import { formatDateTime, formatLatency } from "../../lib/format";
+import { formatDateTime, formatLatency, formatPercent } from "../../lib/format";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
 import { panelTruthRenderState } from "../system/truthRendering";
 import { deriveLatestHaltSummary, type HaltSummaryStatus } from "../system/haltSummary";
@@ -190,17 +190,17 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
           <div className="metric-list">
             <div><span>Strategy state</span><strong>{status.strategy_armed ? "Armed" : "Disarmed"}</strong></div>
             <div><span>Execution state</span><strong>{status.execution_armed ? "Armed" : "Disarmed"}</strong></div>
-            <div><span>Live routing</span><strong>{status.live_routing_enabled ? "Enabled" : "Disabled"}</strong></div>
+            <div><span>Live routing</span><strong>{status.live_routing_enabled === null ? "Unknown" : status.live_routing_enabled ? "Enabled" : "Disabled"}</strong></div>
             <div><span>Active orders</span><strong>{executionSummary.active_orders}</strong></div>
             <div><span>Pending orders</span><strong>{executionSummary.pending_orders}</strong></div>
-            <div><span>Stuck orders</span><strong>{executionSummary.stuck_orders}</strong></div>
+            <div><span>Stuck orders</span><strong>Unavailable</strong></div>
           </div>
         </Panel>
 
         <Panel title="Risk / reconcile summary" subtitle="Hard-stop posture and drift visibility.">
           <div className="metric-list">
-            <div><span>Loss-limit utilization</span><strong>{riskSummary.loss_limit_utilization_pct.toFixed(1)}%</strong></div>
-            <div><span>Drawdown</span><strong>{riskSummary.drawdown_pct.toFixed(2)}%</strong></div>
+            <div><span>Loss-limit utilization</span><strong>{formatPercent(riskSummary.loss_limit_utilization_pct)}</strong></div>
+            <div><span>Drawdown</span><strong>{formatPercent(riskSummary.drawdown_pct)}</strong></div>
             <div><span>Reconcile status</span><strong>{reconcileSummary.status}</strong></div>
             <div><span>Mismatched orders</span><strong>{reconcileSummary.mismatched_orders}</strong></div>
             <div><span>Unmatched broker events</span><strong>{reconcileSummary.unmatched_broker_events}</strong></div>

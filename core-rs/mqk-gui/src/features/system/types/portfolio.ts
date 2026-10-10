@@ -50,24 +50,26 @@ export interface FillRow {
 }
 
 export interface PortfolioSummary {
-  account_equity: number;
-  cash: number;
-  long_market_value: number;
-  short_market_value: number;
-  daily_pnl: number;
-  buying_power: number;
+  account_equity: number | null;
+  cash: number | null;
+  long_market_value: number | null;
+  short_market_value: number | null;
+  daily_pnl: number | null;
+  buying_power: number | null;
+  daily_pnl_truth_state?: string;
+  daily_pnl_unavailable_reason?: string | null;
 }
 
 export interface RiskSummary {
-  gross_exposure: number;
-  net_exposure: number;
-  concentration_pct: number;
-  daily_pnl: number;
-  drawdown_pct: number;
-  loss_limit_utilization_pct: number;
+  gross_exposure: number | null;
+  net_exposure: number | null;
+  concentration_pct: number | null;
+  daily_pnl: number | null;
+  drawdown_pct: number | null;
+  loss_limit_utilization_pct: number | null;
   truth_state: string;
   kill_switch_active: boolean;
-  active_breaches: number;
+  active_breaches: number | null;
 }
 
 export interface RiskDenialRow {
