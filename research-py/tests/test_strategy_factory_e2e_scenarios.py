@@ -20,7 +20,7 @@ from support import factory_e2e as E
 from support.factory_fixtures import HEADER, TEST_PROFILE, make_xlsx, row
 from test_strategy_factory_e2e import SMA, World, registry_rows, report_of, run_one  # noqa: F401
 
-pytestmark = pytest.mark.skipif(not E.cli_available(), reason="native mqk-cli binary not built on this machine")
+pytestmark = E.native_marks()
 REPO = E.REPO
 
 
@@ -116,7 +116,7 @@ def test_e2e_06_killed_mid_trials_recovers_truthfully_without_rewriting_prior_ev
     run_dir = world.root / "factory" / "campaigns" / cid
     env = {**world.env, "PYTHONPATH": str(REPO / "research-py" / "src"), "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.Popen([sys.executable, "-m", "mqk_research.strategy_factory", "--root", str(world.root / "factory"), "--cli", str(E.DEFAULT_CLI),
-                             "run", "--workers", "1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             "run", "--workers", "1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **E.popen_group())
     deadline, durable = time.time() + 900, None
     reg = run_dir / "registry" / "research.sqlite3"
     while time.time() < deadline and durable is None:
@@ -137,7 +137,7 @@ def test_e2e_06_killed_mid_trials_recovers_truthfully_without_rewriting_prior_ev
     # not reached a terminal state is legitimately re-run, and its same-path partial artifacts are replaced.
     before = {path: sha(Path(path)) for row in durable for path in json.loads(row[0]).values() if Path(path).is_file()}
     assert before
-    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    E.kill_tree(proc)
     proc.wait(timeout=60)
     st = world.svc.store
     assert [j for j in st.list_jobs(cid) if j["stage"] == "trials"][0]["status"] == "running"      # a dead worker still holds the lease

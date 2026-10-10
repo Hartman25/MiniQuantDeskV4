@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,8 +31,33 @@ DEFAULT_CLI = Path(os.environ.get("MQK_FACTORY_CLI") or "C:/tmp/mqk-target-facto
 HOLDOUT_START, HOLDOUT_END = "2021-07-01T00:00:00Z", "2022-01-01T00:00:00Z"
 
 
+# A CI lane that must prove the native path sets this; the native-dependent tests then fail (never skip) when the binary is absent.
+REQUIRE_NATIVE = os.environ.get("MQK_FACTORY_REQUIRE_NATIVE") == "1"
+NATIVE_ABSENT_REASON = "native mqk-cli binary not built on this machine"
+
+
 def cli_available() -> bool:
     return DEFAULT_CLI.is_file()
+
+
+def native_marks():
+    import pytest
+    return pytest.mark.skipif(not REQUIRE_NATIVE and not cli_available(), reason=NATIVE_ABSENT_REASON)
+
+
+def popen_group() -> dict:
+    """Popen kwargs that put a child in its own process group, so kill_tree can stop its whole tree on any platform."""
+    return {} if os.name == "nt" else {"start_new_session": True}
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def make_bars_dir(root: Path, symbols=("SPY", "QQQ"), seed: int = 7, drift: float = 0.0004, end: str = "2021-06-30", name: str = "bars_src") -> dict:

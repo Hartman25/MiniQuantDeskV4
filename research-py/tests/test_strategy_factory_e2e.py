@@ -1,6 +1,6 @@
 """Integrated Strategy Factory acceptance: the REAL entrypoints, stage-authorized runner, native Rust engine, registry,
 judge, scanner/review and report - on SYNTHETIC bars (labelled as such; this proves the software path, never market
-readiness). Skipped when the native binary is absent (CI has none; the local proof is recorded in the closure document).
+readiness). Skipped when the native binary is absent, unless MQK_FACTORY_REQUIRE_NATIVE=1 (the strategy-factory CI lane), where absence fails.
 No provider, broker, Paper database or reserved holdout window is touched.
 """
 
@@ -21,7 +21,7 @@ from mqk_research.strategy_factory.service import FactoryService
 from mqk_research.strategy_factory.store import STAGES
 from support import factory_e2e as E
 
-pytestmark = pytest.mark.skipif(not E.cli_available(), reason="native mqk-cli binary not built on this machine")
+pytestmark = E.native_marks()
 REPO = E.REPO
 SMA = {"kind": "grammar_grid", "template": "sma_trend_gate", "grid": {"window": [20, 50]}}
 NATIVE_MOM = {"kind": "native", "strategy_ids": ["absolute_momentum_252"]}

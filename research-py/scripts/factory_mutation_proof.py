@@ -19,6 +19,7 @@ T_SC = "tests/test_strategy_factory_scout.py"
 T_SF = "tests/test_strategy_factory_scheduler_faults.py"
 T_AU = "tests/test_strategy_factory_authority_truth.py"
 T_PS = "tests/test_strategy_factory_prior_search.py"
+T_LN = "tests/test_strategy_factory_native_lane.py"
 T_IM = "tests/test_strategy_factory_implementation.py"
 T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
@@ -164,6 +165,14 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("AU-5 declaration eligibility hard-coded true", SRC + "campaign.py", "**promotion_view(spec[\"evidence_grade\"]),", "\"promotion_eligible\": True,", [T_AU]),
         ("AU-6 Factory claims the Paper runtime state", SRC + "contracts.py", "\"paper\": \"NOT_TOUCHED_BY_FACTORY\",", "\"paper\": \"INACTIVE\",", [T_AU]),
         ("AU-7 authority scope dropped", SRC + "contracts.py", "\"scope\": \"FACTORY_ACTIONS_ONLY: the actual MQD Promotion, Paper and Live runtime state is not read or asserted here\",", "\"scope\": \"global\",", [T_AU]),
+    ],
+    "lane": [
+        ("LN-1 strict native mode still skips", "tests/support/factory_e2e.py", "skipif(not REQUIRE_NATIVE and not cli_available()", "skipif(not cli_available()", [T_LN]),
+        ("LN-2 guard tolerates a skipped required test", "../scripts/guards/check_factory_native_lane.py", "            problems.append(f\"SKIPPED (not allowed): {name}: {msg[:100]}\")", "            pass", [T_LN]),
+        ("LN-3 guard accepts any skip reason for the optional test", "../scripts/guards/check_factory_native_lane.py", "OPTIONAL_SKIP[name] in msg", "True", [T_LN]),
+        ("LN-4 guard ignores failures", "../scripts/guards/check_factory_native_lane.py", "if case.find(\"failure\") is not None or case.find(\"error\") is not None:", "if False:", [T_LN]),
+        ("LN-5 lane drops the strict-native switch", "../.github/workflows/strategy-factory.yml", "MQK_FACTORY_REQUIRE_NATIVE: \"1\"", "MQK_FACTORY_UNUSED: \"1\"", [T_LN]),
+        ("LN-6 lane stops running the guard", "../.github/workflows/strategy-factory.yml", "check_factory_native_lane.py \"$RUNNER_TEMP", "true \"$RUNNER_TEMP", [T_LN]),
     ],
     "history": [
         ("PS-1 compile ignores Factory history", SRC + "campaign.py", "known = build_index(repo_root, factory_prior)", "known = build_index(repo_root)", [T_PS]),

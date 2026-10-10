@@ -17,7 +17,7 @@ SRC = str(Path(__file__).resolve().parents[1] / "src")
 
 
 def cli(root, *args, expect=None):
-    env = {**os.environ, "PYTHONPATH": SRC, "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {**{k: v for k, v in os.environ.items() if k not in ("MQK_FACTORY_CLI", "MQK_M1_CLI")}, "PYTHONPATH": SRC, "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"}
     p = subprocess.run([sys.executable, "-m", "mqk_research.strategy_factory", "--root", str(root), *args], capture_output=True, text=True, env=env, timeout=300)
     if expect is not None:
         assert p.returncode == expect, (p.returncode, p.stdout[-600:], p.stderr[-600:])
