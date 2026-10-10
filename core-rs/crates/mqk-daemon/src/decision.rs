@@ -639,6 +639,22 @@ fn resolve_order_instrument_context(
     )
 }
 
+/// The execution domain that owns an order, from its registry-resolved asset
+/// class. Only a positively resolved Crypto instrument belongs to
+/// `Crypto24_7`; every other outcome (Equity, or an unresolved/refused symbol
+/// that Gate 7 refuses anyway) stays with `EquityNyse`, the historical owner
+/// of this seam. A future asset class or venue is admitted only by adding its
+/// resolver arm in Gate 7 and its domain here; until then it is refused, never
+/// routed to a domain by default.
+fn execution_domain_for_resolved_context(
+    resolved: &Result<DurableOrderInstrumentContext, OrderInstrumentContextError>,
+) -> crate::state::ExecutionDomain {
+    match resolved {
+        Ok(context) if context.asset_class == "crypto" => crate::state::ExecutionDomain::Crypto24_7,
+        _ => crate::state::ExecutionDomain::EquityNyse,
+    }
+}
+
 /// Non-Equity admission guard: a Crypto order is only ever admitted against an
 /// explicit, exactly-parsed operator size. Missing/blank/malformed size
 /// inputs fail closed (never a default of one unit), and a decision larger
@@ -1081,12 +1097,16 @@ pub async fn submit_internal_strategy_decision(
         return outcome(false, "rejected", &did, &sid, None, blockers);
     }
 
-    // Gate 1: PT-AUTO-02 per-run signal intake bound.
-    // B2.6: this internal-decision path is currently equity-only (repo
-    // truth: no Crypto caller exists yet); hardcoded explicitly rather than
-    // silently defaulted, matching every other equity-only production
-    // caller of a domain-keyed AppState primitive.
-    if state.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse) {
+    // The instrument context is resolved once, here, so the execution domain
+    // that owns this order is known before any domain-keyed gate runs. Its
+    // error (if any) is surfaced at Gate 7 exactly where it always was.
+    let resolved_context = resolve_order_instrument_context(state, &decision.symbol);
+    let domain = execution_domain_for_resolved_context(&resolved_context);
+
+    // Gate 1: PT-AUTO-02 per-run signal intake bound, keyed by the domain
+    // that owns the order (B2.6): a Crypto order must never consume, or be
+    // enqueued onto, the Equity domain's run.
+    if state.day_signal_limit_exceeded(domain) {
         return outcome(
             false,
             "day_limit_reached",
@@ -1097,7 +1117,7 @@ pub async fn submit_internal_strategy_decision(
                 "internal decision refused: autonomous day signal limit reached \
                  ({} signals accepted this run); \
                  no further decisions will be accepted until the next run start",
-                state.day_signal_count(crate::state::ExecutionDomain::EquityNyse)
+                state.day_signal_count(domain)
             )],
         );
     }
@@ -1107,10 +1127,7 @@ pub async fn submit_internal_strategy_decision(
     // MQK_PER_SYMBOL_DAY_ORDER_LIMIT is set; in that case Gate 1 above always
     // passes through unaffected — this is an additive, independent counter.
     if state
-        .symbol_day_order_limit_exceeded(
-            crate::state::ExecutionDomain::EquityNyse,
-            &decision.symbol,
-        )
+        .symbol_day_order_limit_exceeded(domain, &decision.symbol)
         .await
     {
         return outcome(
@@ -1124,12 +1141,7 @@ pub async fn submit_internal_strategy_decision(
                  ({} orders accepted this run for this symbol); \
                  no further decisions for this symbol will be accepted until the next run start",
                 decision.symbol.trim(),
-                state
-                    .symbol_day_order_count(
-                        crate::state::ExecutionDomain::EquityNyse,
-                        &decision.symbol
-                    )
-                    .await
+                state.symbol_day_order_count(domain, &decision.symbol).await
             )],
         );
     }
@@ -1531,11 +1543,8 @@ pub async fn submit_internal_strategy_decision(
         return outcome(false, "rejected", &did, &sid, None, vec![blocker]);
     }
 
-    // Gate 6: active run must exist and be in "running" state.
-    let status = match state
-        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
-        .await
-    {
+    // Gate 6: the owning domain's active run must exist and be "running".
+    let status = match state.current_status_snapshot(domain).await {
         Ok(s) => s,
         Err(err) => {
             return outcome(
@@ -1581,7 +1590,7 @@ pub async fn submit_internal_strategy_decision(
     // Gate 7: resolve the exact trading-instrument context before the
     // durable enqueue. Crypto economics are frozen into order_json here so
     // dispatch/restart never depend on later ambient registry state.
-    let instrument_context = match resolve_order_instrument_context(state, &decision.symbol) {
+    let instrument_context = match resolved_context {
         Ok(context) => context,
         Err(OrderInstrumentContextError::Unavailable(blocker)) => {
             return outcome(
@@ -1690,14 +1699,11 @@ pub async fn submit_internal_strategy_decision(
     {
         Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
-            state.increment_day_signal_count(crate::state::ExecutionDomain::EquityNyse);
+            state.increment_day_signal_count(domain);
             // MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol counterpart (cap #4),
             // incremented alongside the account-wide counter above.
             state
-                .increment_symbol_day_order_count(
-                    crate::state::ExecutionDomain::EquityNyse,
-                    &decision.symbol,
-                )
+                .increment_symbol_day_order_count(domain, &decision.symbol)
                 .await;
             outcome(true, "accepted", &did, &sid, Some(active_run_id), vec![])
         }
@@ -2006,12 +2012,6 @@ mod m6_trading_registry_snapshot_writer_tests {
         ));
     }
 
-    // -----------------------------------------------------------------
-    // CUTOVER-1D-A3-4: writer -> order_json -> runtime decoder agreement
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn a3_4_order_json_qty_writer_and_runtime_reader_agree_on_fractional_qty() {
     #[test]
     fn non_account_currency_crypto_instrument_is_refused_not_valued_as_usd() {
         // Same row shape as the admitted BTC/USD fixture, only the currency
@@ -2051,6 +2051,12 @@ mod m6_trading_registry_snapshot_writer_tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // CUTOVER-1D-A3-4: writer -> order_json -> runtime decoder agreement
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a3_4_order_json_qty_writer_and_runtime_reader_agree_on_fractional_qty() {
         let registry = btc_registry();
         let context = resolve_order_instrument_context_from_registry(
             &registry,
