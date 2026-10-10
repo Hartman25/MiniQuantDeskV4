@@ -283,6 +283,17 @@ test("G05: connected model with full status and risk truth — dashboard truth s
             };
           },
         } as Response;
+      case "/api/v1/risk/summary":
+        return Response.json({ has_snapshot: true, truth_state: "active", gross_exposure: null,
+          net_exposure: null, concentration_pct: null, daily_pnl: null, drawdown_pct: null,
+          loss_limit_utilization_pct: null, kill_switch_active: false, active_breaches: 0 });
+      case "/api/v1/execution/summary":
+        return Response.json({ has_snapshot: true, active_orders: 0, pending_orders: 0,
+          dispatching_orders: 0, reject_count_today: 0, cancel_replace_count_today: null,
+          avg_ack_latency_ms: null, stuck_orders: 0 });
+      case "/api/v1/reconcile/status":
+        return Response.json({ status: "unknown", last_run_at: null, mismatched_positions: 0,
+          mismatched_orders: 0, mismatched_fills: 0, unmatched_broker_events: 0 });
       default:
         return {
           ok: false,
@@ -297,7 +308,7 @@ test("G05: connected model with full status and risk truth — dashboard truth s
   try {
     const model = await fetchOperatorModel();
     assert.equal(model.connected, true, "G05: model must be connected");
-    // Dashboard must not be truth-blocked when risk/denials and status are real
+    // Every displayed safety/summary source must be present; denials alone cannot prove them.
     const truthState = panelTruthRenderState(model, "dashboard");
     assert.equal(truthState, null, "G05: dashboard truth state must be null (not blocked)");
     // Dashboard renders content, not just an unavailable notice
