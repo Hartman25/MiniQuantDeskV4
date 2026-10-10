@@ -11,7 +11,8 @@ test("per-order reads encode identity and reject unknown truth, wrong order and 
   const original = globalThis.fetch;
   const orderId = "order/a?b#c";
   let payload: Record<string, unknown> = { canonical_route: `/api/v1/execution/orders/${orderId}/timeline`,
-    truth_state: "filled_without_fill_quality_telemetry", backend: "postgres.fill_quality_telemetry", order_id: orderId, rows: [] };
+    truth_state: "filled_without_fill_quality_telemetry", backend: "postgres.fill_quality_telemetry", order_id: orderId,
+    broker_order_id: null, symbol: "SIM", requested_qty: null, filled_qty: null, current_status: null, current_stage: null, last_event_at: null, rows: [] };
   const paths: string[] = [];
   globalThis.fetch = (async (input, init) => {
     assert.equal(init?.method, "GET");
@@ -24,11 +25,23 @@ test("per-order reads encode identity and reject unknown truth, wrong order and 
     assert.match(orderTimelineNotice(timeline!)!, /durable fill telemetry is missing/);
     await Promise.all([fetchExecutionTrace(orderId), fetchExecutionReplay(orderId), fetchExecutionChart(orderId), fetchCausalityTrace(orderId)]);
     for (const path of paths) assert.match(path, /orders\/order%2Fa%3Fb%23c\//);
-    for (const invalid of [{ truth_state: "future" }, { order_id: "other-order" }, { rows: {} }, { rows: [{}] }]) {
+    for (const invalid of [{ truth_state: "future" }, { order_id: "other-order" }, { rows: {} }, { rows: [{}] },
+      { symbol: {} }, { requested_qty: "2" }, { filled_qty: -1 }, { current_status: {} }, { last_event_at: "yesterday" },
+      { canonical_route: "/wrong" }, { backend: [] }]) {
       const previous = payload;
       payload = { ...payload, ...invalid };
       assert.equal(await fetchExecutionTimeline(orderId), null);
       payload = previous;
+    }
+    const fill = { event_id: "fill-1", ts_utc: "2026-10-10T10:00:00Z", stage: "partial_fill", source: "fill_quality_telemetry",
+      detail: "Durable fill", provenance_ref: "fill_quality:1", fill_qty: 1, fill_price_micros: 12500000, slippage_bps: null };
+    payload = { ...payload, truth_state: "active", requested_qty: 2, filled_qty: 1, rows: [fill] };
+    const active = await fetchExecutionTimeline(orderId);
+    assert.equal(active!.rows[0].fill_price_micros, 12500000);
+    assert.equal(active!.filled_qty, 1);
+    for (const invalid of [{ fill_qty: "1" }, { detail: {} }, { ts_utc: "yesterday" }, { fill_price_micros: {} }]) {
+      payload = { ...payload, rows: [{ ...fill, ...invalid }] };
+      assert.equal(await fetchExecutionTimeline(orderId), null);
     }
   } finally { globalThis.fetch = original; }
 });

@@ -1,5 +1,6 @@
 import type { OrderTraceResponse, OrderReplayResponse, OrderChartResponse, OrderCausalityResponse, ExecutionFlowSurface } from "./types";
 import { canonicalHistory } from "./historyContract";
+import type { DaemonOrderTimelineResponse } from "./legacy";
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): value is RecordValue => !!value && typeof value === "object" && !Array.isArray(value);
@@ -16,12 +17,23 @@ const rows = (value: unknown, identity: string, check: (row: RecordValue) => boo
   value.every((row) => object(row) && text(row[identity]) && check(row)) && new Set(value.map((row) => row[identity])).size === value.length;
 
 /** Validate the actual canonical order DTO before any drill-down can become evidence. */
+export function parseOrderDetail(kind: "timeline", value: unknown, orderId: string): DaemonOrderTimelineResponse | null;
 export function parseOrderDetail(kind: "trace", value: unknown, orderId: string): OrderTraceResponse | null;
 export function parseOrderDetail(kind: "replay", value: unknown, orderId: string): OrderReplayResponse | null;
 export function parseOrderDetail(kind: "chart", value: unknown, orderId: string): OrderChartResponse | null;
 export function parseOrderDetail(kind: "causality", value: unknown, orderId: string): OrderCausalityResponse | null;
-export function parseOrderDetail(kind: "trace" | "replay" | "chart" | "causality", value: unknown, orderId: string): OrderTraceResponse | OrderReplayResponse | OrderChartResponse | OrderCausalityResponse | null {
+export function parseOrderDetail(kind: "timeline" | "trace" | "replay" | "chart" | "causality", value: unknown, orderId: string): DaemonOrderTimelineResponse | OrderTraceResponse | OrderReplayResponse | OrderChartResponse | OrderCausalityResponse | null {
   if (!object(value) || value.order_id !== orderId || value.canonical_route !== `/api/v1/execution/orders/${orderId}/${kind}` || !text(value.backend)) return null;
+  if (kind === "timeline") {
+    if (!["active", "filled_without_fill_quality_telemetry", "no_fills_yet", "no_order", "no_db"].includes(String(value.truth_state)) ||
+      !fields(value, ["broker_order_id", "symbol", "current_status", "current_stage"], nullableText) ||
+      !fields(value, ["requested_qty", "filled_qty"], quantity) || !nullableTime(value.last_event_at) ||
+      !rows(value.rows, "event_id", (row) => time(row.ts_utc) && fields(row, ["stage", "source"], text) &&
+        fields(row, ["detail", "provenance_ref"], nullableText) && quantity(row.fill_qty) &&
+        fields(row, ["fill_price_micros", "slippage_bps"], nullableNumber)) ||
+      value.truth_state !== "active" && (value.rows as unknown[]).length !== 0) return null;
+    return value as unknown as DaemonOrderTimelineResponse;
+  }
   if (kind === "trace") {
     if (!["active", "filled_without_fill_quality_telemetry", "no_fills_yet", "no_order", "no_db"].includes(String(value.truth_state)) ||
       !fields(value, ["broker_order_id", "symbol", "current_status", "current_stage", "outbox_status", "outbox_lifecycle_stage"], nullableText) ||

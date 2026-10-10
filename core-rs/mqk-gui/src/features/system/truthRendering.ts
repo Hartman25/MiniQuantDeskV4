@@ -159,7 +159,7 @@ export function truthStateCopy(state: TruthRenderState): { title: string; detail
     case "no_snapshot":
       return {
         title: "No snapshot",
-        detail: "Snapshot data unavailable — the execution loop may not be running, the broker snapshot may be absent, or broker WS continuity has not been established. Values will populate once the execution loop is running with a proven WS connection.",
+        detail: "Required source evidence is unavailable or cannot be trusted. Inspect endpoint status and broker continuity before treating this panel as operational.",
       };
     case "degraded":
       return {

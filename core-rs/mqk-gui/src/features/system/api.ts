@@ -1448,17 +1448,14 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 // ---------------------------------------------------------------------------
 
 // A5A: fetch per-order execution timeline from the canonical daemon route.
-// Returns null only on network/fetch failure. no_db is preserved as a typed
+// Returns null on transport or contract failure. no_db is preserved as a typed
 // surface so the screen can render an explicit unavailable-truth notice.
 export async function fetchExecutionTimeline(internalOrderId: string): Promise<OrderTimelineSurface | null> {
   const r = await fetchJsonCandidate<DaemonOrderTimelineResponse>(
     `/api/v1/execution/orders/${encodeURIComponent(internalOrderId)}/timeline`,
   );
-  if (!r.ok || r.data == null) return null;
-  const d = r.data;
-  const VALID_STATES: OrderTimelineTruthState[] = ["active", "filled_without_fill_quality_telemetry", "no_fills_yet", "no_order", "no_db"];
-  if (!VALID_STATES.includes(d.truth_state as OrderTimelineTruthState) || d.order_id !== internalOrderId ||
-      !hasRows(d, "rows", ["event_id", "ts_utc", "stage", "source"])) return null;
+  const d = r.ok ? parseOrderDetail("timeline", r.data, internalOrderId) : null;
+  if (d === null) return null;
   const truth_state = d.truth_state as OrderTimelineTruthState;
   return {
     canonical_route: d.canonical_route,
