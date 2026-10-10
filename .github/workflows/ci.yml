@@ -134,6 +134,7 @@ jobs:
             experiments/m1_native_trend_campaign/test_stage_authorization.py \
             experiments/m1_native_trend_campaign/test_subprocess_guard_inheritance.py \
             experiments/m1_native_trend_campaign/test_audit_sink_authority.py \
+            experiments/m1_native_trend_campaign/test_audit_post_ready_evidence.py \
             experiments/m1_native_trend_campaign/test_holdout_incident.py \
             experiments/m1_native_trend_campaign/test_holdout_guard.py \
             experiments/m1_native_trend_campaign/test_kiss_ext032_predeclaration.py \

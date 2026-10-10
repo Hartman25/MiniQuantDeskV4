@@ -21,6 +21,7 @@ REQUIRED_MODULES = (
     "experiments.m1_native_trend_campaign.test_stage_authorization",
     "experiments.m1_native_trend_campaign.test_subprocess_guard_inheritance",
     "experiments.m1_native_trend_campaign.test_audit_sink_authority",
+    "experiments.m1_native_trend_campaign.test_audit_post_ready_evidence",
     "experiments.m1_native_trend_campaign.test_holdout_incident",
     "experiments.m1_native_trend_campaign.test_holdout_guard",
     "experiments.m1_native_trend_campaign.test_kiss_ext032_predeclaration",
