@@ -48,7 +48,7 @@ function killSwitchTone(state: KillSwitchDisplayState): "info" | "warning" | "cr
 export type LiveRoutingDisplayState = "enabled" | "disabled" | "unknown";
 
 export function liveRoutingDisplayState(status: SystemStatus): LiveRoutingDisplayState {
-  if (!status.daemon_reachable) return "unknown";
+  if (!status.daemon_reachable || status.live_routing_enabled === null) return "unknown";
   return status.live_routing_enabled ? "enabled" : "disabled";
 }
 

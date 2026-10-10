@@ -339,24 +339,24 @@ test("negative control: an unrecognized market_data_health string never yields a
   assert.equal(vm.system.marketDataTone, "unknown");
 });
 
-test("positive control: market_data_health=signal_ingestion_ready on an otherwise-healthy Paper+Alpaca state yields a good system tone", () => {
+test("signal-ingestion configuration alone does not prove fresh market data", () => {
   const model = otherwiseHealthyModel();
   model.status.market_data_health = "signal_ingestion_ready" as SystemModel["status"]["market_data_health"];
 
   const vm = buildControlStationViewModel(model);
 
-  assert.equal(vm.system.tone, "good");
-  assert.equal(vm.system.marketDataTone, "good");
+  assert.equal(vm.system.tone, "warn");
+  assert.equal(vm.system.marketDataTone, "warn");
 });
 
-test("positive control: market_data_health=not_configured on an otherwise-healthy state yields a good system tone", () => {
+test("unconfigured market data remains unknown rather than healthy", () => {
   const model = otherwiseHealthyModel();
   model.status.market_data_health = "not_configured" as SystemModel["status"]["market_data_health"];
 
   const vm = buildControlStationViewModel(model);
 
-  assert.equal(vm.system.tone, "good");
-  assert.equal(vm.system.marketDataTone, "good");
+  assert.equal(vm.system.tone, "unknown");
+  assert.equal(vm.system.marketDataTone, "unknown");
 });
 
 // ---------------------------------------------------------------------------

@@ -70,8 +70,9 @@ export function healthTone(state: string): CsTone {
 function marketDataHealthTone(state: string): CsTone {
   switch (state) {
     case "not_configured":
+      return "unknown";
     case "signal_ingestion_ready":
-      return "good";
+      return "warn";
     default:
       return healthTone(state);
   }
@@ -210,7 +211,7 @@ export interface ControlStationTradingDomainSection {
   runtimeStatus: RuntimeStatus;
   strategyArmed: boolean;
   executionArmed: boolean;
-  liveRoutingEnabled: boolean;
+  liveRoutingEnabled: boolean | null;
   marketSession: string;
   tradingWindow: string;
   sessionTruth: TruthRenderState | null;
@@ -221,7 +222,7 @@ function buildTradingDomainSection(model: SystemModel): ControlStationTradingDom
   const { status, sessionState } = model;
 
   let tone: CsTone = "good";
-  if (!model.connected) tone = "unknown";
+  if (!model.connected || !status.daemon_reachable || status.environment === "unknown" || status.live_routing_enabled === null) tone = "unknown";
   else if (status.live_routing_enabled) tone = "bad";
   else if (status.runtime_status === "halted") tone = "bad";
   else if (status.runtime_status === "degraded") tone = "warn";

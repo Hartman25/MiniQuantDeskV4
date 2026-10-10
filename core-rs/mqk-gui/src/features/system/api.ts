@@ -16,6 +16,7 @@ import { parseIncidents } from "./incidentContract";
 import { parseMetricsDashboard } from "./metricsContract";
 import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from "./alertContract";
 import { parseEventFeed, parseOperatorTimeline } from "./historyContract";
+import { parseSystemStatus } from "./statusContract";
 import {
   enforceRunScopeConsistency,
   parseDurablePortfolioPositions,
@@ -414,7 +415,11 @@ function isStructurallyValidPreflight(data: unknown): data is PreflightStatus {
 
 export async function fetchOperatorModel(): Promise<SystemModel> {
   const { fetchJsonCandidate, fetchJsonCandidates } = createReadClient();
-  const statusProbe = await fetchJsonCandidates<SystemStatus | LegacyDaemonStatusSnapshot>(["/api/v1/system/status", "/v1/status"]);
+  let statusProbe = await fetchJsonCandidates<SystemStatus | LegacyDaemonStatusSnapshot>(["/api/v1/system/status", "/v1/status"]);
+  if (statusProbe.ok && statusProbe.endpoint === "/api/v1/system/status") {
+    const status = parseSystemStatus(statusProbe.data);
+    statusProbe = status === null ? { ...statusProbe, ok: false, data: undefined, error: "system_status_contract_invalid" } : { ...statusProbe, data: status };
+  }
   const healthProbe = await fetchJsonCandidates<MetadataSummary>(["/api/v1/system/metadata"]);
 
   // Extract legacy status only when the statusProbe itself resolved via the
@@ -1094,7 +1099,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 
   const unavailableStatus: SystemStatus = {
     ...DEFAULT_STATUS,
-    daemon_reachable: connected,
+    daemon_reachable: false,
   };
   const unavailablePreflight: PreflightStatus = {
     ...DEFAULT_PREFLIGHT,

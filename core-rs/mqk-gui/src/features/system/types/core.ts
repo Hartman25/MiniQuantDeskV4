@@ -3,8 +3,8 @@
 // Primitive type aliases and cross-cutting concepts shared by all other
 // domain type modules. No imports from sibling type modules.
 
-export type EnvironmentMode = "paper" | "live" | "backtest";
-export type RuntimeStatus = "idle" | "starting" | "running" | "paused" | "degraded" | "halted";
+export type EnvironmentMode = "paper" | "live" | "backtest" | "unknown";
+export type RuntimeStatus = "idle" | "starting" | "running" | "paused" | "degraded" | "halted" | "unknown";
 export type HealthState = "ok" | "warning" | "critical" | "disconnected" | "unknown";
 export type Severity = "info" | "warning" | "critical";
 export type ActionLevel = 0 | 1 | 2 | 3;

@@ -28,7 +28,7 @@ export interface SystemStatus {
   has_critical: boolean;
   strategy_armed: boolean;
   execution_armed: boolean;
-  live_routing_enabled: boolean;
+  live_routing_enabled: boolean | null;
   kill_switch_active: boolean;
   risk_halt_active: boolean;
   integrity_halt_active: boolean;
@@ -419,8 +419,8 @@ export interface SystemModel {
 }
 
 export const DEFAULT_STATUS: SystemStatus = {
-  environment: "paper",
-  runtime_status: "idle",
+  environment: "unknown",
+  runtime_status: "unknown",
   broker_status: "disconnected",
   db_status: "unknown",
   market_data_health: "unknown",
@@ -435,7 +435,7 @@ export const DEFAULT_STATUS: SystemStatus = {
   has_critical: true,
   strategy_armed: false,
   execution_armed: false,
-  live_routing_enabled: false,
+  live_routing_enabled: null,
   kill_switch_active: false,
   risk_halt_active: false,
   integrity_halt_active: false,
