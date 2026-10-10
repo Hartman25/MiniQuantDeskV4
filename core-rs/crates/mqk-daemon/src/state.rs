@@ -2573,6 +2573,49 @@ impl AppState {
         &self.operator_auth
     }
 
+    /// Broker-account entitlement readiness for the Equity order path, from
+    /// the same evidence and `admit` logic the gateway enforces. `None` when
+    /// the selected broker has no provider account.
+    pub fn broker_account_entitlement_readiness(
+        &self,
+    ) -> Option<mqk_broker_alpaca::account_entitlement::AccountEntitlementReadiness> {
+        (self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)).then(|| {
+            self.broker_account_evidence.readiness(
+                Utc::now(),
+                account_entitlement_freshness_bound(),
+                mqk_execution::AssetClass::Equity,
+            )
+        })
+    }
+
+    /// Start-refusing blockers that depend on the broker environment, in the
+    /// same terms `start_execution_runtime` refuses them: a Paper deployment
+    /// whose REST endpoint override is not the Paper host, and a fresh
+    /// provider denial of the account. Empty when neither applies.
+    pub fn broker_start_blockers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.runtime_selection.broker_kind != Some(BrokerKind::Alpaca) {
+            return out;
+        }
+        if self.runtime_selection.deployment_mode == DeploymentMode::Paper {
+            let raw = std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok();
+            if let Err(err) = broker::alpaca_base_url_for_mode(DeploymentMode::Paper, raw.as_deref())
+            {
+                out.push(err.to_string());
+            }
+        }
+        if let Some(ent) = self.broker_account_entitlement_readiness() {
+            if ent.state == "denied" {
+                out.push(format!(
+                    "broker account entitlement is denied [{}]: {}",
+                    ent.code.as_deref().unwrap_or("unknown"),
+                    ent.detail.as_deref().unwrap_or("")
+                ));
+            }
+        }
+        out
+    }
+
     pub fn runtime_selection(&self) -> &RuntimeSelection {
         &self.runtime_selection
     }

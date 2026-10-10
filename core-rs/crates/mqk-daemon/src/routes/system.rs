@@ -520,31 +520,28 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     // Broker-account entitlement: same evidence and admit logic as the
     // gateway; `denied` is a blocker (the next start refuses it), the other
     // non-entitled states are warnings (a start probes the account afresh).
-    let broker_account_entitlement = (st.runtime_selection().broker_kind
-        == Some(crate::state::BrokerKind::Alpaca))
-    .then(|| {
-        st.broker_account_evidence.readiness(
-            Utc::now(),
-            crate::state::account_entitlement_freshness_bound(),
-            mqk_execution::AssetClass::Equity,
-        )
-    });
+    let broker_account_entitlement = st.broker_account_entitlement_readiness();
     let mut autonomous_blockers = autonomous_blockers;
     let mut entitlement_blockers = Vec::new();
     if let Some(ent) = broker_account_entitlement.as_ref() {
-        let text = format!(
-            "broker account entitlement is '{}'{}",
-            ent.state,
-            ent.code
-                .as_deref()
-                .map(|c| format!(" [{c}]"))
-                .unwrap_or_default()
-        );
-        match ent.state.as_str() {
-            "entitled" => {}
-            "denied" if is_paper_alpaca => autonomous_blockers.push(text),
-            "denied" => entitlement_blockers.push(text),
-            _ => warnings.push(text),
+        if !matches!(ent.state.as_str(), "entitled" | "denied") {
+            warnings.push(format!(
+                "broker account entitlement is '{}'{}",
+                ent.state,
+                ent.code
+                    .as_deref()
+                    .map(|c| format!(" [{c}]"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    // Start-refusing broker blockers (Paper endpoint identity, fresh provider
+    // denial): same gate the start path enforces.
+    for blocker in st.broker_start_blockers() {
+        if is_paper_alpaca {
+            autonomous_blockers.push(blocker);
+        } else {
+            entitlement_blockers.push(blocker);
         }
     }
     // Shared-capital consequence: with several strategies configured and the
@@ -1055,6 +1052,9 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             nyse_market_session
         ));
     }
+    // Broker-environment start refusals (Paper endpoint identity, fresh
+    // provider denial of the account), appended after the existing gates.
+    blockers.extend(st.broker_start_blockers());
     // STRATEGY-DORMANCY-01: Check strategy bootstrap dormancy.
     //
     // Mirrors the gate added to start_execution_runtime and the autonomous_blockers
