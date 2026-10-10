@@ -1,0 +1,105 @@
+# =============================================================================
+# Strategy Factory - native-engine proof lane (bounded)
+# =============================================================================
+#
+# Builds the real native binary (mqk-cli, pinned toolchain) and runs the Strategy Factory test suite with the native
+# E2E scenarios REQUIRED: MQK_FACTORY_REQUIRE_NATIVE=1 turns "binary absent" from a skip into a failure, and
+# scripts/guards/check_factory_native_lane.py fails the job unless every load-bearing E2E test executed and passed.
+#
+# Bounded on purpose: one crate build (mqk-cli) plus the grammar_v1 engine unit tests. It does not run the
+# workspace-wide Rust suite; that stays in ci.yml's `rust` job. Nothing here touches a provider, broker, Paper database
+# or the reserved holdout: the E2E data is a labelled synthetic fixture.
+# =============================================================================
+
+name: Strategy Factory native lane
+
+on:
+  push:
+    branches:
+      - "strategy-factory/**"
+    paths:
+      - "research-py/**"
+      - "core-rs/**"
+      - "scripts/guards/check_factory_native_lane.py"
+      - ".github/workflows/strategy-factory.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "research-py/src/mqk_research/strategy_factory/**"
+      - "research-py/tests/**factory**"
+      - "core-rs/crates/mqk-strategy/**"
+      - "core-rs/crates/mqk-cli/**"
+      - ".github/workflows/strategy-factory.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -C debuginfo=0
+  MQK_FACTORY_REQUIRE_NATIVE: "1"
+
+jobs:
+  native-lane:
+    name: "Factory suite + native E2E (binary required)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read canonical Rust toolchain channel
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep -m1 '^channel' core-rs/rust-toolchain.toml | sed -E 's/channel *= *"([^"]+)"/\1/')
+          if [ -z "$CHANNEL" ]; then
+            echo "::error::could not parse channel from core-rs/rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain via rustup (core-rs/rust-toolchain.toml is the single source of truth)
+        shell: bash
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --profile minimal
+          rustup default "${{ steps.toolchain.outputs.channel }}"
+
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-factory-cargo-registry-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-factory-cargo-registry-${{ steps.toolchain.outputs.channel }}-
+
+      - name: grammar_v1 engine unit tests (one crate, one module)
+        working-directory: ./core-rs
+        run: cargo test -p mqk-strategy --lib grammar_rule_v1 -- --test-threads=1
+
+      - name: Build the native binary (mqk-cli only)
+        working-directory: ./core-rs
+        run: cargo build -p mqk-cli
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install research package and test extras
+        working-directory: ./research-py
+        run: python -m pip install -e ".[test]"
+
+      - name: Strategy Factory suite with the native binary REQUIRED
+        working-directory: ./research-py
+        env:
+          MQK_FACTORY_CLI: ${{ github.workspace }}/core-rs/target/debug/mqk-cli
+        run: |
+          python -m pytest tests -k "strategy_factory" -q -rs -p no:cacheprovider --tb=short --junitxml="$RUNNER_TEMP/factory_native.xml"
+
+      - name: Native lane proof guard (required E2E tests executed and passed; no unexpected skip)
+        if: always()
+        run: python scripts/guards/check_factory_native_lane.py "$RUNNER_TEMP/factory_native.xml"

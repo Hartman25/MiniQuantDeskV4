@@ -7,6 +7,7 @@ pub mod close_channel_100_50_trend_v1;
 mod daily_math;
 pub mod delayed_overnight_gap_reversal_v1;
 pub mod dual_sma_50_200_trend;
+pub mod grammar_rule_v1;
 pub mod halloween_nov_apr;
 pub mod intraday_scalper;
 pub mod mean_reversion;
@@ -35,6 +36,7 @@ pub use absolute_momentum_252::AbsoluteMomentum252Strategy;
 pub use close_channel_100_50_trend_v1::CloseChannel10050TrendV1Strategy;
 pub use delayed_overnight_gap_reversal_v1::DelayedOvernightGapReversalV1Strategy;
 pub use dual_sma_50_200_trend::DualSma50200TrendStrategy;
+pub use grammar_rule_v1::{register_grammar_strategy_if_named, GrammarRuleStrategy, RuleSpec};
 pub use halloween_nov_apr::HalloweenNovAprStrategy;
 pub use intraday_scalper::{
     compute_diagnostics as intraday_scalper_compute_diagnostics, IntradayScalperDiagnostics,

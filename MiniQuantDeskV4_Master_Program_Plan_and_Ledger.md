@@ -855,6 +855,24 @@ Local, not pushed on the accepted integration branch. Code/test commit `3a21eff1
 
 Acceptance: correction-02 focused proof 9 passed; full registry acceptance 66 passed; AST parse and whitespace checks passed. No provider/broker/Paper/Live/holdout action occurred; Alpha Lab remains archival KEEP/ADAPT/RETIRE only; Strategy Factory automation remains future M9-enabling and non-blocking for M1.
 
+### G2.27 Strategy Factory completion (`V4-STRATEGY-FACTORY-RESEARCH-BACKTEST-FULL-COMPLETION-01`, 2026-10-10) - `LOCALLY_COMPLETE` on a dedicated development branch, independent acceptance pending
+
+Branch `strategy-factory/full-completion-01` (baseline `origin/main` `e190cce9`), guarded fast-forward checkpoints to the same remote branch, **not merged**. Record: `docs/research/STRATEGY_FACTORY_CLOSURE_01.md`.
+
+| Capability | Disposition / proof |
+|---|---|
+| Catalog intake (8 profiles, fail-closed, verbatim rows, composite source identity) | `FIXED+PROVEN`; 668 operator entries -> 521 unique ideas, each with one explicit disposition; 0 admitted (catalogs are research questions) |
+| Typed ideas, deterministic dedup, executable-compatibility admission | `FIXED+PROVEN`; no parameter is ever defaulted; relationships from template signatures only |
+| Provider-neutral AI normalization (Ollama local; paid cloud needs a cost authorization) | `FIXED+PROVEN`; verified-span rule; suggestions never executable; local `deepseek-coder:6.7b` passed the golden check |
+| Executable path | Rust `grammar_v1` (4 stateless exact-integer templates, name-addressed, Research-side registration only); controlled implementation workflow for everything else |
+| Campaign compiler, durable queue, scheduler, recovery, report | `FIXED+PROVEN`; opt-in `run_batch.py --resume`; stage authorization consumed, never minted |
+| Integrated acceptance | E2E-01..12 on the real native engine with synthetic bars; real-data readiness explained, real execution blocked on operator authorization |
+| Mutation proof | 102/102 killed (original); correction sets authority 7, faults 9, history 11, lane 6 also killed |
+| Independent-review correction R1-R5 | `FIXED+PROVEN` on the development branch (scheduler fault containment, grade-derived promotion truth, result-independent prior-search history, strict native CI lane run 38051841844, Factory-scoped status); independent acceptance pending; see the closure record |
+| Declaration concurrency closure | `FIXED+PROVEN` (registry-ordered publish of declaration/spec files, orphan recovery, fail-closed registered damage, atomic status/report writers, directory-aliasing ids refused; 11/11 owner mutants); independent acceptance pending |
+
+Acceptance: see the closure record. No provider, broker, Paper/Live, migration, order/fill or holdout action occurred. M1 `M1_BLOCKED`.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).
@@ -1722,6 +1740,8 @@ The mission must perform a defect/architecture census across current feature/dat
 #### Item A — `STRATEGY-FACTORY-AND-AUTONOMOUS-CANDIDATE-PIPELINE-01`
 
 **Current reconciliation note (2026-10-09, additive and non-superseding):** `PLANNED / PARTIALLY REUSED / AUTOMATION NOT COMPLETE` — this is M9-enabling and **NON-BLOCKING FOR M1**. The accepted catalog, population identities, registry, Rust engine/backtest, scanner/review, holdout/OOS/judge, Promotion/Paper and GUI already exist. The local Alpha Lab reconciliation reuses only unique canonical hardening where proven; it does not create a second `StrategyFactory`, Lab/scan GUI, Research DB schema, economic simulator or Paper risk gate. The Alpha Lab branch and corrected `EXT-032 REJECTED` report remain archival references (`docs/research/M1_KISS_EXT032_CLOSEOUT.md`, `docs/research/M1_KISS_EXT032_ACCESS_INCIDENT_01.md`).
+
+**Implementation update (2026-10-10, additive):** `V4-STRATEGY-FACTORY-RESEARCH-BACKTEST-FULL-COMPLETION-01` implemented the Factory as a thin coordinator (`research-py/src/mqk_research/strategy_factory/`) plus the Research/Backtest-only Rust `grammar_v1` engine on the dedicated branch `strategy-factory/full-completion-01` (not merged to `main`). Status `FACTORY_CODE_COMPLETE` (with disclosed deferrals), `FACTORY_E2E_PROVEN` and `FACTORY_UNATTENDED_PROVEN` on synthetic data with the real native engine, `FACTORY_EXTERNAL_DEPENDENCY_BLOCKED` for real-data execution (operator authorization), live scouting, paid AI and the GUI route (Codex ownership), `FACTORY_INDEPENDENT_ACCEPTANCE_PENDING`; M1 remains `M1_BLOCKED`. Record: `docs/research/STRATEGY_FACTORY_CLOSURE_01.md`; operator procedures: `docs/runbooks/strategy_factory_operator.md`. The authority invariants of this section are unchanged: the Factory promotes nothing, grants no Paper/Live privilege, never mints a stage authorization and never reads the reserved holdout.
 
 Still needed in a later authorized controller: source-policy-compliant local idea scout and provenance quarantine; structured formalization with explicit unknowns; cross-campaign semantic dedup; human acceptance of economic assumptions and prospective research policy; deterministic predeclaration and whole-population trial admission; bounded local scheduling/recovery; native strategy implementation plus Research/runtime fingerprint parity; safe OOS/holdout governance; population-wide statistical judge/robustness; read-only operator GUI and results/decay feedback; and separately controlled promotion authorization. A future canonical Research control-plane entrypoint may coordinate existing modules but must add no economic, identity or promotion authority. Finite later acceptance is one genuine prospectively admitted external idea, full population registered before outcomes, canonical native causal execution with matched benchmark, honest DSR/PBO + OOS exposure, deterministic rejection/review, retry-safe accounting and no silent Paper/Live privilege. No local AI, web crawler, model runtime, data lake or continuous unattended experimentation is implemented by this M1 controller.
 

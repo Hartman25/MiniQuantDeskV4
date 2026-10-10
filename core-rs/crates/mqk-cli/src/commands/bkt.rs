@@ -253,6 +253,8 @@ pub async fn run_backtest_csv(
         reg_max_notional,
     )
     .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    mqk_strategy::engines::register_grammar_strategy_if_named(&mut reg, &*symbol, &*strategy)
+        .with_context(|| format!("grammar_v1 registration failed for strategy={}", strategy))?;
     let strategy_instance = reg.instantiate(&strategy).with_context(|| {
         let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
         format!(
@@ -413,6 +415,8 @@ fn native_strategy_instance(
     };
     register_builtin_strategies_with_sizing(&mut reg, symbol, qty, max_qty, max_notional)
         .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    mqk_strategy::engines::register_grammar_strategy_if_named(&mut reg, &*symbol, &*strategy)
+        .with_context(|| format!("grammar_v1 registration failed for strategy={}", strategy))?;
     reg.instantiate(strategy)
         .with_context(|| format!("unknown strategy '{}'", strategy))
 }
@@ -972,6 +976,8 @@ pub async fn run_backtest_db(
         cfg.sizing.max_position_notional_usd,
     )
     .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    mqk_strategy::engines::register_grammar_strategy_if_named(&mut reg, &*symbol, &*strategy)
+        .with_context(|| format!("grammar_v1 registration failed for strategy={}", strategy))?;
     let strategy_instance = reg.instantiate(&strategy).with_context(|| {
         let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
         format!(
@@ -1206,6 +1212,8 @@ pub async fn run_sweep_csv(
             pt.max_position_notional_usd,
         )
         .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+        mqk_strategy::engines::register_grammar_strategy_if_named(&mut reg, &*symbol, &*strategy)
+            .with_context(|| format!("grammar_v1 registration failed for strategy={}", strategy))?;
         let strategy_instance = reg.instantiate(&strategy).with_context(|| {
             let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
             format!(
