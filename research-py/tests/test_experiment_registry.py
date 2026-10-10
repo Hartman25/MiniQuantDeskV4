@@ -12,11 +12,13 @@ Covers, per the mission's 20 required tests:
     universe changes do, failed candidates remain registered);
   * sweep-plan generation never registers an attempt.
 
-No subprocess, no broker, no OMS, no network, no live Postgres.
+No broker, no OMS, no network, no live Postgres; one test uses two spawned
+local processes against disposable SQLite to prove execution-claim ownership.
 """
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -47,6 +49,26 @@ from mqk_research.sweeps.run_sweep import run_sweep_scaffold
 # ---------------------------------------------------------------------------
 
 BASE_SPEC_KW = dict(train_years=1, test_months=1, step_months=1, holdout_months=1, min_rows_per_fold=200)
+
+
+def _claim_batch_in_process(db_path: str, batch_id: str, spec: dict, job_payload: dict, root: str, ready, start, out) -> None:
+    store = ResearchResultStore(Path(db_path))
+    job = JobSpec.from_dict(job_payload)
+    ready.set()
+    start.wait(10)
+    try:
+        store.claim_batch_for_execution(
+            batch_id,
+            spec,
+            Path(root),
+            1,
+            [job],
+            {job.job_id: Path(root) / "job.json"},
+        )
+    except Exception as exc:
+        out.put(("refused", type(exc).__name__, str(exc)))
+    else:
+        out.put(("claimed",))
 
 
 def _build_wf_dataset(symbols=("AAA", "BBB"), periods_days=560, horizon_days=3, seed=0) -> pd.DataFrame:
@@ -1372,6 +1394,160 @@ def test_rerun_refuses_started_attempt_or_running_job_residue(tmp_path):
         rerun_failed_jobs(result["batch_id"], root=root / "research_out", max_workers=1)
 
     assert len(store.list_attempts(trial["trial_id"])) == 2
+
+
+def test_pool_interruption_preserves_observed_results_and_marks_only_unobserved_slices(tmp_path, monkeypatch):
+    jobs, _ = _mixed_slice_finalize_inputs(["succeeded", "succeeded"])
+    root = tmp_path / "research_out"
+    store = ResearchResultStore(root / "registry.sqlite3")
+    spec = {
+        "engine_id": "EXP",
+        "experiment_id": "exp-1",
+        "strategy_id": "strategy-1",
+        "batch_label": "pool-interruption",
+    }
+    store.upsert_batch("batch-1", spec, root, len(jobs), status="queued")
+    store.upsert_jobs(jobs, {job.job_id: root / f"{job.job_id}.json" for job in jobs}, status="queued")
+
+    def _observed_result(payload, _root_dir):
+        job = JobSpec.from_dict(payload)
+        return JobExecutionResult(
+            job_id=job.job_id,
+            batch_id=job.batch_id,
+            status="succeeded",
+            metrics={"observed": 1},
+            artifact_paths={},
+        ).to_dict()
+
+    class _PartialPool:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def map(self, function, payloads, roots):
+            yield function(payloads[0], roots[0])
+            raise RuntimeError("simulated pool transport interruption")
+
+    monkeypatch.setattr(exp_runner, "_run_job_safely", _observed_result)
+    monkeypatch.setattr(exp_runner, "ProcessPoolExecutor", lambda max_workers: _PartialPool())
+
+    results = exp_runner._run_jobs(jobs, root, store, max_workers=2, batch_id="batch-1")
+
+    assert [result.status for result in results] == ["succeeded", "failed"]
+    assert results[0].metrics == {"observed": 1}
+    assert results[1].metrics == {}
+    assert results[1].artifact_paths == {}
+    assert "no terminal result was observed" in results[1].failure_reason
+    stored_jobs = store.list_jobs("batch-1")
+    assert [row["status"] for row in stored_jobs] == ["succeeded", "failed"]
+
+
+@pytest.mark.parametrize("residue", ["started_attempt", "running_job"])
+def test_run_batch_refuses_unresolved_execution_residue(tmp_path, residue):
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    windows = [{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}]
+    spec_path = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=windows,
+        hypothesis_id=f"hyp.exp_restart_residue_{residue}",
+    )
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["parameter_grid"] = {"lookback_days": [2], "top_n": [1]}
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = run_batch(spec_path, root=root / "research_out", max_workers=1)
+    store = ResearchResultStore(default_db_path(root / "research_out"))
+    trial = store.list_trials(
+        experiment_id="exp.registry_smoke", hypothesis_id=f"hyp.exp_restart_residue_{residue}"
+    )[0]
+    attempts_before = len(store.list_attempts(trial["trial_id"]))
+    if residue == "started_attempt":
+        store.begin_attempt(trial_id=trial["trial_id"], metadata={"batch_id": result["batch_id"]})
+    else:
+        store.set_job_status(store.list_jobs(result["batch_id"])[0]["job_id"], "running")
+
+    with pytest.raises(RuntimeError, match="refusing batch execution claim"):
+        run_batch(spec_path, root=root / "research_out", max_workers=1)
+
+    assert store.get_batch(result["batch_id"])["status"] == "succeeded"
+    assert len(store.list_attempts(trial["trial_id"])) == attempts_before + (residue == "started_attempt")
+    assert store.list_jobs(result["batch_id"])[0]["status"] == ("running" if residue == "running_job" else "succeeded")
+
+
+def test_two_process_batch_claims_have_one_owner(tmp_path):
+    root = tmp_path / "research_out"
+    root.mkdir()
+    db_path = root / "registry.sqlite3"
+    ResearchResultStore(db_path)
+    jobs, _ = _mixed_slice_finalize_inputs(["succeeded", "succeeded"])
+    batch_id = "batch-claim-race"
+    job_payload = jobs[0].to_dict()
+    job_payload["batch_id"] = batch_id
+    spec = {
+        "engine_id": "EXP",
+        "experiment_id": "exp-claim-race",
+        "strategy_id": "strategy-1",
+        "batch_label": "claim-race",
+    }
+
+    context = mp.get_context("spawn")
+    ready = [context.Event(), context.Event()]
+    start = context.Event()
+    output = context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_batch_in_process,
+            args=(str(db_path), batch_id, spec, job_payload, str(root), ready[index], start, output),
+        )
+        for index in range(2)
+    ]
+    for process in processes:
+        process.start()
+    assert all(event.wait(15) for event in ready)
+    start.set()
+    for process in processes:
+        process.join(30)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+        assert process.exitcode == 0
+
+    outcomes = [output.get(timeout=5) for _ in processes]
+    assert sum(outcome[0] == "claimed" for outcome in outcomes) == 1
+    assert sum(outcome[0] == "refused" for outcome in outcomes) == 1
+    batch_status = ResearchResultStore(db_path).get_batch(batch_id)["status"]
+    assert batch_status == "running"
+
+
+def test_distinct_batches_remain_operable_under_execution_claims(tmp_path):
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    windows = [{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}]
+    spec_a = _write_exp_batch_spec(
+        root, dataset_path, symbol_groups=[["AAA", "BBB"]], windows=windows,
+        hypothesis_id="hyp.exp_independent_a", out_name="batch-a.json",
+    )
+    spec_b = _write_exp_batch_spec(
+        root, dataset_path, symbol_groups=[["AAA", "BBB"]], windows=windows,
+        hypothesis_id="hyp.exp_independent_b", out_name="batch-b.json",
+    )
+    payload_a = json.loads(spec_a.read_text(encoding="utf-8"))
+    payload_b = json.loads(spec_b.read_text(encoding="utf-8"))
+    payload_a["parameter_grid"] = {"lookback_days": [2], "top_n": [1]}
+    payload_b["parameter_grid"] = {"lookback_days": [3], "top_n": [1]}
+    spec_a.write_text(json.dumps(payload_a), encoding="utf-8")
+    spec_b.write_text(json.dumps(payload_b), encoding="utf-8")
+
+    result_a = run_batch(spec_a, root=root / "research_out", max_workers=1)
+    result_b = run_batch(spec_b, root=root / "research_out", max_workers=1)
+
+    assert result_a["status"] == result_b["status"] == "succeeded"
+    assert result_a["batch_id"] != result_b["batch_id"]
 
 
 # ---------------------------------------------------------------------------

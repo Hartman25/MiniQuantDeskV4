@@ -54,11 +54,28 @@ def load_batch_spec(path: Path) -> BatchSpec:
     return BatchSpec.from_dict(_resolve_spec_relative_paths(resolved_path, payload))
 
 
-def _prepare_batch(plan: BatchPlan, spec: BatchSpec, root: Path, store: ResearchResultStore) -> Dict[str, Path]:
+def _prepare_batch(
+    plan: BatchPlan,
+    spec: BatchSpec,
+    root: Path,
+    store: ResearchResultStore,
+    *,
+    claim_execution: bool = False,
+) -> Dict[str, Path]:
     root.mkdir(parents=True, exist_ok=True)
-    store.upsert_batch(plan.batch_id, spec.to_dict(), root, len(plan.jobs), status="queued")
     spec_paths = {job.job_id: write_job_spec(root, job) for job in plan.jobs}
-    store.upsert_jobs(plan.jobs, spec_paths, status="queued")
+    if claim_execution:
+        store.claim_batch_for_execution(
+            plan.batch_id,
+            spec.to_dict(),
+            root,
+            len(plan.jobs),
+            plan.jobs,
+            spec_paths,
+        )
+    else:
+        store.upsert_batch(plan.batch_id, spec.to_dict(), root, len(plan.jobs), status="queued")
+        store.upsert_jobs(plan.jobs, spec_paths, status="queued")
     write_json(batch_root(root, plan.batch_id) / "batch_manifest.json", plan.batch_manifest)
     return spec_paths
 
@@ -334,19 +351,24 @@ def _run_jobs(
             raw_results = [_run_job_safely(payload, str(root)) for payload in payloads]
         else:
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                raw_results = list(executor.map(_run_job_safely, payloads, [str(root)] * len(payloads)))
+                raw_results = []
+                for raw_result in executor.map(_run_job_safely, payloads, [str(root)] * len(payloads)):
+                    raw_results.append(raw_result)
     except Exception as exc:
-        raw_results = [
+        observed_job_ids = {raw.get("job_id") for raw in raw_results}
+        raw_results.extend(
             JobExecutionResult(
                 job_id=job.job_id,
                 batch_id=job.batch_id,
                 status="failed",
                 metrics={},
                 artifact_paths={},
-                failure_reason=f"worker_pool_interrupted: {type(exc).__name__}: {exc}",
+                failure_reason=f"worker_pool_interrupted: {type(exc).__name__}: {exc}; "
+                "no terminal result was observed for this slice",
             ).to_dict()
             for job in jobs
-        ]
+            if job.job_id not in observed_job_ids
+        )
 
     results = [JobExecutionResult(**raw) for raw in raw_results]
     for result in results:
@@ -389,7 +411,7 @@ def run_batch(spec_path: Path, root: Path | None = None, max_workers: int | None
     # (pre-execution) write so both the queued and finalized manifest agree.
     plan.batch_manifest["registry_status"] = registration_mode
     store = ResearchResultStore(default_db_path(actual_root))
-    _prepare_batch(plan, spec, actual_root, store)
+    _prepare_batch(plan, spec, actual_root, store, claim_execution=True)
     results = _run_jobs(
         plan.jobs,
         actual_root,
@@ -451,7 +473,7 @@ def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int 
         row for row in store.list_jobs(batch_id) if row["status"] in {"queued", "running"}
     ]
     started_attempts = store.list_started_attempts_for_batch(batch_id)
-    if incomplete_jobs or started_attempts:
+    if batch["status"] == "running" or incomplete_jobs or started_attempts:
         job_ids = [row["job_id"] for row in incomplete_jobs]
         attempt_ids = [row["attempt_id"] for row in started_attempts]
         raise RuntimeError(
@@ -468,9 +490,18 @@ def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int 
     allow_unregistered_diagnostic = bool(batch_spec.get("allow_unregistered_diagnostic", False))
     registration_mode = _resolve_registration_mode(hypothesis_id, allow_unregistered_diagnostic)
 
-    jobs = [JobSpec.from_dict(json.loads(Path(row["job_spec_path"]).read_text(encoding="utf-8"))) for row in failed_rows]
+    failed_spec_paths = {row["job_id"]: Path(row["job_spec_path"]) for row in failed_rows}
+    failed_jobs = [JobSpec.from_dict(json.loads(path.read_text(encoding="utf-8"))) for path in failed_spec_paths.values()]
+    store.claim_batch_for_execution(
+        batch_id,
+        batch_spec,
+        actual_root,
+        int(batch["job_count"]),
+        failed_jobs,
+        failed_spec_paths,
+    )
     _run_jobs(
-        jobs,
+        failed_jobs,
         actual_root,
         store,
         max_workers=max_workers,
@@ -513,6 +544,6 @@ def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int 
         },
     )
     finalized = _finalize_batch(refreshed_plan, all_results, actual_root, store)
-    finalized["rerun_count"] = len(jobs)
+    finalized["rerun_count"] = len(failed_jobs)
     finalized["registry_status"] = registration_mode
     return finalized

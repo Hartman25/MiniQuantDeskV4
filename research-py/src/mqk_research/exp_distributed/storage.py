@@ -318,6 +318,159 @@ class ResearchResultStore:
                 )
             connection.commit()
 
+    @staticmethod
+    def _started_attempts_for_batch(connection: sqlite3.Connection, batch_id: str) -> List[Dict[str, Any]]:
+        linked_attempt_ids = {
+            row[0]
+            for row in connection.execute(
+                """
+                select distinct a.attempt_id
+                from research_attempts a
+                join research_attempt_jobs aj on aj.attempt_id=a.attempt_id
+                join exp_jobs j on j.job_id=aj.job_id
+                where a.status='started' and j.batch_id=?
+                """,
+                (batch_id,),
+            ).fetchall()
+        }
+        started_rows = connection.execute(
+            "select * from research_attempts where status='started' order by attempt_id asc"
+        ).fetchall()
+        matches = []
+        for row in started_rows:
+            metadata_raw = row["metadata_json"] or "{}"
+            try:
+                metadata = json.loads(metadata_raw)
+            except (TypeError, ValueError):
+                metadata = {"_malformed_metadata": True}
+            if row["attempt_id"] in linked_attempt_ids or metadata.get("batch_id") == batch_id or metadata.get(
+                "_malformed_metadata"
+            ):
+                matches.append(dict(row))
+        return matches
+
+    def claim_batch_for_execution(
+        self,
+        batch_id: str,
+        spec: Dict[str, Any],
+        root_dir: Path,
+        job_count: int,
+        jobs: Iterable[JobSpec],
+        spec_paths: Dict[str, Path],
+    ) -> None:
+        """Atomically claim one batch for a new execution attempt.
+
+        A queued planning row is claimable when it has no started attempts;
+        terminal batches are claimable for intentional reruns only when no
+        queued/running jobs or started attempts remain. The SQLite write lock
+        covers the residue check and all operational status resets, so a
+        second launcher cannot pass the check before the first launcher marks
+        the batch running.
+        """
+        prepared_jobs = list(jobs)
+        canonical_spec = json.dumps(spec, sort_keys=True)
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "select * from exp_batches where batch_id=?", (batch_id,)
+                ).fetchone()
+                if existing is not None:
+                    if existing["spec_json"] != canonical_spec:
+                        raise RuntimeError(
+                            f"batch_id collision with conflicting canonical spec: {batch_id!r}"
+                        )
+                    active_jobs = connection.execute(
+                        "select job_id, status from exp_jobs where batch_id=? and status in ('queued', 'running') "
+                        "order by job_id asc",
+                        (batch_id,),
+                    ).fetchall()
+                    started_attempts = self._started_attempts_for_batch(connection, batch_id)
+                    if existing["status"] == "running" or started_attempts or (
+                        existing["status"] != "queued" and active_jobs
+                    ) or (existing["status"] == "queued" and any(row["status"] == "running" for row in active_jobs)):
+                        raise RuntimeError(
+                            "refusing batch execution claim while incomplete execution remains: "
+                            f"batch_id={batch_id!r}, batch_status={existing['status']!r}, "
+                            f"jobs={[row['job_id'] for row in active_jobs]!r}, "
+                            f"started_attempts={[row['attempt_id'] for row in started_attempts]!r}"
+                        )
+                    if existing["status"] not in {"queued", "succeeded", "failed"}:
+                        raise RuntimeError(
+                            f"refusing batch execution claim for unsupported status {existing['status']!r}"
+                        )
+
+                connection.execute(
+                    """
+                    insert into exp_batches (
+                        batch_id, engine_id, experiment_id, strategy_id, status, spec_json,
+                        batch_label, root_dir, job_count, aggregate_paths_json, summary_json
+                    ) values (?, ?, ?, ?, 'running', ?, ?, ?, ?, null, null)
+                    on conflict(batch_id) do update set
+                        status='running',
+                        spec_json=excluded.spec_json,
+                        batch_label=excluded.batch_label,
+                        root_dir=excluded.root_dir,
+                        job_count=excluded.job_count,
+                        aggregate_paths_json=null,
+                        summary_json=null
+                    """,
+                    (
+                        batch_id,
+                        spec["engine_id"],
+                        spec["experiment_id"],
+                        spec["strategy_id"],
+                        canonical_spec,
+                        spec.get("batch_label", ""),
+                        str(root_dir),
+                        int(job_count),
+                    ),
+                )
+                for job in prepared_jobs:
+                    connection.execute(
+                        """
+                        insert into exp_jobs (
+                            job_id, batch_id, job_index, engine_id, experiment_id, strategy_id,
+                            status, params_json, symbols_json, window_start_utc, window_end_utc,
+                            dataset_fingerprint_json, job_spec_path, artifact_dir, artifact_paths_json,
+                            metrics_json, failure_reason, runtime_seconds
+                        ) values (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, null, null, null, null, null)
+                        on conflict(job_id) do update set
+                            status='queued',
+                            params_json=excluded.params_json,
+                            symbols_json=excluded.symbols_json,
+                            window_start_utc=excluded.window_start_utc,
+                            window_end_utc=excluded.window_end_utc,
+                            dataset_fingerprint_json=excluded.dataset_fingerprint_json,
+                            job_spec_path=excluded.job_spec_path,
+                            artifact_dir=null,
+                            artifact_paths_json=null,
+                            metrics_json=null,
+                            failure_reason=null,
+                            runtime_seconds=null
+                        """,
+                        (
+                            job.job_id,
+                            job.batch_id,
+                            int(job.job_index),
+                            job.engine_id,
+                            job.experiment_id,
+                            job.strategy_id,
+                            json.dumps(job.params, sort_keys=True),
+                            json.dumps(job.symbols, sort_keys=True),
+                            job.window.start_utc,
+                            job.window.end_utc,
+                            json.dumps(job.dataset_fingerprint.to_dict(), sort_keys=True),
+                            str(spec_paths[job.job_id]),
+                        ),
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
     def set_job_status(self, job_id: str, status: str) -> None:
         with closing(self._connect()) as connection:
             connection.execute("update exp_jobs set status=? where job_id=?", (status, job_id))
@@ -1002,18 +1155,7 @@ class ResearchResultStore:
         see that residue and refuse to claim a clean failed-only recovery.
         """
         with closing(self._connect()) as connection:
-            rows = connection.execute(
-                """
-                select distinct a.*
-                from research_attempts a
-                join research_attempt_jobs aj on aj.attempt_id=a.attempt_id
-                join exp_jobs j on j.job_id=aj.job_id
-                where a.status='started' and j.batch_id=?
-                order by a.attempt_id asc
-                """,
-                (batch_id,),
-            ).fetchall()
-        return [dict(row) for row in rows]
+            return self._started_attempts_for_batch(connection, batch_id)
 
     def registry_summary(
         self,
