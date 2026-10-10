@@ -639,6 +639,27 @@ fn resolve_order_instrument_context(
     )
 }
 
+/// Identity proof for an order surface that carries no asset class (the
+/// manual operator order): the symbol must resolve, through the same registry
+/// authority the internal decision seam uses, to an Equity. A symbol that
+/// resolves to anything else, or that no registry proves, is refused rather
+/// than written to the outbox as an implied Equity.
+pub(crate) fn prove_equity_order_identity(
+    state: &AppState,
+    symbol: &str,
+) -> Result<(), OrderInstrumentContextError> {
+    let context = resolve_order_instrument_context(state, symbol)?;
+    if context.asset_class == "equity" {
+        return Ok(());
+    }
+    Err(OrderInstrumentContextError::Rejected(format!(
+        "symbol '{}' resolves to asset class '{}' and this order surface carries no asset class: \
+         only a registry-proven Equity is accepted here",
+        symbol.trim(),
+        context.asset_class
+    )))
+}
+
 /// The execution domain that owns an order, from its registry-resolved asset
 /// class. Only a positively resolved Crypto instrument belongs to
 /// `Crypto24_7`; every other outcome (Equity, or an unresolved/refused symbol
