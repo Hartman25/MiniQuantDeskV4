@@ -100,6 +100,12 @@ test("portfolio panel remains broker_snapshot when only broker-backed portfolio 
   assert.equal(sources.portfolio, "broker_snapshot");
 });
 
+test("composite operational panels do not label durable or broker evidence as pure runtime truth", () => {
+  const sources = classifyPanelSources(baseDataSource({ realEndpoints: ["/api/v1/metrics/dashboards", "/api/v1/risk/summary",
+    "/api/v1/risk/denials", "/api/v1/reconcile/status", "/api/v1/reconcile/mismatches", "/api/v1/strategy/summary"] }), true);
+  for (const panel of ["metrics", "risk", "reconcile", "strategy"] as const) assert.equal(sources[panel], "mixed", panel);
+});
+
 test("risk denials field is mixed because the route can resolve from durable DB truth or runtime session truth", () => {
   const authority = classifyFieldSource(
     baseDataSource({ realEndpoints: ["/api/v1/risk/denials"] }),

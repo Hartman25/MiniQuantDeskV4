@@ -92,11 +92,11 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: ["/portfolio/summary", "/trading/account"],
     placeholder: ["status", "preflight", "portfolioSummary"],
   },
-  // Metrics endpoint is deferred; when implemented it will be runtime daemon state.
+  // Snapshot metrics combine broker economics, runtime execution and reconcile authority.
   metrics: {
-    db: [],
+    db: ["/metrics/dashboards"],
     runtime: ["/metrics/dashboards"],
-    broker: [],
+    broker: ["/metrics/dashboards"],
     placeholder: ["metrics"],
   },
   // Canonical orders/summary come from OMS (runtime). Legacy /trading/orders is broker snapshot.
@@ -107,14 +107,11 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: ["/trading/orders"],
     placeholder: ["executionSummary", "executionOrders"],
   },
-  // Risk summary is derived from broker_snapshot (runtime memory).
-  // Risk denials are sourced from execution_snapshot (runtime memory, not DB-persisted).
-  // Both surfaces are runtime truth; the panel authority resolves to runtime_memory
-  // when both endpoints are in realEndpoints.
+  // Risk combines broker exposure, durable risk blocks/denials and runtime safety.
   risk: {
-    db: [],
+    db: ["/risk/summary", "/risk/denials"],
     runtime: ["/risk/summary", "/risk/denials", "/system/status"],
-    broker: [],
+    broker: ["/risk/summary"],
     placeholder: ["riskSummary", "riskDenials"],
   },
   // Portfolio data originates from the broker (account/positions/orders/fills are broker snapshot).
@@ -124,11 +121,11 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: ["/portfolio/summary", "/portfolio/positions", "/portfolio/orders/open", "/portfolio/fills", "/trading/account", "/trading/positions", "/trading/fills"],
     placeholder: ["portfolioSummary", "positions", "openOrders", "fills"],
   },
-  // Reconcile records are persisted in Postgres — always DB truth.
+  // Summary can use durable/runtime truth; mismatch rows compare runtime and broker snapshots.
   reconcile: {
     db: ["/reconcile/status", "/reconcile/mismatches"],
-    runtime: [],
-    broker: [],
+    runtime: ["/reconcile/status", "/reconcile/mismatches"],
+    broker: ["/reconcile/mismatches"],
     placeholder: ["reconcileSummary", "mismatches"],
   },
   // Strategy summary truth is conditional on MQK_STRATEGY_IDS fleet configuration:
@@ -141,7 +138,7 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
   //   "active" + durable rows when DB pool is present (postgres.sys_strategy_suppressions).
   // Evidence hints are aligned to actual source authority: db for suppressions, runtime for summary.
   strategy: {
-    db: ["/strategy/suppressions"],
+    db: ["/strategy/suppressions", "/strategy/summary"],
     runtime: ["/strategy/summary"],
     broker: [],
     placeholder: ["strategies", "strategySuppressions"],
