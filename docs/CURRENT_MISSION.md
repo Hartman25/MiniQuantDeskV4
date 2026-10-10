@@ -6,6 +6,15 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -39. Distributed Research independent-review correction (2026-10-09, `V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-01`)
+
+Local correction on the isolated integration branch, **not pushed**. Code commit `241d84b7`; full record and M1 matrix: [`docs/research/M1_REMAINING_GATES_CENSUS_01.md`](research/M1_REMAINING_GATES_CENSUS_01.md).
+
+- C1 aggregate-status shadowing, C2 missing-slice accounting, and C3 interrupted worker/artifact recovery are `FIXED+PROVEN` through the canonical `exp_distributed` runner and `ResearchResultStore`; no new authority or schema was created. Durable SQLite evidence is immutable and duplicate terminalization remains refused.
+- Proof: focused correction tests **14 passed**; full `research-py/tests/test_experiment_registry.py` **61 passed**. Mutation controls killed the last-slice-status, missing-slice-accounting, and incomplete-recovery mutants. Prior operator evidence of 49 passed is preserved as historical context, not conflated with this run.
+- C5 historical impact is `UNKNOWN`: no canonical SQLite registry file was locally available for a read-only census. No historical record, Alpha Lab artifact, provider, broker, Paper DB, migration, order, fill, or holdout was touched.
+- Correction scope is `LOCALLY COMPLETE`; M1 remains `M1_BLOCKED`, Paper INACTIVE, Live NOT TOUCHED, and combined exact-head GitHub CI remains pending a later guarded publication.
+
 ## -38. Accepted-branch integration and M1 closure census (2026-10-09, `V4-M1-ACCEPTED-BRANCHES-ALPHA-REUSE-AND-CLOSURE-CENSUS-01`)
 
 Local isolated integration only, **not pushed**: branch `integration/m1-alpha-reuse-closure-01`, based on verified `origin/main` `a49cae1f9a2849c769707d239a61e10cb0f39903`, with accepted four-way merge `5144aa7` and accepted EXT-032 merge `722a04a`. Full finite matrix: [`docs/research/M1_REMAINING_GATES_CENSUS_01.md`](research/M1_REMAINING_GATES_CENSUS_01.md).

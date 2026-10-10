@@ -829,6 +829,20 @@ Open: operator execution authorization (and acknowledgement of the holdout-windo
 
 Superseding status (V4-M1-KISS-EXT032-ALL-DEFECT-CLOSURE-01, local, not pushed): the holdout is `RESERVED_NOT_FORMALLY_CONSUMED__ACCESS_INCIDENT_PENDING_ADJUDICATION` (incident `HOA-KISS-EXT032-01`; `docs/research/M1_KISS_EXT032_ACCESS_INCIDENT_01.md`), not "untouched"/"UNCONSUMED"; the campaign now ends its provider request at the reserved start (fixed partition v1), so the old holdout-window fetch acknowledgement (U5) is replaced by a non-OHLCV corporate-action-discovery acknowledgement inside a per-stage, HMAC-authenticated operator authorization (the `executable` flag alone authorizes nothing); the near-miss review is v2 (recomputed identity, no free-form Promotion verdict, withheld qualification while `CUMULATIVE_SEARCH_VALIDATION_BLOCKED` / SAB-1 and the incident stand); the experiment tests now run in CI under an audit-hook network guard. Execution remains NOT authorized; M1 `M1_BLOCKED`; Paper INACTIVE; Live NOT TOUCHED.
 
+### G2.25 Distributed Research independent-review correction (`V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-01`, 2026-10-09) - `LOCALLY_COMPLETE`, M1 remains blocked
+
+Local, not pushed on the accepted integration branch. Code commit `241d84b7`; full census and proof: `docs/research/M1_REMAINING_GATES_CENSUS_01.md`.
+
+| Finding | Disposition / proof |
+|---|---|
+| C1 aggregate status/reason shadowing | `FIXED+PROVEN`; failed-first/last-success, success-first/last-failed and all-success cases pass; original last-slice mutant killed |
+| C2 missing required result | `FIXED+PROVEN`; immutable `missing` slice status, `missing_slices` summary count and explicit missing-evidence reason; missing-first/last/all cases pass; accounting mutant killed |
+| C3 interrupted worker/artifact and retry recovery | `FIXED+PROVEN`; runner-observed interruption is terminal failed evidence with no fabricated artifacts; queued/running jobs or started attempts block failed-only retry; recovery mutant killed |
+| C4 durable SQLite round trip | `FIXED+PROVEN`; aggregate summary, immutable slices, duplicate slice write and duplicate terminal finalization are covered |
+| C5 historical impact | `UNKNOWN`; no locally available canonical SQLite registry was found; no historical rewrite or audit claim |
+
+Acceptance: focused correction proof 14 passed; full `research-py/tests/test_experiment_registry.py` 61 passed. Prior operator evidence of 49 passed remains historical context. No provider/broker/Paper/Live/holdout action occurred; Alpha Lab remains archival KEEP/ADAPT/RETIRE only; Strategy Factory automation remains future M9-enabling and non-blocking for M1.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).

@@ -2,7 +2,7 @@
 
 Date: 2026-10-09 (Pacific/Honolulu)
 Controller: `V4-M1-ACCEPTED-BRANCHES-ALPHA-REUSE-AND-CLOSURE-CENSUS-01`
-Status: `OPEN` — local integration only; not independently accepted; no push.
+Status: `LOCALLY COMPLETE FOR THIS CORRECTION SCOPE` — local integration only; not independently accepted; no push.
 
 This is a finite current-state census, not a claim that green CI or local code proof makes Paper deployment ready. The canonical owners remain the existing Research registry, native strategy/backtest/evidence path, Promotion gate, and daemon `active_paper` authority. The Alpha Lab remains read-only archival reference.
 
@@ -47,12 +47,16 @@ EXT-032 archival decision remains negative: SPY alpha `-$26,776.13`, DIA `-$25,9
 
 ## Defect census and second sweep
 
-- `runner.py::_finalize_candidate_attempts`: `FIXED+PROVEN` by the bounded patch in this integration tree. Aggregate attempt status/reason now use distinct names from per-slice status/reason. Two tests cover failed/then-succeeded and succeeded/then-failed order, with immutable slice status and failure count assertions. The test code is present, but the supplied runtime lacks `pytest` and `PyYAML`, so RED/GREEN execution was unavailable in this environment; syntax/test execution must be repeated in a provisioned research environment.
+- `runner.py::_finalize_candidate_attempts`: `FIXED+PROVEN`. Aggregate attempt status/reason use distinct names from per-slice status/reason; missing required results are immutable `missing` slice evidence, counted as `missing_slices`, and named in the aggregate failure reason. Failed/then-succeeded, succeeded/then-failed, all-success, missing-first/last/all cases pass in both capture-store and durable SQLite tests.
+- Worker/artifact interruption and retry recovery: `FIXED+PROVEN`. Runner-observed worker/process-pool exceptions become terminal failed attempts with empty metrics/artifact paths and explicit `worker_execution_interrupted` / `worker_pool_interrupted` reasons; no worker result is fabricated. `rerun_failed_jobs` refuses queued/running jobs or started attempts instead of silently claiming recovery. Interrupted retry preserves one trial and increments attempts only.
+- Durable registry invariants: `FIXED+PROVEN`. SQLite round trips preserve aggregate summaries and immutable per-slice evidence; duplicate slice recording and duplicate terminal attempt finalization remain refused. Full `research-py/tests/test_experiment_registry.py`: **61 passed**, including the prior operator evidence of 49 passed plus this correction's coverage.
+- Mutation proof: original last-slice-status mutant killed (9 focused tests RED); missing-slice accounting/report mutant killed (6 focused tests RED); incomplete-recovery guard mutant killed (1 focused test RED). Correct source restored and focused GREEN rerun: 14 passed.
 - Trial/attempt/slice registration, immutable slice snapshots, retries, identity, holdout guard, native economic bridge, scanner/review, Promotion and `active_paper` authority: `ALREADY_CORRECT+PROVEN` by the accepted branch evidence and adjacent source/tests; no duplicate owner was added here.
 - Alpha Lab active runner, independent runs schema, and Python economic loop: `RETIRE` as an active path; no copy exists in the integration tree.
+- Historical impact: `UNKNOWN`. No locally available canonical SQLite registry files were present under the integration checkout; no historical record was rewritten or declared audited.
 - Real Paper DB schema, provider readiness, genuine Paper lifecycle, and M1.10 market-session count: `BLOCKED` or `UNAVAILABLE_NEEDS_PROOF`; no provider, broker, Paper DB, migration, order, fill, or holdout call was made.
-- Second adversarial sweep of changed paths and adjacent callers: no additional ordinary deterministic defect was found in this bounded review. The unresolved rows above are operator/economic/runtime proof gates, not silently closed code defects.
+- Second adversarial sweep of changed paths and adjacent callers/callees: no additional ordinary deterministic defect was found. The unresolved rows above are operator/economic/runtime proof gates, not silently closed code defects.
 
 ## Tooling and side effects
 
-Inspected: repository-local `.agents`/`.codex` inventory (no MQD-specific skill surfaced), available Codex tool catalog (no `mqk_readonly`, Srclight, or Graft capability surfaced), bundled workspace dependency paths, Git, and the GitHub connector for PR existence and commit-status lookup. Used: native Git, focused `rg`/PowerShell reads, `apply_patch`, bundled-runtime discovery, and GitHub read-only calls. No provider, broker, real Paper DB, migration, order/fill, or remote write was performed. `smoke_logs/`, the main checkout, GUI worktree and Alpha Lab worktree were not modified.
+Inspected: repository-local `.agents`/`.codex` inventory (no MQD-specific skill surfaced), available Codex tool catalog (no `mqk_readonly`, Srclight, or Graft capability surfaced), bundled workspace dependency paths, Git, and the GitHub connector for PR existence and commit-status lookup. Used: native Git, focused `rg`/PowerShell reads, `apply_patch`, bundled-runtime discovery, the provisioned venv site-packages through the bundled Python interpreter, and GitHub read-only calls. No provider, broker, real Paper DB, migration, order/fill, or remote write was performed. `smoke_logs/`, the main checkout, GUI worktree and Alpha Lab worktree were not modified.
