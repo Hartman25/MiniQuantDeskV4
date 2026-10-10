@@ -1268,7 +1268,7 @@ const DEFAULT_PORTFOLIO_ECONOMICS_TIMEFRAME: &str = "1D";
 /// it never performs FX conversion, and any resolved position whose registry
 /// quote currency differs from this constant fails closed via the existing
 /// ASSET-CORE-04A/04C `CurrencyConversionUnsupported` check.
-const PORTFOLIO_ECONOMICS_ACCOUNT_CURRENCY: &str = "USD";
+const PORTFOLIO_ECONOMICS_ACCOUNT_CURRENCY: &str = crate::decision::ACCOUNT_CURRENCY;
 
 fn portfolio_economics_status_message(truth_state: &str) -> String {
     match truth_state {

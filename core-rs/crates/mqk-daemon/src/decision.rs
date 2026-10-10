@@ -300,6 +300,15 @@ fn validate_fields(d: &InternalStrategyDecision) -> Result<(), Vec<String>> {
 // order_json shape for the outbox
 // ---------------------------------------------------------------------------
 
+/// Currency of the account every order, cap and equity figure is denominated
+/// in. The single account-currency seam in the daemon: callers compare an
+/// instrument's quote currency against it and never against a literal. There
+/// is no FX conversion authority yet, so an order on an instrument quoted in
+/// any other currency is refused (fail closed) rather than valued as if it
+/// were this one; an account- or venue-derived currency replaces this value
+/// here without touching the comparisons.
+pub(crate) const ACCOUNT_CURRENCY: &str = "USD";
+
 #[derive(Debug, Clone)]
 struct DurableOrderInstrumentContext {
     asset_class: String,
@@ -468,6 +477,18 @@ fn resolve_order_instrument_context_from_registry(
                     bridged.reason_code
                 ))
             })?;
+
+            // No FX authority exists: sizing, allocation caps and account
+            // equity are all denominated in the account currency, so an
+            // instrument quoted in another currency would be valued as if it
+            // were that currency. Refuse instead of mixing currencies.
+            if economics.quote_currency != ACCOUNT_CURRENCY {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' is quoted in '{}' but the account currency is '{}'; \
+                     no FX conversion authority exists (currency_conversion_unsupported)",
+                    instrument.symbol, economics.quote_currency, ACCOUNT_CURRENCY
+                )));
+            }
 
             let min_trade_qty_micros =
                 economics.min_trade_qty_micros.ok_or_else(|| {
@@ -1991,6 +2012,45 @@ mod m6_trading_registry_snapshot_writer_tests {
 
     #[test]
     fn a3_4_order_json_qty_writer_and_runtime_reader_agree_on_fractional_qty() {
+    #[test]
+    fn non_account_currency_crypto_instrument_is_refused_not_valued_as_usd() {
+        // Same row shape as the admitted BTC/USD fixture, only the currency
+        // differs: the refusal must come from the currency check, not from
+        // any other registry rule.
+        let mut registry = btc_registry();
+        {
+            let row = &mut registry.instruments[0];
+            row.instrument_id = "crypto:GLOBAL:BTCEUR".to_string();
+            row.symbol = "BTC/EUR".to_string();
+            row.currency = "EUR".to_string();
+            row.quote_currency = Some("EUR".to_string());
+            row.broker_symbols = BTreeMap::from([("alpaca".to_string(), "BTC/EUR".to_string())]);
+            row.contract = Some(ContractDefinitionV2::CryptoPair {
+                base: "BTC".to_string(),
+                quote: "EUR".to_string(),
+            });
+        }
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTC/EUR",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                OrderInstrumentContextError::Rejected(message)
+                    if message.contains("currency_conversion_unsupported")
+                        && message.contains("'EUR'")
+            ),
+            "{err:?}"
+        );
+    }
+
         let registry = btc_registry();
         let context = resolve_order_instrument_context_from_registry(
             &registry,
