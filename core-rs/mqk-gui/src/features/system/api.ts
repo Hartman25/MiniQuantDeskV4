@@ -14,6 +14,7 @@
 import { withClassifiedPanelSources } from "./sourceAuthority";
 import { parseIncidents } from "./incidentContract";
 import { parseMetricsDashboard } from "./metricsContract";
+import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from "./alertContract";
 import {
   enforceRunScopeConsistency,
   parseDurablePortfolioPositions,
@@ -561,7 +562,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       if (wrapper.truth_state !== "active") {
         return { ok: false, endpoint: r.endpoint, error: "alerts_truth_unavailable" };
       }
-      return { ok: true, endpoint: r.endpoint, data: mapActiveAlertsResponse(wrapper) };
+      const rows = parseActiveAlerts(wrapper);
+      return rows === null ? { ok: false, endpoint: r.endpoint, error: "alerts_contract_invalid" } : { ok: true, endpoint: r.endpoint, data: rows };
     })(),
     // events/feed: daemon returns EventsFeedResponse wrapper (not a bare array).
     // truth_state "backend_unavailable" = no DB pool → fail closed (empty feed must not
@@ -633,23 +635,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     })(),
     // A4: alerts/triage — mounted; truth_state "alerts_no_triage" (source real, lifecycle not).
     // Map daemon triage rows → AlertTriageRow[]. Passes ok:true because the alert source is real.
-    (async (): Promise<EndpointFetchResult<AlertTriageRow[]>> => {
+    (async (): Promise<EndpointFetchResult<AlertTriageSnapshot>> => {
       const r = await fetchJsonCandidate<AlertTriageWrapper>("/api/v1/alerts/triage");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      const w = r.data as AlertTriageWrapper;
-      const rows: AlertTriageRow[] = (w.rows ?? []).map((row) => ({
-        alert_id: row.alert_id,
-        severity: row.severity as AlertTriageRow["severity"],
-        status: row.status as AlertTriageRow["status"],
-        title: row.title,
-        domain: row.domain,
-        linked_incident_id: row.linked_incident_id,
-        linked_order_id: row.linked_order_id,
-        linked_strategy_id: row.linked_strategy_id,
-        created_at: row.created_at,
-        assigned_to: row.assigned_to,
-      }));
-      return { ok: true, endpoint: r.endpoint, data: rows };
+      const data = parseAlertTriage(r.data);
+      return data === null ? { ok: false, endpoint: r.endpoint, error: "alert_triage_contract_invalid" } : { ok: true, endpoint: r.endpoint, data };
     })(),
     fetchJsonCandidates<SessionStateSummary>(["/api/v1/system/session"]),
     fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
@@ -1361,7 +1351,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     transport: useObject("transport", transportR, unavailableTransport),
     incidents: useArray("incidents", incidentsR, []),
     replaceCancelChains: useArray("replaceCancelChains", replaceCancelChainsR, []),
-    alertTriage: useArray("alertTriage", alertTriageR, []),
+    alertTriage: alertTriageR.ok ? alertTriageR.data?.rows ?? [] : [],
+    alertTriageTruth: alertTriageR.ok && alertTriageR.data
+      ? { truth_state: alertTriageR.data.truth_state, note: alertTriageR.data.note }
+      : { truth_state: "unavailable", note: alertTriageR.error ?? "Acknowledgement and incident linkage unavailable" },
     sessionState: useObject("sessionState", sessionStateR, unavailableSessionState),
     configFingerprint: useObject("configFingerprint", configFingerprintR, unavailableConfigFingerprint),
     marketDataQuality: useObject("marketDataQuality", marketDataQualityR, unavailableMarketDataQuality),

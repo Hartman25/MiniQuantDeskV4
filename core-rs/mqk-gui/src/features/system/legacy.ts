@@ -834,6 +834,8 @@ function deriveAlertDomain(faultClass: string): OperatorAlert["domain"] {
 
 export function mapActiveAlertsResponse(wrapper: ActiveAlertsWrapper): OperatorAlert[] {
   return (wrapper.rows ?? []).map((row) => ({
+    source: row.source,
+    fault_class: row.class,
     id: row.alert_id,
     severity: row.severity as Severity,
     title: row.summary,

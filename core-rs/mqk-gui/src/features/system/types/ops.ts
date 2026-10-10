@@ -6,6 +6,8 @@
 import type { ActionLevel, EnvironmentMode, OperatorTimelineCategory, Severity } from "./core";
 
 export interface OperatorAlert {
+  source?: string;
+  fault_class?: string;
   id: string;
   severity: Severity;
   title: string;
@@ -86,7 +88,9 @@ export interface AlertTriageRow {
   linked_incident_id: string | null;
   linked_order_id: string | null;
   linked_strategy_id: string | null;
-  created_at: string;
+  /** Backend field is the acknowledgement timestamp, not alert creation. */
+  created_at: string | null;
+  linked_incident_status?: "open" | "resolved" | null;
   assigned_to: string | null;
 }
 

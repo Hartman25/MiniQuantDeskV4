@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
@@ -7,236 +8,71 @@ import { selectHaltEvents } from "../system/haltSummary";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
-// The events feed is fail-closed: when backend_unavailable, api.ts places
-// /api/v1/events/feed in missingEndpoints and model.feed === [].
-// We check missingEndpoints to distinguish "genuinely empty" from "backend down".
-const FEED_ENDPOINT = "/api/v1/events/feed" as const;
-
-const STATUS_PRIORITY: Record<string, number> = { unacked: 0, escalated: 1, acked: 2, silenced: 3 };
-const SEVERITY_PRIORITY: Record<string, number> = { critical: 0, warning: 1, info: 2 };
-
-function statusStyle(status: string): string {
-  if (status === "unacked") return "state-critical";
-  if (status === "escalated") return "state-warning";
-  if (status === "acked") return "state-ok";
-  return "";
-}
-
-function severityStyle(severity: string): string {
-  if (severity === "critical") return "state-critical";
-  if (severity === "warning") return "state-warning";
-  return "";
-}
-
+const PRIORITY: Record<string, number> = { critical: 0, warning: 1, info: 2 };
 export function AlertsScreen({ model }: { model: SystemModel }) {
+  const [query, setQuery] = useState("");
+  const [severity, setSeverity] = useState("all");
   const truthState = panelTruthRenderState(model, "alerts");
   if (truthState !== null) return <TruthStateNotice state={truthState} />;
-
-  const triage = [...model.alertTriage].sort((a, b) => {
-    const sd = (STATUS_PRIORITY[a.status] ?? 9) - (STATUS_PRIORITY[b.status] ?? 9);
-    if (sd !== 0) return sd;
-    return (SEVERITY_PRIORITY[a.severity] ?? 9) - (SEVERITY_PRIORITY[b.severity] ?? 9);
-  });
-
-  const unacked = triage.filter((r) => r.status === "unacked");
-  const escalated = triage.filter((r) => r.status === "escalated");
-  const managed = triage.filter((r) => r.status === "acked" || r.status === "silenced");
-  const needsAction = triage.filter((r) => r.status === "unacked" || r.status === "escalated");
-  const ownerGaps = unacked.filter((r) => r.assigned_to == null);
-  const hasCriticalAction = needsAction.some((r) => r.severity === "critical");
-
-  // Raw alerts not yet covered by any triage row — incoming but unmanaged.
-  const triageIds = new Set(model.alertTriage.map((r) => r.alert_id));
-  const untriaged = model.alerts.filter((a) => !triageIds.has(a.id));
-
-  // Halt history — orchestrator_halt rows from the events feed, newest first.
-  const haltEvents = selectHaltEvents(model.feed);
-
+  const triageAvailable = model.alertTriageTruth?.truth_state === "active";
+  const triage = new Map(model.alertTriage.map((row) => [row.alert_id, row]));
+  const alerts = model.alerts.filter((row) => (severity === "all" || row.severity === severity) &&
+    [row.id, row.title, row.message, row.source, row.domain].join(" ").toLowerCase().includes(query.toLowerCase()))
+    .sort((a, b) => PRIORITY[a.severity] - PRIORITY[b.severity] || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const halts = selectHaltEvents(model.feed);
+  const feedAvailable = model.dataSource.realEndpoints.includes("/api/v1/events/feed");
   return (
     <div className="screen-grid desk-screen-grid">
-
-      {/* Triage posture header — action-gap focused, not raw severity distribution */}
       <div className="summary-grid summary-grid-four">
-        <StatCard
-          title="Needs Action"
-          value={String(needsAction.length)}
-          detail={`${unacked.length} unacked · ${escalated.length} escalated`}
-          tone={hasCriticalAction ? "bad" : needsAction.length > 0 ? "warn" : "good"}
-        />
-        <StatCard
-          title="Escalated"
-          value={String(escalated.length)}
-          detail="Pending escalation response"
-          tone={escalated.length > 0 ? "warn" : "neutral"}
-        />
-        <StatCard
-          title="Acknowledged"
-          value={String(triage.filter((r) => r.status === "acked").length)}
-          detail="Under management"
-          tone="neutral"
-        />
-        <StatCard
-          title="Ownership Gaps"
-          value={String(ownerGaps.length)}
-          detail="Unacked with no assigned owner"
-          tone={ownerGaps.length > 0 ? "warn" : "neutral"}
-        />
+        <StatCard title="Active fault signals" value={String(model.alerts.length)} detail="Acknowledged alerts remain active until the fault clears" tone={model.alerts.some((row) => row.severity === "critical") ? "bad" : model.alerts.length ? "warn" : "neutral"} />
+        <StatCard title="Critical" value={String(model.alerts.filter((row) => row.severity === "critical").length)} tone="neutral" />
+        <StatCard title="Acknowledgement source" value={triageAvailable ? "Reported by backend" : "Unavailable"} detail="Advisory annotation; does not resolve or suppress faults" tone="neutral" />
+        <StatCard title="Observation" value={formatDateTime(model.lastUpdatedAt)} detail="Browser observation; not first or latest occurrence" tone="neutral" />
       </div>
-
-      {/* Primary triage surface — unacked and escalated, sorted: critical before warning */}
-      <Panel
-        title="Action required — unacked and escalated"
-        subtitle={
-          needsAction.length === 0
-            ? "No alerts require immediate action."
-            : `${needsAction.length} alert${needsAction.length === 1 ? "" : "s"} need operator attention. Unacked before escalated, critical before warning.`
-        }
-      >
-        {needsAction.length === 0 ? (
-          <div className="empty-state">All alerts are acknowledged or silenced.</div>
-        ) : (
-          <div className="operator-timeline-stack">
-            {needsAction.map((row) => {
-              const linkage = [
-                row.linked_incident_id && `incident ${row.linked_incident_id}`,
-                row.linked_order_id && `order ${row.linked_order_id}`,
-                row.linked_strategy_id && `strategy ${row.linked_strategy_id}`,
-              ].filter(Boolean).join(" · ");
-
-              return (
-                <div key={row.alert_id} className={`operator-timeline-card severity-${row.severity}`}>
-                  <div className="operator-timeline-head">
-                    <strong>
-                      <span className={statusStyle(row.status)}>{row.status}</span>
-                      {" · "}
-                      <span className={severityStyle(row.severity)}>{row.severity}</span>
-                      {" — "}
-                      {row.title}
-                    </strong>
-                    <span className="alert-domain-badge">{row.domain}</span>
-                  </div>
-                  <div className="operator-timeline-meta">
-                    <span>
-                      {"owner: "}
-                      {row.assigned_to != null
-                        ? row.assigned_to
-                        : <span className="state-warning">unassigned</span>}
-                    </span>
-                    {linkage && <span>{linkage}</span>}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+      <Panel title="Active alerts and diagnostics" subtitle="GET /api/v1/alerts/active · current daemon fault signals · read-only">
+        <label>Search alerts <input value={query} onChange={(event) => setQuery(event.target.value)} /></label>{" "}
+        <label>Severity <select value={severity} onChange={(event) => setSeverity(event.target.value)}>
+          <option value="all">All</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option>
+        </select></label>
+        <p>{model.alertTriageTruth?.note ?? "Acknowledgement authority unavailable."}</p>
+        <p>First/latest occurrence, retention, and execution domain/account are not recorded by the active alert contract. Disappearance from this poll does not establish recovery.</p>
+        {alerts.length === 0 ? <div className="empty-state">{query || severity !== "all" ? "No matching active alerts." : "No current fault signals returned by the active source."}</div> :
+          <div className="operator-timeline-stack">{alerts.map((alert) => {
+            const annotation = triageAvailable ? triage.get(alert.id) : undefined;
+            const linked = annotation?.linked_incident_id;
+            return <details key={alert.id} id={`alert-${encodeURIComponent(alert.id)}`} className={`operator-timeline-card severity-${alert.severity}`}>
+              <summary>{alert.severity} · {alert.title} · {alert.id}</summary>
+              <dl>
+                <dt>Explanation / violated condition</dt><dd>{alert.message}</dd>
+                <dt>Source / subsystem</dt><dd>{alert.source ?? "Unavailable"} · {alert.domain}</dd>
+                <dt>Fault identity</dt><dd>{alert.fault_class ?? alert.id}</dd>
+                <dt>State</dt><dd>Present in the current active alert snapshot; advisory acknowledgement does not prove recovery.</dd>
+                <dt>Acknowledgement annotation</dt><dd>{annotation ? annotation.status : "Unavailable for this alert"}</dd>
+                <dt>Acknowledged at</dt><dd>{annotation?.status === "acked" ? formatDateTime(annotation.created_at) : "Unavailable"}</dd>
+                <dt>Incident evidence</dt><dd>{linked ? `${linked} · ${annotation?.linked_incident_status ?? "status unavailable"}` : "No authoritative linkage available"}</dd>
+                {linked && <dt>Case detail</dt>}{linked && <dd>{model.incidents.find((row) => row.incident_id === linked)?.title ?? "Incident detail unavailable in this observation; inspect Incidents by identity."}</dd>}
+                <dt>Next action</dt><dd>Investigate the named subsystem and evidence. Any runtime or case mutation requires an existing authorized operator workflow.</dd>
+              </dl>
+            </details>;
+          })}</div>}
       </Panel>
-
-      {/* Secondary — acked/silenced: already under management, no immediate action */}
-      {managed.length > 0 && (
-        <Panel
-          title="Under management — acked and silenced"
-          subtitle="No immediate action required. Monitor for escalation criteria changes."
-        >
-          <DataTable
-            rows={managed}
-            rowKey={(row) => row.alert_id}
-            columns={[
-              { key: "status", title: "Status", render: (row) => <span className={statusStyle(row.status)}>{row.status}</span> },
-              { key: "severity", title: "Sev", render: (row) => <span className={severityStyle(row.severity)}>{row.severity}</span> },
-              { key: "title", title: "Title", render: (row) => row.title },
-              { key: "domain", title: "Domain", render: (row) => row.domain },
-              { key: "incident", title: "Incident", render: (row) => row.linked_incident_id ?? "—" },
-              { key: "order", title: "Order", render: (row) => row.linked_order_id ?? "—" },
-              { key: "owner", title: "Owner", render: (row) => row.assigned_to ?? <span className="state-warning">—</span> },
-            ]}
-          />
-        </Panel>
-      )}
-
-      {/* Untriaged raw alerts — not yet under acknowledgment or escalation management */}
-      {untriaged.length > 0 && (
-        <Panel
-          title="Untriaged raw alerts"
-          subtitle="Alerts from the active surface with no triage row yet — not under acknowledgment or escalation management."
-        >
-          <DataTable
-            rows={untriaged}
-            rowKey={(row) => row.id}
-            columns={[
-              { key: "severity", title: "Sev", render: (row) => <span className={severityStyle(row.severity)}>{row.severity}</span> },
-              { key: "domain", title: "Domain", render: (row) => row.domain },
-              { key: "title", title: "Title", render: (row) => row.title },
-              { key: "message", title: "Message", render: (row) => row.message },
-            ]}
-          />
-        </Panel>
-      )}
-
-      {/* GUI-ALERTS-HALT-HISTORY-FILTER-SURFACE-01: Halt history — orchestrator_halt
-          rows pulled out of the events feed so operators don't have to read the
-          full mixed feed to find recent halts. Same fail-closed truth handling
-          as the raw feed panel below: backend_unavailable is shown explicitly,
-          never as an empty/healthy halt history. */}
-      <Panel
-        title="Halt history"
-        subtitle={
-          model.dataSource.missingEndpoints.includes(FEED_ENDPOINT)
-            ? "backend_unavailable — halt history not accessible"
-            : `Latest ${haltEvents.length} orchestrator_halt event${haltEvents.length === 1 ? "" : "s"} from the events feed (newest first)`
-        }
-      >
-        {model.dataSource.missingEndpoints.includes(FEED_ENDPOINT) ? (
-          <div className="unavailable-notice unavailable-critical">
-            Events feed backend unavailable. Halt history is NOT authoritative — do not read as "no halts".
-          </div>
-        ) : haltEvents.length === 0 ? (
-          <div className="empty-state">No orchestrator halt events in the current feed.</div>
-        ) : (
-          <DataTable
-            rows={haltEvents}
-            rowKey={(row) => row.id}
-            columns={[
-              { key: "at", title: "Time", render: (row) => formatDateTime(row.at) },
-              { key: "severity", title: "Severity", render: (row) => <span className={severityStyle(row.severity)}>{row.severity}</span> },
-              { key: "text", title: "Reason / detail", render: (row) => row.text },
-              { key: "run_id", title: "Run ID", render: (row) => row.run_id ?? "—" },
-              { key: "audit_event_id", title: "Audit event ID", render: (row) => row.audit_event_id ?? "—" },
-            ]}
-          />
-        )}
+      <Panel title="Halt history" subtitle="Bounded events/feed observation · newest first · history completeness unavailable">
+        {!feedAvailable ? <div className="unavailable-notice">Events feed unavailable. Halt history is unknown.</div> : halts.length === 0 ? <div className="empty-state">No halt rows in the current bounded feed.</div> :
+          <DataTable rows={halts} rowKey={(row) => row.id} columns={[
+            { key: "at", title: "Time", render: (row) => formatDateTime(row.at) },
+            { key: "detail", title: "Evidence", render: (row) => row.text },
+            { key: "run", title: "Run", render: (row) => row.run_id ?? "Unavailable" },
+            { key: "audit", title: "Audit ID", render: (row) => row.audit_event_id ?? "Unavailable" },
+          ]} />}
       </Panel>
-
-      {/* Supporting context only — not the triage surface.
-          GUI-OPS-03: Events feed panel — explicit truth notice when backend unavailable.
-          feed is fail-closed: api.ts places endpoint in missingEndpoints on backend_unavailable,
-          so model.feed === [] even when daemon has recorded events. Operator must see this
-          distinction rather than "no events" appearing authoritative. */}
-      <Panel
-        title="System events feed — context only"
-        subtitle={
-          model.dataSource.missingEndpoints.includes(FEED_ENDPOINT)
-            ? "backend_unavailable — event history not accessible"
-            : `postgres.runs + postgres.audit_events (${model.feed.length} events) — chronological record; use Operator Timeline for full session history`
-        }
-      >
-        {model.dataSource.missingEndpoints.includes(FEED_ENDPOINT) ? (
-          <div className="unavailable-notice unavailable-critical">
-            Events feed backend unavailable. Empty feed is NOT authoritative — do not read as "no events".
-          </div>
-        ) : model.feed.length === 0 ? (
-          <div className="empty-state">No system events recorded yet.</div>
-        ) : (
-          <DataTable
-            rows={model.feed}
-            rowKey={(row) => row.id}
-            columns={[
-              { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
-              { key: "source", title: "Source", render: (row) => row.source },
-              { key: "severity", title: "Severity", render: (row) => <span className={severityStyle(row.severity)}>{row.severity}</span> },
-              { key: "text", title: "Event", render: (row) => row.text },
-            ]}
-          />
-        )}
+      <Panel title="System events feed — context only" subtitle="Bounded durable events; use Operator Timeline for its separate bounded lifecycle projection">
+        {!feedAvailable ? <div className="unavailable-notice">Event history unavailable; empty rows are not authoritative.</div> :
+          <DataTable rows={model.feed} rowKey={(row) => row.id} columns={[
+            { key: "at", title: "Time", render: (row) => formatDateTime(row.at) },
+            { key: "id", title: "Identity", render: (row) => row.id },
+            { key: "source", title: "Source", render: (row) => row.source },
+            { key: "detail", title: "Evidence", render: (row) => row.text },
+          ]} />}
       </Panel>
     </div>
   );

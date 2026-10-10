@@ -342,6 +342,7 @@ export interface SystemModel {
   incidents: IncidentCase[];
   replaceCancelChains: ReplaceCancelChainRow[];
   alertTriage: AlertTriageRow[];
+  alertTriageTruth?: { truth_state: "active" | "no_db" | "unavailable"; note: string };
   sessionState: SessionStateSummary;
   configFingerprint: ConfigFingerprintSummary;
   marketDataQuality: MarketDataQualitySummary;
