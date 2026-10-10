@@ -47,7 +47,7 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 # (no DB table, no migration, no fixture) -- so for real RAW_UNADJUSTED
 # registered data, this module is DESIGNED to fail closed until that source
 # exists. See docs/research/Research_Backtest_V1_Closeout_Audit.md for the
-# P8 PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED status this implies.
+# P8 PARTIAL â€” CORPORATE_ACTION_SOURCE_REQUIRED status this implies.
 #
 # BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-02 (independent-review repair):
 #   - Defect 1: a manifest's STRUCTURAL validity (require_registered_
@@ -129,6 +129,7 @@ _TRUSTED_EXTRACTOR_IDS: FrozenSet[str] = frozenset(
         # attestation_content). Do not reinterpret a V1 attestation as V2.
         "mqk_research.data.alpaca_historical.v1",
         "mqk_research.data.alpaca_historical.v2",
+        "mqk_research.data.alpaca_historical.v3",
     }
 )
 
@@ -144,7 +145,8 @@ _TRUSTED_EXTRACTOR_IDS: FrozenSet[str] = frozenset(
 # regardless of what NEW attestations now also carry. Kept in sync by
 # test_alpaca_historical.py::test_v2_extractor_ids_match_bars_provenance_mirror.
 _V2_PLUS_EXTRACTOR_IDS: FrozenSet[str] = frozenset(
-    {"mqk_research.data.alpaca_historical.v2", "mqk_research.data.alpaca_historical.diagnostic_v2"}
+    {"mqk_research.data.alpaca_historical.v2", "mqk_research.data.alpaca_historical.diagnostic_v2",
+     "mqk_research.data.alpaca_historical.v3", "mqk_research.data.alpaca_historical.diagnostic_v3"}
 )
 
 # BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01-REPAIR-01 (F1): the EXACT CA
@@ -467,8 +469,12 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
         "extractor_id": attestation.get("extractor_id"),
         "source_authority": attestation.get("source_authority"),
         "api_endpoint_bars": attestation.get("api_endpoint_bars"),
-        "api_endpoint_corporate_actions": attestation.get("api_endpoint_corporate_actions"),
-        "symbols": sorted({str(s).strip().upper() for s in attestation.get("symbols") or []}),
+        "api_endpoint_corporate_actions": attestation.get(
+            "api_endpoint_corporate_actions"
+        ),
+        "symbols": sorted(
+            {str(s).strip().upper() for s in attestation.get("symbols") or []}
+        ),
         "requested_start_utc": attestation.get("requested_start_utc"),
         "requested_end_utc": attestation.get("requested_end_utc"),
         "returned_coverage_start_utc": attestation.get("returned_coverage_start_utc"),
@@ -477,17 +483,27 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
         "feed": attestation.get("feed"),
         "asof": attestation.get("asof"),
         "pagination_complete_bars": attestation.get("pagination_complete_bars"),
-        "pagination_complete_corporate_actions": attestation.get("pagination_complete_corporate_actions"),
+        "pagination_complete_corporate_actions": attestation.get(
+            "pagination_complete_corporate_actions"
+        ),
         "corporate_action_query_coverage": canonical_ca_query_semantic_content(
             attestation.get("corporate_action_query_coverage")
         ),
         "category_b_events_found": attestation.get("category_b_events_found"),
         "canonical_semantic_bars_hash": attestation.get("canonical_semantic_bars_hash"),
-        "canonical_corporate_action_evidence_hash": attestation.get("canonical_corporate_action_evidence_hash"),
+        "canonical_corporate_action_evidence_hash": attestation.get(
+            "canonical_corporate_action_evidence_hash"
+        ),
         "protocol_version": attestation.get("protocol_version"),
     }
     if attestation.get("extractor_id") in _V2_PLUS_EXTRACTOR_IDS:
         content["ca_resolution_policy_id"] = attestation.get("ca_resolution_policy_id")
+    from mqk_research.data.historical import V3_EXTRACTORS
+
+    if attestation.get("extractor_id") in V3_EXTRACTORS:
+        content["historical_data_contract_id"] = attestation.get(
+            "historical_data_contract_id"
+        )
     return content
 
 
@@ -525,6 +541,7 @@ def build_source_attestation(
     retrieval_timestamp_utc: str,
     protocol_version: str = "1",
     ca_resolution_policy_id: Optional[str] = None,
+    historical_data_contract_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Pure assembly of one durable, content-addressed source attestation
     (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) -- the evidence a trusted
@@ -566,7 +583,9 @@ def build_source_attestation(
         "feed": feed,
         "asof": asof,
         "pagination_complete_bars": bool(pagination_complete_bars),
-        "pagination_complete_corporate_actions": bool(pagination_complete_corporate_actions),
+        "pagination_complete_corporate_actions": bool(
+            pagination_complete_corporate_actions
+        ),
         "corporate_action_query_coverage": corporate_action_query_coverage,
         "category_b_events_found": list(category_b_events_found),
         "raw_response_content_hashes": raw_response_content_hashes,
@@ -576,6 +595,8 @@ def build_source_attestation(
         "retrieval_timestamp_utc": retrieval_timestamp_utc,
         "ca_resolution_policy_id": ca_resolution_policy_id,
     }
+    if historical_data_contract_id is not None:
+        attestation["historical_data_contract_id"] = historical_data_contract_id
     attestation["attestation_id"] = source_attestation_id(attestation)
     return attestation
 
@@ -964,7 +985,7 @@ def provenance_identity_fragment(manifest: Dict[str, Any]) -> Dict[str, Any]:
     derived id only, not the full attestation object -- so which trusted
     extraction produced an adjusted-data candidate is part of its identity,
     the same way corporate_action_evidence_id already is."""
-    return {
+    fragment = {
         "schema_version": manifest["schema_version"],
         "provider_ids_observed": manifest["provider_ids_observed"],
         "resolved_close_column": manifest["resolved_close_column"],
@@ -980,6 +1001,15 @@ def provenance_identity_fragment(manifest: Dict[str, Any]) -> Dict[str, Any]:
         "canonical_semantic_bars_hash": manifest["canonical_semantic_bars_hash"],
         "source_attestation_id": manifest.get("source_attestation_id"),
     }
+
+    if "historical_data_contract_id" in manifest:
+        fragment["historical_data_contract_id"] = manifest[
+            "historical_data_contract_id"
+        ]
+        if manifest.get("timeframe") in _DAILY_TRANSPORT_LABELS:
+            fragment["timeframe"] = DAILY_SEMANTIC_TIMEFRAME
+            fragment["timeframe_identity"] = TIMEFRAME_IDENTITY_CANONICAL_SEMANTIC_V1
+    return fragment
 
 
 TIMEFRAME_IDENTITY_CANONICAL_SEMANTIC_V1 = "canonical_semantic_v1"
@@ -1093,6 +1123,10 @@ def require_bars_match_manifest(bars: pd.DataFrame, manifest: Dict[str, Any]) ->
             "to evaluate bars data under a manifest that does not describe it"
         )
 
+    from mqk_research.data.historical import verify_historical_contract
+
+    verify_historical_contract(bars, manifest)
+
     actual_symbols = sorted({str(s).strip().upper() for s in bars["symbol"].unique()})
     declared_symbols = list(manifest.get("symbol_universe") or [])
     if actual_symbols != declared_symbols:
@@ -1132,10 +1166,19 @@ def require_bars_match_manifest(bars: pd.DataFrame, manifest: Dict[str, Any]) ->
     # not rejected here -- this system does not carry an independent
     # granularity authority beyond what the bars themselves can prove.
     if manifest.get("timeframe") in _DAILY_TIMEFRAME_LABELS:
-        def _at_midnight(ts: pd.Series) -> pd.Series:
-            return (ts.dt.hour == 0) & (ts.dt.minute == 0) & (ts.dt.second == 0) & (ts.dt.microsecond == 0)
 
-        sub_day = ~(_at_midnight(actual_ts) | _at_midnight(actual_ts.dt.tz_convert("America/New_York")))
+        def _at_midnight(ts: pd.Series) -> pd.Series:
+            return (
+                (ts.dt.hour == 0)
+                & (ts.dt.minute == 0)
+                & (ts.dt.second == 0)
+                & (ts.dt.microsecond == 0)
+            )
+
+        sub_day = ~(
+            _at_midnight(actual_ts)
+            | _at_midnight(actual_ts.dt.tz_convert("America/New_York"))
+        )
         if bool(sub_day.any()):
             raise BarsProvenanceContentMismatch(
                 f"Fail-closed: manifest declares daily timeframe={manifest.get('timeframe')!r} but actual "

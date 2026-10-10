@@ -684,7 +684,13 @@ def run_phase1_equity(policy_path: Path, asof_utc: pd.Timestamp, pg_url: str, ou
 
 
 def run_alpaca_research_extraction(
-    *, symbols_csv: str, start_utc: pd.Timestamp, end_utc: pd.Timestamp, timeframe: str, asof: str, out_root: Path
+    *,
+    symbols_csv: str,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    timeframe: str,
+    asof: str,
+    out_root: Path,
 ) -> Path:
     """BKT-RESEARCH-MARKET-DATA-AUTHORITY-01: thin CLI wrapper around the
     OFFICIAL mqk_research.data.alpaca_historical.extract_research_bars_with_provenance
@@ -707,13 +713,21 @@ def run_alpaca_research_extraction(
         raise ValueError("--symbols must be non-empty (comma-separated)")
 
     result = extract_research_bars_with_provenance(
-        symbols=symbols, start_utc=start_utc, end_utc=end_utc, timeframe=timeframe, asof=asof
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        timeframe=timeframe,
+        asof=asof,
+    )
+
+    from mqk_research.data.bars_provenance import (
+        provenance_identity_fragment_canonical_timeframe,
     )
 
     run_id = stable_run_id(
-        "alpaca_research_extract_v1",
-        start_utc.isoformat(),
-        {"symbols": symbols, "start_utc": start_utc.isoformat(), "end_utc": end_utc.isoformat(), "timeframe": timeframe},
+        "alpaca_research_extract_v2",
+        result["manifest"]["start_utc"],
+        provenance_identity_fragment_canonical_timeframe(result["manifest"]),
     )
     run_dir = out_root / run_id
     write_research_extraction_artifacts(run_dir, result)

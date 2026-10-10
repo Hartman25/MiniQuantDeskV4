@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
@@ -247,7 +248,8 @@ EXTRACTOR_ID_V1_LEGACY = "mqk_research.data.alpaca_historical.v1"
 # even when the underlying OHLC bars are byte-identical to a V1 extraction
 # of the same window. See resolution_policy_fingerprint / bars_provenance.
 # canonical_source_attestation_content's ca_resolution_policy_id handling.
-EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v2"
+# V3 binds the full OHLCV historical contract; legacy v1/v2 remain verifiable.
+EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v3"
 
 # Explicitly UNtrusted diagnostic identity (Defect 3), bumped alongside
 # EXTRACTOR_ID (V2-01) for the same reason -- the diagnostic path runs the
@@ -256,7 +258,7 @@ EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v2"
 # bars_provenance._TRUSTED_EXTRACTOR_IDS or SOURCE_AUTHORITY_OFFICIAL_PROVIDER
 # regardless of what transport/base_url a caller injects. Minted only by
 # extract_research_bars_with_provenance_diagnostic.
-DIAGNOSTIC_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v2"
+DIAGNOSTIC_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v3"
 
 _ASOF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -650,8 +652,12 @@ def _require_resolved_asof(asof: str) -> str:
     """Fail-closed format check for a caller-RESOLVED asof date (Defect 2):
     must be an explicit YYYY-MM-DD, never None/empty -- this module never
     falls back to Alpaca's implicit current-day default."""
-    if not asof or not _ASOF_RE.match(asof):
+    if not isinstance(asof, str) or not _ASOF_RE.fullmatch(asof):
         raise ValueError(f"asof must be an explicit 'YYYY-MM-DD' date string, got {asof!r}")
+    try:
+        pd.Timestamp(asof)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("asof must be a valid calendar date") from exc
     return asof
 
 
@@ -695,6 +701,7 @@ def _fetch_all_pages(
     hashes: List[str] = []
     params = dict(base_params)
     page_token: Optional[str] = None
+    seen_tokens: set[str] = set()
     for _ in range(max_pages):
         if page_token:
             params["page_token"] = page_token
@@ -711,11 +718,20 @@ def _fetch_all_pages(
             raise AlpacaHistoricalExtractionError(
                 f"Alpaca API response JSON decode failed: endpoint={endpoint_url}: {exc}"
             ) from exc
+        if not isinstance(payload, dict):
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca API response must be a JSON object"
+            )
         pages.append(payload)
         hashes.append(sha256_json(payload))
         page_token = payload.get("next_page_token")
-        if not page_token:
+        if page_token is None or page_token == "":
             return pages, True, hashes
+        if not isinstance(page_token, str) or page_token in seen_tokens:
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca API pagination did not terminate: invalid or repeated token"
+            )
+        seen_tokens.add(page_token)
     raise AlpacaHistoricalExtractionError(
         f"Alpaca API pagination did not terminate within max_pages={max_pages}: endpoint={endpoint_url} "
         "-- refusing to return a possibly-incomplete result"
@@ -776,7 +792,10 @@ def fetch_historical_bars(
     }
     endpoint_url = f"{base_url}{BARS_PATH}"
     pages, complete, page_hashes = _fetch_all_pages(
-        endpoint_url=endpoint_url, base_params=base_params, credentials=creds, http_get=getter
+        endpoint_url=endpoint_url,
+        base_params=base_params,
+        credentials=creds,
+        http_get=getter,
     )
 
     rows: List[Dict[str, Any]] = []
@@ -786,25 +805,67 @@ def fetch_historical_bars(
             raise AlpacaHistoricalExtractionError(
                 f"Alpaca bars response missing required 'bars' key: endpoint={endpoint_url}"
             )
+        if not isinstance(bars_by_symbol, dict):
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca bars must be an object keyed by symbol"
+            )
         for sym, bar_list in bars_by_symbol.items():
-            for b in bar_list or []:
-                ts = pd.Timestamp(b["t"])
-                ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+            symbol = str(sym).strip().upper()
+            if symbol not in symbols_norm:
+                raise AlpacaHistoricalExtractionError(
+                    f"Alpaca returned unexpected symbol {symbol!r}"
+                )
+            if not isinstance(bar_list, list):
+                raise AlpacaHistoricalExtractionError(
+                    f"Alpaca bars for {symbol!r} must be a list"
+                )
+            for b in bar_list:
+                try:
+                    if not isinstance(b, dict):
+                        raise ValueError("bar must be an object")
+                    if not isinstance(b.get("t"), str):
+                        raise ValueError(
+                            "timestamp must be an explicit timezone-aware string"
+                        )
+                    ts = pd.Timestamp(b["t"])
+                    if pd.isna(ts) or ts.tzinfo is None:
+                        raise ValueError("timestamp must have an explicit timezone")
+                    if not start_utc <= ts < end_utc:
+                        continue
+                    values = {}
+                    for key, field in (
+                        ("o", "open"),
+                        ("h", "high"),
+                        ("l", "low"),
+                        ("c", "close"),
+                        ("v", "volume"),
+                    ):
+                        if isinstance(b.get(key), bool):
+                            raise ValueError(f"invalid {field}")
+                        value = float(b[key])
+                        if not np.isfinite(value):
+                            raise ValueError(f"non-finite {field}")
+                        if value < 0 if key == "v" else value <= 0:
+                            raise ValueError(f"invalid {field}")
+                        values[field] = value
+                    if not (
+                        values["low"] <= values["open"] <= values["high"]
+                        and values["low"] <= values["close"] <= values["high"]
+                    ):
+                        raise ValueError("inconsistent OHLC range")
+                    if "is_complete" in b and b["is_complete"] is not True:
+                        raise ValueError("bar is not finalized")
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise AlpacaHistoricalExtractionError(
+                        f"Alpaca invalid bar for {symbol!r}: missing/invalid fields: {exc}"
+                    ) from exc
                 rows.append(
-                    {
-                        "symbol": str(sym).strip().upper(),
-                        "end_ts": ts,
-                        "open": float(b["o"]),
-                        "high": float(b["h"]),
-                        "low": float(b["l"]),
-                        "close": float(b["c"]),
-                        "volume": float(b.get("v", 0.0)),
-                    }
+                    {"symbol": symbol, "end_ts": ts.tz_convert("UTC"), **values}
                 )
 
     if not rows:
         raise AlpacaHistoricalExtractionError(
-            f"Alpaca returned zero bars for symbols={symbols_norm} window=[{start_utc.isoformat()}, "
+            f"Alpaca returned zero bars: none fall inside the internal window for symbols={symbols_norm} window=[{start_utc.isoformat()}, "
             f"{end_utc.isoformat()})"
         )
 
@@ -828,12 +889,18 @@ def fetch_historical_bars(
     for col in ("open", "high", "low", "close"):
         values = df[col].to_numpy(dtype=float)
         if not np.isfinite(values).all():
-            raise AlpacaHistoricalExtractionError(f"Alpaca bars contain non-finite {col!r} values")
+            raise AlpacaHistoricalExtractionError(
+                f"Alpaca bars contain non-finite {col!r} values"
+            )
 
     dup_mask = df.duplicated(subset=["symbol", "end_ts"], keep=False)
     if bool(dup_mask.any()):
-        dup_rows = df.loc[dup_mask, ["symbol", "end_ts"]].drop_duplicates().to_dict("records")
-        raise AlpacaHistoricalExtractionError(f"Alpaca bars contain duplicate (symbol,end_ts) rows: {dup_rows}")
+        dup_rows = (
+            df.loc[dup_mask, ["symbol", "end_ts"]].drop_duplicates().to_dict("records")
+        )
+        raise AlpacaHistoricalExtractionError(
+            f"Alpaca bars contain duplicate (symbol,end_ts) rows: {dup_rows}"
+        )
 
     df = df.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
     df["end_ts"] = df["end_ts"].map(lambda t: t.isoformat())
@@ -841,7 +908,9 @@ def fetch_historical_bars(
     present = set(df["symbol"].unique().tolist())
     missing = sorted(set(symbols_norm) - present)
     if missing:
-        raise AlpacaHistoricalExtractionError(f"Alpaca returned no bars at all for symbol(s): {missing}")
+        raise AlpacaHistoricalExtractionError(
+            f"Alpaca returned no bars at all for symbol(s): {missing}"
+        )
 
     meta: Dict[str, Any] = {
         "pagination_complete": complete,
@@ -970,7 +1039,9 @@ def fetch_corporate_actions(
     creds = credentials or load_alpaca_credentials()
     getter = http_get or _default_http_get
 
-    requested_types = sorted({t.strip() for t in (types or KNOWN_CORPORATE_ACTION_TYPES) if t.strip()})
+    requested_types = sorted(
+        {t.strip() for t in (types or KNOWN_CORPORATE_ACTION_TYPES) if t.strip()}
+    )
     unknown_types = sorted(set(requested_types) - KNOWN_CORPORATE_ACTION_TYPES)
     if unknown_types:
         raise ValueError(f"Unknown corporate action type(s) requested: {unknown_types}")
@@ -987,7 +1058,10 @@ def fetch_corporate_actions(
     }
     endpoint_url = f"{base_url}{CORPORATE_ACTIONS_PATH}"
     pages, complete, page_hashes = _fetch_all_pages(
-        endpoint_url=endpoint_url, base_params=base_params, credentials=creds, http_get=getter
+        endpoint_url=endpoint_url,
+        base_params=base_params,
+        credentials=creds,
+        http_get=getter,
     )
 
     entries: List[Dict[str, Any]] = []
@@ -998,6 +1072,10 @@ def fetch_corporate_actions(
                 f"Alpaca corporate-actions response missing required 'corporate_actions' key: "
                 f"endpoint={endpoint_url}"
             )
+        if not isinstance(ca, dict):
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca corporate_actions must be an object"
+            )
         unmapped_keys = sorted(set(ca.keys()) - set(_RESPONSE_KEY_TO_TYPE.keys()))
         if unmapped_keys:
             raise AlpacaHistoricalExtractionError(
@@ -1007,7 +1085,14 @@ def fetch_corporate_actions(
                 "_SYMBOL_FIELDS_BY_TYPE against current Alpaca documentation first"
             )
         for response_key, action_type in _RESPONSE_KEY_TO_TYPE.items():
-            for raw in ca.get(response_key) or []:
+            bucket = ca.get(response_key, [])
+            if not isinstance(bucket, list) or any(
+                not isinstance(raw, dict) for raw in bucket
+            ):
+                raise AlpacaHistoricalExtractionError(
+                    f"Alpaca malformed corporate-actions bucket {response_key!r}"
+                )
+            for raw in bucket:
                 entries.extend(_effective_windows_for_entry(action_type, raw))
 
     meta: Dict[str, Any] = {
@@ -1358,7 +1443,9 @@ def _neutral_extract(
     }
 
 
-def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authority: str) -> Dict[str, Any]:
+def _mint_manifest(
+    neutral: Dict[str, Any], *, extractor_id: str, source_authority: str
+) -> Dict[str, Any]:
     """Mint the OFFICIAL or DIAGNOSTIC source attestation + bars provenance
     manifest from a _neutral_extract result (REPAIR-03 Defect 1):
     `extractor_id`/`source_authority` are supplied here, by the caller-facing
@@ -1370,6 +1457,14 @@ def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authori
     ca_meta = neutral["ca_meta"]
     evidence = neutral["evidence"]
 
+    from mqk_research.data.historical import build_historical_contract
+
+    historical_contract = build_historical_contract(
+        neutral["bars_df"],
+        timeframe=neutral["timeframe"],
+        asof=bars_meta["resolved_asof"],
+    )
+    historical_contract_id = sha256_json(historical_contract)
     attestation = build_source_attestation(
         source_provider_id="alpaca",
         extractor_id=extractor_id,
@@ -1404,6 +1499,7 @@ def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authori
         # canonical_source_attestation_content decides whether it actually
         # participates in a given attestation's identity.
         ca_resolution_policy_id=resolution_policy_fingerprint(),
+        historical_data_contract_id=historical_contract_id,
     )
 
     price_provenance = {
@@ -1433,6 +1529,9 @@ def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authori
         bars=neutral["bars_df"],
         source_attestation=attestation,
     )
+
+    manifest["historical_data_contract"] = historical_contract
+    manifest["historical_data_contract_id"] = historical_contract_id
 
     return {
         "bars": neutral["bars_df"],
@@ -1537,49 +1636,248 @@ def extract_research_bars_with_provenance_diagnostic(
     return _mint_manifest(neutral, extractor_id=DIAGNOSTIC_EXTRACTOR_ID, source_authority=SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC)
 
 
-def write_research_extraction_artifacts(run_dir: Path, result: Dict[str, Any]) -> Dict[str, Path]:
-    """Write the deterministic durable artifacts for one extraction result
-    (see extract_research_bars_with_provenance) into `run_dir`:
-    research_bars.csv, research_bars_provenance.json, corporate_actions.json,
-    corporate_actions_provenance.json. The manifest's `artifact_sha256`/
-    `row_count` (PHYSICAL file facts) are filled in from the file actually
-    written here -- distinct from `canonical_semantic_bars_hash` (the
-    CANONICAL SEMANTIC identity, already fixed at extraction time and never
-    changed by this function; see bars_provenance.canonical_semantic_bars_hash)."""
+_EXTRACTION_ARTIFACTS = {
+    "bars_csv": "research_bars.csv",
+    "bars_provenance_json": "research_bars_provenance.json",
+    "corporate_actions_json": "corporate_actions.json",
+    "corporate_actions_provenance_json": "corporate_actions_provenance.json",
+}
+_ARTIFACT_SET_VERSION = "research_extraction_artifact_set_v1"
+
+
+def _extraction_paths(run_dir):
+    return {key: Path(run_dir) / name for key, name in _EXTRACTION_ARTIFACTS.items()}
+
+
+@contextmanager
+def _extraction_publish_lock(run_dir):
+    """OS-owned nonblocking lock: process crashes release ownership, not the file."""
+    lock_path = run_dir.parent / f".{run_dir.name}.publish.lock"
+    if lock_path.is_symlink():
+        raise AlpacaHistoricalExtractionError("publication lock may not be a symlink")
+    with lock_path.open("a+b") as handle:
+        if handle.seek(0, 2) == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise AlpacaHistoricalExtractionError(
+                "dataset publication is busy; retry explicitly"
+            ) from exc
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _validate_extraction_result(result):
+    from mqk_research.data.bars_provenance import (
+        require_bars_match_manifest,
+        source_attestation_id,
+    )
+
+    manifest = result["manifest"]
+    require_bars_match_manifest(result["bars"], manifest)
+    attestation = manifest.get("source_attestation")
+    if not isinstance(attestation, dict) or source_attestation_id(
+        attestation
+    ) != manifest.get("source_attestation_id"):
+        raise AlpacaHistoricalExtractionError("source attestation checksum mismatch")
+    evidence = result["corporate_action_evidence"]
+    if corporate_action_evidence_id(evidence) != manifest.get(
+        "corporate_action_evidence_id"
+    ) or evidence != manifest.get("corporate_action_evidence"):
+        raise AlpacaHistoricalExtractionError(
+            "corporate action evidence checksum/content mismatch"
+        )
+    actual = sorted(result["corporate_action_entries"], key=sha256_json)
+    expected = sorted(evidence.get("corporate_action_entries") or [], key=sha256_json)
+    if actual != expected:
+        raise AlpacaHistoricalExtractionError(
+            "corporate action artifact entries mismatch"
+        )
+    if attestation.get("source_authority") == SOURCE_AUTHORITY_OFFICIAL_PROVIDER:
+        from mqk_research.data.bars_provenance import (
+            check_corporate_action_integrity,
+            require_registered_bars_provenance,
+        )
+
+        require_registered_bars_provenance(manifest)
+        check_corporate_action_integrity(result["bars"], manifest)
+
+
+def load_research_extraction_artifacts(run_dir: Path, *, historical_requirements=None):
+    """Integrity-checked local snapshot loading; never fetches or repairs data."""
+    paths = _extraction_paths(run_dir)
+    try:
+        if Path(run_dir).is_symlink() or any(
+            p.is_symlink() or not p.is_file() for p in paths.values()
+        ):
+            raise AlpacaHistoricalExtractionError(
+                "incomplete or unsafe extraction artifact set"
+            )
+        manifest = json.loads(paths["bars_provenance_json"].read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("artifact_set_version") != _ARTIFACT_SET_VERSION
+        ):
+            raise AlpacaHistoricalExtractionError(
+                "missing/unsupported complete artifact-set manifest"
+            )
+        integrity = manifest.get("manifest_integrity_sha256")
+        payload = {
+            key: value
+            for key, value in manifest.items()
+            if key != "manifest_integrity_sha256"
+        }
+        if integrity != sha256_json(payload):
+            raise AlpacaHistoricalExtractionError(
+                "manifest integrity checksum mismatch"
+            )
+        expected_files = set(_EXTRACTION_ARTIFACTS.values()) - {
+            "research_bars_provenance.json"
+        }
+        checksums = manifest.get("artifact_checksums")
+        if not isinstance(checksums, dict) or set(checksums) != expected_files:
+            raise AlpacaHistoricalExtractionError(
+                "incomplete artifact checksum inventory"
+            )
+        for name, digest in checksums.items():
+            if sha256_file(Path(run_dir) / name) != digest:
+                raise AlpacaHistoricalExtractionError(
+                    f"artifact checksum mismatch: {name}"
+                )
+        bars = pd.read_csv(paths["bars_csv"], float_precision="round_trip")
+        if (
+            type(manifest.get("row_count")) is not int
+            or len(bars) != manifest["row_count"]
+            or manifest.get("artifact_sha256") != checksums["research_bars.csv"]
+        ):
+            raise AlpacaHistoricalExtractionError(
+                "bars row count/artifact checksum mismatch"
+            )
+        evidence = json.loads(
+            paths["corporate_actions_provenance_json"].read_text(encoding="utf-8")
+        )
+        entries = json.loads(
+            paths["corporate_actions_json"].read_text(encoding="utf-8")
+        )["corporate_action_entries"]
+        result = {
+            "bars": bars,
+            "manifest": manifest,
+            "corporate_action_evidence": evidence,
+            "corporate_action_entries": entries,
+        }
+        _validate_extraction_result(result)
+        if historical_requirements is not None:
+            from mqk_research.data.historical import require_historical_dataset
+
+            result["qualification"] = require_historical_dataset(
+                bars, manifest, **historical_requirements
+            )
+        return result
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise AlpacaHistoricalExtractionError(
+            f"invalid extraction artifact set at {run_dir}: {type(exc).__name__}"
+        ) from exc
+
+
+def write_research_extraction_artifacts(
+    run_dir: Path, result: Dict[str, Any]
+) -> Dict[str, Path]:
+    """Publish a verified four-file set atomically; existing snapshots are immutable.
+
+    The deterministic sibling staging directory and OS lock are transport state,
+    never dataset identity. An interrupted writer is resumed under a new OS lock;
+    only the atomic directory rename makes a complete dataset visible.
+    """
+    from mqk_research.data.bars_provenance import provenance_identity_fragment
+    from mqk_research.data.historical import normalized_historical_bars
+
+    _validate_extraction_result(result)
     run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    bars_path = run_dir / "research_bars.csv"
-    manifest_path = run_dir / "research_bars_provenance.json"
-    ca_entries_path = run_dir / "corporate_actions.json"
-    ca_provenance_path = run_dir / "corporate_actions_provenance.json"
-
-    bars_out = result["bars"].sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
-    bars_out.to_csv(bars_path, index=False, lineterminator="\n")
-
-    manifest = dict(result["manifest"])
-    manifest["artifact_sha256"] = sha256_file(bars_path)
-    manifest["row_count"] = int(len(bars_out))
-    manifest_path.write_text(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-    )
-
-    ca_entries_path.write_text(
-        json.dumps(
-            {"corporate_action_entries": result["corporate_action_entries"]},
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-    ca_provenance_path.write_text(
-        json.dumps(result["corporate_action_evidence"], sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
-
-    return {
-        "bars_csv": bars_path,
-        "bars_provenance_json": manifest_path,
-        "corporate_actions_json": ca_entries_path,
-        "corporate_actions_provenance_json": ca_provenance_path,
-    }
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    if run_dir.is_symlink():
+        raise AlpacaHistoricalExtractionError(
+            "dataset destination may not be a symlink"
+        )
+    with _extraction_publish_lock(run_dir):
+        if run_dir.exists():
+            existing = load_research_extraction_artifacts(run_dir)
+            if provenance_identity_fragment(
+                existing["manifest"]
+            ) != provenance_identity_fragment(result["manifest"]):
+                raise AlpacaHistoricalExtractionError(
+                    "immutable dataset destination contains a different revision/policy; use a new destination"
+                )
+            return _extraction_paths(run_dir)
+        stage = run_dir.parent / f".{run_dir.name}.staging"
+        if stage.is_symlink():
+            raise AlpacaHistoricalExtractionError(
+                "staging directory may not be a symlink"
+            )
+        stage.mkdir(exist_ok=True)
+        if any(
+            p.name not in _EXTRACTION_ARTIFACTS.values()
+            or p.is_symlink()
+            or not p.is_file()
+            for p in stage.iterdir()
+        ):
+            raise AlpacaHistoricalExtractionError(
+                "unexpected staging contents; refusing recovery overwrite"
+            )
+        paths = _extraction_paths(stage)
+        normalized_historical_bars(result["bars"]).to_csv(
+            paths["bars_csv"], index=False, lineterminator="\n"
+        )
+        paths["corporate_actions_json"].write_text(
+            json.dumps(
+                {"corporate_action_entries": result["corporate_action_entries"]},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        paths["corporate_actions_provenance_json"].write_text(
+            json.dumps(
+                result["corporate_action_evidence"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        manifest = dict(result["manifest"])
+        manifest["artifact_sha256"] = sha256_file(paths["bars_csv"])
+        manifest["row_count"] = len(result["bars"])
+        manifest["artifact_set_version"] = _ARTIFACT_SET_VERSION
+        manifest["artifact_checksums"] = {
+            p.name: sha256_file(p)
+            for key, p in paths.items()
+            if key != "bars_provenance_json"
+        }
+        manifest.pop("manifest_integrity_sha256", None)
+        manifest["manifest_integrity_sha256"] = sha256_json(manifest)
+        paths["bars_provenance_json"].write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        for path in paths.values():
+            with path.open("r+b") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+        load_research_extraction_artifacts(stage)
+        os.rename(stage, run_dir)
+        return _extraction_paths(run_dir)
