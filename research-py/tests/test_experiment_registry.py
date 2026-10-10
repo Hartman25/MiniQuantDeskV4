@@ -25,8 +25,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mqk_research.exp_distributed.models import BatchSpec, DatasetFingerprint, JobSpec, WindowSpec
+from mqk_research.exp_distributed.models import (
+    BatchSpec,
+    DatasetFingerprint,
+    JobExecutionResult,
+    JobSpec,
+    WindowSpec,
+)
 from mqk_research.exp_distributed.registry_integration import build_candidate_trial_identity
+from mqk_research.exp_distributed import runner as exp_runner
 from mqk_research.exp_distributed.runner import default_db_path, rerun_failed_jobs, run_batch
 from mqk_research.exp_distributed.storage import ResearchResultStore
 from mqk_research.ml.eval_walkforward import WalkForwardSpec
@@ -1134,6 +1141,105 @@ def test_attempt_summary_matches_its_own_immutable_slice_snapshots(tmp_path):
         assert summary["failed_slices"] == sum(1 for s in slices if s["status"] != "succeeded")
         assert sorted(summary["job_ids"]) == sorted(s["job_id"] for s in slices)
         assert attempt["status"] == ("succeeded" if summary["failed_slices"] == 0 else "failed")
+
+
+class _FinalizeCaptureStore:
+    def __init__(self):
+        self.slice_snapshots = []
+        self.finalized = []
+
+    def record_attempt_slices(self, attempt_id, trial_id, snapshots):
+        self.slice_snapshots.append((attempt_id, trial_id, snapshots))
+
+    def finalize_attempt(self, attempt_id, *, status, result_summary, failure_reason):
+        self.finalized.append(
+            {
+                "attempt_id": attempt_id,
+                "status": status,
+                "result_summary": result_summary,
+                "failure_reason": failure_reason,
+            }
+        )
+
+
+def _mixed_slice_finalize_inputs(statuses):
+    fingerprint = DatasetFingerprint(
+        dataset_path="dataset.csv",
+        dataset_sha256="dataset-sha",
+        selection_sha256="selection-sha",
+        timeframe="1D",
+        symbols=["AAA"],
+        start_utc="2024-01-01T00:00:00Z",
+        end_utc="2024-01-31T00:00:00Z",
+    )
+    jobs = [
+        JobSpec(
+            job_id=f"job-{index}",
+            batch_id="batch-1",
+            job_index=index,
+            experiment_id="exp-1",
+            strategy_id="strategy-1",
+            params={},
+            symbols=["AAA"],
+            window=WindowSpec(
+                start_utc="2024-01-01T00:00:00Z",
+                end_utc="2024-01-31T00:00:00Z",
+                label=f"w{index}",
+            ),
+            dataset_fingerprint=fingerprint,
+        )
+        for index in (1, 2)
+    ]
+    results = [
+        JobExecutionResult(
+            job_id=f"job-{index}",
+            batch_id="batch-1",
+            status=status,
+            metrics={},
+            artifact_paths={},
+            failure_reason=None if status == "succeeded" else f"failure-{index}",
+        )
+        for index, status in enumerate(statuses, start=1)
+    ]
+    return jobs, results
+
+
+@pytest.mark.parametrize(
+    "statuses,failed_job",
+    [
+        (["failed", "succeeded"], "job-1"),
+        (["succeeded", "failed"], "job-2"),
+    ],
+)
+def test_mixed_slice_results_finalize_failed_with_aggregate_reason(monkeypatch, statuses, failed_job):
+    monkeypatch.setattr(
+        exp_runner,
+        "capture_artifact_evidence",
+        lambda _paths: {"artifact_files": {}, "artifact_metadata_sha256": None},
+    )
+    jobs, results = _mixed_slice_finalize_inputs(statuses)
+    store = _FinalizeCaptureStore()
+
+    exp_runner._finalize_candidate_attempts(
+        jobs,
+        results,
+        store,
+        {"job-1": "attempt-1", "job-2": "attempt-1"},
+        {"attempt-1": "trial-1"},
+        "full_batch",
+    )
+
+    finalized = store.finalized[0]
+    assert finalized["status"] == "failed"
+    assert failed_job in finalized["failure_reason"]
+    assert finalized["result_summary"] == {
+        "total_slices": 2,
+        "succeeded_slices": 1,
+        "failed_slices": 1,
+        "job_ids": ["job-1", "job-2"],
+    }
+    snapshots = store.slice_snapshots[0][2]
+    assert [snapshot["status"] for snapshot in snapshots] == statuses
 
 
 # ---------------------------------------------------------------------------

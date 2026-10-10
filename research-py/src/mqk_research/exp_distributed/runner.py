@@ -210,18 +210,22 @@ def _finalize_candidate_attempts(
         slice_results = [result_by_job_id[job_id] for job_id in job_ids if job_id in result_by_job_id]
         succeeded = [r for r in slice_results if r.status == "succeeded"]
         failed = [r for r in slice_results if r.status != "succeeded"]
-        status = "succeeded" if len(succeeded) == len(job_ids) else "failed"
-        failure_reason = None
-        if status == "failed":
+        aggregate_status = "succeeded" if len(succeeded) == len(job_ids) else "failed"
+        aggregate_failure_reason = None
+        if aggregate_status == "failed":
             reasons = [f"{r.job_id}: {r.failure_reason}" for r in failed if r.failure_reason]
-            failure_reason = "; ".join(reasons) if reasons else f"{len(failed)} of {len(job_ids)} evaluation slices failed"
+            aggregate_failure_reason = (
+                "; ".join(reasons)
+                if reasons
+                else f"{len(failed)} of {len(job_ids)} evaluation slices failed"
+            )
 
         slice_snapshots = []
         for job_id in job_ids:
             job = job_by_id.get(job_id)
             result = result_by_job_id.get(job_id)
-            status = result.status if result else "missing"
-            failure_reason = result.failure_reason if result else None
+            slice_status = result.status if result else "missing"
+            slice_failure_reason = result.failure_reason if result else None
             metrics = result.metrics if result else {}
             runtime_seconds = result.runtime_seconds if result else None
             artifact_paths = result.artifact_paths if result else {}
@@ -234,8 +238,8 @@ def _finalize_candidate_attempts(
             artifact_evidence = {
                 "attempt_id": attempt_id,
                 "job_id": job_id,
-                "status": status,
-                "failure_reason": failure_reason,
+                "status": slice_status,
+                "failure_reason": slice_failure_reason,
                 "metrics": metrics,
                 "runtime_seconds": runtime_seconds,
                 "source_artifact_paths": artifact_paths,
@@ -246,8 +250,8 @@ def _finalize_candidate_attempts(
                     "job_id": job_id,
                     "window_start_utc": job.window.start_utc if job else None,
                     "window_end_utc": job.window.end_utc if job else None,
-                    "status": status,
-                    "failure_reason": failure_reason,
+                    "status": slice_status,
+                    "failure_reason": slice_failure_reason,
                     "artifact_paths": artifact_paths,
                     "metrics": metrics,
                     "runtime_seconds": runtime_seconds,
@@ -259,14 +263,14 @@ def _finalize_candidate_attempts(
 
         store.finalize_attempt(
             attempt_id,
-            status=status,
+            status=aggregate_status,
             result_summary={
                 "total_slices": len(job_ids),
                 "succeeded_slices": len(succeeded),
                 "failed_slices": len(failed),
                 "job_ids": job_ids,
             },
-            failure_reason=failure_reason,
+            failure_reason=aggregate_failure_reason,
         )
 
 
