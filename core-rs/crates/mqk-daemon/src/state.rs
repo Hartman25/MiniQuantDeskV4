@@ -7389,6 +7389,44 @@ mod tests {
     fn pt_truth_01_paper_paper_is_fail_closed() {
         // PT-TRUTH-01: paper+paper is not an honest paper trading path.
         // LockedPaperBroker requires an external bar-feed (on_bar) that is not
+    /// Paper credentials must never be bound to a non-Paper endpoint by an
+    /// environment override (environment identity: parsed host, not label).
+    #[test]
+    fn paper_base_url_override_must_target_paper_host_or_loopback() {
+        for refused in [
+            "https://api.alpaca.markets",
+            "https://paper-api.alpaca.markets.example.net",
+            "https://api.alpaca.markets/?h=paper-api.alpaca.markets",
+            "http://paper-api.alpaca.markets",
+            "https://example.com",
+            "not a url",
+        ] {
+            let err = alpaca_base_url_for_mode(DeploymentMode::Paper, Some(refused))
+                .expect_err(&format!("paper must refuse override {refused:?}"));
+            assert!(
+                err.to_string().contains("ALPACA_PAPER_BASE_URL"),
+                "refusal must name the offending override: {err}"
+            );
+        }
+        for accepted in [
+            "https://paper-api.alpaca.markets",
+            "https://paper-api.alpaca.markets/",
+            "http://127.0.0.1:18080",
+            "http://localhost:18080",
+        ] {
+            assert_eq!(
+                alpaca_base_url_for_mode(DeploymentMode::Paper, Some(accepted)).unwrap(),
+                accepted
+            );
+        }
+        for blank in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                alpaca_base_url_for_mode(DeploymentMode::Paper, blank).unwrap(),
+                "https://paper-api.alpaca.markets"
+            );
+        }
+    }
+
         // wired in the daemon runtime.  The real paper route is paper+alpaca.
         let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
         assert!(

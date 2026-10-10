@@ -146,11 +146,29 @@ pub(crate) fn alpaca_base_url_for_mode(
     paper_base_url_override: Option<&str>,
 ) -> Result<String, RuntimeLifecycleError> {
     match deployment_mode {
-        DeploymentMode::Paper => Ok(paper_base_url_override
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "https://paper-api.alpaca.markets".to_string())),
+        DeploymentMode::Paper => {
+            let Some(value) = paper_base_url_override
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return Ok(format!("https://{}", mqk_broker_alpaca::ALPACA_PAPER_API_HOST));
+            };
+            // Paper credentials must never be pointed at a non-Paper host
+            // (e.g. the live API) by an environment override: the Paper
+            // deployment label would then be attached to a Live account.
+            // Loopback is admitted solely for hermetic in-process mocks.
+            if mqk_broker_alpaca::is_alpaca_paper_base_url(value)
+                || mqk_broker_alpaca::is_loopback_base_url(value)
+            {
+                Ok(value.to_owned())
+            } else {
+                Err(RuntimeLifecycleError::service_unavailable(
+                    "runtime.start_refused.alpaca_paper_base_url_not_paper",
+                    "ALPACA_PAPER_BASE_URL does not target the Alpaca Paper API host; \
+                     refusing to bind a Paper deployment to a non-Paper endpoint",
+                ))
+            }
+        }
         DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
             Ok("https://api.alpaca.markets".to_string())
         }

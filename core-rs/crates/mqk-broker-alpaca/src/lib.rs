@@ -219,8 +219,43 @@ impl AlpacaConfig {
     /// authority `supports_asset_class` consults (together with
     /// `crypto_capability_enabled`) to decide Crypto capability -- never
     /// inferred from deployment-mode labels or any other config field.
+/// Alpaca's PAPER trading API host.
+pub const ALPACA_PAPER_API_HOST: &str = "paper-api.alpaca.markets";
+
+/// `true` iff `base_url` is an `https` URL whose parsed host is exactly
+/// Alpaca's PAPER API host, with no userinfo. A substring match is not
+/// sufficient: `https://paper-api.alpaca.markets.example.net` and
+/// `https://api.alpaca.markets/?h=paper-api.alpaca.markets` both contain the
+/// paper host text but do not target it.
+pub fn is_alpaca_paper_base_url(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str() == Some(ALPACA_PAPER_API_HOST)
+}
+
+/// `true` iff `base_url` is an `http(s)` URL whose host is a loopback address
+/// (`127.0.0.1`, `localhost`, `[::1]`). Used only to admit hermetic in-process
+/// mock servers as a Paper REST base URL; a loopback host never names a
+/// real Alpaca environment.
+pub fn is_loopback_base_url(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(
+            url.host_str(),
+            Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+        )
+}
+
     fn targets_paper_api(&self) -> bool {
-        self.base_url.contains("paper-api.alpaca.markets")
+        is_alpaca_paper_base_url(&self.base_url)
     }
 }
 // ---------------------------------------------------------------------------
@@ -1537,6 +1572,55 @@ mod crypto_qty_validation_tests {
         let token = BrokerInvokeToken::for_test();
         let req = BrokerSubmitRequest {
             order_id: "ord-1".to_string(),
+    /// Environment identity is the parsed host, not a substring: a URL that
+    /// merely contains the paper host text must not unlock Paper-only crypto.
+    #[test]
+    fn paper_host_must_be_parsed_host_not_substring() {
+        for (url, is_paper) in [
+            ("https://paper-api.alpaca.markets", true),
+            ("https://paper-api.alpaca.markets/", true),
+            ("https://PAPER-API.alpaca.markets/v2", true),
+            ("http://paper-api.alpaca.markets", false),
+            ("https://api.alpaca.markets", false),
+            ("https://paper-api.alpaca.markets.example.net", false),
+            ("https://api.alpaca.markets/?h=paper-api.alpaca.markets", false),
+            ("https://paper-api.alpaca.markets@api.alpaca.markets", false),
+            ("https://user:pw@paper-api.alpaca.markets", false),
+            ("not a url", false),
+            ("", false),
+        ] {
+            assert_eq!(is_alpaca_paper_base_url(url), is_paper, "url={url:?}");
+            let a = AlpacaBrokerAdapter::new(AlpacaConfig {
+                base_url: url.to_string(),
+                api_key_id: "k".to_string(),
+                api_secret_key: "s".to_string(),
+                crypto_capability_enabled: true,
+                options_mleg_capability_enabled: false,
+            });
+            assert_eq!(
+                a.supports_asset_class(AssetClass::Crypto),
+                is_paper,
+                "crypto capability must follow the parsed host for url={url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_base_url_is_recognised_only_for_loopback_hosts() {
+        for (url, loopback) in [
+            ("http://127.0.0.1:8080", true),
+            ("http://localhost:9", true),
+            ("http://[::1]:9", true),
+            ("https://api.alpaca.markets", false),
+            ("https://paper-api.alpaca.markets", false),
+            ("http://127.0.0.1.example.net", false),
+            ("http://user@127.0.0.1", false),
+            ("ftp://127.0.0.1", false),
+        ] {
+            assert_eq!(is_loopback_base_url(url), loopback, "url={url:?}");
+        }
+    }
+
             symbol: "BTC/USD".to_string(),
             side: Side::Buy,
             quantity: qty("0.00001"),

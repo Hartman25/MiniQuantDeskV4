@@ -85,7 +85,6 @@ use super::types::{
 };
 use super::AppState;
 
-const DEFAULT_PAPER_BASE_URL: &str = "https://paper-api.alpaca.markets";
 const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 
@@ -175,8 +174,19 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
             return None;
         }
     };
-    let base_url = std::env::var(super::ALPACA_BASE_URL_PAPER_ENV)
-        .unwrap_or_else(|_| DEFAULT_PAPER_BASE_URL.to_string());
+    // Same environment-identity authority as the REST adapter: a Paper WS
+    // stream must not be opened against a non-Paper host.
+    let paper_override = std::env::var(super::ALPACA_BASE_URL_PAPER_ENV).ok();
+    let base_url = match super::broker::alpaca_base_url_for_mode(
+        DeploymentMode::Paper,
+        paper_override.as_deref(),
+    ) {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::warn!("alpaca_ws: {err}; WS transport will not start");
+            return None;
+        }
+    };
     let ws_url = ws_url_from_base_url(&base_url);
 
     tracing::info!(
