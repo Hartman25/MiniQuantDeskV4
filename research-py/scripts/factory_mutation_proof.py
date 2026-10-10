@@ -86,9 +86,8 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
     ],
     "rust": [
         ("R-1 sma gate non-strict", RS, "window as i128 * last > sum(win)", "window as i128 * last >= sum(win)", CARGO),
-        ("R-2 dual cross non-strict", RS, "slow as i128 * sum(&win[win.len() - f..]) > fast as i128 * sum(&win[win.len() - s..])",
-         "slow as i128 * sum(&win[win.len() - f..]) >= fast as i128 * sum(&win[win.len() - s..])", CARGO),
-        ("R-3 momentum non-strict", RS, "RuleSpec::AbsMomentum { lookback } => last > close(", "RuleSpec::AbsMomentum { lookback } => last >= close(", CARGO),
+        ("R-2 dual cross non-strict", RS, "slow as i128 * sum(&win[win.len() - f..])\n                    > fast as i128", "slow as i128 * sum(&win[win.len() - f..])\n                    >= fast as i128", CARGO),
+        ("R-3 momentum non-strict", RS, "last > close(&win[win.len() - 1 - lookback as usize])", "last >= close(&win[win.len() - 1 - lookback as usize])", CARGO),
         ("R-4 near-high boundary excluded", RS, "let near = 10_000 * last >= (10_000 - proximity_bps as i128) * high;",
          "let near = 10_000 * last > (10_000 - proximity_bps as i128) * high;", CARGO),
         ("R-5 trend filter non-strict", RS, "|| trend_window as i128 * last > sum(", "|| trend_window as i128 * last >= sum(", CARGO),
@@ -96,7 +95,7 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("R-7 fast>=slow accepted", RS, "if fast >= slow {", "if false {", CARGO),
         ("R-8 momentum history off by one", RS, "RuleSpec::AbsMomentum { lookback } => lookback as usize + 1,", "RuleSpec::AbsMomentum { lookback } => lookback as usize,", CARGO),
         ("R-9 short window goes long", RS, "            return 0;\n        };\n        let close = |b: &BarStub|", "            return 1;\n        };\n        let close = |b: &BarStub|", CARGO),
-        ("R-10 fingerprint ignores the symbol", RS, ".push_str(&self.symbol)\n            .push_i64(TIMEFRAME_SECS)", ".push_i64(TIMEFRAME_SECS)", CARGO),
+        ("R-10 fingerprint ignores the symbol", RS, ".push_str(&self.symbol)\n        .push_i64(TIMEFRAME_SECS)", ".push_i64(TIMEFRAME_SECS)", CARGO),
         ("R-12 parameter bounds not enforced", RS, "if (lo..=hi).contains(&v) {", "if true {", CARGO),
     ],
     "knowledge": [
