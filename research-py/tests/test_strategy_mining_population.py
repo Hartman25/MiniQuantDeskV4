@@ -1,0 +1,716 @@
+from __future__ import annotations
+
+import dataclasses
+import inspect
+from pathlib import Path
+
+import pytest
+
+from mqk_research.strategy_mining import grammar as grammar_mod
+from mqk_research.strategy_mining import population as population_mod
+from mqk_research.strategy_mining.grammar import (
+    AssetClassTag,
+    Direction,
+    GrammarError,
+    HypothesisGrammar,
+    MechanismFamily,
+    OPERATIONAL_ASSET_CLASSES,
+)
+from mqk_research.strategy_mining.population import (
+    PopulationDeclaration,
+    deterministic_trial_id,
+    generate_population,
+    trial_identity_for,
+)
+
+
+def _decl(**over) -> PopulationDeclaration:
+    base = dict(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING, MechanismFamily.BREAKOUT),
+        directions=(Direction.LONG,),
+        asset_classes=(AssetClassTag.EQUITY,),
+        parameter_grids={
+            MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20, 50)},
+            MechanismFamily.BREAKOUT: {"lookback_days": (10,)},
+        },
+        timeframe="1d",
+        data_inputs=("daily_bars",),
+        universe_requirement="sp500_point_in_time",
+        session_calendar_contract="us_equity_calendar_v1",
+        sizing_contract="capital_fraction_v1",
+        execution_model_contract="next_bar_open_v1",
+        cost_model_contract="flat_bps_v1",
+        risk_model_requirement="none",
+        point_in_time_universe_requirement="required",
+        historical_evidence_partition="research_partition_2026h1",
+        max_population_size=2_000,
+    )
+    base.update(over)
+    return PopulationDeclaration(**base)
+
+
+# ---------------------------------------------------------------------------
+# Predeclared cardinality / resource bounds
+# ---------------------------------------------------------------------------
+
+def test_declared_cardinality_matches_hand_computed_value():
+    decl = _decl()
+    # trend_following: 2 lookbacks * 1 direction * 1 asset = 2
+    # breakout:        1 lookback  * 1 direction * 1 asset = 1
+    assert decl.declared_cardinality() == 3
+    manifest = generate_population(decl)
+    assert manifest.declared_cardinality == 3
+    assert manifest.raw_count == 3
+
+
+def test_population_over_budget_is_rejected_before_generation():
+    decl = _decl(max_population_size=2)
+    with pytest.raises(GrammarError, match="exceeds max_population_size"):
+        generate_population(decl)
+
+
+def test_empty_declaration_fails_closed():
+    decl = _decl(mechanism_families=())
+    with pytest.raises(GrammarError, match="empty"):
+        generate_population(decl)
+
+
+@pytest.mark.parametrize("field_name", [
+    "session_calendar_contract", "execution_model_contract", "sizing_contract",
+    "cost_model_contract", "risk_model_requirement", "universe_requirement",
+    "point_in_time_universe_requirement", "historical_evidence_partition", "timeframe",
+])
+def test_missing_contract_field_fails_closed(field_name):
+    decl = _decl(**{field_name: ""})
+    with pytest.raises(GrammarError, match="missing/empty"):
+        generate_population(decl)
+
+
+def test_missing_data_inputs_fails_closed():
+    decl = _decl(data_inputs=())
+    with pytest.raises(GrammarError, match="data_inputs"):
+        generate_population(decl)
+
+
+def test_risk_model_requirement_none_is_a_valid_explicit_value_not_rejected():
+    # "none" is an explicit declaration ("no risk model is required"), not
+    # a missing/empty value — it must NOT be rejected.
+    manifest = generate_population(_decl(risk_model_requirement="none"))
+    assert manifest.raw_count > 0
+
+
+def test_duplicate_values_in_a_parameter_domain_fail_closed():
+    decl = _decl(parameter_grids={
+        MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20, 20)},
+        MechanismFamily.BREAKOUT: {"lookback_days": (10,)},
+    })
+    with pytest.raises(GrammarError, match="duplicate values"):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Structural no-omission / no-extra-member proof (mutation-forced)
+# ---------------------------------------------------------------------------
+
+def test_raw_count_mismatch_against_predeclaration_fails_closed(monkeypatch):
+    decl = _decl()
+
+    real = population_mod.PopulationDeclaration._param_combos
+
+    def _drop_one_combo(self, family):
+        combos = real(self, family)
+        if family == MechanismFamily.TREND_FOLLOWING and len(combos) > 1:
+            return combos[:-1]  # silently produce one fewer than declared
+        return combos
+
+    monkeypatch.setattr(population_mod.PopulationDeclaration, "_param_combos", _drop_one_combo)
+    with pytest.raises(GrammarError, match="generator/declaration mismatch"):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Determinism / identity stability
+# ---------------------------------------------------------------------------
+
+def test_identical_declaration_produces_identical_manifest_id():
+    m1 = generate_population(_decl())
+    m2 = generate_population(_decl())
+    assert m1.manifest_id == m2.manifest_id
+    assert m1.declaration_id == m2.declaration_id
+
+
+def test_field_insertion_order_does_not_change_fingerprint():
+    g1 = HypothesisGrammar(
+        mechanism_family=MechanismFamily.TREND_FOLLOWING, direction=Direction.LONG,
+        asset_class=AssetClassTag.EQUITY, parameters={"a": 1, "b": 2},
+        timeframe="1d", data_inputs=("x", "y"), universe_requirement="u",
+        session_calendar_contract="c", sizing_contract="s", execution_model_contract="e",
+        cost_model_contract="co", risk_model_requirement="r",
+        point_in_time_universe_requirement="p", historical_evidence_partition="h",
+    )
+    g2 = HypothesisGrammar(
+        mechanism_family=MechanismFamily.TREND_FOLLOWING, direction=Direction.LONG,
+        asset_class=AssetClassTag.EQUITY, parameters={"b": 2, "a": 1},  # reversed insertion order
+        timeframe="1d", data_inputs=("y", "x"),  # reversed order
+        universe_requirement="u", session_calendar_contract="c", sizing_contract="s",
+        execution_model_contract="e", cost_model_contract="co", risk_model_requirement="r",
+        point_in_time_universe_requirement="p", historical_evidence_partition="h",
+    )
+    assert g1.semantic_fingerprint() == g2.semantic_fingerprint()
+
+
+def test_meaningful_parameter_change_changes_fingerprint():
+    m1 = generate_population(_decl(parameter_grids={
+        MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)},
+        MechanismFamily.BREAKOUT: {"lookback_days": (10,)},
+    }))
+    m2 = generate_population(_decl(parameter_grids={
+        MechanismFamily.TREND_FOLLOWING: {"lookback_days": (21,)},
+        MechanismFamily.BREAKOUT: {"lookback_days": (10,)},
+    }))
+    assert m1.manifest_id != m2.manifest_id
+
+
+def test_cost_model_change_changes_fingerprint_and_identity():
+    decl_a = _decl(parameter_grids={
+        MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)},
+        MechanismFamily.BREAKOUT: {"lookback_days": (10,)},
+    }, cost_model_contract="flat_bps_v1")
+    decl_b = dataclasses.replace(decl_a, cost_model_contract="flat_bps_v2")
+    m_a = generate_population(decl_a)
+    m_b = generate_population(decl_b)
+    assert m_a.manifest_id != m_b.manifest_id
+
+
+# ---------------------------------------------------------------------------
+# Deduplication — identical hypotheses never become independent candidates
+# ---------------------------------------------------------------------------
+
+def test_duplicate_hypotheses_deduplicate_to_one_item():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        directions=(Direction.LONG, Direction.LONG),  # caller error: same direction twice
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)}},
+    )
+    manifest = generate_population(decl)
+    assert manifest.raw_count == 2  # both instances were actually generated
+    assert manifest.duplicate_count == 1
+    assert len(manifest.items) == 1  # but only one survives as a candidate
+
+
+# ---------------------------------------------------------------------------
+# Unsupported asset/direction: tagged, never dropped, never coerced to a default
+# ---------------------------------------------------------------------------
+
+def test_unsupported_asset_class_is_tagged_not_dropped_and_not_coerced_to_equity():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        asset_classes=(AssetClassTag.CRYPTO,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)}},
+    )
+    manifest = generate_population(decl)
+    assert len(manifest.items) == 1
+    g, status = manifest.items[0]
+    assert g.asset_class == AssetClassTag.CRYPTO  # never silently rewritten to EQUITY
+    assert status == "unsupported_asset_class"
+    assert manifest.unsupported_count == 1
+    assert manifest.compatible_count == 0
+
+
+def test_unsupported_direction_is_tagged_not_dropped_and_not_coerced():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        directions=(Direction.UNSUPPORTED,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)}},
+    )
+    manifest = generate_population(decl)
+    g, status = manifest.items[0]
+    assert g.direction == Direction.UNSUPPORTED
+    assert status == "unsupported_direction"
+
+
+def test_operational_asset_classes_is_only_equity_no_premature_enablement():
+    assert OPERATIONAL_ASSET_CLASSES == frozenset({AssetClassTag.EQUITY})
+
+
+# ---------------------------------------------------------------------------
+# Result-independence (structural, not just conventional)
+# ---------------------------------------------------------------------------
+
+def test_hypothesis_grammar_has_no_result_field():
+    field_names = {f.name for f in dataclasses.fields(HypothesisGrammar)}
+    for forbidden in ("result", "pnl", "sharpe", "return", "rank", "score", "winner"):
+        assert not any(forbidden in name for name in field_names), (
+            f"HypothesisGrammar must stay result-independent; found a field matching {forbidden!r}"
+        )
+
+
+def test_population_declaration_has_no_result_field():
+    field_names = {f.name for f in dataclasses.fields(PopulationDeclaration)}
+    for forbidden in ("result", "pnl", "sharpe", "return", "rank", "score", "winner"):
+        assert not any(forbidden in name for name in field_names)
+
+
+def test_generate_population_signature_takes_no_history_or_result_input():
+    params = set(inspect.signature(generate_population).parameters)
+    assert params == {"decl"}
+
+
+# ---------------------------------------------------------------------------
+# No registry/broker/network authority embedded in the generator itself
+# ---------------------------------------------------------------------------
+
+def test_module_touches_no_registry_broker_or_network():
+    """Checks actual import statements only (not prose/docstrings, which
+    legitimately describe the existing seam this module stays compatible
+    with) — a false-positive fixture would otherwise flag this module's own
+    documentation of that relationship."""
+    for mod in (grammar_mod, population_mod):
+        import_lines = [
+            line.strip()
+            for line in inspect.getsource(mod).splitlines()
+            if line.strip().startswith(("import ", "from "))
+        ]
+        for forbidden in (
+            "exp_distributed.storage", "ResearchResultStore", "subprocess",
+            "requests", "httpx", "socket", "promotion", "broker", "daemon",
+        ):
+            assert not any(forbidden in line for line in import_lines), (
+                f"{mod.__name__} unexpectedly imports {forbidden!r}: {import_lines}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Provenance completeness
+# ---------------------------------------------------------------------------
+
+def test_manifest_items_carry_complete_provenance_fields():
+    manifest = generate_population(_decl())
+    required = {
+        "mechanism_family", "direction", "asset_class", "parameters", "timeframe",
+        "data_inputs", "universe_requirement", "session_calendar_contract",
+        "sizing_contract", "execution_model_contract", "cost_model_contract",
+        "risk_model_requirement", "point_in_time_universe_requirement",
+        "historical_evidence_partition",
+    }
+    for g, _status in manifest.items:
+        fields = g.economic_fields()
+        assert required <= set(fields.keys())
+        for key in required:
+            assert fields[key] not in (None, ""), f"{key} must not be empty/missing"
+
+
+def test_deterministic_trial_id_is_stable_and_tracks_fingerprint():
+    manifest = generate_population(_decl())
+    g, _status = manifest.items[0]
+    tid_1 = deterministic_trial_id("exp1", g)
+    tid_2 = deterministic_trial_id("exp1", g)
+    assert tid_1 == tid_2
+    assert g.semantic_fingerprint()[:16] in tid_1
+
+
+# ---------------------------------------------------------------------------
+# Compatibility with the REAL existing registration seam (proves authority
+# stays with existing machinery; this test, not the module, imports storage).
+# ---------------------------------------------------------------------------
+
+def test_trial_identity_round_trips_through_the_real_registry(tmp_path: Path):
+    from mqk_research.exp_distributed.storage import ResearchResultStore
+
+    manifest = generate_population(_decl())
+    g, status = manifest.items[0]
+    assert status == "compatible"
+
+    store = ResearchResultStore(tmp_path / "mining_dry_run_registry.sqlite")
+    store.register_hypothesis(hypothesis_id="h1", experiment_id="exp_mining_dry_run_01")
+
+    identity = trial_identity_for(g, experiment_id="exp_mining_dry_run_01", hypothesis_id="h1")
+    trial_id = deterministic_trial_id("exp_mining_dry_run_01", g)
+
+    store.register_trial(
+        trial_id=trial_id,
+        experiment_id="exp_mining_dry_run_01",
+        hypothesis_id="h1",
+        strategy_id="strategy_mining_dry_run",
+        protocol_id="strategy_mining_population_v1",
+        identity=identity,
+    )
+
+    fetched = store.get_trial(trial_id)
+    assert fetched["trial_id"] == trial_id
+    assert fetched["hypothesis_id"] == "h1"
+
+    # Idempotent re-registration with the SAME identity succeeds (no-op).
+    store.register_trial(
+        trial_id=trial_id, experiment_id="exp_mining_dry_run_01", hypothesis_id="h1",
+        strategy_id="strategy_mining_dry_run", protocol_id="strategy_mining_population_v1",
+        identity=identity,
+    )
+
+    # Conflicting identity under the same trial_id fails closed.
+    other_g, _ = manifest.items[-1] if len(manifest.items) > 1 else (g, status)
+    conflicting_identity = trial_identity_for(other_g, experiment_id="exp_mining_dry_run_01", hypothesis_id="h1")
+    if conflicting_identity != identity:
+        with pytest.raises(RuntimeError, match="conflicting canonical identity"):
+            store.register_trial(
+                trial_id=trial_id, experiment_id="exp_mining_dry_run_01", hypothesis_id="h1",
+                strategy_id="strategy_mining_dry_run", protocol_id="strategy_mining_population_v1",
+                identity=conflicting_identity,
+            )
+
+
+# ---------------------------------------------------------------------------
+# C1: only explicit, finite, JSON-native parameter values are allowed --
+# no `default=str` fallback that could let an unsupported/unstable object
+# representation enter an economic identity.
+# ---------------------------------------------------------------------------
+
+def _grammar_with_params(params):
+    return HypothesisGrammar(
+        mechanism_family=MechanismFamily.TREND_FOLLOWING, direction=Direction.LONG,
+        asset_class=AssetClassTag.EQUITY, parameters=params,
+        timeframe="1d", data_inputs=("daily_bars",), universe_requirement="u",
+        session_calendar_contract="c", sizing_contract="s", execution_model_contract="e",
+        cost_model_contract="co", risk_model_requirement="r",
+        point_in_time_universe_requirement="p", historical_evidence_partition="h",
+    )
+
+
+def test_unsupported_object_in_parameters_fails_closed():
+    class Unapproved:
+        def __str__(self):
+            return "unapproved-but-stringifiable"
+
+    with pytest.raises(GrammarError, match="unsupported economic parameter value type"):
+        _grammar_with_params({"x": Unapproved()})
+
+
+def test_nan_float_in_parameters_fails_closed():
+    with pytest.raises(GrammarError, match="non-finite float"):
+        _grammar_with_params({"x": float("nan")})
+
+
+def test_infinite_float_in_parameters_fails_closed():
+    with pytest.raises(GrammarError, match="non-finite float"):
+        _grammar_with_params({"x": float("inf")})
+
+
+def test_set_value_in_parameters_fails_closed():
+    with pytest.raises(GrammarError, match="unsupported economic parameter value type"):
+        _grammar_with_params({"x": {1, 2, 3}})
+
+
+def test_non_string_key_in_nested_parameter_dict_fails_closed():
+    with pytest.raises(GrammarError, match="only string keys"):
+        _grammar_with_params({"x": {1: "nested_non_string_key"}})
+
+
+def test_nested_list_of_finite_values_is_accepted():
+    g = _grammar_with_params({"x": [1, 2.5, "a", None, True]})
+    assert g.semantic_fingerprint()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# C2: a frozen dataclass does not stop a caller mutating a nested mutable
+# mapping after construction -- economic identity must be immutable once
+# declared/generated.
+# ---------------------------------------------------------------------------
+
+def test_mutating_the_original_dict_after_construction_does_not_change_identity():
+    original = {"lookback_days": 20}
+    g = _grammar_with_params(original)
+    fp_before = g.semantic_fingerprint()
+    original["lookback_days"] = 999  # mutate the SAME dict object the caller still holds
+    original["new_key"] = "sneaked_in"
+    assert g.semantic_fingerprint() == fp_before
+    assert g.parameters["lookback_days"] == 20
+    assert "new_key" not in g.parameters
+
+
+def test_grammar_parameters_mapping_is_read_only():
+    g = _grammar_with_params({"lookback_days": 20})
+    with pytest.raises(TypeError):
+        g.parameters["lookback_days"] = 999  # type: ignore[index]
+
+
+def test_grammar_data_inputs_is_a_tuple_even_if_a_list_was_passed():
+    original = ["daily_bars"]
+    g = HypothesisGrammar(
+        mechanism_family=MechanismFamily.TREND_FOLLOWING, direction=Direction.LONG,
+        asset_class=AssetClassTag.EQUITY, parameters={}, timeframe="1d",
+        data_inputs=original, universe_requirement="u", session_calendar_contract="c",
+        sizing_contract="s", execution_model_contract="e", cost_model_contract="co",
+        risk_model_requirement="r", point_in_time_universe_requirement="p",
+        historical_evidence_partition="h",
+    )
+    original.append("sneaked_in")
+    assert g.data_inputs == ("daily_bars",)
+
+
+def test_population_declaration_parameter_grids_is_read_only():
+    decl = _decl()
+    with pytest.raises(TypeError):
+        decl.parameter_grids[MechanismFamily.TREND_FOLLOWING]["lookback_days"] = (999,)  # type: ignore[index]
+
+
+def test_mutating_the_original_parameter_grids_dict_after_construction_does_not_change_declaration():
+    grids = {
+        MechanismFamily.TREND_FOLLOWING: {"lookback_days": [20, 50]},
+        MechanismFamily.BREAKOUT: {"lookback_days": [10]},
+    }
+    decl = _decl(parameter_grids=grids)
+    id_before = decl.declared_cardinality()
+    grids[MechanismFamily.TREND_FOLLOWING]["lookback_days"].append(999)  # mutate original list
+    assert decl.declared_cardinality() == id_before
+
+
+# ---------------------------------------------------------------------------
+# C3: every declared mechanism_family must have an EXPLICIT parameter_grids
+# entry (even an empty one); max_population_size must be a real positive
+# integer.
+# ---------------------------------------------------------------------------
+
+def test_mechanism_family_without_an_explicit_grid_key_fails_closed():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING, MechanismFamily.MOMENTUM),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)}},
+        # MOMENTUM is declared as a family to generate but has NO grid entry at all.
+    )
+    with pytest.raises(GrammarError, match="no explicit parameter_grids entry"):
+        generate_population(decl)
+
+
+def test_explicit_empty_grid_for_a_family_is_a_valid_parameterless_declaration():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {}},  # explicit "no parameters"
+    )
+    manifest = generate_population(decl)
+    assert manifest.raw_count == 1
+    assert manifest.items[0][0].parameters == {}
+
+
+@pytest.mark.parametrize("bad_cap", [float("nan"), float("inf"), True, 0, -5, 10.5])
+def test_invalid_max_population_size_fails_closed(bad_cap):
+    decl = _decl(max_population_size=bad_cap)
+    with pytest.raises(GrammarError):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# C4: max_population_size is an administrative/resource bound, not an
+# economic parameter -- it must not participate in declaration/manifest
+# identity, even though the manifest still records it for transparency.
+# ---------------------------------------------------------------------------
+
+def test_changing_only_max_population_size_does_not_change_declaration_or_manifest_identity():
+    decl_a = _decl(max_population_size=100)
+    decl_b = dataclasses.replace(decl_a, max_population_size=500)
+    m_a = generate_population(decl_a)
+    m_b = generate_population(decl_b)
+    assert m_a.declaration_id == m_b.declaration_id
+    assert m_a.manifest_id == m_b.manifest_id
+    assert m_a.max_population_size == 100
+    assert m_b.max_population_size == 500
+
+
+def test_changing_an_economic_field_still_changes_identity_even_with_the_same_cap():
+    decl_a = _decl(max_population_size=100, cost_model_contract="flat_bps_v1")
+    decl_b = _decl(max_population_size=100, cost_model_contract="flat_bps_v2")
+    m_a = generate_population(decl_a)
+    m_b = generate_population(decl_b)
+    assert m_a.declaration_id != m_b.declaration_id
+
+
+# ---------------------------------------------------------------------------
+# FW-C2-R1 (surgical closeout 02): the PREVIOUS C2 fix only froze the outer
+# mapping; a mutable value NESTED inside a parameter (a list/dict value,
+# not just a list/dict container at the top) was still reachable and
+# mutable. Deep-freeze must cover every level.
+# ---------------------------------------------------------------------------
+
+def test_direct_nested_list_mutation_through_grammar_parameters_cannot_change_identity():
+    g = _grammar_with_params({"n": [1, 2, 3]})
+    fp_before = g.semantic_fingerprint()
+    with pytest.raises(AttributeError):
+        g.parameters["n"].append(999)  # the stored value has no .append at all
+    assert g.semantic_fingerprint() == fp_before
+
+
+def test_direct_nested_dict_mutation_through_grammar_parameters_cannot_change_identity():
+    g = _grammar_with_params({"n": {"inner": 1}})
+    fp_before = g.semantic_fingerprint()
+    with pytest.raises(TypeError):
+        g.parameters["n"]["inner"] = 999  # MappingProxyType, no __setitem__
+    assert g.semantic_fingerprint() == fp_before
+
+
+def test_original_caller_nested_list_mutation_after_construction_does_not_change_identity():
+    original_inner_list = [1, 2]
+    g = _grammar_with_params({"n": original_inner_list})
+    fp_before = g.semantic_fingerprint()
+    original_inner_list.append(999)  # mutate the CALLER's own object
+    assert g.semantic_fingerprint() == fp_before
+    assert g.economic_fields()["parameters"]["n"] == [1, 2]
+
+
+def test_declaration_parameter_grids_nested_list_value_direct_mutation_cannot_change_identity():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"n": ([1, 2], [3, 4])}},
+    )
+    cardinality_before = decl.declared_cardinality()
+    with pytest.raises(AttributeError):
+        decl.parameter_grids[MechanismFamily.TREND_FOLLOWING]["n"][0].append(999)
+    assert decl.declared_cardinality() == cardinality_before
+    manifest = generate_population(decl)
+    manifest_id_before = manifest.manifest_id
+    manifest2 = generate_population(decl)
+    assert manifest2.manifest_id == manifest_id_before
+
+
+def test_declaration_parameter_grids_original_caller_nested_list_mutation_does_not_change_identity():
+    original_axis_value = [1, 2]
+    grids = {MechanismFamily.TREND_FOLLOWING: {"n": (original_axis_value, [3, 4])}}
+    decl = _decl(mechanism_families=(MechanismFamily.TREND_FOLLOWING,), parameter_grids=grids)
+    m1 = generate_population(decl)
+    original_axis_value.append(999)  # mutate the caller's own object
+    m2 = generate_population(decl)
+    assert m1.manifest_id == m2.manifest_id
+
+
+def test_golden_fingerprint_unchanged_by_the_deep_freeze_refactor():
+    # A scalar-only parameter set (no nested containers) must produce the
+    # exact same fingerprint shape/value class as before -- the freeze
+    # refactor must be byte-identical for ordinary inputs.
+    g = _grammar_with_params({"lookback_days": 20, "threshold": 1.5, "label": "x"})
+    fields = g.economic_fields()
+    assert fields["parameters"] == {"lookback_days": 20, "threshold": 1.5, "label": "x"}
+    assert isinstance(fields["parameters"], dict)  # thawed, plain JSON-native dict
+    assert isinstance(fields["parameters"]["lookback_days"], int)
+
+
+# ---------------------------------------------------------------------------
+# FW-C3-R7 (surgical closeout 02): an empty named parameter axis `()` must
+# be rejected up front, not silently counted as 1 combination.
+# ---------------------------------------------------------------------------
+
+def test_empty_named_parameter_axis_is_rejected_not_silently_counted_as_one():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"n": ()}},
+    )
+    with pytest.raises(GrammarError, match="is empty"):
+        generate_population(decl)
+
+
+def test_param_combo_count_itself_reports_zero_for_an_empty_axis_not_one():
+    decl = PopulationDeclaration(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,), directions=(Direction.LONG,),
+        asset_classes=(AssetClassTag.EQUITY,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {"n": ()}},
+        timeframe="1d", data_inputs=("daily_bars",), universe_requirement="u",
+        session_calendar_contract="c", sizing_contract="s", execution_model_contract="e",
+        cost_model_contract="co", risk_model_requirement="r",
+        point_in_time_universe_requirement="p", historical_evidence_partition="h",
+    )
+    # Direct unit check on the function the review flagged as "lying" --
+    # it must itself report 0, not rely solely on a downstream mismatch guard.
+    assert decl._param_combo_count(MechanismFamily.TREND_FOLLOWING) == 0
+
+
+def test_explicit_empty_family_grid_still_means_exactly_one_parameterless_variant():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {}},
+    )
+    assert decl._param_combo_count(MechanismFamily.TREND_FOLLOWING) == 1
+    manifest = generate_population(decl)
+    assert manifest.raw_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Addendum: extraneous parameter_grids key (family not in mechanism_families)
+# must be rejected -- it would otherwise change declaration_id without
+# changing the generated candidate set at all.
+# ---------------------------------------------------------------------------
+
+def test_extraneous_parameter_grids_family_not_in_mechanism_families_is_rejected():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={
+            MechanismFamily.TREND_FOLLOWING: {"lookback_days": (20,)},
+            MechanismFamily.MOMENTUM: {"unused_axis": (1, 2)},  # never in mechanism_families
+        },
+    )
+    with pytest.raises(GrammarError, match="not in mechanism_families"):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Addendum: data_inputs must reject non-string elements deterministically
+# (GrammarError), not crash with an unrelated AttributeError from .strip().
+# ---------------------------------------------------------------------------
+
+def test_non_string_data_inputs_element_fails_closed_with_grammar_error_not_attribute_error():
+    decl = _decl(data_inputs=(3,))
+    with pytest.raises(GrammarError, match="data_inputs"):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Addendum: strict enum typing for mechanism_families/directions/asset_classes.
+# ---------------------------------------------------------------------------
+
+def test_plain_string_mechanism_family_is_rejected_not_silently_accepted():
+    decl = _decl(mechanism_families=("trend_following",))  # plain str, not the enum
+    with pytest.raises(GrammarError, match="MechanismFamily enum member"):
+        generate_population(decl)
+
+
+def test_plain_string_direction_is_rejected():
+    decl = _decl(directions=("long",))
+    with pytest.raises(GrammarError, match="Direction enum member"):
+        generate_population(decl)
+
+
+def test_plain_string_asset_class_is_rejected():
+    decl = _decl(asset_classes=("equity",))
+    with pytest.raises(GrammarError, match="AssetClassTag enum member"):
+        generate_population(decl)
+
+
+def test_non_string_parameter_domain_name_is_rejected():
+    decl = _decl(
+        mechanism_families=(MechanismFamily.TREND_FOLLOWING,),
+        parameter_grids={MechanismFamily.TREND_FOLLOWING: {123: (1, 2)}},  # non-string axis name
+    )
+    with pytest.raises(GrammarError, match="non-empty string"):
+        generate_population(decl)
+
+
+# ---------------------------------------------------------------------------
+# Second-sweep negative: trial_identity_for/deterministic_trial_id must
+# reject a blank experiment_id/hypothesis_id at the shaping boundary,
+# rather than relying on the (unmodified, out-of-scope) registry.
+# ---------------------------------------------------------------------------
+
+def test_trial_identity_for_blank_experiment_id_fails_closed():
+    manifest = generate_population(_decl())
+    g, _status = manifest.items[0]
+    with pytest.raises(GrammarError, match="experiment_id must be a non-empty string"):
+        trial_identity_for(g, experiment_id="", hypothesis_id="h1")
+
+
+def test_trial_identity_for_blank_hypothesis_id_fails_closed():
+    manifest = generate_population(_decl())
+    g, _status = manifest.items[0]
+    with pytest.raises(GrammarError, match="hypothesis_id must be a non-empty string"):
+        trial_identity_for(g, experiment_id="exp1", hypothesis_id="   ")
+
+
+def test_deterministic_trial_id_blank_experiment_id_fails_closed():
+    manifest = generate_population(_decl())
+    g, _status = manifest.items[0]
+    with pytest.raises(GrammarError, match="experiment_id must be a non-empty string"):
+        deterministic_trial_id("", g)

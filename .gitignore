@@ -176,3 +176,9 @@ scripts/windows/generated/
 /evidence/**
 /exports/**
 /scripts/windows/generated/**
+
+# -----------------------------
+# Repowise local pilot index (Component A — read-only supplementary tool;
+# bounded local index only, never committed)
+# -----------------------------
+.repowise/
