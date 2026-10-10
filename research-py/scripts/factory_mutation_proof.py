@@ -1,11 +1,4 @@
-"""Mutation proof for Strategy Factory invariants.
-
-Each mutant replaces exactly one source fragment in place, runs the named focused tests, and MUST turn them red; the
-original bytes are then restored and re-hashed. A surviving mutant (tests stay green), a broken fragment or a failed
-byte-exact restore fails the run. Usage:  python scripts/factory_mutation_proof.py <set-name>
-
-Fragments use \n for line breaks; they are matched against the file's own line endings.
-"""
+"""Mutation proof for Strategy Factory invariants.\n\nEach mutant replaces exactly one source fragment in place, runs the named focused tests, and MUST turn them red; the\noriginal bytes are then restored and re-hashed. A surviving mutant (tests stay green), a broken fragment or a failed\nbyte-exact restore fails the run. Usage:  python scripts/factory_mutation_proof.py <set-name>\n\nFragments use \n for line breaks; they are matched against the file's own line endings.\n"""
 
 from __future__ import annotations
 
@@ -21,6 +14,8 @@ T_INT = "tests/test_strategy_factory_intake.py"
 T_AI = "tests/test_strategy_factory_ai_normalize.py"
 T_ST = "tests/test_strategy_factory_store.py"
 T_KN = "tests/test_strategy_factory_knowledge.py"
+T_CP = "tests/test_strategy_factory_campaign.py"
+T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
 CARGO = ["cargo:-p", "mqk-strategy", "--lib", "grammar_rule_v1"]
 
@@ -107,6 +102,30 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("KN-7 glossary never reaches the prompt", SRC + "ai_normalize.py", "prompt = build_prompt(source, knowledge.prompt_block(terms) if terms else \"\")",
          "prompt = build_prompt(source, \"\")", [T_KN]),
         ("KN-8 control counted as strategy kind", SRC + "contracts.py", "if idea_kind == \"GOVERNANCE_CONTROL\":", "if False:", [T_KN]),
+    ],
+    "campaign": [
+        ("CP-1 invalid grid combinations dropped silently", SRC + "campaign.py", "report[\"excluded\"].append({\"source\": label, \"params\": params, \"reason\": str(exc)})", "pass", [T_CP]),
+        ("CP-2 max_trials ignored", SRC + "campaign.py", "if trial_count > spec[\"population\"][\"max_trials\"]:", "if False:", [T_CP]),
+        ("CP-3 protocol profile not pinned", SRC + "campaign.py", "if hashlib.sha256(canonical(decl).encode(\"utf-8\")).hexdigest() != pin:", "if False:", [T_CP]),
+        ("CP-4 synthetic data may carry a market grade", SRC + "campaign.py", "if official != (spec[\"evidence_grade\"] != \"SYNTHETIC_DIAGNOSTIC\"):", "if False:", [T_CP]),
+        ("CP-5 data pins unchecked", SRC + "campaign.py", "if spec[\"data\"][k] != m.get(mk):", "if False:", [T_CP]),
+        ("CP-6 unadmitted idea enters a population", SRC + "campaign.py", "if not ok or not rec.get(\"execution_path\"):", "if False:", [T_CP]),
+        ("CP-7 legacy engine allowed", SRC + "campaign.py", "CARD_BY_ID[sid].template_id == \"legacy_engine\" and sid not in src.get(\"allow_legacy\", [])", "False", [T_CP]),
+        ("CP-8 gate enters the identity", SRC + "campaign.py", "if k != \"execution_gate\"}).encode", "if True}).encode", [T_CP]),
+        ("CP-9 grammar used when unavailable", SRC + "campaign.py", "if not grammar_available:\n                raise CampaignError(\"grammar_v1 is not available", "if False:\n                raise CampaignError(\"grammar_v1 is not available", [T_CP]),
+        ("EX-1 gate not enforced", SRC + "executor.py", "if gate.get(\"executable\") is not True:", "if False:", [T_CP]),
+        ("EX-2 authorization not verified", SRC + "executor.py", "if auth_class != sa.READ_ONLY:\n            try:", "if False:\n            try:", [T_CP]),
+        ("EX-3 native binary pin not verified", SRC + "executor.py", "if stage in NATIVE_STAGES:", "if False:", [T_CP]),
+        ("EX-4 declaration identity unchecked", SRC + "executor.py", "if declaration_identity(decl) != campaign[\"declaration_sha256\"]:", "if False:", [T_CP]),
+        ("SC-1 blocked work re-evaluated every pass", SRC + "scheduler.py", "reevaluate_blocked=(n == 0)", "reevaluate_blocked=True", [T_CP]),
+        ("SC-2 job budget ignored", SRC + "scheduler.py", "if budget[0] <= 0:\n                    return ran", "if False:\n                    return ran", [T_CP]),
+        ("SC-3 failure not reported", SRC + "scheduler.py", "elif \"FAILED\" in states:", "elif False:", [T_CP]),
+        ("SC-4 dead worker leases never recovered", SRC + "scheduler.py", "result.interrupted_recovered = store.recover_expired()", "result.interrupted_recovered = 0", [T_CP]),
+    ],
+    "resume": [
+        ("RS-1 terminal trials re-evaluated on resume", "experiments/m1_native_trend_campaign/run_batch.py", "if \"economic_eval_id\" in rec or \"failed\" in rec:\n        return True", "if False:\n        return True", T_E2E),
+        ("RS-2 orphaned attempt left started", "experiments/m1_native_trend_campaign/run_batch.py", "store.finalize_attempt(a[\"attempt_id\"], status=\"failed\", failure_reason=INTERRUPTED_REASON)", "pass", T_E2E),
+        ("RS-3 succeeded attempt re-run when index lacks it", "experiments/m1_native_trend_campaign/run_batch.py", "    if done:\n        a = done[-1]", "    if False:\n        a = done[-1]", T_E2E),
     ],
     "store": [
         ("ST-1 stage order ignored", SRC + "store.py",

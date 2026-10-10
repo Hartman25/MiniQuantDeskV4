@@ -61,6 +61,13 @@ class StageExecutor:
         self.clock = clock
         self.store = None            # attached by the scheduler so the report can include restart/retry history
 
+    def auth_path(self, campaign: Mapping[str, Any]) -> str | None:
+        """Per-campaign signed authorization (operator-placed `<run_dir>/stage_authorization.json`) wins over the shared environment
+        path, so independent campaigns with independent authorizations can run in one pass."""
+        run_dir = campaign.get("run_dir")
+        local = Path(run_dir) / "stage_authorization.json" if run_dir else None
+        return str(local) if local is not None and local.is_file() else self._env.get(AUTH_FILE_ENV)
+
     # ------------------------------------------------------------------ preflight
     def load_declaration(self, campaign: Mapping[str, Any]) -> dict[str, Any]:
         path = Path(campaign["declaration_path"])
@@ -84,7 +91,7 @@ class StageExecutor:
         if stage not in RUNNER_STAGE and stage not in GUARD_STAGES:
             return Outcome("failed", None, f"unknown stage {stage!r}")
         auth_class = sa.STAGE_CLASS[RUNNER_STAGE[stage]] if stage in RUNNER_STAGE else sa.READ_ONLY
-        auth = sa.load_auth_file(self._env.get(AUTH_FILE_ENV))
+        auth = sa.load_auth_file(self.auth_path(campaign))
         key = self._env.get(KEY_ENV)
         if auth_class != sa.READ_ONLY:
             try:
@@ -120,6 +127,8 @@ class StageExecutor:
             return Outcome("succeeded", 0, None, f"report written: {path}")
         env = dict(self._env)
         env["MQK_M1_BATCH_DECLARATION"] = campaign["declaration_path"]
+        if self.auth_path(campaign):
+            env[AUTH_FILE_ENV] = self.auth_path(campaign)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         if self.cli_path is not None:
             env[CLI_ENV] = str(self.cli_path)
@@ -169,7 +178,7 @@ class StageExecutor:
         gate = decl.get("execution_gate") or {}
         put("execution_gate", gate.get("executable") is True, f"{gate.get('status')} / {gate.get('blocker')}")
         sa = _load_sa(self.repo_root)
-        auth = sa.load_auth_file(self._env.get(AUTH_FILE_ENV))
+        auth = sa.load_auth_file(self.auth_path(campaign))
         key = self._env.get(KEY_ENV)
         classes = sorted({sa.STAGE_CLASS[s] for s in RUNNER_STAGE.values() if sa.STAGE_CLASS[s] != sa.READ_ONLY})
         for c in classes:

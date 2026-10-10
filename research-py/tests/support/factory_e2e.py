@@ -33,12 +33,12 @@ def cli_available() -> bool:
     return DEFAULT_CLI.is_file()
 
 
-def make_bars_dir(root: Path, symbols=("SPY", "QQQ"), seed: int = 7, drift: float = 0.0004) -> dict:
+def make_bars_dir(root: Path, symbols=("SPY", "QQQ"), seed: int = 7, drift: float = 0.0004, end: str = "2021-06-30", name: str = "bars_src") -> dict:
     """A verified-looking bars directory (research_bars.csv + provenance + corporate-action files) of SYNTHETIC prices."""
-    data = Path(root) / "bars_src"
+    data = Path(root) / name
     data.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    dates = pd.bdate_range("2018-01-01", "2021-06-30", tz="UTC")
+    dates = pd.bdate_range("2018-01-01", end, tz="UTC")
     rows = []
     for k, sym in enumerate(symbols):
         px = 100.0 + 10 * k
@@ -81,7 +81,8 @@ def make_spec(campaign_id: str, bars: dict, *, sources, grade="SYNTHETIC_DIAGNOS
     }
 
 
-def operator_release_and_authorize(decl_path: Path, cli: Path, auth_dir: Path, *, classes=None, now=None, key=TEST_KEY, valid_hours=24) -> dict:
+def operator_release_and_authorize(decl_path: Path, cli: Path, auth_dir: Path | None = None, *, classes=None, now=None, key=TEST_KEY,
+                                   valid_hours=24, in_run_dir: bool = False) -> dict:
     """Operator stand-in: release the gate (re-issue) and mint a signed stage authorization for this exact declaration."""
     import hashlib
     from datetime import timedelta
@@ -93,7 +94,12 @@ def operator_release_and_authorize(decl_path: Path, cli: Path, auth_dir: Path, *
     classes = classes or [c for c in sa.AUTHORIZABLE if c not in sa.INCIDENT_BLOCKED]
     auth = sa.mint(decl, list(classes), operator="test-operator", approval_ref="TEST", key=key, now=now or datetime.now(timezone.utc),
                    valid_for=timedelta(hours=valid_hours), cli_sha256=hashlib.sha256(Path(cli).resolve().read_bytes()).hexdigest())
+    if in_run_dir:                                   # the per-campaign convention the executor looks for
+        auth_dir = Path(decl["run_dir"])
+        name = "stage_authorization.json"
+    else:
+        name = "authorization.json"
     auth_dir.mkdir(parents=True, exist_ok=True)
-    path = auth_dir / "authorization.json"
+    path = auth_dir / name
     path.write_text(json.dumps(auth), encoding="utf-8")
     return {"auth": auth, "path": path, "env": {sa.KEY_ENV: key, sa.AUTH_FILE_ENV: str(path)}}
