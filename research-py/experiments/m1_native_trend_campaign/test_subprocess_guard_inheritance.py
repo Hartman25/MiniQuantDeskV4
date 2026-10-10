@@ -541,6 +541,20 @@ def test_a_conflicting_sitecustomize_cannot_displace_the_guard(world, tmp_path, 
     assert _netguard.audit(_netguard.sink_rows(log), _netguard.process_token())["uninitialized"] == []
 
 
+@pytest.mark.parametrize("supplied", [None, "", "0"])
+def test_guarded_child_cannot_reenable_usercustomize_via_environment(tmp_path, supplied):
+    """Usercustomize runs after a guarded sitecustomize on system Python; a venv masks this unless pinned."""
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(decoy)}
+    if supplied is not None:
+        env["PYTHONNOUSERSITE"] = supplied
+    child_env = _netguard.guarded_env(env)
+    assert child_env["PYTHONNOUSERSITE"] == "1"
+    assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(_netguard.GUARD_SITE)
+    assert str(decoy) in child_env["PYTHONPATH"].split(os.pathsep)[1:]
+
+
 def test_a_leaky_child_with_a_redirected_sink_still_fails_its_test_and_the_session_summary(tmp_path):
     """End to end through the real conftest: the leaky child supplies MQK_NETGUARD_LOG=/dev/null and swallows the
     error; the owning test still errors and the session summary counts the attempt."""

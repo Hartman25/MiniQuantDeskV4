@@ -539,6 +539,11 @@ def guarded_env(env, launch: str | None = None) -> dict:
     diagnostic copies, this process as the parent and a fresh launch id for the child. A Python child then installs
     the guard before running any of its own code even when the caller passed a minimal or hand-built environment."""
     out = dict(os.environ if env is None else env)
+    # PYTHONPATH-first guards sitecustomize, but CPython can still import a separate
+    # usercustomize from later entries (or the user site) after installing the guard.
+    # Disable that startup execution unconditionally, even if the caller overrides it.
+    # This does not disable sitecustomize (unlike -S or -I).
+    out["PYTHONNOUSERSITE"] = "1"
     paths = [p for p in out.get("PYTHONPATH", "").split(os.pathsep) if p and p != str(GUARD_SITE)]
     out["PYTHONPATH"] = os.pathsep.join([str(GUARD_SITE), *paths])  # first: no other sitecustomize may win
     for name in (LOG_ENV, DIAG_ENV, LAUNCH_ENV, PARENT_ENV):
