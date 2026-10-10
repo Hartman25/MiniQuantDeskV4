@@ -418,6 +418,12 @@ const validEvidenceTime = (value: unknown): boolean => typeof value === "string"
 const nullableEvidenceTime = (value: unknown): boolean => value === null || validEvidenceTime(value);
 const nullableFinite = (value: unknown): boolean => value === null || typeof value === "number" && Number.isFinite(value);
 const nullableString = (value: unknown): boolean => value === null || typeof value === "string";
+const stringArray = (value: unknown): boolean => Array.isArray(value) && value.every((entry) => typeof entry === "string");
+function scalarFields(value: object, strings: string[], booleans: string[] = [], numbers: string[] = []): boolean {
+  const record = value as Record<string, unknown>;
+  return strings.every((key) => typeof record[key] === "string") && booleans.every((key) => typeof record[key] === "boolean") &&
+    numbers.every((key) => typeof record[key] === "number" && Number.isFinite(record[key]));
+}
 
 export function mapLegacyPositionsResponse(response: LegacyTradingPositionsResponse | null): PositionRow[] | null {
   if (!response || !hasRows(response, "positions", ["symbol", "qty", "avg_price"]) ||
@@ -675,6 +681,18 @@ export interface AutonomousReadinessPartial {
     decision: string;
     reason: string;
   } | null;
+}
+
+export function validAutonomousReadiness(value: AutonomousReadinessPartial | null | undefined): value is AutonomousReadinessPartial {
+  if (!value || value.truth_state !== "active" || !scalarFields(value, ["session_window_state", "session_window_source"], ["session_in_window"]) ||
+    !validEvidenceTime(value.now_utc) || ![value.session_start_utc, value.session_stop_utc].every((field) => field === null || typeof field === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d UTC$/.test(field)) ||
+    value.blockers !== undefined && !stringArray(value.blockers) ||
+    ![value.bar_tick_dispatch_count, value.last_bar_signal_qty, value.bar_context_bars_loaded].every((field) => field === undefined || nullableFinite(field)) ||
+    value.bar_context_source !== undefined && typeof value.bar_context_source !== "string") return false;
+  const diagnostic = value.strategy_decision_diagnostics;
+  return diagnostic == null || scalarFields(diagnostic, ["strategy_id", "symbol", "timeframe", "decision", "reason"], [], ["lookback_bars", "threshold_bps", "raw_direction"]) &&
+    [diagnostic.latest_bar_ts, diagnostic.latest_close_micros, diagnostic.lookback_bar_ts, diagnostic.lookback_close_micros,
+      diagnostic.move_bps, diagnostic.abs_move_bps, diagnostic.gap_to_threshold_bps].every(nullableFinite);
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,7 +1075,13 @@ export function mapAutonomousPaperStatusWrapper(
   if (wrapper == null || typeof wrapper.truth_state !== "string") {
     return UNAVAILABLE_AUTONOMOUS_PAPER_STATUS;
   }
-  if (!AUTONOMOUS_PAPER_STATUS_VALID_TRUTH_STATES.has(wrapper.truth_state)) {
+  if (!AUTONOMOUS_PAPER_STATUS_VALID_TRUTH_STATES.has(wrapper.truth_state) ||
+    !scalarFields(wrapper, ["mode", "runtime_status", "arm_state", "deadman_status", "ws_continuity", "reconcile_status", "watchlist_outcome",
+      "readiness_classification", "next_operator_action", "autonomous_session_state"],
+      ["live_routing_enabled", "kill_switch_active", "flatten_available", "watchlist_approved"], ["mismatch_count", "open_order_count", "position_count"]) ||
+    ![wrapper.current_symbol, wrapper.no_order_reason, wrapper.last_strategy_decision].every(nullableString) ||
+    ![wrapper.current_position_qty, wrapper.target_qty, wrapper.computed_delta_qty].every(nullableFinite) ||
+    !stringArray(wrapper.flatten_blockers) || !stringArray(wrapper.blockers) || !validEvidenceTime(wrapper.now_utc)) {
     return UNAVAILABLE_AUTONOMOUS_PAPER_STATUS;
   }
   return {
@@ -1291,7 +1315,11 @@ export function mapMultiSymbolDispatchSummaryWrapper(
   if (wrapper == null || typeof wrapper.truth_state !== "string") {
     return UNAVAILABLE_MULTI_SYMBOL_DISPATCH_SUMMARY;
   }
-  if (!MULTI_SYMBOL_DISPATCH_SUMMARY_VALID_TRUTH_STATES.has(wrapper.truth_state)) {
+  if (!MULTI_SYMBOL_DISPATCH_SUMMARY_VALID_TRUTH_STATES.has(wrapper.truth_state) ||
+    !scalarFields(wrapper, ["backend", "runtime_execution_mode"], [], ["configured_symbol_count"]) ||
+    !hasRows(wrapper, "per_symbol", ["symbol", "strategy_id", "no_order_reason"], ["current_qty", "target_qty", "delta", "day_order_count"]) ||
+    !wrapper.per_symbol.every((row) => [row.last_decision_id, row.last_decision_disposition].every(nullableString) &&
+      [row.day_order_limit, row.bar_staleness_secs].every(nullableFinite))) {
     return UNAVAILABLE_MULTI_SYMBOL_DISPATCH_SUMMARY;
   }
   return {
@@ -1344,7 +1372,12 @@ export function mapDryRunStrategyStatusWrapper(
   if (wrapper == null || typeof wrapper.truth_state !== "string") {
     return UNAVAILABLE_DRY_RUN_STRATEGY_STATUS;
   }
-  if (!DRY_RUN_STRATEGY_STATUS_VALID_TRUTH_STATES.has(wrapper.truth_state)) {
+  if (!DRY_RUN_STRATEGY_STATUS_VALID_TRUTH_STATES.has(wrapper.truth_state) || typeof wrapper.backend !== "string" ||
+    !stringArray(wrapper.configured_dry_run_strategy_ids) ||
+    !hasRows(wrapper, "dry_run_strategy_diagnostics", ["strategy_id", "symbol", "decision", "reason", "would_classify_as", "evaluated_at_utc"],
+      ["timeframe_secs", "current_qty", "target_qty", "delta_qty"]) ||
+    !wrapper.dry_run_strategy_diagnostics.every((row) => row.submitted === false && typeof row.would_b5_block === "boolean" &&
+      typeof row.would_policy_block === "boolean" && nullableString(row.policy_reason_code) && validEvidenceTime(row.evaluated_at_utc))) {
     return UNAVAILABLE_DRY_RUN_STRATEGY_STATUS;
   }
   return {
@@ -1406,7 +1439,10 @@ function strategyAssignmentCount(value: unknown): number | null {
 export function mapWatchlistStatusWrapper(
   wrapper: WatchlistStatusWrapper | null | undefined,
 ): WatchlistStatusSurface {
-  if (wrapper == null || typeof wrapper.status !== "string") {
+  if (wrapper == null || !scalarFields(wrapper, ["status"], ["approved_for_autonomous_paper", "approved_for_live"]) ||
+    wrapper.approved_for_live !== false || ![wrapper.configured_path, wrapper.top_symbol].every(nullableString) ||
+    !stringArray(wrapper.symbols) || !stringArray(wrapper.failure_reasons) ||
+    ![wrapper.max_symbols_to_trade, wrapper.max_concurrent_positions].every(nullableFinite) || !validEvidenceTime(wrapper.checked_at_utc)) {
     return UNAVAILABLE_WATCHLIST_STATUS;
   }
   return {
@@ -1489,6 +1525,8 @@ export function unavailableAdmissionCheck(symbol: string, strategyId: string): A
 export function mapWatchlistAdmissionCheckWrapper(
   wrapper: WatchlistAdmissionCheckWrapper,
 ): AdmissionCheckSurface {
+  if (!scalarFields(wrapper, ["symbol", "strategy_id", "reason", "status", "note"], ["allowed", "approved_for_autonomous_paper", "approved_for_live"]) ||
+    wrapper.approved_for_live !== false || !validEvidenceTime(wrapper.checked_at_utc)) return unavailableAdmissionCheck(wrapper.symbol, wrapper.strategy_id);
   return {
     state: "checked",
     reason_unchecked: null,

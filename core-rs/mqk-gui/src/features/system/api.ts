@@ -100,6 +100,7 @@ import {
   mapLegacyTradingOrdersToOpenOrders,
   mapLegacyStatusToSystemStatus,
   nowIso,
+  validAutonomousReadiness,
   type ActiveAlertsWrapper,
   type AutonomousDailyOperationResponseWrapper,
   type AutonomousDailyOperationsResponseWrapper,
@@ -1305,7 +1306,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   // preflight. Only merged when truth_state === "active" (paper+alpaca deployment).
   // These fields are optional on PreflightStatus — absent for non-paper+alpaca deployments.
   const autonomousReadinessDiag =
-    autonomousReadinessR.ok && autonomousReadinessR.data?.truth_state === "active"
+    autonomousReadinessR.ok && validAutonomousReadiness(autonomousReadinessR.data)
       ? autonomousReadinessR.data
       : null;
 

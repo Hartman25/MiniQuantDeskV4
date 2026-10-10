@@ -4,6 +4,7 @@ import { fetchOperatorModel } from "./api";
 import { DEFAULT_STATUS } from "./types";
 import { mapExecutionOutboxWrapper, mapFillQualityWrapper, mapPaperJournalWrapper,
   mapLegacyPositionsResponse, mapLegacyPortfolioSummary, mapLegacyTradingOrdersToExecutionOrders, mapLegacyTradingFillsToRows } from "./legacy";
+import { mapAutonomousPaperStatusWrapper, mapWatchlistStatusWrapper, mapMultiSymbolDispatchSummaryWrapper, mapDryRunStrategyStatusWrapper, validAutonomousReadiness } from "./legacy";
 
 test("malformed row wrappers fail their own probes without erasing independent alerts", async () => {
   const original = globalThis.fetch;
@@ -28,6 +29,16 @@ test("malformed row wrappers fail their own probes without erasing independent a
       assert.equal(model.paperJournal.fills_truth_state, "unavailable");
     }
   } finally { globalThis.fetch = original; }
+});
+
+test("partial read-only readiness and strategy wrappers cannot declare available truth", () => {
+  for (const value of [{ truth_state: "active" }, { truth_state: "active", blockers: [{}], per_symbol: [{}], dry_run_strategy_diagnostics: [{}] }]) {
+    assert.equal(mapAutonomousPaperStatusWrapper(value as never).truth_state, "unavailable");
+    assert.equal(mapMultiSymbolDispatchSummaryWrapper(value as never).truth_state, "unavailable");
+    assert.equal(mapDryRunStrategyStatusWrapper(value as never).truth_state, "unavailable");
+    assert.equal(validAutonomousReadiness(value as never), false);
+  }
+  assert.equal(mapWatchlistStatusWrapper({ status: "approved", approved_for_autonomous_paper: true, approved_for_live: true } as never).truth_state, "unavailable");
 });
 
 test("durable lane row validation fails independently and legacy conversions never repair missing economics", () => {
