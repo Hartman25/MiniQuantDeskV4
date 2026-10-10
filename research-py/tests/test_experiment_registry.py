@@ -1200,18 +1200,25 @@ def _mixed_slice_finalize_inputs(statuses):
             failure_reason=None if status == "succeeded" else f"failure-{index}",
         )
         for index, status in enumerate(statuses, start=1)
+        if status is not None
     ]
     return jobs, results
 
 
 @pytest.mark.parametrize(
-    "statuses,failed_job",
+    "statuses,expected_status,reason_fragment",
     [
-        (["failed", "succeeded"], "job-1"),
-        (["succeeded", "failed"], "job-2"),
+        (["failed", "succeeded"], "failed", "job-1"),
+        (["succeeded", "failed"], "failed", "job-2"),
+        (["succeeded", "succeeded"], "succeeded", None),
+        ([None, "succeeded"], "failed", "job-1: missing terminal result"),
+        (["succeeded", None], "failed", "job-2: missing terminal result"),
+        ([None, None], "failed", "missing terminal result"),
     ],
 )
-def test_mixed_slice_results_finalize_failed_with_aggregate_reason(monkeypatch, statuses, failed_job):
+def test_mixed_slice_results_finalize_with_consistent_aggregate_and_missing_evidence(
+    monkeypatch, statuses, expected_status, reason_fragment
+):
     monkeypatch.setattr(
         exp_runner,
         "capture_artifact_evidence",
@@ -1230,16 +1237,141 @@ def test_mixed_slice_results_finalize_failed_with_aggregate_reason(monkeypatch, 
     )
 
     finalized = store.finalized[0]
-    assert finalized["status"] == "failed"
-    assert failed_job in finalized["failure_reason"]
+    assert finalized["status"] == expected_status
+    if reason_fragment is None:
+        assert finalized["failure_reason"] is None
+    else:
+        assert reason_fragment in finalized["failure_reason"]
+    expected_failed = sum(status not in (None, "succeeded") for status in statuses)
+    expected_missing = sum(status is None for status in statuses)
     assert finalized["result_summary"] == {
         "total_slices": 2,
-        "succeeded_slices": 1,
-        "failed_slices": 1,
+        "succeeded_slices": sum(status == "succeeded" for status in statuses),
+        "failed_slices": expected_failed,
+        "missing_slices": expected_missing,
         "job_ids": ["job-1", "job-2"],
     }
     snapshots = store.slice_snapshots[0][2]
-    assert [snapshot["status"] for snapshot in snapshots] == statuses
+    assert [snapshot["status"] for snapshot in snapshots] == [
+        "missing" if status is None else status for status in statuses
+    ]
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        ["failed", "succeeded"],
+        ["succeeded", "failed"],
+        ["succeeded", "succeeded"],
+        [None, "succeeded"],
+        ["succeeded", None],
+        [None, None],
+    ],
+)
+def test_finalize_round_trips_aggregate_and_immutable_slice_evidence_in_sqlite(
+    tmp_path, monkeypatch, statuses
+):
+    registry_db = tmp_path / "registry.sqlite3"
+    store = ResearchResultStore(registry_db)
+    _setup_trial(store, trial_id="trial-durable-finalize")
+    attempt_id, _ = store.begin_attempt(trial_id="trial-durable-finalize")
+    jobs, results = _mixed_slice_finalize_inputs(statuses)
+    store.link_attempt_jobs(attempt_id, [job.job_id for job in jobs])
+    monkeypatch.setattr(
+        exp_runner,
+        "capture_artifact_evidence",
+        lambda _paths: {"artifact_files": {}, "artifact_metadata_sha256": None},
+    )
+
+    exp_runner._finalize_candidate_attempts(
+        jobs,
+        results,
+        store,
+        {job.job_id: attempt_id for job in jobs},
+        {attempt_id: "trial-durable-finalize"},
+        "full_batch",
+    )
+
+    attempt = store.list_attempts("trial-durable-finalize")[0]
+    summary = json.loads(attempt["result_summary_json"])
+    slices = store.list_attempt_slices(attempt_id)
+    assert attempt["status"] == ("succeeded" if all(status == "succeeded" for status in statuses) else "failed")
+    assert summary["total_slices"] == len(slices) == 2
+    assert summary["missing_slices"] == sum(status is None for status in statuses)
+    assert [slice_row["status"] for slice_row in slices] == [
+        "missing" if status is None else status for status in statuses
+    ]
+    with pytest.raises(Exception):
+        store.record_attempt_slices(attempt_id, "trial-durable-finalize", [
+            {"job_id": "job-1", "status": "succeeded"},
+        ])
+
+
+def test_interrupted_worker_is_terminalized_without_fabricated_artifacts_and_can_retry(
+    tmp_path, monkeypatch
+):
+    import mqk_research.exp_distributed.runner as runner_module
+
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    windows = [{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}]
+    spec_path = _write_exp_batch_spec(
+        root, dataset_path, symbol_groups=[["AAA", "BBB"]], windows=windows,
+        hypothesis_id="hyp.exp_interrupted_worker",
+    )
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["parameter_grid"] = {"lookback_days": [2], "top_n": [1]}
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
+    real_worker = runner_module.run_job_worker
+
+    def _artifact_writer_interrupted(_payload, _root_dir):
+        raise OSError("artifact writer interrupted")
+
+    monkeypatch.setattr(runner_module, "run_job_worker", _artifact_writer_interrupted)
+    result = runner_module.run_batch(spec_path, root=root / "research_out", max_workers=1)
+    assert result["status"] == "failed"
+
+    store = ResearchResultStore(default_db_path(root / "research_out"))
+    trial = store.list_trials(experiment_id="exp.registry_smoke", hypothesis_id="hyp.exp_interrupted_worker")[0]
+    attempt_1 = store.list_attempts(trial["trial_id"])[0]
+    assert attempt_1["status"] == "failed"
+    assert "worker_execution_interrupted" in attempt_1["failure_reason"]
+    slices = store.list_attempt_slices(attempt_1["attempt_id"])
+    assert slices[0]["status"] == "failed"
+    assert slices[0]["artifact_paths"] == {}
+    assert "artifact writer interrupted" in slices[0]["failure_reason"]
+
+    monkeypatch.setattr(runner_module, "run_job_worker", real_worker)
+    retry = runner_module.rerun_failed_jobs(result["batch_id"], root=root / "research_out", max_workers=1)
+    assert retry["status"] == "succeeded"
+    assert store.registry_summary(experiment_id="exp.registry_smoke", hypothesis_id="hyp.exp_interrupted_worker") == {
+        "unique_trials": 1,
+        "attempts": 2,
+        "started_attempts": 0,
+        "succeeded_attempts": 1,
+        "failed_attempts": 1,
+        "blocked_attempts": 0,
+    }
+
+
+def test_rerun_refuses_started_attempt_or_running_job_residue(tmp_path):
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    windows = [{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}]
+    spec_path = _write_exp_batch_spec(
+        root, dataset_path, symbol_groups=[["AAA", "BBB"]], windows=windows,
+        hypothesis_id="hyp.exp_incomplete_recovery",
+    )
+    result = run_batch(spec_path, root=root / "research_out", max_workers=1)
+    store = ResearchResultStore(default_db_path(root / "research_out"))
+    trial = store.list_trials(experiment_id="exp.registry_smoke", hypothesis_id="hyp.exp_incomplete_recovery")[0]
+    attempt_id, _ = store.begin_attempt(trial_id=trial["trial_id"])
+    store.link_attempt_jobs(attempt_id, [store.list_jobs(result["batch_id"])[0]["job_id"]])
+
+    with pytest.raises(RuntimeError, match="incomplete execution remains"):
+        rerun_failed_jobs(result["batch_id"], root=root / "research_out", max_workers=1)
+
+    assert len(store.list_attempts(trial["trial_id"])) == 2
 
 
 # ---------------------------------------------------------------------------

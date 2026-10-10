@@ -210,14 +210,20 @@ def _finalize_candidate_attempts(
         slice_results = [result_by_job_id[job_id] for job_id in job_ids if job_id in result_by_job_id]
         succeeded = [r for r in slice_results if r.status == "succeeded"]
         failed = [r for r in slice_results if r.status != "succeeded"]
+        missing_job_ids = [job_id for job_id in job_ids if job_id not in result_by_job_id]
         aggregate_status = "succeeded" if len(succeeded) == len(job_ids) else "failed"
         aggregate_failure_reason = None
         if aggregate_status == "failed":
             reasons = [f"{r.job_id}: {r.failure_reason}" for r in failed if r.failure_reason]
+            reasons.extend(f"{job_id}: missing terminal result" for job_id in missing_job_ids)
             aggregate_failure_reason = (
                 "; ".join(reasons)
                 if reasons
-                else f"{len(failed)} of {len(job_ids)} evaluation slices failed"
+                else (
+                    f"{len(failed)} of {len(job_ids)} evaluation slices failed"
+                    if not missing_job_ids
+                    else f"{len(missing_job_ids)} of {len(job_ids)} evaluation slices missing terminal results"
+                )
             )
 
         slice_snapshots = []
@@ -268,10 +274,35 @@ def _finalize_candidate_attempts(
                 "total_slices": len(job_ids),
                 "succeeded_slices": len(succeeded),
                 "failed_slices": len(failed),
+                "missing_slices": len(missing_job_ids),
                 "job_ids": job_ids,
             },
             failure_reason=aggregate_failure_reason,
         )
+
+
+def _run_job_safely(job_payload: Dict[str, Any], root_dir: str) -> Dict[str, Any]:
+    """Convert runner-observed worker failures into truthful terminal evidence.
+
+    A worker normally catches strategy/data failures itself. This boundary also
+    catches failures in worker-side artifact writing and process-pool transport,
+    where no worker result or artifact exists. The returned failed result has no
+    metrics or artifact paths; it records only that execution was interrupted by
+    the named exception, so the attempt can be finalized without inventing a
+    worker observation.
+    """
+    job = JobSpec.from_dict(job_payload)
+    try:
+        return run_job_worker(job_payload, root_dir)
+    except Exception as exc:
+        return JobExecutionResult(
+            job_id=job.job_id,
+            batch_id=job.batch_id,
+            status="failed",
+            metrics={},
+            artifact_paths={},
+            failure_reason=f"worker_execution_interrupted: {type(exc).__name__}: {exc}",
+        ).to_dict()
 
 
 def _run_jobs(
@@ -298,11 +329,24 @@ def _run_jobs(
         store.set_job_status(job.job_id, "running")
 
     payloads = [job.to_dict() for job in jobs]
-    if max_workers == 1:
-        raw_results = [run_job_worker(payload, str(root)) for payload in payloads]
-    else:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            raw_results = list(executor.map(run_job_worker, payloads, [str(root)] * len(payloads)))
+    try:
+        if max_workers == 1:
+            raw_results = [_run_job_safely(payload, str(root)) for payload in payloads]
+        else:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                raw_results = list(executor.map(_run_job_safely, payloads, [str(root)] * len(payloads)))
+    except Exception as exc:
+        raw_results = [
+            JobExecutionResult(
+                job_id=job.job_id,
+                batch_id=job.batch_id,
+                status="failed",
+                metrics={},
+                artifact_paths={},
+                failure_reason=f"worker_pool_interrupted: {type(exc).__name__}: {exc}",
+            ).to_dict()
+            for job in jobs
+        ]
 
     results = [JobExecutionResult(**raw) for raw in raw_results]
     for result in results:
@@ -402,11 +446,23 @@ def failed_jobs(batch_id: str, root: Path | None = None) -> Dict[str, Any]:
 def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int = 1) -> Dict[str, Any]:
     actual_root = (root or default_root()).resolve()
     store = ResearchResultStore(default_db_path(actual_root))
+    batch = store.get_batch(batch_id)
+    incomplete_jobs = [
+        row for row in store.list_jobs(batch_id) if row["status"] in {"queued", "running"}
+    ]
+    started_attempts = store.list_started_attempts_for_batch(batch_id)
+    if incomplete_jobs or started_attempts:
+        job_ids = [row["job_id"] for row in incomplete_jobs]
+        attempt_ids = [row["attempt_id"] for row in started_attempts]
+        raise RuntimeError(
+            "refusing retry while incomplete execution remains: "
+            f"jobs={job_ids!r}, started_attempts={attempt_ids!r}; "
+            "reconcile the interrupted run before retrying"
+        )
     failed_rows = store.list_jobs(batch_id, status="failed")
     if not failed_rows:
         return {"batch_id": batch_id, "rerun_count": 0, "status": "no_failed_jobs"}
 
-    batch = store.get_batch(batch_id)
     batch_spec = json.loads(batch["spec_json"])
     hypothesis_id = str(batch_spec.get("hypothesis_id", ""))
     allow_unregistered_diagnostic = bool(batch_spec.get("allow_unregistered_diagnostic", False))

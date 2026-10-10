@@ -994,6 +994,27 @@ class ResearchResultStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_started_attempts_for_batch(self, batch_id: str) -> List[Dict[str, Any]]:
+        """Return durable in-flight attempts linked to jobs in ``batch_id``.
+
+        A started attempt may survive a process crash after all of its jobs have
+        been persisted but before attempt finalization. Retry entrypoints must
+        see that residue and refuse to claim a clean failed-only recovery.
+        """
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                select distinct a.*
+                from research_attempts a
+                join research_attempt_jobs aj on aj.attempt_id=a.attempt_id
+                join exp_jobs j on j.job_id=aj.job_id
+                where a.status='started' and j.batch_id=?
+                order by a.attempt_id asc
+                """,
+                (batch_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def registry_summary(
         self,
         *,
