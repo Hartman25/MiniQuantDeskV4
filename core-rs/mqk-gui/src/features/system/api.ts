@@ -29,6 +29,7 @@ import {
 } from "./durablePortfolio";
 import {
   createReadClient,
+  canTryLegacyRead,
   fetchJsonCandidate,
   tryFetchJson,
   type EndpointFetchResult,
@@ -447,9 +448,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     (async (): Promise<EndpointFetchResult<ExecutionOrderRow[] | LegacyTradingOrdersResponse>> => {
       const canonical = await fetchJsonCandidate<ExecutionOrderRow[]>("/api/v1/execution/orders");
       if (canonical.ok) return canonical;
-      // 503 = explicit no-snapshot signal; keep canonical as the failed probe result.
-      if (canonical.error === "HTTP 503") return canonical;
-      // Any other failure (404 = unmounted, network error) → try legacy path.
+      if (!canTryLegacyRead(canonical)) return canonical;
       return fetchJsonCandidate<LegacyTradingOrdersResponse>("/v1/trading/orders");
     })(),
     (async (): Promise<EndpointFetchResult<OmsOverview>> => {
@@ -476,6 +475,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         }
         return canonical;
       }
+      if (!canTryLegacyRead(canonical)) return canonical;
       return fetchJsonCandidate<LegacyTradingPositionsResponse>("/v1/trading/positions");
     })(),
     // Portfolio open orders: same snapshot_state pattern as positions.
@@ -487,6 +487,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         }
         return canonical;
       }
+      if (!canTryLegacyRead(canonical)) return canonical;
       return fetchJsonCandidate<LegacyTradingOrdersResponse>("/v1/trading/orders");
     })(),
     // Portfolio fills: same snapshot_state pattern as positions.
@@ -498,6 +499,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         }
         return canonical;
       }
+      if (!canTryLegacyRead(canonical)) return canonical;
       return fetchJsonCandidate<LegacyTradingFillsResponse>("/v1/trading/fills");
     })(),
     fetchJsonCandidates<RiskSummary>(["/api/v1/risk/summary"]),

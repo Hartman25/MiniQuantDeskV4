@@ -9,6 +9,7 @@ import { getDesktopOperatorToken, isDesktopShell } from "../../desktop/bootstrap
 export interface EndpointFetchResult<T> {
   ok: boolean;
   endpoint: string;
+  status?: number;
   data?: T;
   error?: string;
 }
@@ -24,6 +25,7 @@ export interface EndpointPostResult<T> {
 export async function fetchJsonCandidate<T>(path: string, options?: { baseUrl?: string; timeoutMs?: number }): Promise<EndpointFetchResult<T>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options?.timeoutMs ?? 10_000);
+  let status: number | undefined;
   try {
     const url = new URL(path, options?.baseUrl ?? getDaemonUrl()).toString();
     const response = await fetch(url, {
@@ -31,23 +33,31 @@ export async function fetchJsonCandidate<T>(path: string, options?: { baseUrl?: 
       headers: { Accept: "application/json" },
       signal: controller.signal,
     });
+    status = response.status;
 
     if (!response.ok) {
-      return { ok: false, endpoint: path, error: `HTTP ${response.status}` };
+      return { ok: false, endpoint: path, status, error: `HTTP ${response.status}` };
     }
 
     return {
       ok: true,
       endpoint: path,
+      status,
       data: (await response.json()) as T,
     };
   } catch (error) {
     return {
       ok: false,
       endpoint: path,
+      status,
       error: error instanceof Error ? error.message : "unknown error",
     };
   } finally { clearTimeout(timer); }
+}
+
+/** Explicit refusals and malformed success bodies must never select a legacy authority. */
+export function canTryLegacyRead(result: EndpointFetchResult<unknown>): boolean {
+  return !result.ok && (result.status === 404 || result.status === undefined);
 }
 
 export async function fetchJsonCandidates<T>(paths: string[], options?: { baseUrl?: string; timeoutMs?: number }): Promise<EndpointFetchResult<T>> {
@@ -55,6 +65,7 @@ export async function fetchJsonCandidates<T>(paths: string[], options?: { baseUr
   for (const path of paths) {
     const result = await fetchJsonCandidate<T>(path, options);
     if (result.ok) return result;
+    if (!canTryLegacyRead(result)) return result;
     if (firstFailure === null) firstFailure = result;
   }
   // Return the first candidate's error so callers can inspect the specific HTTP status.

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { LatestRequest } from "./latestRequest";
-import { createReadClient, fetchJsonCandidate } from "./http";
+import { createReadClient, fetchJsonCandidate, fetchJsonCandidates } from "./http";
+import { fetchOperatorModel } from "./api";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -28,6 +29,35 @@ test("latest observation wins across late success, late error and unmount invali
   assert.equal(gate.busy, false);
   await gate.run(() => Promise.reject("current failure"), () => assert.fail(), (error) => failed.push(error));
   assert.deepEqual(failed, ["current failure"]);
+});
+
+test("canonical refusals and malformed JSON never fall through to legacy reads", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const status of [401, 403, 409, 500, 503, 200]) {
+      const paths: string[] = [];
+      globalThis.fetch = (async (input) => {
+        const path = new URL(String(input)).pathname;
+        paths.push(path);
+        return new Response(status === 200 ? "{invalid" : "refused", { status });
+      }) as typeof fetch;
+      const result = await fetchJsonCandidates(["/canonical", "/legacy"]);
+      assert.equal(result.ok, false);
+      assert.equal(result.status, status);
+      assert.deepEqual(paths, ["/canonical"]);
+      paths.length = 0;
+      await fetchOperatorModel();
+      assert.equal(paths.some((path) => path.startsWith("/v1/")), false, `status ${status} must preserve canonical refusal`);
+    }
+    const paths: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      return path === "/canonical" ? new Response(null, { status: 404 }) : Response.json({ present: true });
+    }) as typeof fetch;
+    assert.equal((await fetchJsonCandidates(["/canonical", "/legacy"])).ok, true);
+    assert.deepEqual(paths, ["/canonical", "/legacy"]);
+  } finally { globalThis.fetch = original; }
 });
 
 test("read client pins daemon identity and GET requests have bounded timeout", async () => {
