@@ -194,19 +194,19 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
   },
   incidents: {
     title: "Incidents",
-    description: "Case workspace for grouping alerts, orders, reconcile cases, and operator actions.",
+    description: "Read-only durable incident summaries and linked current fault evidence; case resolution does not prove recovery.",
     monitorGroup: "diagnostics",
     render: ({ model }) => <IncidentsScreen model={model} />,
   },
   alerts: {
     title: "Alerts",
-    description: "Alert triage board with ack/escalation workflow and incident linkage.",
+    description: "Read-only active fault investigation, advisory acknowledgement evidence, and incident linkage.",
     monitorGroup: "diagnostics",
     render: ({ model }) => <AlertsScreen model={model} />,
   },
   operatorTimeline: {
     title: "Operator Timeline",
-    description: "Chronological record of alerts, operator actions, restarts, config changes, and incidents.",
+    description: "Bounded durable runtime transitions and operator actions with source identities and recorded links.",
     monitorGroup: "diagnostics",
     render: ({ model }) => <OperatorTimelineScreen model={model} />,
   },
@@ -218,7 +218,7 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
   },
   metrics: {
     title: "Metrics",
-    description: "Institution-style time-series dashboards for runtime, execution, fill quality, risk, and reconcile pressure.",
+    description: "Current operational metric snapshots with explicit unavailable measurements and history limitations.",
     monitorGroup: "diagnostics",
     render: ({ model }) => <MetricsScreen model={model} />,
   },
@@ -230,7 +230,7 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
   },
   transport: {
     title: "Transport",
-    description: "Outbox/inbox transport supervision with claim age, lag, retries, and duplicates.",
+    description: "Outbox/inbox depth, claim age, and documented retry/stale-claim proxies; duplicate telemetry is unavailable.",
     monitorGroup: "diagnostics",
     render: ({ model }) => <TransportScreen model={model} />,
   },

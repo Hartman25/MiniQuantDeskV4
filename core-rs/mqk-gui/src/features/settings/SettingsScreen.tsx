@@ -1,4 +1,6 @@
-import { clearSavedDaemonUrl, defaultDaemonUrl, getSavedDaemonUrl, setSavedDaemonUrl } from "../../config";
+import { useState } from "react";
+import { clearSavedDaemonUrl, getDaemonUrl, setSavedDaemonUrl } from "../../config";
+import { getDesktopDaemonUrl } from "../../desktop/bootstrap";
 import { Panel } from "../../components/common/Panel";
 import { formatLabel } from "../../lib/format";
 import { AssetCapabilityMatrixPanel } from "../system/AssetCapabilityMatrixPanel";
@@ -10,8 +12,10 @@ import { systemStatusScreenIncludes } from "../system/systemStatusSections";
 import type { SystemModel } from "../system/types";
 
 export function SettingsScreen({ model }: { model: SystemModel }) {
-  const saved = getSavedDaemonUrl();
-  const current = saved ?? defaultDaemonUrl();
+  const current = getDaemonUrl();
+  const [draftUrl, setDraftUrl] = useState(current);
+  const [endpointError, setEndpointError] = useState<string | null>(null);
+  const launcherManaged = getDesktopDaemonUrl() !== null;
   const session = model.sessionState;
   const profileOpen = session.session_profile_is_open;
   const supportedProfiles = session.supported_session_profiles ?? [];
@@ -21,12 +25,11 @@ export function SettingsScreen({ model }: { model: SystemModel }) {
     window.location.reload();
   };
 
-  const handlePrompt = () => {
-    const next = window.prompt("Enter daemon base URL", current);
-    if (!next) return;
-    const result = setSavedDaemonUrl(next);
+  const handleApplyEndpoint = () => {
+    if (launcherManaged) return;
+    const result = setSavedDaemonUrl(draftUrl);
     if (!result.ok) {
-      window.alert(result.error ?? "Invalid URL");
+      setEndpointError(result.error ?? "Invalid URL");
       return;
     }
     window.location.reload();
@@ -37,10 +40,15 @@ export function SettingsScreen({ model }: { model: SystemModel }) {
       <Panel title="Daemon endpoint">
         <div className="settings-stack">
           <div className="setting-row"><span>Current endpoint</span><strong>{current}</strong></div>
-          <div className="button-row">
-            <button type="button" className="action-button" onClick={handlePrompt}>Change endpoint</button>
-            <button type="button" className="action-button ghost" onClick={handleUseDefault}>Use default</button>
-          </div>
+          <form onSubmit={(event) => { event.preventDefault(); handleApplyEndpoint(); }}>
+            <label>Daemon base URL <input value={draftUrl} disabled={launcherManaged} onChange={(event) => { setDraftUrl(event.target.value); setEndpointError(null); }} /></label>
+            <div className="button-row">
+              <button type="submit" className="action-button" disabled={launcherManaged}>Apply endpoint</button>
+              <button type="button" className="action-button ghost" disabled={launcherManaged} onClick={handleUseDefault}>Use default</button>
+            </div>
+          </form>
+          {launcherManaged && <p>Desktop endpoint is managed by the launcher. Restart with the configured launcher endpoint to change it.</p>}
+          {endpointError && <div role="alert">{endpointError}</div>}
         </div>
       </Panel>
       <Panel title="Operations metadata">

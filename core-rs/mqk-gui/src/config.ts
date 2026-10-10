@@ -20,7 +20,7 @@ export function getDaemonUrl(): string {
   const saved = getSavedDaemonUrl();
   if (saved) return saved;
 
-  const env = (import.meta as any)?.env?.VITE_MQK_DAEMON_URL as string | undefined;
+  const env = (import.meta as any).env?.VITE_MQK_DAEMON_URL as string | undefined;
   if (env && typeof env === "string") {
     const trimmed = env.trim();
     if (trimmed) return normalizeUrl(trimmed);
