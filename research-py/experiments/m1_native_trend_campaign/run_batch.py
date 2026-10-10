@@ -34,6 +34,8 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "research-py" / "src"))
+sys.path.insert(0, str(HERE))
+import stage_authorization  # noqa: E402
 
 DECL_FILE = os.environ.get("MQK_M1_BATCH_DECLARATION", "PREDECLARED_BATCH_01.json")
 DECL = json.loads((HERE / DECL_FILE).read_text(encoding="utf-8"))
@@ -61,6 +63,34 @@ BENCHMARK_CF = "capital_fraction_matched_passive_buy_hold_v1"
 CAPITAL_BASIS = "native_backtest.initial_cash_micros"
 
 
+_ACTIVE = {"stage": None, "auth": None}
+
+
+def _require_active_stage() -> None:
+    """Effectful helpers (`_run_cli`, `_save_index`) run only inside an authorized stage of a non-historical
+    declaration, so importing this module and calling a helper directly cannot bypass the stage gate."""
+    if _ACTIVE["stage"] is None and not stage_authorization.is_frozen_historical(DECL):
+        raise stage_authorization.AuthorizationError(
+            "fail-closed: effectful helper called outside an authorized runner stage")
+
+
+def staged(name: str):
+    """Authorize `name` for this exact declaration BEFORE the stage does anything (credentials, HTTP,
+    directories, registry, subprocess), whether it is reached from the CLI dispatcher or called directly."""
+    def wrap(fn):
+        def run(args):
+            outer = (_ACTIVE["stage"], _ACTIVE["auth"])
+            _ACTIVE["auth"] = stage_authorization.require_stage(DECL, name)
+            _ACTIVE["stage"] = name
+            try:
+                return fn(args)
+            finally:
+                _ACTIVE["stage"], _ACTIVE["auth"] = outer  # a nested stage never ends or inherits its caller's authority
+        run.__name__, run.__doc__, run.__wrapped__ = fn.__name__, fn.__doc__, fn
+        return run
+    return wrap
+
+
 def tdir(strategy: str, symbol: str) -> Path:
     return RUN / "trials" / strategy / symbol
 
@@ -69,12 +99,12 @@ def key(strategy: str, symbol: str) -> str:
     return f"{strategy}/{symbol}"
 
 
-def _economic_spec():
+def _economic_spec(decl: dict | None = None):
     from mqk_research.ml.economic_walkforward import (
         AnnualizationSpec, CostModelSpec, EconomicWalkForwardSpec, SignalPolicySpec)
     from mqk_research.ml.execution_pricing import ExecutionPricingSpec
     from mqk_research.ml.weight_to_share import WeightToShareSpec
-    p = DECL["economic_protocol"]
+    p = (decl or DECL)["economic_protocol"]
     return EconomicWalkForwardSpec(
         signal_policy=SignalPolicySpec(**p["signal_policy"]),
         cost_model=CostModelSpec(**p["cost_model"]),
@@ -85,7 +115,13 @@ def _economic_spec():
 
 
 def _run_cli(*argv: str) -> str:
-    out = subprocess.run([str(CLI), *argv], capture_output=True, text=True)
+    _require_active_stage()
+    exe = CLI
+    if not stage_authorization.is_frozen_historical(DECL):
+        # _ACTIVE is mutable state: the signed authorization is re-verified here, at the executable boundary, and
+        # only the exact binary it pins may run.
+        exe = stage_authorization.authorize_native_execution(DECL, _ACTIVE["stage"], _ACTIVE["auth"], CLI)
+    out = subprocess.run([str(exe), *argv], capture_output=True, text=True)
     if out.returncode != 0:
         raise SystemExit(f"mqk-cli failed ({argv[:2]}): {out.stderr[-800:]}")
     return out.stdout
@@ -103,6 +139,9 @@ def _load_index() -> dict:
 
 
 def _save_index(index: dict) -> None:
+    _require_active_stage()
+    if not stage_authorization.is_frozen_historical(DECL):
+        stage_authorization.reverify_active_stage(DECL, _ACTIVE["stage"], _ACTIVE["auth"])
     INDEX.parent.mkdir(parents=True, exist_ok=True)
     INDEX.write_text(json.dumps(index, indent=1, sort_keys=True), encoding="utf-8")
 
@@ -298,21 +337,35 @@ def _require_frozen_trial_structure() -> None:
         raise SystemExit("fail-closed: the declared trial count differs from max_trials")
 
 
+@staged("check")
 def stage_check(_args) -> None:
     _require_exact_target_protocol()
+    require_development_window(DECL)
     sizing_args(DECL)
     stress_plan(DECL)
     _require_frozen_trial_structure()
     assert len(TRIALS) == DECL["universe"]["max_trials"]
+    cli_check = "NOT_PRESENT"
     if CLI.exists():  # a stale binary that lacks a declared engine or sizing flag fails here, before any work
-        for strategy, sym in TRIALS:
-            _fingerprint, required = _resolve_native_identity(strategy, sym)
-            if required != HYP[strategy]["required_history_bars"]:
-                raise SystemExit(f"fail-closed: {strategy} requires {required} bars in the CLI but "
-                                 f"{HYP[strategy]['required_history_bars']} in the predeclaration")
-    print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()}")
+        # Executing the native binary is not read-only: a graded declaration runs it only under an
+        # authorization that pins the exact binary; otherwise the declaration-only validation above stands.
+        auth = None if stage_authorization.is_frozen_historical(DECL) else stage_authorization.optional_authorization(
+            DECL, stage_authorization.NATIVE_IDENTITY_RESOLUTION)
+        if stage_authorization.is_frozen_historical(DECL) or auth is not None:
+            _ACTIVE["auth"] = auth
+            for strategy, sym in TRIALS:
+                _fingerprint, required = _resolve_native_identity(strategy, sym)
+                if required != HYP[strategy]["required_history_bars"]:
+                    raise SystemExit(f"fail-closed: {strategy} requires {required} bars in the CLI but "
+                                     f"{HYP[strategy]['required_history_bars']} in the predeclaration")
+            cli_check = "PERFORMED"
+        else:
+            cli_check = "SKIPPED_NOT_AUTHORIZED"
+    print(f"batch={DECL['batch_id']} trials={len(TRIALS)} strategies={STRATEGIES} cli_present={CLI.exists()} "
+          f"cli_identity_check={cli_check}")
 
 
+@staged("reuse_data")
 def stage_reuse_data(_args) -> None:
     import shutil
     from mqk_research.ml.util_hash import sha256_file
@@ -338,6 +391,8 @@ def stage_reuse_data(_args) -> None:
 
 def _load_alpaca_env() -> None:
     """Load only the two research-data credential keys from .env.local (values are never printed)."""
+    from mqk_research.data.alpaca_historical import require_provider_access_allowed
+    require_provider_access_allowed()  # before ANY read of the environment or .env.local
     want = {"ALPACA_API_KEY_PAPER", "ALPACA_API_SECRET_PAPER"}
     if all(os.environ.get(k) for k in want):
         return
@@ -352,13 +407,57 @@ def _load_alpaca_env() -> None:
         raise SystemExit(f"fail-closed: credentials unavailable: {missing}")
 
 
+def fixed_holdout_boundary(decl: dict) -> dict | None:
+    """The declared fixed partition (`partition.holdout_boundary`), validated, or None for the historical
+    derivation from the fetched span. A malformed boundary is refused, never ignored."""
+    boundary = decl["partition"].get("holdout_boundary")
+    if boundary is None:
+        return None
+    from mqk_research.ml.native_signal_registry_integration import NativeSignalError, validate_fixed_holdout_boundary
+    try:
+        validate_fixed_holdout_boundary(boundary, decl["partition"]["holdout_months"])
+    except NativeSignalError as exc:
+        raise SystemExit(f"fail-closed: {exc}") from exc
+    return boundary
+
+
+def require_development_window(decl: dict) -> None:
+    """A graded declaration (one carrying `evidence_grade`) must name a fixed reserved boundary, and any
+    declared boundary bounds the provider request: the development fetch can never ask for a reserved date.
+    Ungraded historical declarations keep their derived boundary and their recorded fetch window."""
+    boundary = fixed_holdout_boundary(decl)
+    if boundary is None:
+        if "evidence_grade" in decl:
+            raise SystemExit("fail-closed: a graded declaration must declare partition.holdout_boundary "
+                             "(the provider request may not be allowed to reach a derived reserved window)")
+        return
+    start, end = pd.Timestamp(decl["data"]["start_utc"]), pd.Timestamp(decl["data"]["end_utc"])
+    reserved = pd.Timestamp(boundary["holdout_start_utc"])
+    if start.tzinfo is None or end.tzinfo is None or not start < end <= reserved:
+        raise SystemExit(f"fail-closed: data.end_utc {end} must be a UTC instant at or before the reserved holdout "
+                         f"start {reserved}; the provider request may not include a reserved date")
+
+
 def verify_fetched_bars(decl: dict, bars: pd.DataFrame) -> dict[str, int]:
     """Every declared symbol present exactly (no extras, no substitution) with enough history to cover the
-    widest declared strategy requirement. Returns per-symbol row counts."""
+    widest declared strategy requirement. Returns per-symbol row counts. Under a fixed partition every
+    returned row must lie in [data.start_utc, holdout_start) and every symbol must cover the same span."""
     symbols = list(decl["universe"]["symbols"])
     present = sorted(bars["symbol"].unique())
     if present != sorted(symbols):
         raise SystemExit(f"fail-closed: fetched symbols {present} differ from the declared universe {sorted(symbols)}")
+    boundary = fixed_holdout_boundary(decl)
+    if boundary is not None:
+        ts = pd.to_datetime(bars["end_ts"], utc=True)
+        reserved, begin = pd.Timestamp(boundary["holdout_start_utc"]), pd.Timestamp(decl["data"]["start_utc"])
+        if (ts >= reserved).any():
+            raise SystemExit(f"fail-closed: the provider returned {int((ts >= reserved).sum())} row(s) at or after the "
+                             f"reserved holdout start {reserved}; nothing is admitted")
+        if (ts < begin).any():
+            raise SystemExit("fail-closed: the provider returned rows before the declared development start")
+        spans = {s: (ts[bars["symbol"] == s].min(), ts[bars["symbol"] == s].max()) for s in symbols}
+        if len(set(spans.values())) != 1:
+            raise SystemExit(f"fail-closed: symbols cover different spans {sorted((s, str(v)) for s, v in spans.items())}")
     need = max(h["required_history_bars"] for h in decl["hypotheses"])
     counts = {s: int((bars["symbol"] == s).sum()) for s in symbols}
     short = {s: n for s, n in counts.items() if n < need}
@@ -367,9 +466,11 @@ def verify_fetched_bars(decl: dict, bars: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
+@staged("fetch")
 def stage_fetch(args) -> None:
     if not args.execute:
         raise SystemExit("fetch contacts the data provider; pass --execute")
+    require_development_window(DECL)  # before credentials, HTTP or any directory
     dest = RUN / "data"
     if (dest / "research_bars.csv").exists():
         raise SystemExit("fail-closed: bars already fetched for this run; refusing to overwrite")
@@ -381,6 +482,15 @@ def stage_fetch(args) -> None:
         symbols=list(DECL["universe"]["symbols"]), start_utc=pd.Timestamp(d["start_utc"]),
         end_utc=pd.Timestamp(d["end_utc"]), asof=d["asof"], timeframe=d["timeframe"], feed=d["feed"])
     counts = verify_fetched_bars(DECL, result["bars"])
+    boundary = fixed_holdout_boundary(DECL)
+    if boundary is not None:  # the attested range, not only the rows, must stay inside the development window
+        try:
+            attested_end = pd.Timestamp(result["manifest"]["end_utc"])
+        except (KeyError, TypeError, ValueError):
+            raise SystemExit("fail-closed: the provenance manifest carries no readable end_utc") from None
+        if attested_end.tzinfo is None or attested_end > pd.Timestamp(boundary["holdout_start_utc"]):
+            raise SystemExit(f"fail-closed: the provenance manifest attests a range ending {attested_end}, past the "
+                             f"reserved holdout start {boundary['holdout_start_utc']}")
     paths = write_research_extraction_artifacts(dest, result)
     print("rows", counts, {k: v.name for k, v in paths.items()})
 
@@ -392,21 +502,29 @@ def _resolve_native_identity(strategy: str, sym: str) -> tuple[str, int]:
     return _parse(info, "semantic_fingerprint"), int(_parse(info, "required_history_bars"))
 
 
-def expected_trial_ids(fingerprints: dict, manifest: dict) -> list[tuple[str, str, str, dict]]:
+def expected_trial_ids(fingerprints: dict, manifest: dict, decl: dict | None = None) -> list[tuple[str, str, str, dict]]:
     """The predeclared (strategy, symbol, trial_id, identity) for every slot, derived only from the
-    declaration, the resolved native fingerprints and the data provenance -- never from a result."""
+    declaration, the resolved native fingerprints and the data provenance -- never from a result.
+    `decl` defaults to the runner's declaration; a reviewer passes the declaration it is reviewing."""
     from mqk_research.ml.native_signal_registry_integration import build_native_signal_trial_identity
-    part = DECL["partition"]
+    if decl is None:  # the runner's own (possibly test-narrowed) module state
+        decl, experiment, hyp, slots = DECL, EXPERIMENT, HYP, TRIALS
+    else:
+        experiment = decl["experiment"]["real_experiment_id"]
+        hyp = {h["strategy_id"]: h for h in decl["hypotheses"]}
+        slots = [(t["strategy_id"], t["symbol"]) for t in decl["universe"]["trials"]]
+    part = decl["partition"]
     out = []
-    for strategy, sym in TRIALS:
-        h, (fingerprint, required) = HYP[strategy], fingerprints[(strategy, sym)]
+    for strategy, sym in slots:
+        h, (fingerprint, required) = hyp[strategy], fingerprints[(strategy, sym)]
         trial_id, identity = build_native_signal_trial_identity(
-            experiment_id=EXPERIMENT, hypothesis_id=h["hypothesis_id"], strategy_id=strategy, symbol=sym,
+            experiment_id=experiment, hypothesis_id=h["hypothesis_id"], strategy_id=strategy, symbol=sym,
             semantic_fingerprint=fingerprint, required_history_bars=required, bars_provenance=manifest,
             evaluation_start_utc=pd.Timestamp(part["evaluation_start_utc"]), test_months=part["test_months"],
-            holdout_months=part["holdout_months"], economic_spec=_economic_spec(),
-            capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL),
-            canonical_timeframe_identity=canonical_timeframe_identity(DECL))
+            holdout_months=part["holdout_months"], economic_spec=_economic_spec(decl),
+            capital_sizing=research_capital_sizing(decl), stress_contract=research_stress_contract(decl),
+            canonical_timeframe_identity=canonical_timeframe_identity(decl),
+            fixed_holdout_boundary=fixed_holdout_boundary(decl))
         out.append((strategy, sym, trial_id, identity))
     return out
 
@@ -442,6 +560,8 @@ def registration_gate(store, experiment_id: str, expected: list, *, require_zero
 
 def _run_registration_gate(*, require_zero_attempts: bool) -> dict:
     from mqk_research.exp_distributed.storage import ResearchResultStore
+    if not REGISTRY.exists():  # the store constructor creates directories and a database: verification must not
+        raise SystemExit("fail-closed: the batch registry does not exist; nothing to verify")
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     fingerprints = {(strategy, sym): _resolve_native_identity(strategy, sym) for strategy, sym in TRIALS}
     return registration_gate(ResearchResultStore(REGISTRY), EXPERIMENT,
@@ -449,6 +569,7 @@ def _run_registration_gate(*, require_zero_attempts: bool) -> dict:
                              require_zero_attempts=require_zero_attempts)
 
 
+@staged("gate")
 def stage_gate(_args) -> None:
     """Pre-run gate: every predeclared trial is registered, nothing else is, and no attempt exists."""
     _require_exact_target_protocol()
@@ -456,12 +577,14 @@ def stage_gate(_args) -> None:
     print("registration_gate_passed registered", result["registered"], "attempts", result["attempts"])
 
 
+@staged("register")
 def stage_register(_args) -> None:
     """Register every hypothesis and trial. Resolves the native fingerprint from the
     strategy registry only -- no emitter, no Backtest, no market data."""
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.native_signal_registry_integration import register_native_signal_trial
     _require_exact_target_protocol()
+    require_development_window(DECL)
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     store = ResearchResultStore(REGISTRY)
@@ -483,7 +606,8 @@ def stage_register(_args) -> None:
             test_months=part["test_months"], holdout_months=part["holdout_months"],
             hypothesis_text=h["economic_rationale"], registry_db=REGISTRY,
             capital_sizing=research_capital_sizing(DECL), stress_contract=research_stress_contract(DECL),
-            canonical_timeframe_identity=canonical_timeframe_identity(DECL))
+            canonical_timeframe_identity=canonical_timeframe_identity(DECL),
+            fixed_holdout_boundary=fixed_holdout_boundary(DECL))
         index[key(strategy, sym)] = {"trial_id": trial_id, "hypothesis_id": h["hypothesis_id"],
                                      "semantic_fingerprint": fingerprint, "required_history_bars": required}
         print(key(strategy, sym), trial_id, fingerprint[:12])
@@ -495,12 +619,14 @@ def stage_register(_args) -> None:
     print("registered_unique_trials", len(registered), "attempts", attempts)
 
 
+@staged("trials")
 def stage_trials(_args) -> None:
     from mqk_research.exp_distributed.storage import ResearchResultStore
     from mqk_research.ml.native_signal_registry_integration import (
         NativeSignalError, native_holdout_start, research_bars_to_backtest_csv,
         run_registered_native_signal_economic_eval)
     _require_exact_target_protocol()
+    require_development_window(DECL)
     part, manifest = DECL["partition"], json.loads(MANIFEST.read_text(encoding="utf-8"))
     store = ResearchResultStore(REGISTRY)
     if len(store.list_trials(experiment_id=EXPERIMENT)) != len(TRIALS):
@@ -510,7 +636,7 @@ def stage_trials(_args) -> None:
     for strategy, sym in TRIALS:  # frozen order; failures never stop the batch
         h, sdir, rec = HYP[strategy], tdir(strategy, sym), index[key(strategy, sym)]
         sdir.mkdir(parents=True, exist_ok=True)
-        hold = native_holdout_start(BARS, sym, part["holdout_months"])
+        hold = native_holdout_start(BARS, sym, part["holdout_months"], fixed_holdout_boundary(DECL))
         bt = research_bars_to_backtest_csv(BARS, sym, sdir / "bt_bars.csv", end_exclusive_utc=hold)
 
         def emit(bt=bt, strategy=strategy, sym=sym, sdir=sdir, h=h):
@@ -529,7 +655,8 @@ def stage_trials(_args) -> None:
                 required_history_bars=rec["required_history_bars"],
                 expected_capital_sizing=research_capital_sizing(DECL),
                 expected_stress_contract=research_stress_contract(DECL),
-                canonical_timeframe_identity=canonical_timeframe_identity(DECL))
+                canonical_timeframe_identity=canonical_timeframe_identity(DECL),
+                fixed_holdout_boundary=fixed_holdout_boundary(DECL))
         except NativeSignalError as exc:  # the failed attempt is already durable
             rec["failed"] = str(exc)
             print(key(strategy, sym), "FAILED attempt kept:", str(exc)[:200])
@@ -544,6 +671,7 @@ def stage_trials(_args) -> None:
     _save_index(index)
 
 
+@staged("judge")
 def stage_judge(_args) -> None:
     from mqk_research.exp_distributed.hashing import canonical_json, sha256_bytes
     from mqk_research.exp_distributed.storage import ResearchResultStore
@@ -560,6 +688,7 @@ def stage_judge(_args) -> None:
           "included", len(art["included_trial_ids"]), "excluded", art["excluded_trial_ids"], "sha", sha[:12])
 
 
+@staged("backtest")
 def stage_backtest(_args) -> None:
     index = _load_index()
     nb = DECL["native_backtest"]
@@ -597,6 +726,7 @@ def _capital_fraction_stress_args(strategy: str, sym: str, plan: dict) -> list[s
             "--stress-sizing-expected-semantic-fingerprint", fingerprint]
 
 
+@staged("finalize")
 def stage_finalize(_args) -> None:
     index = _load_index()
     sha = (RUN / "judge" / "judge_sha256.txt").read_text(encoding="utf-8").strip()
@@ -639,6 +769,7 @@ SCAN_REGISTRY_SUPPLEMENT = {
 }
 
 
+@staged("review")
 def stage_review(_args) -> None:
     reg = json.loads((REPO / "config" / "instruments" / "equities.json").read_text(encoding="utf-8"))
     symbols = sorted({s for _, s in TRIALS})
@@ -672,6 +803,7 @@ def stage_review(_args) -> None:
         print(strategy, out)
 
 
+@staged("summary")
 def stage_summary(_args) -> None:
     print(INDEX.read_text(encoding="utf-8"))
 
@@ -688,6 +820,9 @@ def require_executable_declaration(decl: dict) -> None:
     Declarations without the block (closed historical campaigns) are unaffected."""
     gate = decl.get("execution_gate")
     if gate is None:
+        if "evidence_grade" in decl:
+            raise SystemExit(f"fail-closed: {decl['batch_id']} declares an evidence_grade but carries no execution_gate; "
+                             "a graded declaration is never runnable without an explicit executable gate")
         return
     if gate.get("executable") is not True:
         raise SystemExit(f"fail-closed: {decl['batch_id']} is {gate.get('status')} "

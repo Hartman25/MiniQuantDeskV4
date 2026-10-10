@@ -28,6 +28,8 @@ from mqk_research.data.bars_provenance import (  # noqa: E402
 )
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 import mqk_research.ml.native_signal_registry_integration as bridge  # noqa: E402
+sys.path.insert(0, str(HERE))
+import stage_auth_testkit  # noqa: E402
 
 FP = "c" * 64
 SPEC = importlib.util.spec_from_file_location("run_batch_under_test", HERE / "run_batch.py")
@@ -94,6 +96,7 @@ def runner(tmp_path, monkeypatch):
     }.items():
         monkeypatch.setattr(rb, name, value)
     rb.DECL["universe"]["max_trials"] = len(trials)
+    stage_auth_testkit.grant_runner_stages(monkeypatch, rb)  # the mutated declaration is not a frozen historical one
     return rb, calls
 
 
@@ -180,3 +183,10 @@ def test_the_closed_campaign_runner_cannot_drive_the_superseded_bridge():
     spec.loader.exec_module(legacy)
     with pytest.raises(SystemExit, match="superseded native bridge v1"):
         legacy.main()
+
+
+def test_the_closed_campaign_runner_refuses_any_declaration_that_is_not_pinned_history(monkeypatch):
+    monkeypatch.setenv("M1_CAMPAIGN_FILE", "PREDECLARED_KISS_EXT032_ETF_01.json")
+    spec = importlib.util.spec_from_file_location("run_campaign_kiss", HERE / "run_campaign.py")
+    with pytest.raises(SystemExit, match="not a frozen historical declaration"):
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))

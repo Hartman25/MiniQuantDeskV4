@@ -810,6 +810,25 @@ Local, not pushed (baseline `a75dbdbe`). Record, matrices, defect census and ope
 
 Future intake: external 200-idea catalog is untrusted intake (profiled read-only, not committed; SHA-256 `6fc945a8...a37f3`); recommended controller `V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-01` (authority doc §16). Open: OD-1..OD-8 (candidate bar and OOS regime, population, holdout use, multiple-testing denominator, stress contract, calendar migration for monthly engines, Confirmation outcome rule, benchmark/no-trade semantics). BLOCKED: monthly-engine calendar horizon (E1, needs OD-6). DEFERRED: M1.10 evaluator operator entrypoint. M1 `M1_BLOCKED`; Paper INACTIVE; Live untouched; holdout RESERVED / UNCONSUMED.
 
+
+### G2.24 M1 KISS campaign: calendar v2, EXT-032 engine, non-executable predeclaration (`V4-M1-KISS-CALENDAR-CAMPAIGN-PREDECLARATION-AND-ENGINE-01`, 2026-10-09) - `LOCALLY_COMPLETE`, execution NOT authorized
+
+Local, not pushed (baseline `a49cae1f`, CI #637 green). Record: `docs/research/M1_KISS_EXT032_CLOSEOUT.md`.
+
+| Commit | Invariant |
+|---|---|
+| `81702cf` | operator economic-policy record and frozen EXT-032 design |
+| `4850082` | `us_equity_regular_sessions_v2` (2016-2028, closure classes, early closes, own hash); v1 untouched |
+| `b575426` | `CalendarContract` seam; existing engines keep the v1 path |
+| `49d04b5` | `pre_holiday_two_session_long_v1` (25th identity; universe bound 25) |
+| `4a2bb00` | non-executable `M1-KISS-EXT032-ETF-01` predeclaration (1 hypothesis, 4 trials, 0 attempts) + stage guards |
+| `63cd838` | cross-campaign search accounting (115 verified + 4 = 119; pooled DSR/PBO BLOCKED) |
+| `6aa9f96` | read-only near-miss review of every registered trial |
+
+Open: operator execution authorization (and acknowledgement of the holdout-window fetch and of the disclosed accidental provider fetch); DEFERRED: registered v2-bound siblings of the monthly/calendar engines (E1 beyond the seam). M1 `M1_BLOCKED`; Paper INACTIVE; Live untouched; holdout RESERVED / UNCONSUMED by any evaluation.
+
+Superseding status (V4-M1-KISS-EXT032-ALL-DEFECT-CLOSURE-01, local, not pushed): the holdout is `RESERVED_NOT_FORMALLY_CONSUMED__ACCESS_INCIDENT_PENDING_ADJUDICATION` (incident `HOA-KISS-EXT032-01`; `docs/research/M1_KISS_EXT032_ACCESS_INCIDENT_01.md`), not "untouched"/"UNCONSUMED"; the campaign now ends its provider request at the reserved start (fixed partition v1), so the old holdout-window fetch acknowledgement (U5) is replaced by a non-OHLCV corporate-action-discovery acknowledgement inside a per-stage, HMAC-authenticated operator authorization (the `executable` flag alone authorizes nothing); the near-miss review is v2 (recomputed identity, no free-form Promotion verdict, withheld qualification while `CUMULATIVE_SEARCH_VALIDATION_BLOCKED` / SAB-1 and the incident stand); the experiment tests now run in CI under an audit-hook network guard. Execution remains NOT authorized; M1 `M1_BLOCKED`; Paper INACTIVE; Live NOT TOUCHED.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).

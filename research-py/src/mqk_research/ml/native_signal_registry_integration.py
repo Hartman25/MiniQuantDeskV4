@@ -79,7 +79,15 @@ _MICROS = 1_000_000
 # quantity.
 NATIVE_EXECUTION_FIDELITY_FLOOR = 0.95
 
+# A fixed partition names the reserved window in the declaration instead of deriving it from the last
+# fetched bar, so the development fetch can end exactly at the reserved start without the derived boundary
+# (and therefore the historical folds) sliding backwards. Absent = the historical derivation, unchanged.
+FIXED_HOLDOUT_BOUNDARY_VERSION = "fixed_holdout_boundary_v1"
+_FIXED_HOLDOUT_KEYS = frozenset({"version", "holdout_start_utc", "holdout_end_utc"})
+
 __all__ = [
+    "FIXED_HOLDOUT_BOUNDARY_VERSION",
+    "validate_fixed_holdout_boundary",
     "NATIVE_EXECUTION_FIDELITY_FLOOR",
     "NATIVE_QUANTITY_SEMANTICS_ID",
     "NATIVE_SIGNAL_SOURCE_KIND",
@@ -158,6 +166,27 @@ def research_bars_to_backtest_csv(
     return Path(out_csv)
 
 
+def validate_fixed_holdout_boundary(boundary: Any, holdout_months: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """(holdout_start, holdout_end) of a declared fixed partition, or NativeSignalError. The start must be a
+    month-aligned UTC midnight, the end exactly `holdout_months` later; nothing is read from market data."""
+    if not isinstance(boundary, dict) or set(boundary) != _FIXED_HOLDOUT_KEYS:
+        raise NativeSignalError(f"fixed holdout boundary must have exactly the keys {sorted(_FIXED_HOLDOUT_KEYS)}")
+    if boundary["version"] != FIXED_HOLDOUT_BOUNDARY_VERSION:
+        raise NativeSignalError(f"fixed holdout boundary version must be {FIXED_HOLDOUT_BOUNDARY_VERSION!r}")
+    try:
+        start, end = pd.Timestamp(boundary["holdout_start_utc"]), pd.Timestamp(boundary["holdout_end_utc"])
+    except (TypeError, ValueError) as exc:
+        raise NativeSignalError("fixed holdout boundary timestamps are unreadable") from exc
+    if start.tzinfo is None or end.tzinfo is None:
+        raise NativeSignalError("fixed holdout boundary timestamps must be timezone-aware UTC")
+    start, end = start.tz_convert("UTC"), end.tz_convert("UTC")
+    if start != pd.Timestamp(year=start.year, month=start.month, day=1, tz="UTC"):
+        raise NativeSignalError("fixed holdout start must be a month-aligned UTC midnight")
+    if end != start + pd.DateOffset(months=int(holdout_months)):
+        raise NativeSignalError("fixed holdout end must equal the start plus holdout_months")
+    return start, end
+
+
 def plan_native_folds(
     *,
     t_min: pd.Timestamp,
@@ -165,13 +194,25 @@ def plan_native_folds(
     evaluation_start_utc: pd.Timestamp,
     test_months: int,
     holdout_months: int,
+    fixed_holdout_boundary: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[NativeFold], pd.Timestamp, pd.Timestamp]:
     """Contiguous, non-overlapping test windows from `evaluation_start_utc`
     up to the reserved holdout. Returns (folds, holdout_start, dataset_end).
-    The holdout boundary is the one the classifier protocol uses."""
+    Without `fixed_holdout_boundary` the holdout boundary is derived from the observed span, as the
+    classifier protocol does. With it, the boundary is the declared one and the observed bars must lie
+    wholly before it AND reach its final development month: a missing month never moves the boundary."""
     if int(test_months) <= 0 or int(holdout_months) <= 0:
         raise NativeSignalError("test_months and holdout_months must be > 0")
-    _anchor, holdout_start, dataset_end = compute_holdout_boundary(t_min, t_max, int(holdout_months))
+    if fixed_holdout_boundary is None:
+        _anchor, holdout_start, dataset_end = compute_holdout_boundary(t_min, t_max, int(holdout_months))
+    else:
+        holdout_start, dataset_end = validate_fixed_holdout_boundary(fixed_holdout_boundary, int(holdout_months))
+        if t_max >= holdout_start:
+            raise NativeSignalError(
+                f"bars reach {t_max.isoformat()}, at or after the reserved holdout start {holdout_start.isoformat()}")
+        if t_max < holdout_start - pd.DateOffset(months=1):
+            raise NativeSignalError(
+                "bars do not reach the final development month before the reserved holdout; the boundary does not move")
     start = pd.Timestamp(evaluation_start_utc)
     if start.tzinfo is None:
         start = start.tz_localize("UTC")
@@ -233,13 +274,21 @@ def native_exact_target_fidelity(
     return NativeFidelity(matched / evaluated, evaluated, matched, max_gap, desired_nonzero)
 
 
-def native_holdout_start(bars_csv: Path, symbol: str, holdout_months: int) -> pd.Timestamp:
-    """The reserved holdout start the bridge derives for `symbol`'s bars."""
+def native_holdout_start(
+    bars_csv: Path, symbol: str, holdout_months: int, fixed_holdout_boundary: Optional[Dict[str, Any]] = None
+) -> pd.Timestamp:
+    """The reserved holdout start for `symbol`'s bars: derived from the observed span, or the declared
+    fixed boundary (refusing bars that reach it)."""
     bars = pd.read_csv(bars_csv)
     ts = pd.to_datetime(bars[bars["symbol"].astype(str) == symbol]["end_ts"], utc=True)
     if ts.empty:
         raise NativeSignalError(f"no bars for symbol {symbol!r} in {bars_csv}")
-    return compute_holdout_boundary(ts.min(), ts.max(), int(holdout_months))[1]
+    if fixed_holdout_boundary is None:
+        return compute_holdout_boundary(ts.min(), ts.max(), int(holdout_months))[1]
+    start, _end = validate_fixed_holdout_boundary(fixed_holdout_boundary, int(holdout_months))
+    if ts.max() >= start:
+        raise NativeSignalError(f"{symbol} bars reach {ts.max().isoformat()}, at or after the reserved holdout start")
+    return start
 
 
 def require_native_exact_target_spec(economic_spec: EconomicWalkForwardSpec) -> EconomicWalkForwardSpec:
@@ -472,6 +521,7 @@ def build_native_signal_trial_identity(
     capital_sizing: Optional[Dict[str, Any]] = None,
     stress_contract: Optional[Dict[str, Any]] = None,
     canonical_timeframe_identity: bool = False,
+    fixed_holdout_boundary: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Result-independent identity: strategy semantics, quantity contract, data
     provenance, partition policy and economic protocol only. The signal source
@@ -511,6 +561,12 @@ def build_native_signal_trial_identity(
         },
         "economic_protocol": economic_protocol_identity(spec),
     }
+    if fixed_holdout_boundary is not None:
+        # Absent unless declared, so every historical trial id is unchanged.
+        start, end = validate_fixed_holdout_boundary(fixed_holdout_boundary, int(holdout_months))
+        identity["evaluation_spec"]["holdout_boundary"] = {
+            "version": FIXED_HOLDOUT_BOUNDARY_VERSION, "holdout_start_utc": start.isoformat(),
+            "holdout_end_utc": end.isoformat()}
     if capital_sizing is not None:
         # Behavior-bearing and result-independent; absent for fixed-quantity
         # trials, so every historical trial id is unchanged.
@@ -553,6 +609,7 @@ def register_native_signal_trial(
     capital_sizing: Optional[Dict[str, Any]] = None,
     stress_contract: Optional[Dict[str, Any]] = None,
     canonical_timeframe_identity: bool = False,
+    fixed_holdout_boundary: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Register the hypothesis and the trial and NOTHING else: no emission, no
     market data, no attempt, no evaluation. The fingerprint comes from the
@@ -573,6 +630,7 @@ def register_native_signal_trial(
         test_months=test_months, holdout_months=holdout_months, economic_spec=spec,
         capital_sizing=capital_sizing, stress_contract=stress_contract,
         canonical_timeframe_identity=canonical_timeframe_identity,
+        fixed_holdout_boundary=fixed_holdout_boundary,
     )
     store = ResearchResultStore(registry_db or default_db_path(default_root()))
     store.register_hypothesis(
@@ -609,6 +667,7 @@ def run_registered_native_signal_economic_eval(
     expected_capital_sizing: Optional[Dict[str, Any]] = None,
     expected_stress_contract: Optional[Dict[str, Any]] = None,
     canonical_timeframe_identity: bool = False,
+    fixed_holdout_boundary: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Official registered entry point for a native strategy's signals. The
     trial must ALREADY be registered (`register_native_signal_trial`); order is
@@ -639,6 +698,7 @@ def run_registered_native_signal_economic_eval(
         t_min=bar_ts.min(), t_max=bar_ts.max(),
         evaluation_start_utc=evaluation_start_utc,
         test_months=test_months, holdout_months=holdout_months,
+        fixed_holdout_boundary=fixed_holdout_boundary,
     )
 
     # The backtest CSV must be exactly the deterministic conversion of the
@@ -661,6 +721,7 @@ def run_registered_native_signal_economic_eval(
         holdout_months=holdout_months, economic_spec=spec, capital_sizing=expected_capital_sizing,
         stress_contract=expected_stress_contract,
         canonical_timeframe_identity=canonical_timeframe_identity,
+        fixed_holdout_boundary=fixed_holdout_boundary,
     )
 
     store = ResearchResultStore(registry_db or default_db_path(default_root()))

@@ -84,3 +84,15 @@ def test_post_phase_never_passes_vacuously(tmp_path):
     run2, _ = build(empty)
     with pytest.raises(hg.HoldoutBreach, match="no holdout ledger row"):
         hg.check(DECL, run2, empty / "missing.sqlite3", "post")
+
+
+def test_the_guard_report_carries_the_access_incident_and_never_certifies_independence(tmp_path):
+    kiss = json.loads((HERE / "PREDECLARED_KISS_EXT032_ETF_01.json").read_text(encoding="utf-8"))
+    decl = {"partition": {"holdout_months": 6}, "universe": {"symbols": ["SPY", "EFA"]},
+            "data": {"end_utc": "2026-09-01T00:00:00Z"}}
+    run, registry = build(tmp_path)
+    report = hg.check(decl, run, registry, "post")
+    assert report["ledger_all_reserved"] is True
+    assert report["access_incident"]["access_incident_status"] == "ACCESS_INCIDENT_PENDING_ADJUDICATION"
+    assert report["access_incident"]["independence_certification_blocked"] is True
+    assert kiss["holdout"]["access_incident"]["state"] == report["access_incident"]["access_incident_status"]

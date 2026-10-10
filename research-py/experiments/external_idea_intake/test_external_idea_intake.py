@@ -7,6 +7,8 @@ bytes are pinned only by EXPECTED_SHA256 (the committed-workbook test is conditi
 from __future__ import annotations
 
 import io
+import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -244,7 +246,12 @@ def test_committed_workbook_verifies_when_present():
 def test_no_declaration_or_registry_names_an_ext_id_and_no_provider_import():
     root = HERE.parent
     for path in root.glob("**/PREDECLARED_*.json"):
-        assert "EXT-" not in path.read_text(encoding="utf-8"), path.name
+        text = path.read_text(encoding="utf-8")
+        if path.name == "PREDECLARED_KISS_EXT032_ETF_01.json":  # the later, separately authorized, non-executable campaign
+            assert sorted(set(re.findall(r"EXT-\d{3}", text))) == ["EXT-032"]
+            assert json.loads(text)["execution_gate"]["executable"] is False
+        else:
+            assert "EXT-" not in text, path.name
     src = (HERE / "intake.py").read_text(encoding="utf-8")
     for banned in ("requests", "urllib", "socket", "subprocess", "alpaca", "pandas", "openpyxl", "eval(", "exec("):
         assert banned not in src, banned

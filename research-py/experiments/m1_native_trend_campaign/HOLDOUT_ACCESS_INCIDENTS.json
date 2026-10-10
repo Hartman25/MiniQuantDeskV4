@@ -1,0 +1,81 @@
+{
+ "append_only_rule": "Entries are never edited or removed. A later ADJUDICATION entry references the incident_id and supersedes its state; each entry chains to its predecessor by sha256 and the first entry's hash is pinned by test.",
+ "entries": [
+  {
+   "affected": {
+    "requested_range_utc": [
+     "2016-01-01T00:00:00Z",
+     "2026-09-01T00:00:00Z"
+    ],
+    "symbols": [
+     "SPY",
+     "QQQ",
+     "IWM",
+     "DIA"
+    ],
+    "window_end_utc": "2026-09-01T00:00:00Z",
+    "window_meaning": "the Final-Holdout months (OD-3) inside the requested range; every campaign whose reserved window starts 2026-03-01 shares it",
+    "window_start_utc": "2026-03-01T00:00:00Z"
+   },
+   "artifacts": {
+    "data_and_corporate_action_artifacts": "written to a git-ignored run directory, subsequently deleted (deletion does not undo the provider access)",
+    "provider_or_proxy_logs": "MAY EXIST outside the container; not inspected"
+   },
+   "entry_sha256": "a0c48a20bb27882733c3c8fec20c79592c69792d86b768902c72bd22744b0d0e",
+   "events": {
+    "formal_holdout_consumption": {
+     "detail": "no research_holdout_ledger reservation or consumption row was reported; the formal ledger is per-run and cannot show cross-process access",
+     "status": "NOT_REPORTED"
+    },
+    "human_price_inspection": {
+     "detail": "no price inspection was reported by the controller; absence of a report is not proof of absence",
+     "status": "NOT_REPORTED"
+    },
+    "ohlcv_parsing": {
+     "detail": "the response was parsed into a DataFrame; per-symbol counts and history sufficiency were validated by verify_fetched_bars",
+     "evidence": [
+      "run_batch.stage_fetch control flow (verify_fetched_bars precedes artifact writes)"
+     ],
+     "status": "OCCURRED"
+    },
+    "provider_access": {
+     "detail": "official extractor request executed for the four symbols over the full requested range, including the reserved months; ~10,720 bars returned",
+     "evidence": [
+      "controller session report (V4-M1-KISS-CALENDAR-CAMPAIGN-PREDECLARATION-AND-ENGINE-01) C15",
+      "docs/research/M1_KISS_EXT032_CLOSEOUT.md section 6 C15"
+     ],
+     "status": "OCCURRED"
+    },
+    "strategy_evaluation": {
+     "detail": "no emitter, judge, backtest, Promotion or economic evaluation was reported; the stage that ran (fetch) performs none",
+     "status": "NOT_REPORTED"
+    },
+    "trial_attempt_registration": {
+     "detail": "an empty registry file was created; no trial or attempt was reported registered",
+     "status": "NOT_REPORTED"
+    }
+   },
+   "incident_id": "HOA-KISS-EXT032-01",
+   "incident_summary": "A mutation test of the V4-M1-KISS-CALENDAR-CAMPAIGN-PREDECLARATION-AND-ENGINE-01 controller opened the declaration's execution gate; the spawned runner executed `fetch --execute` against the official Alpaca extractor with credentials present in the environment.",
+   "kind": "OPEN",
+   "not_asserted": [
+    "the holdout is untouched",
+    "the holdout is statistically clean",
+    "the holdout is permanently consumed",
+    "deleting the files restored the holdout"
+   ],
+   "outstanding_adjudication": "OPERATOR: decide whether the Final Holdout remains usable for its single-use purpose, is consumed, or must be replaced by a different reserved window. Until an ADJUDICATION entry is appended, no code path may certify the Final Holdout as independently cleared, and Promotion and Paper deployment stages are refused.",
+   "prev_entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+   "recorded_by_mission": "V4-M1-KISS-EXT032-ALL-DEFECT-CLOSURE-01",
+   "sequence": 1,
+   "state": "ACCESS_INCIDENT_PENDING_ADJUDICATION",
+   "unknowns": [
+    "whether any process or person inspected the returned prices before deletion",
+    "whether provider-side or proxy logs retain the request and response metadata",
+    "whether the returned reserved-window rows were copied elsewhere before deletion",
+    "whether the operator considers provider access plus parsing, without inspection or evaluation, to consume the holdout's single-use character"
+   ]
+  }
+ ],
+ "schema": "m1_holdout_access_incidents_v1"
+}

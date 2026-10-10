@@ -14,6 +14,7 @@ mod arm_state; // Patch L7 — sticky disarm + fail-closed boot
 pub mod calendar; // Patch B3 — trading session calendar
 mod engine;
 pub mod sessions; // us_equity_regular_sessions_v1 — daily session-date authority
+pub mod sessions_v2; // us_equity_regular_sessions_v2 — versioned successor (2016-2028, closure classes)
 pub mod soak_ledger; // M1.10 finite validation ledger (pure)
 mod types;
 

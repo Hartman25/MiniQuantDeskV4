@@ -1,0 +1,566 @@
+{
+ "batch_id": "m1_kiss_ext032_etf_01",
+ "campaign_id": "M1-KISS-EXT032-ETF-01",
+ "mission_id": "V4-M1-KISS-CALENDAR-CAMPAIGN-PREDECLARATION-AND-ENGINE-01",
+ "predeclared_utc_date": "2026-10-09",
+ "wave_classification": "KISS_SINGLE_HYPOTHESIS_FOUR_ETF_EXPOSED_DEVELOPMENT_PROSPECTIVE",
+ "execution_gate": {
+  "status": "KISS_EXT032_PREDECLARED_NOT_EXECUTED",
+  "executable": false,
+  "blocker": "OPERATOR_EXECUTION_AUTHORIZATION_REQUIRED",
+  "rule": "Every runner stage, the batch outcome selector and the results review refuse this declaration until the operator re-issues it as executable. Registration of 4 trials, the data fetch and attempt #1 are separate authorizations; none has happened. The re-issue may change only execution_gate (and asof if the fetch date differs, disclosed); any other change is a new predeclaration.",
+  "stage_authorization": {
+   "required": true,
+   "schema": "m1_stage_authorization_v1",
+   "module": "stage_authorization.py",
+   "classes": [
+    "data_materialization",
+    "native_identity_resolution",
+    "provider_fetch",
+    "registry_registration",
+    "attempt_execution",
+    "judge_finalize",
+    "promotion",
+    "paper_deployment"
+   ],
+   "binding": "sha256 of the declaration excluding execution_gate; operator, approval reference, validity window (at most 7 days), acknowledged pending incident ids; HMAC-SHA256 under the operator-held secret MQK_M1_STAGE_AUTH_KEY; native-binary execution additionally requires the authorization's signed cli_sha256 to equal the sha256 of the binary actually executed (MQK_M1_CLI is a mutable path and proves nothing)",
+   "enforcement": "the check runs at the top of every runner stage function and in the effectful helpers, so a directly imported stage is gated like the CLI dispatcher; executable=true alone authorizes nothing. `check` is declaration-only unless an authorization for native_identity_resolution is present; `gate` is not read-only because it resolves identities through the native binary",
+   "active_authorizations": "NONE",
+   "limits": "a shared-secret check, not non-repudiation; library functions called outside the runner are protected by credentials, the hermetic provider boundary and the network guard, not by this artifact"
+  }
+ },
+ "evidence_grade": {
+  "grade": "EXPOSED_DEVELOPMENT",
+  "independent_confirmation": false,
+  "forbidden_labels": [
+   "INDEPENDENTLY_CONFIRMED",
+   "OUT_OF_SAMPLE",
+   "CONFIRMED",
+   "VALIDATED"
+  ],
+  "statement": "The 2016-2026-02 window is declared-exposed development data (Census-01/02, Confirmation-01, native Batches 01-03 and earlier ETF waves all read it). A result here shows only whether the registered hypothesis clears the existing economic gates on exposed data. Forward Paper can add independent observations only after lawful Promotion and an authorized Paper deployment; it cannot make a contaminated historical test out-of-sample. Relabelling a retest never makes the window fresh.",
+  "promotion_contract_note": "verify_promotion_oos_evidence requires walk-forward fold evidence (folds_used > 0), the economic_walk_forward_v1 protocol and holdout.status == reserved_not_evaluated; this path can supply exactly that and nothing more. Independent confirmation is not a Promotion input and is not claimed. Gate 3b (active_paper) is untouched."
+ },
+ "protocol_note": "Hypothesis != trial != attempt != evaluation slice != robustness scenario: ONE hypothesis (EXT-032), one trial per instrument = 4 trials, one disclosed selection population. A robustness stress is an evaluation of the SAME registered trial, never a trial.",
+ "calendar": {
+  "contract_id": "us_equity_regular_sessions_v2",
+  "coverage_start_date": "2016-01-01",
+  "coverage_end_date": "2028-12-31",
+  "expected_content_sha256": "88b305dbe93f67f0cf7247e9a850234ce5b59ebe55bcec65fbee6842e8a49fe2",
+  "authority": "mqk-integrity::sessions_v2 (scheduled/unscheduled closure classes, early closes, content identity); the EXT-032 engine binds the contract id and content hash into its native semantic fingerprint",
+  "frozen_predecessor": {
+   "contract_id": "us_equity_regular_sessions_v1",
+   "expected_content_sha256": "3249ee517cbc6763b9f73b372d5c6a5f8337d872b91d20a5bca1c27b7a1a76de",
+   "status": "UNCHANGED; every earlier campaign and fingerprint keeps resolving through it"
+  },
+  "closure_classes": {
+   "scheduled": "rule-derived full closures known prospectively; the only holiday events",
+   "unscheduled": "2018-12-05 and 2025-01-09 national-mourning closures; never events, knowable only from their own date"
+  },
+  "unscheduled_closure_policy": "an unscheduled closure never creates, cancels or moves a signal; the decision rule reads the scheduled calendar only",
+  "early_close_policy": "early-close sessions are sessions and may be window members; 2016-2022 early closes are exchange-rule derived (the rule reproduces the published 2023-2028 table exactly), not provider-evidenced; they do not change EXT-032 economics"
+ },
+ "hypotheses": [
+  {
+   "hypothesis_id": "m1_kiss_ext032_pre_holiday_two_session_long_v1",
+   "hypothesis_label": "H1",
+   "catalog_id": "EXT-032",
+   "catalog_source": {
+    "workbook_sha256": "6fc945a873733cda6a1552049923a153ed2f7213c488c6d5f07ffeb8077a37f3",
+    "ledger": "docs/research/intake/external_idea_disposition_ledger_v1.json",
+    "ledger_row_source_sha256": "72e56800d20466bc011655c4479dc43028a69a03758d1b6a240a7a94ae0793e9",
+    "catalog_text": "Long equity market during two trading days before holidays; exit at holiday window end; use exchange holiday calendar; known bias risks: small sample, holiday definition drift. The derived short control is NOT part of this identity.",
+    "status": "UNTRUSTED_IDEA_INTAKE until this declaration; the catalog's own priority/readiness labels are not used"
+   },
+   "strategy_id": "pre_holiday_two_session_long_v1",
+   "economic_rationale": "Equity returns have been documented to be unusually high on sessions preceding exchange holidays (pre-holiday effect). The single predeclared form holds a long position across the two scheduled sessions before each scheduled exchange holiday. Falsifiable; no profitability is assumed; the effect is small per event and the sample is small (about nine to ten events a year).",
+   "rationale_references": [
+    "Lakonishok & Smidt (1988), Are Seasonal Anomalies Real? A Ninety-Year Perspective, RFS 1(4)",
+    "Ariel (1990), High Stock Returns before Holidays, Journal of Finance 45(5)"
+   ],
+   "reference_note": "descriptive only; no parameter, threshold or code path is derived from these references",
+   "timeframe_secs": 86400,
+   "required_history_bars": 2,
+   "direction": "long_only_flat",
+   "rule": "Holiday event H = a weekday scheduled full closure of us_equity_regular_sessions_v2 (weekends and unscheduled closures are not events). Window = the two scheduled sessions immediately preceding H (P2 < P1 < H); overlapping or consecutive events union. At the completed daily bar of session t with N(t) the next SCHEDULED session: TARGET +1 iff N(t) is in a window, else 0. The latest two bars must be consecutive actual sessions.",
+   "decision_kind": "calendar_window_hold",
+   "parameters": {
+    "WINDOW_SESSIONS": 2
+   },
+   "causal_timeline": {
+    "example_event": "Thanksgiving 2024-11-28",
+    "entry_signal": "Mon 2024-11-25 bar completed (P3): N = Tue 11-26 = P2 -> target long; quantity Q = floor(USD 10,000 / close of the P3 bar)",
+    "entry_fill": "Tue 2024-11-26 (P2), the next permitted bar, conservative bar-range fill plus slippage; never the signal bar",
+    "intended_first_exposed_session": "P2 (the P3-close to P2-close return is not capturable: a signal cannot fill on its own bar)",
+    "hold": "decision at P2 completion: N = P1 -> still long; no resize, no re-entry",
+    "intended_last_exposed_session": "Wed 2024-11-27 (P1)",
+    "exit_signal": "Wed 2024-11-27 bar completed: N = Fri 11-29, not in a window -> target flat",
+    "exit_fill": "Fri 2024-11-29, the first session after the holiday, conservative bar-range fill minus slippage",
+    "unavoidable_exposure": "the overnight gap into the holiday, the holiday gap itself and the reopening session until the exit fill",
+    "near_evaluation_boundary": "no window straddles a 1 March fold or holdout boundary in 2016-2028 (pinned by a Rust test); force_flat_last_bar therefore never truncates an event",
+    "missing_or_stale_bars": "latest two bars not consecutive actual sessions -> flat; a missing decision bar means no entry; a missing bar after a valid entry decision delays the fill to the next available bar and the next decision exits; never bridged",
+    "restart": "stateless, BoundedHistoryReconstructible; continuous execution equals restart-at-every-boundary; the durable held-sizing record is the quantity authority after a restart and its absence means flat (a mid-window restart without a record is a fresh entry, never a phantom position)"
+   },
+   "calendar_contract_bound": true,
+   "calendar_contract_id": "us_equity_regular_sessions_v2",
+   "restart_recovery": "BoundedHistoryReconstructible",
+   "special_cases": {
+    "short_or_missing_window": "FLAT",
+    "incomplete_latest_bar": "FLAT",
+    "nonpositive_or_malformed_price": "FLAT / fail-closed",
+    "uncovered_or_unresolvable_calendar": "FLAT / fail-closed",
+    "same_bar_fill": "never; execution is a strictly later bar"
+   },
+   "no_variants": "no other window length, entry offset, exit offset, holiday subset, indicator, filter, stop, trailing stop, parameter grid or short side is registered or evaluated"
+  }
+ ],
+ "universe": {
+  "selection_rule": "OD-2: the exact fixed ex-ante instrument list SPY, QQQ, IWM, DIA (US-listed equity ETFs, long/flat, canonical daily). Accepted instrument-registry membership; no substitution, expansion or performance-dependent exclusion.",
+  "symbols": [
+   "SPY",
+   "QQQ",
+   "IWM",
+   "DIA"
+  ],
+  "symbol_roles": {
+   "SPY": "US large-cap equities",
+   "QQQ": "US large-cap growth/technology",
+   "IWM": "US small-cap equities",
+   "DIA": "US large-cap price-weighted (Dow 30)"
+  },
+  "instrument_identity": {
+   "SPY": {
+    "instrument_id": "equity:US:SPY",
+    "registry": "config/instruments/equities.json",
+    "registry_row_sha256": "546fc91140363729fd6605e3ab1d8f609010a1612995c62f02c092342bb25e35",
+    "instrument_kind": "etf"
+   },
+   "QQQ": {
+    "instrument_id": "equity:US:QQQ",
+    "registry": "config/instruments/equities.json",
+    "registry_row_sha256": "56f086e9e364ddd77886e07d105c4a9f5a1a8498366fb6b0199d22f772e12325",
+    "instrument_kind": "etf"
+   },
+   "IWM": {
+    "instrument_id": "equity:US:IWM",
+    "registry": "config/instruments/equities.json",
+    "registry_row_sha256": "252ef353d9c5e79387547e757e06a7e617bda151c8771a9ec76514e6c457bdff",
+    "instrument_kind": "etf"
+   },
+   "DIA": {
+    "instrument_id": "equity:US:DIA",
+    "registry": "config/instruments/equities.json",
+    "registry_row_sha256": "2d7e7edcd2f1f4f6bcda3f4b3505872be42ec2a20c6c020f5e7260bc05e69283",
+    "instrument_kind": "etf"
+   }
+  },
+  "universe_mode": "fixed_ex_ante",
+  "point_in_time_membership": false,
+  "survivorship_note": "A fixed list of long-lived, still-listed ETFs is not point-in-time clean; each symbol is its own registered trial and the judge deflates over all four.",
+  "max_trials": 4,
+  "additional_candidate_after_predeclaration": "forbidden",
+  "trials": [
+   {
+    "order": 1,
+    "hypothesis_label": "H1",
+    "strategy_id": "pre_holiday_two_session_long_v1",
+    "symbol": "SPY"
+   },
+   {
+    "order": 2,
+    "hypothesis_label": "H1",
+    "strategy_id": "pre_holiday_two_session_long_v1",
+    "symbol": "QQQ"
+   },
+   {
+    "order": 3,
+    "hypothesis_label": "H1",
+    "strategy_id": "pre_holiday_two_session_long_v1",
+    "symbol": "IWM"
+   },
+   {
+    "order": 4,
+    "hypothesis_label": "H1",
+    "strategy_id": "pre_holiday_two_session_long_v1",
+    "symbol": "DIA"
+   }
+  ]
+ },
+ "strategy_fingerprints": {
+  "note": "result-independent; recomputed by core-rs mqk-backtest scenario_kiss_ext032_declaration_pins_01 against the registered engine and the capital-fraction wrapper constructor",
+  "wrapper_inputs": {
+   "allocation_fraction_bps": 1000,
+   "initial_allocated_capital_micros": 100000000000
+  },
+  "per_symbol": {
+   "SPY": {
+    "inner_semantic_fingerprint": "135f5f770f7a15ea7231514fc03ea9ad048d96e8ef478fc9fd09b49db4357c6d",
+    "capital_fraction_wrapped_semantic_fingerprint": "b3671666a25ae23e5fb8540f21ad822cf40e3286bc2b6b1a25530a385997facc"
+   },
+   "QQQ": {
+    "inner_semantic_fingerprint": "e41e94fd6bdd63af323bd2ba39a74ae239eaeb3d782c0fa9bc22d3f6b1973a91",
+    "capital_fraction_wrapped_semantic_fingerprint": "e2c321850f1c3e6f6b29097f4f60bcd50359e5eae48ef7d6511da593ab4b442c"
+   },
+   "IWM": {
+    "inner_semantic_fingerprint": "e3b3abca51569a6f65c8d94c7694ff7a64f5682d53478ec14ab8e2049d607d35",
+    "capital_fraction_wrapped_semantic_fingerprint": "5ec1e579172db804dd53689143c8f3fafcf26a6b2e89adec18c6ab02aae6559c"
+   },
+   "DIA": {
+    "inner_semantic_fingerprint": "f32d4fc75b59399f3900cc648190920a5701edcbe27d8dae56b583a1468c5b3a",
+    "capital_fraction_wrapped_semantic_fingerprint": "19ab330e4f58d9aea95bb95197e8246aee447616025c2e1457c7721970e104e5"
+   }
+  }
+ },
+ "experiment": {
+  "real_experiment_id": "M1-KISS-EXT032-ETF-01",
+  "registry_db_relative_path": "runs/run_kiss_ext032_etf_01/registry/research.sqlite3",
+  "trial_per_hypothesis_symbol": true,
+  "population_policy": "ONE experiment id holds the one hypothesis and all four trials. The multiple-testing judge scope is the experiment id with hypothesis_id unset: ONE batch-wide selection population of all 4; losing and failed trials are never excluded.",
+  "judge_scope": "whole experiment, never a subset",
+  "all_four_trials_registered_before_first_economic_evaluation": true
+ },
+ "run_dir": "runs/run_kiss_ext032_etf_01",
+ "declaration_selection": "run_batch.py and summarize_batch.py read this file when MQK_M1_BATCH_DECLARATION names it.",
+ "data": {
+  "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+  "feed": "sip",
+  "timeframe": "1Day",
+  "timeframe_identity": "canonical_semantic_v1",
+  "adjustment": "all",
+  "start_utc": "2016-01-01T00:00:00Z",
+  "end_utc": "2026-03-01T00:00:00Z",
+  "asof": "2026-10-09",
+  "completed_bars_only": true,
+  "verification_required_before_registration": "fetch/verify provider bars for SPY, QQQ, IWM and DIA, record the provenance manifest and row counts; any symbol without sufficient adjusted history is reported, never substituted. No prior verified bars cover DIA, so all four are fetched under this campaign's own manifest.",
+  "asof_note": "the data vintage date; an executable re-issue may move it only if the fetch date differs, and discloses the change",
+  "holdout_window_fetch_disclosure": "The provider request ends at the reserved holdout start (2026-03-01T00:00:00Z, exclusive): no OHLCV timestamp at or after it is requested, parsed or admitted (fetch window end <= partition.holdout_boundary.holdout_start_utc is enforced before credentials or HTTP, and verify_fetched_bars refuses any returned reserved row). The reserved boundary is DECLARED, not derived from the last fetched bar, so a short final month cannot move it. Disclosed residual, not an OHLCV read: the official extractor's corporate-action DISCOVERY queries action metadata by process date up to the extraction instant (REPAIR-02: a superset ceiling that is deliberately not the research end); entries are filtered to the research interval before use. The provider_fetch authorization must acknowledge CA_DISCOVERY_PROCESS_DATE_TO_EXTRACTION_TIME.",
+  "required_fetch_acknowledgements": [
+   "CA_DISCOVERY_PROCESS_DATE_TO_EXTRACTION_TIME"
+  ]
+ },
+ "partition": {
+  "evaluation_start_utc": "2016-03-01T00:00:00Z",
+  "test_months": 12,
+  "holdout_months": 6,
+  "expected_folds": 10,
+  "holdout_rule": "the final 6 calendar months (from 2026-03-01) are RESERVED and not formally consumed (ACCESS_INCIDENT_PENDING_ADJUDICATION: see holdout.access_incident); discovery bars are truncated before the holdout start",
+  "warmup_note": "EXT-032 needs two completed bars; the first fold is never structurally flat for warm-up. A fold with zero long signals is non-evaluable under the unchanged policy (OD-8); about nine to ten events a year make this not expected.",
+  "holdout_boundary": {
+   "version": "fixed_holdout_boundary_v1",
+   "holdout_start_utc": "2026-03-01T00:00:00Z",
+   "holdout_end_utc": "2026-09-01T00:00:00Z"
+  },
+  "holdout_boundary_note": "Fixed partition (additive, versioned): reproduces the ten accepted 12-month folds 2016-03-01..2026-03-01 and the 2026-03-01..2026-09-01 reserved window that the historical derivation yields from bars ending 2026-08-31, without fetching them and without a fabricated dataset-end observation. holdout_end is the declared reserved-window end, not an observation. Bound into every trial identity; historical campaigns keep the derivation and their trial ids."
+ },
+ "economic_protocol": {
+  "protocol_id": "economic_walk_forward_v1",
+  "signal_policy": {
+   "direction_policy": "native_exact_target_qty_v1",
+   "sizing": "exact_native_target_qty_v1",
+   "entry_threshold": 0.5,
+   "long_only": true,
+   "max_gross_exposure": 1.0
+  },
+  "cost_model": {
+   "commission_bps_per_side": 10.0,
+   "slippage_bps_per_side": 0.0
+  },
+  "execution_pricing": {
+   "pricing_model_id": "rust_conservative_bar_range_v1",
+   "slippage_bps": 5,
+   "volatility_mult_bps": 0
+  },
+  "weight_to_share": {
+   "equity_usd": 100000.0,
+   "max_position_notional_usd": 50000.0
+  },
+  "annualization": {
+   "annualization_days": 252,
+   "risk_free_rate_annual": 0.0
+  },
+  "signal_stream_protocol": "native_strategy_signal_stream_v2",
+  "quantity_semantics": {
+   "id": "absolute_target_qty_micros_v1",
+   "rule": "the economic engine holds EXACTLY the native absolute target quantity; ml_score is ignored; no weight re-sizing"
+  }
+ },
+ "native_backtest": {
+  "initial_cash_micros": 100000000000,
+  "timeframe_secs": 86400,
+  "integrity_calendar": "us-equity-regular",
+  "bars": "the same provenance-bound research bars converted deterministically, truncated at the holdout start"
+ },
+ "capital_sizing": {
+  "policy_id": "fixed_initial_capital_fraction_v1",
+  "allocation_fraction_bps": 1000,
+  "capital_basis": "native_backtest.initial_cash_micros",
+  "initial_capital_micros": 100000000000,
+  "nominal_entry_budget_micros": 10000000000,
+  "max_position_notional_usd": 50000,
+  "quantity_rule": "Q = floor(position_budget_micros / close_micros of the fully completed strategy bar on which a FLAT strategy emits its new target); position_budget_micros = floor(initial_capital_micros * 1000 / 10000) = USD 10,000; whole shares; refuse (stay flat) if the budget cannot buy one share; no +1 fallback; no compounding; no family-specific sizing; held exactly for the position lifetime",
+  "forbidden": [
+   "current-equity resizing",
+   "broker buying-power sizing",
+   "compounding",
+   "Kelly",
+   "ATR sizing",
+   "risk parity",
+   "volatility targeting",
+   "portfolio optimizer",
+   "floating-point sizing",
+   "rounding up",
+   "family-specific sizing"
+  ]
+ },
+ "benchmark": {
+  "policy_id": "capital_fraction_matched_passive_buy_hold_v1",
+  "min_alpha_pct": 0.0,
+  "scanner_cli_flag": "--benchmark-policy capital_fraction_matched_passive_buy_hold_v1",
+  "cross_substitution": "capital_matched_exact_target_buy_hold_v1 is not authorized; cross-substitution fails closed"
+ },
+ "robustness": {
+  "block_counts": [
+   8,
+   10,
+   12
+  ],
+  "dsr_max_sensitivity_range": 0.15,
+  "pbo_max_sensitivity_range": 0.15,
+  "p7a_p7b_stress": {
+   "status": "OPERATOR_FROZEN_BATCH03_STRESS_CONTRACT",
+   "register_stress_contract": true,
+   "stress_execution_slippage_bps": 15,
+   "stress_execution_volatility_mult_bps": 10,
+   "max_drawdown_ceiling": 0.4,
+   "stress_sizing": {
+    "scenario_id": "half_exposure_capital_fraction_500bps_v1",
+    "policy_id": "fixed_initial_capital_fraction_v1",
+    "allocation_fraction_bps": 500,
+    "initial_capital_micros": 100000000000,
+    "nominal_entry_budget_micros": 5000000000,
+    "quantity_rule": "resolve a new stress Q from the same causal completed-bar reference price; do not cap a 1000-bps baseline Q",
+    "is_a_trial": false,
+    "identity": "the stress is an evaluation scenario of the SAME registered trial; the trial identity stays bound to the 1000 bps baseline; the scenario artifact separately binds the stress sizing, the stress signal stream hash and the execution-stress parameters"
+   },
+   "stress_notional_cap_policy": "stress_max_position_notional_usd and stress_max_target_qty are NOT used. A USD 5,000 cap on a 1000-bps quantity is not a half-exposure mechanism and is not a Production default; the independent baseline notional safety cap (USD 50,000) is carried unchanged into the stress.",
+   "baseline_adversity_check": "baseline execution slippage_bps 5 / volatility_mult_bps 0 (economic_protocol.execution_pricing) -> stress 15 / 10: both at least as adverse, both strictly worse."
+  }
+ },
+ "scanner_review": {
+  "policy": "mqk_backtest::StrategyScanReviewPolicy::default, unchanged; benchmark_policy = capital_fraction_matched_passive_buy_hold_v1",
+  "benchmark_policy": "capital_fraction_matched_passive_buy_hold_v1"
+ },
+ "promotion_policy": {
+  "note": "Thresholds carried over unchanged from Batch 03 (OD-8); no result may reopen them. Discovery never promotes.",
+  "MQK_PROMOTION_MIN_SHARPE": 0.5,
+  "MQK_PROMOTION_MAX_MDD": 0.25,
+  "MQK_PROMOTION_MIN_CAGR": 0.0,
+  "MQK_PROMOTION_MIN_PROFIT_FACTOR": 1.05,
+  "MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT": 0.4,
+  "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO": 0.5,
+  "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING": 0.5,
+  "MQK_RESEARCH_REQUIRE_NATIVE_SEMANTIC_BINDING": 1
+ },
+ "execution_fidelity": {
+  "floor": 0.95,
+  "metric": "fraction of evaluated bars on which the simulator's discrete post-order position equals the native desired target quantity"
+ },
+ "holdout": {
+  "status": "RESERVED_NOT_FORMALLY_CONSUMED__ACCESS_INCIDENT_PENDING_ADJUDICATION",
+  "formal_ledger_basis": "no research_holdout_ledger reservation or consumption exists for this campaign; a per-run reservation row is not evidence about other processes",
+  "access_incident": {
+   "state": "ACCESS_INCIDENT_PENDING_ADJUDICATION",
+   "incident_ids": [
+    "HOA-KISS-EXT032-01"
+   ],
+   "record": "docs/research/M1_KISS_EXT032_ACCESS_INCIDENT_01.md",
+   "ledger": "research-py/experiments/m1_native_trend_campaign/HOLDOUT_ACCESS_INCIDENTS.json",
+   "effect": "No code path may represent the Final Holdout as independently cleared. Promotion and Paper deployment stages and any 'qualifies' label are refused while the incident is pending or adjudicated CONSUMED. Only an ADJUDICATION entry authenticated under the operator-held secret (MQK_M1_INCIDENT_ADJUDICATION_KEY) and moving the state forward to PRESERVED clears the veto; an unauthenticated entry is ignored. The committed opening entry is pinned in source and cannot be rewritten."
+  },
+  "rule": "never consumed by discovery; consumed holdout data is never fresh again; a rerun requiring the holdout is a hard stop"
+ },
+ "stop_loss_policy": {
+  "status": "NOT_INTRODUCED",
+  "rule": "Accepted execution, risk and halt controls apply unchanged. No stop-loss or trailing stop is a trial, a variant or a parameter of this campaign.",
+  "unexecuted_future_ideas": [
+   "fixed stop",
+   "ATR stop",
+   "ATR trailing stop"
+  ],
+  "future_idea_status": "unexecuted ideas only; each changes economic identity and requires a separate prospective declaration with its own accounting; a stop does not create expectancy and does not bound realized loss"
+ },
+ "search_accounting": {
+  "document": "docs/research/M1_KISS_EXT032_SEARCH_ACCOUNTING.md",
+  "module": "search_accounting.py",
+  "schema": "m1_cross_campaign_search_accounting_v1",
+  "operative_rule": "REGISTERED_NATIVE_TRIAL_IDENTITIES_EXCLUDING_SUPERSEDED_V1",
+  "prior_native_trial_identities_operative": 115,
+  "new_trials": 4,
+  "cumulative_disclosed_search_count": 119,
+  "sensitivity_counts": {
+   "REGISTERED_NATIVE_TRIAL_IDENTITIES_EXCLUDING_SUPERSEDED_V1": 119,
+   "ALL_REGISTERED_NATIVE_TRIAL_IDENTITIES_INCLUDING_SUPERSEDED_V1": 134,
+   "UNIQUE_STRATEGY_ID_SYMBOL_PAIRS": 109
+  },
+  "pooled_statistics_support": "BLOCKED_UNSUPPORTED",
+  "rule": "The count is a disclosure printed beside every DSR. The gate DSR/PBO come from the new experiment's own four-trial judge and are not deflated for the prior campaigns. No pooled DSR/PBO is produced or claimed. No results-based denominator reduction."
+ },
+ "comparison_scope": {
+  "scope": "experiment M1-KISS-EXT032-ETF-01, hypothesis_id unset",
+  "population": "all four predeclared trials",
+  "judge": "canonical research_multiple_testing_judge_v1 over the whole experiment; block counts 8/10/12"
+ },
+ "judge_plan": {
+  "judges": 1,
+  "protocol_id": "research_multiple_testing_judge_v1",
+  "scope": "whole experiment, hypothesis_id unset; run once after all four attempts are final",
+  "population": 4,
+  "non_evaluable_trials": "remain in registry_population and are listed in excluded_trial_ids; the judge_evaluable gate fails closed for a trial the judge could not include",
+  "cumulative_context": "see search_accounting; disclosed, not substituted into the judge",
+  "thresholds": {
+   "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO": 0.5,
+   "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING": 0.5
+  }
+ },
+ "outcome_policy": {
+  "automatic_selection": false,
+  "winner_only_registration": false,
+  "near_miss_selection": "FORBIDDEN",
+  "review": "near_miss_review.py: every registered trial, fixed schema, deterministic order, read-only; formatting never converts a failure into a candidate",
+  "followup": "the operator and independent review may authorize at most ONE focused follow-up hypothesis in a separately declared campaign with a new semantic identity and honest accounting; the same exposed window never becomes fresh OOS by relabelling",
+  "stopping_rule_optimization": "forbidden: no stop or exit is tuned on these outcomes"
+ },
+ "expected_result_inventory": {
+  "trials": 4,
+  "attempts_before_execution": 0,
+  "hypotheses": 1,
+  "per_trial_required_evidence": [
+   "registered trial identity (carrying strategy fingerprint, capital sizing, stress contract, bars provenance, partition and economic protocol)",
+   "succeeded or failed attempt record (retries are attempts of the same trial)",
+   "economic_walk_forward artifact with aggregate and daily returns",
+   "native_signals stream bound to the registered fingerprint",
+   "canonical Backtest metrics with the capital-fraction benchmark evidence",
+   "robustness gauntlet (all required scenarios) and stress suite",
+   "P7A/P7B replay stress under the registered contract",
+   "genuine shuffled placebo",
+   "scanner review decision",
+   "batch judge row (included or excluded with reason)"
+  ],
+  "completeness_rule": "a missing artifact is MISSING_EVIDENCE for that trial and blocks any 'qualifies' status; a missing, duplicate or extra trial makes the population unresolved, never a rejection"
+ },
+ "near_miss_review": {
+  "module": "near_miss_review.py",
+  "schema": "m1_near_miss_review_v2",
+  "classes": [
+   "QUALIFIES_UNDER_EVERY_APPLICABLE_GATE",
+   "QUALIFICATION_WITHHELD",
+   "QUANTITATIVE_ECONOMIC_NEAR_MISS",
+   "STRUCTURALLY_UNQUALIFIED_OR_NON_EVALUABLE",
+   "INSUFFICIENT_PROVENANCE_OR_INDEPENDENT_VALIDATION",
+   "INVALID_EXECUTION_IDENTITY_OR_SAFETY_EVIDENCE"
+  ],
+  "precedence": "INVALID > UNQUALIFIED > INSUFFICIENT (provenance, canonical Promotion proof) > NEAR_MISS (numbers) > WITHHELD (global conditions) > QUALIFIES; first match wins",
+  "identity_rule": "expected trial ids are recomputed from this declaration, the declared wrapped fingerprints and the bars provenance manifest; rows, registry records and the judge inventory must each equal them",
+  "promotion_proof": "only a validated run-bound canonical PromotionReport (PromotionProof.from_report); a free-form verdict mapping is never a proof; unavailable proof is PROMOTION_PROOF_UNAVAILABLE",
+  "populated_only_after_authorized_execution": true
+ },
+ "economic_outcome_status": "NONE_NOT_EXECUTED",
+ "unresolved_proof_capabilities": [
+  {
+   "id": "U1",
+   "item": "pooled DSR/PBO across campaigns",
+   "status": "BLOCKED_UNSUPPORTED",
+   "why": "see search_accounting.pooled_statistics_support; named statistical acceptance blocker SAB-1: CUMULATIVE_SEARCH_VALIDATION_BLOCKED, so no trial may be labelled cumulative-search validated or qualifying"
+  },
+  {
+   "id": "U2",
+   "item": "independent confirmation of any positive result",
+   "status": "NOT_AVAILABLE_BY_DESIGN",
+   "why": "EXPOSED_DEVELOPMENT grade; forward Paper is the only later independent observation"
+  },
+  {
+   "id": "U3",
+   "item": "provider bars and provenance for DIA (and all four under this manifest)",
+   "status": "REQUIRES_EXECUTION_AUTHORIZATION",
+   "why": "no fetch is authorized by this predeclaration"
+  },
+  {
+   "id": "U4",
+   "item": "trial identities",
+   "status": "COMPUTABLE_ONLY_AFTER_FETCH",
+   "why": "trial_id binds the bars provenance; the identity rule and its registration gate are proven with synthetic provenance, the four trial ids are not precomputed"
+  },
+  {
+   "id": "U5",
+   "item": "corporate-action metadata discovery by process date up to the extraction instant (non-OHLCV)",
+   "status": "OPERATOR_ACKNOWLEDGEMENT_REQUIRED_IN_THE_FETCH_AUTHORIZATION",
+   "why": "see data.holdout_window_fetch_disclosure; the OHLCV request itself never reaches the reserved window"
+  },
+  {
+   "id": "U6",
+   "item": "2016-2022 early-close dates",
+   "status": "RULE_DERIVED_NOT_PROVIDER_EVIDENCED",
+   "why": "economics-neutral for EXT-032"
+  },
+  {
+   "id": "U7",
+   "item": "canonical Promotion report for each trial",
+   "status": "PROMOTION_PROOF_UNAVAILABLE",
+   "why": "no producer writes run/promotion/<strategy>/<symbol>/promotion_report.json; the review accepts only a validated run-bound report and never a free-form verdict"
+  },
+  {
+   "id": "U8",
+   "item": "Final-Holdout independence",
+   "status": "ACCESS_INCIDENT_PENDING_ADJUDICATION",
+   "why": "see holdout.access_incident; Promotion and Paper stage authorizations are refused and no qualification label is issued until an operator ADJUDICATION entry is appended"
+  }
+ ],
+ "batch_stopping_rule": {
+  "trials": 4,
+  "stop_status": "KISS_EXT032_PREDECLARED_NOT_EXECUTED",
+  "economic_attempts": 0,
+  "no_additional_variants": [
+   "alternate window lengths",
+   "entry or exit offsets",
+   "holiday subsets",
+   "indicators or filters",
+   "stops or trailing stops",
+   "short side",
+   "additional symbols",
+   "individual stocks"
+  ],
+  "infrastructure_failure": "retry the same trial under a new attempt id; an economic failure is finalized failed and never retried"
+ },
+ "attempt_identity_rules": "A retry is a new attempt of the SAME trial_id. trial_id derives from experiment, strategy family/version, symbol, canonical timeframe, native inner and capital-wrapped semantic fingerprints, bars provenance, partition, economic protocol, capital sizing and the full stress contract; never from a result value.",
+ "paper_live": {
+  "paper": "NOT ACTIVATED",
+  "production_promotion_state": "NOT WRITTEN",
+  "live": "NOT TOUCHED"
+ },
+ "forbidden_after_predeclaration": [
+  "changing symbols, families or trial order",
+  "changing any family rule, threshold, horizon, hold length or equality boundary",
+  "changing the 1000 bps baseline sizing or the capital basis",
+  "changing execution chronology",
+  "changing commission or slippage to improve outcomes",
+  "changing the benchmark or falling back to Benchmark V2",
+  "changing scanner, Promotion or robustness thresholds",
+  "changing DSR/PBO policy",
+  "changing the partition",
+  "consuming the holdout",
+  "dropping losing trials",
+  "winner-only registration",
+  "defining identity from results",
+  "retrying economic failures",
+  "adding variants or individual stocks",
+  "shorting",
+  "hand promotion",
+  "Paper activation",
+  "Live activation",
+  "relabelling exposed development data as out-of-sample or confirmed",
+  "selecting a near-miss or a winner automatically",
+  "adding a stop, trailing stop or any exit variant to this campaign",
+  "reducing the cumulative denominator after seeing results",
+  "claiming a pooled cross-campaign DSR or PBO"
+ ]
+}

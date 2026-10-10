@@ -20,6 +20,8 @@ import pandas as pd
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE))
+import holdout_incident  # noqa: E402
 
 # (category, glob under the run dir, timestamp column, kind)
 CATEGORIES = (
@@ -37,6 +39,9 @@ CATEGORIES = (
 )
 
 
+FIXED_PARTITION_CATEGORY = ("research_bars_fetch", "data/research_bars.csv", "end_ts", "iso")
+
+
 class HoldoutBreach(Exception):
     pass
 
@@ -51,10 +56,14 @@ def _latest(path: Path, column: str, kind: str) -> pd.Timestamp:
 
 
 def holdout_start(decl: dict, run: Path) -> pd.Timestamp:
-    from mqk_research.ml.native_signal_registry_integration import native_holdout_start
+    from mqk_research.ml.native_signal_registry_integration import NativeSignalError, native_holdout_start
     bars = run / "data" / "research_bars.csv"
-    starts = {native_holdout_start(bars, sym, decl["partition"]["holdout_months"])
-              for sym in decl["universe"]["symbols"]}
+    boundary = decl["partition"].get("holdout_boundary")  # declared fixed partition; refuses bars that reach it
+    try:
+        starts = {native_holdout_start(bars, sym, decl["partition"]["holdout_months"], boundary)
+                  for sym in decl["universe"]["symbols"]}
+    except NativeSignalError as exc:
+        raise HoldoutBreach(str(exc)) from exc
     if len(starts) != 1:
         raise HoldoutBreach(f"symbols derive different holdout starts: {sorted(map(str, starts))}")
     return starts.pop()
@@ -77,9 +86,14 @@ def check(decl: dict, run: Path, registry: Path, phase: str) -> dict:
     for holdout_id, status, consumed_at, consumer in ledger:
         if status != "reserved" or consumed_at is not None or consumer is not None:
             raise HoldoutBreach(f"holdout {holdout_id} is not RESERVED/UNCONSUMED: {status} {consumed_at}")
+    # A clean per-run ledger and clean artifacts show only what THIS run recorded; they never certify the
+    # window against access by other processes, so the incident ledger's truth rides in every report.
     report = {"phase": phase, "holdout_start_utc": start.isoformat(), "ledger_rows": len(ledger),
-              "ledger_all_reserved": True, "categories": {}}
-    for name, pattern, column, kind in CATEGORIES:
+              "ledger_all_reserved": True, "categories": {},
+              "access_incident": holdout_incident.truth_summary(decl)}
+    # Under a fixed partition the fetch itself is bounded, so the research bars are a checked category too.
+    categories = CATEGORIES + ((FIXED_PARTITION_CATEGORY,) if decl["partition"].get("holdout_boundary") else ())
+    for name, pattern, column, kind in categories:
         files = sorted(glob.glob(str(run / pattern)))
         latest = None
         for f in files:

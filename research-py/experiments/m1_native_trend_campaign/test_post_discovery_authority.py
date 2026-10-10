@@ -112,6 +112,12 @@ def test_external_catalog_is_recorded_as_untrusted_unread_intake() -> None:
     for needle in ("UNTRUSTED IDEA INTAKE", "V4-M1-EXTERNAL-IDEA-INTAKE-DEDUP-01", "6fc945a873733cda6a1552049923a153ed2f7213c488c6d5f07ffeb8077a37f3", "not yet committed",
                    "EXT-032", "EXT-024", "EXT-045", "EXT-070", "EXT-141", "BACKWARD_TEMPORAL"):
         assert needle in text, needle
-    # Intake must not create a trial or declaration: no declaration names an external idea.
+    # Intake must not create a trial or declaration: no declaration names an external idea, except the later,
+    # separately authorized KISS campaign, which names exactly EXT-032 and is non-executable.
     for path in HERE.glob("PREDECLARED_*.json"):
-        assert "EXT-" not in path.read_text(encoding="utf-8"), path.name
+        text = path.read_text(encoding="utf-8")
+        if path.name == "PREDECLARED_KISS_EXT032_ETF_01.json":
+            assert set(re.findall(r"EXT-\d{3}", text)) == {"EXT-032"}
+            assert json.loads(text)["execution_gate"]["executable"] is False
+        else:
+            assert "EXT-" not in text, path.name

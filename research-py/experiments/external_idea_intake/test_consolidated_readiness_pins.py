@@ -14,6 +14,10 @@ import intake  # noqa: E402
 
 ROOT = HERE.parents[2]
 DOC = (ROOT / "docs/research/M1_CANDIDATE_SUPPLY_OOS_PAPER_READINESS_CONSOLIDATED_01.md").read_text(encoding="utf-8")
+# The consolidated record is a baseline-time document (24 engine identities); the identity added by the
+# KISS campaign is documented in its own design record.
+KISS_DOC = (ROOT / "docs/research/M1_KISS_EXT032_CAMPAIGN_DESIGN.md").read_text(encoding="utf-8")
+POST_BASELINE_IDS = ["pre_holiday_two_session_long_v1"]
 RUNBOOK = (ROOT / "docs/runbooks/m1_9_paper_deployment_preflight.md").read_text(encoding="utf-8")
 CRATES = ROOT / "core-rs/crates"
 
@@ -30,16 +34,20 @@ def registered_engine_ids() -> list[str]:
 
 def test_inventory_names_every_registered_engine_identity():
     ids = registered_engine_ids()
-    assert len(ids) == len(set(ids)) == 24
-    missing = [i for i in ids if i not in DOC and i.replace("_short", "") not in DOC]
+    assert len(ids) == len(set(ids)) == 25
+    baseline = [i for i in ids if i not in POST_BASELINE_IDS]
+    assert len(baseline) == 24
+    missing = [i for i in baseline if i not in DOC and i.replace("_short", "") not in DOC]
     assert not missing, missing
+    assert all(i in KISS_DOC for i in POST_BASELINE_IDS)
 
 
 def test_universe_bound_equals_registry_count_as_the_doc_states():
     src = (CRATES / "mqk-portfolio/src/dynamic_selection.rs").read_text(encoding="utf-8")
     bound = int(re.search(r"pub const MAX_STRATEGY_UNIVERSE: usize = (\d+);", src).group(1))
-    assert bound == len(registered_engine_ids()) == 24
-    assert "`MAX_STRATEGY_UNIVERSE = 24`" in DOC
+    assert bound == len(registered_engine_ids()) == 25
+    assert "`MAX_STRATEGY_UNIVERSE = 24`" in DOC  # the baseline-time statement, kept as history
+    assert "`MAX_STRATEGY_UNIVERSE = 25`" in KISS_DOC
 
 
 def test_migration_head_is_0091_as_the_runbook_states():
@@ -63,8 +71,12 @@ def test_record_states_its_verdict_and_authorizes_nothing():
     for phrase in ("CATALOG_FROZEN_AND_DISPOSITIONED", "NO_ELIGIBLE_CANDIDATE_EXISTS", "ONE_ESTABLISHED_PROMOTION_CONSTRAINT_EXT_169", "`M1_BLOCKED`", "NOT_AUTHORIZED",
                    "NOT_EXECUTABLE", "`execution_gate.executable = false`", "**not pushed**"):
         assert phrase in DOC, phrase
-    assert "EXT-" not in "".join(p.read_text(encoding="utf-8") for p in
-                                 (ROOT / "research-py/experiments").glob("**/PREDECLARED_*.json"))
+    # The separately authorized, non-executable KISS campaign names exactly EXT-032; nothing else names a catalog id.
+    kiss = "PREDECLARED_KISS_EXT032_ETF_01.json"
+    declarations = list((ROOT / "research-py/experiments").glob("**/PREDECLARED_*.json"))
+    assert "EXT-" not in "".join(p.read_text(encoding="utf-8") for p in declarations if p.name != kiss)
+    assert set(re.findall(r"EXT-\d{3}", (ROOT / "research-py/experiments/m1_native_trend_campaign" / kiss)
+                          .read_text(encoding="utf-8"))) == {"EXT-032"}
 
 
 def test_record_counts_tiers_and_structural_numbers_match_the_committed_ledger_and_the_calendar_analysis():

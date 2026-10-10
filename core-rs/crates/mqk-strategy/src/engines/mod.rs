@@ -16,6 +16,7 @@ pub mod monthly_12_minus_1_abs_momentum_v1;
 pub mod monthly_52week_high_proximity_v1;
 pub mod monthly_multihorizon_abs_momentum_consensus_v1;
 pub mod near_high_momentum_252_3pct;
+pub mod pre_holiday_two_session_long_v1;
 pub mod pullback_mean_reversion_20_2;
 mod session_calendar;
 pub mod swing_momentum;
@@ -45,6 +46,7 @@ pub use monthly_12_minus_1_abs_momentum_v1::Monthly12Minus1AbsMomentumV1Strategy
 pub use monthly_52week_high_proximity_v1::Monthly52WeekHighProximityV1Strategy;
 pub use monthly_multihorizon_abs_momentum_consensus_v1::MonthlyMultihorizonAbsMomentumConsensusV1Strategy;
 pub use near_high_momentum_252_3pct::NearHighMomentum2523PctStrategy;
+pub use pre_holiday_two_session_long_v1::PreHolidayTwoSessionLongV1Strategy;
 pub use pullback_mean_reversion_20_2::PullbackMeanReversion202Strategy;
 pub use swing_momentum::SwingMomentumStrategy;
 pub use trading_range_breakout_50d_hold10::TradingRangeBreakout50dHold10Strategy;
@@ -95,6 +97,7 @@ pub const REGISTERED_STRATEGY_IDS: &[&str] = &[
     monthly_12_minus_1_abs_momentum_v1::NAME,
     delayed_overnight_gap_reversal_v1::NAME,
     monthly_52week_high_proximity_v1::NAME,
+    pre_holiday_two_session_long_v1::NAME,
     intraday_scalper::SHORT_NAME,
 ];
 
@@ -251,6 +254,13 @@ pub fn register_builtin_strategies(
     registry.register(monthly_52week_high_proximity_v1::meta(), move || {
         Box::new(Monthly52WeekHighProximityV1Strategy::new(
             f10_symbol.clone(),
+        )) as Box<dyn Strategy>
+    })?;
+
+    let ext032_symbol = symbol.clone();
+    registry.register(pre_holiday_two_session_long_v1::meta(), move || {
+        Box::new(PreHolidayTwoSessionLongV1Strategy::new(
+            ext032_symbol.clone(),
         )) as Box<dyn Strategy>
     })?;
 
@@ -457,6 +467,13 @@ fn register_with_sizing(
                 f10_symbol.clone(),
             )) as Box<dyn Strategy>
         })?;
+
+        let ext032_symbol = symbol.clone();
+        registry.register(pre_holiday_two_session_long_v1::meta(), move || {
+            Box::new(PreHolidayTwoSessionLongV1Strategy::new(
+                ext032_symbol.clone(),
+            )) as Box<dyn Strategy>
+        })?;
     }
 
     let scalp_symbol = symbol.clone();
@@ -506,7 +523,7 @@ mod registered_strategy_ids_tests {
     }
 
     #[test]
-    fn registered_strategy_ids_has_twenty_four_distinct_entries() {
+    fn registered_strategy_ids_has_twenty_five_distinct_entries() {
         let mut unique = REGISTERED_STRATEGY_IDS.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -515,7 +532,7 @@ mod registered_strategy_ids_tests {
             REGISTERED_STRATEGY_IDS.len(),
             "every registered strategy identity must be distinct"
         );
-        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 24);
+        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 25);
     }
 
     /// IR-2: the production seam `instantiate_verified` must refuse every engine
