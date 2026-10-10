@@ -402,3 +402,67 @@ async fn unresolved_and_failed_claims_remain_fail_closed() -> anyhow::Result<()>
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Concurrent claimers for one binding-bar identity: exactly one wins the
+// claim; every other is denied and the identity ends fail-closed
+// (`uncertain`), never completed and never claimable again.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn concurrent_claimers_for_one_binding_bar_yield_exactly_one_claim() -> anyhow::Result<()> {
+    const CLAIMERS: usize = 8;
+    let pool = test_pool().await?;
+    let adapter_id = format!("binding-bar-race-{}", unique_suffix());
+    let t0 = Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap();
+    let operation = create_test_operation(&pool, &adapter_id, t0).await;
+    let bar_end_ts = 1_800_000_600_i64;
+
+    let mut tasks = Vec::new();
+    for _ in 0..CLAIMERS {
+        let pool = pool.clone();
+        let operation_id = operation.operation_id;
+        tasks.push(tokio::spawn(async move {
+            claim_autonomous_daily_binding_bar_dispatch(
+                &pool,
+                operation_id,
+                "ZZRACE",
+                "strategy_A",
+                "5m",
+                bar_end_ts,
+                t0,
+            )
+            .await
+        }));
+    }
+    let mut claimed = 0;
+    let mut denied = 0;
+    for t in tasks {
+        match t.await?? {
+            BarDispatchClaimOutcome::Claimed => claimed += 1,
+            BarDispatchClaimOutcome::Unresolved { .. } => denied += 1,
+            BarDispatchClaimOutcome::AlreadyCompleted { .. } => {
+                panic!("nothing completed this identity")
+            }
+        }
+    }
+    assert_eq!(claimed, 1, "exactly one concurrent claimer may win");
+    assert_eq!(denied, CLAIMERS - 1, "every other claimer is denied");
+
+    let row = fetch_autonomous_daily_binding_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZRACE",
+        "strategy_A",
+        "5m",
+        bar_end_ts,
+    )
+    .await?
+    .expect("the contested identity has exactly one row");
+    assert_eq!(
+        row.status, DISPATCH_STATUS_UNCERTAIN,
+        "a contested claim must end fail-closed, not completed"
+    );
+    Ok(())
+}
