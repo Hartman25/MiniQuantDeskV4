@@ -8,12 +8,11 @@ No daemon, GUI or Paper/Live component is touched here; a GUI/API consumer can p
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any
 
-from mqk_research.strategy_factory.contracts import FACTORY_AUTHORITY, promotion_view
+from mqk_research.strategy_factory.contracts import FACTORY_AUTHORITY, atomic_write_text, promotion_view
 
 SCHEMA = "factory_status_v1"
 
@@ -61,7 +60,5 @@ def build_status(db_path: Path) -> dict[str, Any]:
 def write_status(db_path: Path, out: Path) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    tmp.write_text(json.dumps(build_status(db_path), indent=1, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, out)
+    atomic_write_text(out, json.dumps(build_status(db_path), indent=1, sort_keys=True))
     return out

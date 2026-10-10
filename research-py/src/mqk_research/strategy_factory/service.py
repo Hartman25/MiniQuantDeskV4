@@ -8,13 +8,12 @@ the operator (gate release, stage authorization) and with the accepted determini
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from mqk_research.strategy_factory import ai_normalize, campaign as campaign_mod, catalog_import, knowledge as knowledge_mod, pipeline
-from mqk_research.strategy_factory.contracts import sha
+from mqk_research.strategy_factory.contracts import atomic_write_text as _atomic_write, sha
 from mqk_research.strategy_factory.executor import StageExecutor
 from mqk_research.strategy_factory.formalize import formalize_entry
 from mqk_research.strategy_factory.known_index import build_index, factory_prior_entries
@@ -22,13 +21,6 @@ from mqk_research.strategy_factory.scheduler import PassResult, run_pass, run_un
 from mqk_research.strategy_factory.store import FactoryStore, StoreError
 
 GRAMMAR_PROBE = "grammar_v1__sma_trend_gate__window_2"
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    """Replace a control file atomically so a crash or a concurrent reader never sees a torn declaration."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def detect_grammar(cli_path: Path | None) -> bool:
@@ -132,18 +124,21 @@ class FactoryService:
         compiled = campaign_mod.compile_campaign(spec, repo_root=self.repo_root, run_root=self.root / "campaigns", ideas=ideas,
                                                  grammar_available=self.grammar_available, factory_prior=prior, prior_campaigns=prior_ids)
         cdir = self.root / "campaigns" / cid
-        cdir.mkdir(parents=True, exist_ok=True)
         decl_path = cdir / "declaration.json"
         body = json.dumps(compiled.declaration, indent=1, sort_keys=True)
-        # No store row exists for this id (checked above), so nothing is frozen yet: a leftover file is an uncommitted attempt
-        # (crash or refused stale-history compile) and is replaced; the store row is what makes a predeclaration immutable.
-        if not decl_path.exists() or campaign_mod.declaration_identity(json.loads(decl_path.read_text(encoding="utf-8"))) != compiled.declaration_sha256:
+        spec_body = json.dumps(spec, indent=1, sort_keys=True)
+
+        def publish() -> None:
+            # Runs inside the registry's write transaction (see FactoryStore.create_campaign): only the registered winner reaches it,
+            # so an unregistered leftover (crash, refused compile) is never read and is simply replaced.
+            cdir.mkdir(parents=True, exist_ok=True)
             _atomic_write(decl_path, body)
-        _atomic_write(cdir / "spec.json", json.dumps(spec, indent=1, sort_keys=True))
+            _atomic_write(cdir / "spec.json", spec_body)
+
         created = self.store.create_campaign(campaign_id=cid, spec=spec, declaration_sha256=compiled.declaration_sha256,
                                              declaration_path=str(decl_path).replace("\\", "/"), run_dir=compiled.declaration["run_dir"],
                                              evidence_grade=spec["evidence_grade"], trials=compiled.trials,
-                                             expected_prior_campaigns=prior_ids)
+                                             expected_prior_campaigns=prior_ids, publish=publish)
         return {"campaign_id": cid, "created": created, "declaration_sha256": compiled.declaration_sha256, "trials": len(compiled.trials),
                 "declaration_path": str(decl_path)}
 
@@ -154,7 +149,10 @@ class FactoryService:
             raise StoreError("a gate release names an operator and an approval reference")
         c = self.store.get_campaign(campaign_id)
         path = Path(c["declaration_path"])
-        decl = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            decl = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise StoreError(f"the frozen declaration of {campaign_id!r} is unreadable ({type(exc).__name__}); it is not rewritten") from exc
         decl["execution_gate"] = {"status": "RELEASED_BY_OPERATOR", "executable": True, "blocker": None, "operator": operator,
                                   "approval_ref": approval_ref,
                                   "rule": "Released; every effectful stage still requires a signed stage authorization bound to this declaration identity."}

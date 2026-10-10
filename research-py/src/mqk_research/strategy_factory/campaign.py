@@ -40,6 +40,7 @@ GRADES = {
 }
 FORBIDDEN_LABELS = ["INDEPENDENTLY_CONFIRMED", "OUT_OF_SAMPLE", "CONFIRMED", "VALIDATED"]
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$")
+_RESERVED_DIR_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))})
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 MAX_TRIALS_HARD = 500
 
@@ -86,8 +87,10 @@ def historical_hypotheses(repo_root: Path) -> dict[str, dict[str, Any]]:
 def validate_spec(spec: Mapping[str, Any]) -> None:
     if spec.get("schema") != SPEC_SCHEMA:
         raise CampaignError(f"spec schema must be {SPEC_SCHEMA!r}")
-    if not _ID.match(str(spec.get("campaign_id", ""))):
-        raise CampaignError("campaign_id must be 3-64 characters of [A-Za-z0-9_.-]")
+    cid = str(spec.get("campaign_id", ""))
+    if not _ID.match(cid) or cid.endswith(".") or cid.split(".")[0].upper() in _RESERVED_DIR_NAMES:
+        raise CampaignError("campaign_id must be 3-64 characters of [A-Za-z0-9_.-], must not end with '.', and must not be a reserved "
+                            "device name: it names a directory")
     if spec.get("evidence_grade") not in GRADES:
         raise CampaignError(f"evidence_grade must be one of {sorted(GRADES)}")
     if spec.get("protocol_profile") not in PROFILES:

@@ -229,11 +229,14 @@ class FactoryStore:
 
     def create_campaign(self, *, campaign_id: str, spec: Mapping[str, Any], declaration_sha256: str, declaration_path: str,
                         run_dir: str, evidence_grade: str, trials: Sequence[Mapping[str, Any]], stages: Sequence[str] = STAGES,
-                        expected_prior_campaigns: Sequence[str] | None = None) -> bool:
+                        expected_prior_campaigns: Sequence[str] | None = None, publish: Callable[[], None] | None = None) -> bool:
         """Freeze a campaign: its spec, declaration identity and complete trial population. Idempotent only for the
         identical content; any difference for an existing id is refused (a predeclaration is immutable). When
         `expected_prior_campaigns` is given, the campaign is refused if the store's campaign history is not exactly that set:
-        its declared prior-search disclosure must describe the history it is actually committed against."""
+        its declared prior-search disclosure must describe the history it is actually committed against. `publish` writes the
+        campaign's control files; it runs INSIDE this write transaction, after every refusal check and the inserts, so the registry
+        orders competing compilers: a loser never reaches it, and if it raises or the process dies the registration rolls back
+        (an unregistered leftover file is never frozen and is replaced by the next compile)."""
         if not trials or len({t["trial_key"] for t in trials}) != len(trials):
             raise StoreError("a campaign needs a non-empty population of unique trial keys")
         if any(s not in STAGES for s in stages):
@@ -254,6 +257,10 @@ class FactoryStore:
                 if have != sorted(expected_prior_campaigns):
                     raise StoreError("the prior-search history changed while this campaign was being compiled; recompile it "
                                      f"(declared against {sorted(expected_prior_campaigns)}, store holds {have})")
+            clash = con.execute("select campaign_id from campaigns where lower(campaign_id)=lower(?) and campaign_id!=?",
+                                (campaign_id, campaign_id)).fetchone()
+            if clash is not None:
+                raise StoreError(f"campaign id {campaign_id!r} differs only by case from {clash['campaign_id']!r}: they would share one directory")
             con.execute("insert into campaigns values(?,?,?,?,?,?,?,?,?,?)", (
                 campaign_id, spec_sha, spec_json, declaration_sha256, declaration_path, run_dir, evidence_grade,
                 "PREDECLARED", None, int(con.execute("select coalesce(max(created_seq),0)+1 from campaigns").fetchone()[0])))
@@ -265,6 +272,8 @@ class FactoryStore:
                             (sha({"c": campaign_id, "s": stage})[:24], campaign_id, stage, order))
             self.event(con, campaign_id, "campaign_predeclared", {"spec_sha256": spec_sha, "declaration_sha256": declaration_sha256,
                                                                    "trials": len(trials), "evidence_grade": evidence_grade})
+            if publish is not None:
+                publish()
             return True
 
     def get_campaign(self, campaign_id: str) -> dict[str, Any]:

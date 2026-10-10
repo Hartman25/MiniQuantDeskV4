@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from enum import Enum
+from pathlib import Path
 
 from mqk_research.exp_distributed.hashing import canonical_json, sha256_bytes
 
@@ -112,6 +115,24 @@ FACTORY_AUTHORITY = {
     "paper": "NOT_TOUCHED_BY_FACTORY",
     "live": "NOT_TOUCHED_BY_FACTORY",
 }
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace a control or report file atomically so a crash or a concurrent reader never sees a torn file. The temporary name is
+    unique per call, so concurrent writers to one path cannot collide on it."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def sha(obj) -> str:

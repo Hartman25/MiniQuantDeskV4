@@ -20,6 +20,7 @@ T_SF = "tests/test_strategy_factory_scheduler_faults.py"
 T_AU = "tests/test_strategy_factory_authority_truth.py"
 T_PS = "tests/test_strategy_factory_prior_search.py"
 T_LN = "tests/test_strategy_factory_native_lane.py"
+T_DC = "tests/test_strategy_factory_declaration_concurrency.py"
 T_IM = "tests/test_strategy_factory_implementation.py"
 T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
@@ -173,6 +174,19 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("LN-4 guard ignores failures", "../scripts/guards/check_factory_native_lane.py", "if case.find(\"failure\") is not None or case.find(\"error\") is not None:", "if False:", [T_LN]),
         ("LN-5 lane drops the strict-native switch", "../.github/workflows/strategy-factory.yml", "MQK_FACTORY_REQUIRE_NATIVE: \"1\"", "MQK_FACTORY_UNUSED: \"1\"", [T_LN]),
         ("LN-6 lane stops running the guard", "../.github/workflows/strategy-factory.yml", "check_factory_native_lane.py \"$RUNNER_TEMP", "true \"$RUNNER_TEMP", [T_LN]),
+    ],
+    "owner": [
+        ("DC-1 files are not published by the registry", SRC + "service.py", "expected_prior_campaigns=prior_ids, publish=publish)", "expected_prior_campaigns=prior_ids)", [T_DC]),
+        ("DC-2 publish runs before the refusal checks", SRC + "store.py", "            row = con.execute(\"select spec_sha256, declaration_sha256 from campaigns where campaign_id=?\", (campaign_id,)).fetchone()", "            (publish or (lambda: None))()\n            row = con.execute(\"select spec_sha256, declaration_sha256 from campaigns where campaign_id=?\", (campaign_id,)).fetchone()", [T_DC]),
+        ("DC-3 temp name shared by concurrent writers", SRC + "contracts.py", "    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + \".\", suffix=\".tmp\")", "    tmp = str(path) + \".tmp\"\n    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)", [T_DC]),
+        ("DC-4 orphan declaration is kept instead of replaced", SRC + "service.py", "            _atomic_write(decl_path, body)\n            _atomic_write(cdir / \"spec.json\", spec_body)", "            if not decl_path.exists():\n                _atomic_write(decl_path, body)\n            _atomic_write(cdir / \"spec.json\", spec_body)", [T_DC]),
+        ("DC-5 case-aliased campaign id accepted", SRC + "store.py", "            if clash is not None:", "            if False:", [T_DC]),
+        ("DC-6 reserved device names accepted", SRC + "campaign.py", " or cid.split(\".\")[0].upper() in _RESERVED_DIR_NAMES:", ":", [T_DC]),
+        ("DC-7 trailing-dot id accepted", SRC + "campaign.py", " or cid.endswith(\".\") or ", " or ", [T_DC]),
+        ("DC-8 publish failure does not roll back", SRC + "store.py", "            if publish is not None:\n                publish()\n            return True", "            if publish is not None:\n                try:\n                    publish()\n                except OSError:\n                    pass\n            return True", [T_DC]),
+        ("DC-10 status export written in place", SRC + "status.py", "    atomic_write_text(out, json.dumps(build_status(db_path), indent=1, sort_keys=True))", "    out.write_text(json.dumps(build_status(db_path), indent=1, sort_keys=True), encoding=\"utf-8\")", [T_DC]),
+        ("DC-11 report written in place", SRC + "reporting.py", "atomic_write_text(out / \"report.json\", json.dumps(report, indent=1, sort_keys=True))", "(out / \"report.json\").write_text(json.dumps(report, indent=1, sort_keys=True), encoding=\"utf-8\")", [T_DC]),
+        ("DC-9 fixture workbook depends on the wall clock", "tests/support/factory_fixtures.py", "date_time=(2020, 1, 1, 0, 0, 0)", "date_time=__import__(\"time\").localtime(__import__(\"time\").time())[:6]", ["tests/test_strategy_factory_catalog_import.py"]),
     ],
     "history": [
         ("PS-1 compile ignores Factory history", SRC + "campaign.py", "known = build_index(repo_root, factory_prior)", "known = build_index(repo_root)", [T_PS]),

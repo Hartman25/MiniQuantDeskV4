@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mqk_research.strategy_factory.campaign import EXPERIMENTS_REL
+from mqk_research.strategy_factory.contracts import atomic_write_text
 from mqk_research.strategy_factory.contracts import FACTORY_AUTHORITY, promotion_view, sha
 
 REPORT_SCHEMA = "strategy_factory_campaign_report_v1"
@@ -183,7 +184,7 @@ def write_campaign_report(campaign: Mapping[str, Any], repo_root: Path, store: A
     report = build_report(campaign, repo_root, store)
     out = Path(json.loads(Path(campaign["declaration_path"]).read_text(encoding="utf-8"))["run_dir"]) / "factory_report"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "report.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
+    atomic_write_text(out / "report.json", json.dumps(report, indent=1, sort_keys=True))
     c = report["campaign"]
     lines = [f"# Campaign {c['campaign_id']} — {c['state']}", "", f"Evidence grade: **{c['evidence_grade']}** — {c['evidence_statement']}", "",
              f"Declaration `{c['declaration_sha256'][:16]}…` · profile `{c['protocol_profile']}` · promotion readiness: {c['promotion_readiness']}", ""]
@@ -192,5 +193,5 @@ def write_campaign_report(campaign: Mapping[str, Any], repo_root: Path, store: A
             lines.append(f"- **{k}**: {v['truth_state']}" + (f" — {v['reason']}" if v.get("reason") else ""))
     lines += ["", f"Trials: {json.dumps(report['trial_execution']['data']['status_counts'])}", "",
               "Authority: " + "; ".join(f"{k}={v}" for k, v in report["authority"].items())]
-    (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(out / "report.md", "\n".join(lines) + "\n")
     return out / "report.json"
