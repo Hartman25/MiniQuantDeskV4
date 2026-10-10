@@ -35,3 +35,47 @@ CLAUDE.md; .claude/rules/gui_rules.md; bounded Master Plan/ledger sections; GUI_
 
 ## Proof policy
 Production adapters + real React render; transport mocks at fetch boundary; old implementation RED or killed representative mutation. Synthetic transport proof is CODE/TEST only, never DB/provider/Paper/desktop operational proof. Final dispositions must be supported by actual run output. Full workspace Rust acceptance prohibited. No shared master ledger, daemon, schema, DB, strategy, promotion or research changes.
+
+## Final dispositions (implementation 2dfa4d1bab05b55a386f41f74af849f87e028ae8)
+
+| IDs | Final disposition | Load-bearing evidence |
+| --- | --- | --- |
+| OBS-01 | FIXED+PROVEN | incidentContract fetch/model/React tests; row-drop mutation killed; browser incident detail |
+| OBS-02 | FIXED+PROVEN | metricsContract fetch/model/React tests; missing-metric-zero mutation killed; daemon CC05 six tests |
+| OBS-03 | FIXED+PROVEN for frontend; DEP-01 remains | alertContract and observabilityRendering tests; active ACK/resolved-case browser detail; storage-read caveat |
+| OBS-04 | FIXED+PROVEN | latestRequest timeout/sequence tests; stale-publish mutation killed; browser delayed selection, refresh and identity invalidation |
+| OBS-05 | FIXED+PROVEN within bounded history | historyContract tests; duplicate fixture collapses to one timeline row; explicit bounded-history copy |
+| OBS-06 | FIXED+PROVEN | compact-rail, dashboard-lane and haltSummary render tests; missing-endpoint browser observations |
+| OBS-07 | FIXED+PROVEN for consumed operational DTOs | status/snapshot/economic/row/orderDetail contract tests and malformed HTTP-body negative controls |
+| OBS-08 | FIXED+PROVEN | nullable economic/render tests; order-detail fractional aggregate withheld; actual row quantity/price preservation assertions |
+| OBS-09 | FIXED+PROVEN | explicit UTC formatting and nonfinite guards; no-offset timestamps refused in incident/ACK/metrics/reconcile contracts |
+| OBS-10 | FIXED+PROVEN | registered Evidence monitor integration; all 26 final production-bundle navigation snapshots, no error boundaries |
+| OBS-11 | FIXED+PROVEN | stale/degraded diagnostic rendering tests; fault evidence retained in production browser with warnings |
+| OBS-12 | FIXED+PROVEN within current single-deployment authority | source/status/viewModel tests; missing status leaves Tier-0 unknown; Live-disabled and changed-account browser proof |
+| DEP-01..06 | BACKEND_DEPENDENCY | unchanged daemon source; exact disposition in GUI_OPS_OBSERVABILITY_FINAL.md |
+| DEP-07 | BACKEND_DEPENDENCY | order_history.rs replay cumulative_filled uses nullable whole quantity unwrap_or(0); GUI withholds unsupported totals |
+| ENV-01 | PARTIAL_TEST_PROOF | browser and native startup now observed; native input/reload/packaging and genuine operational Paper/Live remain unproven |
+
+## Second adversarial sweep
+
+Completed the original bounded sweep and adjacent callers, without restarting the census. Findings below are frontend FIXED+PROVEN unless marked otherwise. The final 1,340-test suite has zero failures/skips. Five actual unsafe-behavior mutations fail assertions and exact source bytes are restored.
+
+| Seam | Correction / proof |
+| --- | --- |
+| Canonical refusals | 401/403/409/500/503 and malformed success cannot silently select legacy truth; GET timeout includes body decoding; refusal mutation killed |
+| Independent missing lanes | Positions/orders/fills, reconciliation details, dashboard alerts/session/config and compact rails distinguish absent from authoritative empty |
+| Model contracts | Core scalars/wrappers, durable outbox/fill/Paper lanes, strategy/readiness and selected order DTOs validate consumed fields; malformed lanes fail independently |
+| Async identity | URL-pinned observations, latest-request generations, bounded non-overlapping automatic polls, account/mode/generation-bound details; delayed first order cannot overwrite second |
+| Execution flow | Requested order/run scope checked; changing filters clears obsolete evidence; unknown truth rejected |
+| Diagnostic semantics | Stale/degraded valid evidence retained with warning, missing required truth takes precedence; metadata is not artifact generation |
+| Replay and causality | Fractional cumulative/open aggregates withheld; request-time OMS state labeled; unsupported playback controls removed; proven intent lanes retained |
+| Endpoint/navigation | Vite environment read corrected; inline validated settings replaces unsupported prompt; desktop-owned configuration locked by existing bootstrap; Evidence registered |
+| Alert storage | Backend-active triage can hide DB read failure (DEP-01); frontend explicitly disclaims independent read success and does not hide ongoing fault after ACK |
+| Timeline headers | Final continuation found unvalidated header objects/quantities/times; same order-detail guard now validates header and fill rows; header-trust mutation killed |
+| Timestamp determinism | Final continuation found no-offset source timestamps accepted by Date.parse; existing explicit-zone validator now used for incident, ACK, metric and reconciliation instants |
+| Failure wording | Removed unsupported promise that starting runtime/WS will restore an absent endpoint |
+| Permissions/untrusted text | Read-only browser fixture request log is GET-only; no new control API; React escapes external strings (incident script-text negative assertion) |
+| Resource/reload boundaries | Interval cleanup/generation invalidation retained; GET timers clear in finally; browser refresh and endpoint reload exercised; native reload not proved |
+| Ownership | All changed paths are under mqk-gui; daemon/research/schema/central docs/smoke_logs diffs empty; no other worktree edits |
+
+Remaining known ordinary deterministic frontend defects from this bounded sweep: NONE. This is a local implementation/proof disposition, not independent acceptance or a claim that unavailable backend functionality is implemented.
