@@ -1,8 +1,8 @@
 # M1 Remaining Gates — Current Closure Census
 
 Date: 2026-10-09 (Pacific/Honolulu)
-Controller: `V4-M1-ACCEPTED-BRANCHES-ALPHA-REUSE-AND-CLOSURE-CENSUS-01`
-Status: `LOCALLY COMPLETE FOR THIS CORRECTION SCOPE` — local integration only; not independently accepted; no push.
+Controller: `V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-02` (superseding correction-01)
+Status: `LOCALLY COMPLETE FOR CORRECTION-02 SCOPE` — local integration only; not independently accepted; no push.
 
 This is a finite current-state census, not a claim that green CI or local code proof makes Paper deployment ready. The canonical owners remain the existing Research registry, native strategy/backtest/evidence path, Promotion gate, and daemon `active_paper` authority. The Alpha Lab remains read-only archival reference.
 
@@ -47,15 +47,17 @@ EXT-032 archival decision remains negative: SPY alpha `-$26,776.13`, DIA `-$25,9
 
 ## Defect census and second sweep
 
+- Independent-review IR-01: `FIXED+PROVEN`. `_run_jobs` now preserves terminal results yielded before a pool transport exception and creates failed, empty-evidence records only for slices with no observed terminal result. A controlled partial-result pool test passes; the blanket-all-failed mutant is killed. Normal multi-worker success remains on the same ordered `executor.map` semantics.
+- Independent-review IR-02: `FIXED+PROVEN`. `run_batch` and `rerun_failed_jobs` use one SQLite `BEGIN IMMEDIATE` claim that checks batch status, queued/running jobs, and both linked and metadata-attributed started attempts before resetting mutable operational rows. Completed exact reruns remain allowed; the claim race has one owner across two real spawned processes; residue and entrypoint-bypass mutants are killed.
 - `runner.py::_finalize_candidate_attempts`: `FIXED+PROVEN`. Aggregate attempt status/reason use distinct names from per-slice status/reason; missing required results are immutable `missing` slice evidence, counted as `missing_slices`, and named in the aggregate failure reason. Failed/then-succeeded, succeeded/then-failed, all-success, missing-first/last/all cases pass in both capture-store and durable SQLite tests.
 - Worker/artifact interruption and retry recovery: `FIXED+PROVEN`. Runner-observed worker/process-pool exceptions become terminal failed attempts with empty metrics/artifact paths and explicit `worker_execution_interrupted` / `worker_pool_interrupted` reasons; no worker result is fabricated. `rerun_failed_jobs` refuses queued/running jobs or started attempts instead of silently claiming recovery. Interrupted retry preserves one trial and increments attempts only.
-- Durable registry invariants: `FIXED+PROVEN`. SQLite round trips preserve aggregate summaries and immutable per-slice evidence; duplicate slice recording and duplicate terminal attempt finalization remain refused. Full `research-py/tests/test_experiment_registry.py`: **61 passed**, including the prior operator evidence of 49 passed plus this correction's coverage.
-- Mutation proof: original last-slice-status mutant killed (9 focused tests RED); missing-slice accounting/report mutant killed (6 focused tests RED); incomplete-recovery guard mutant killed (1 focused test RED). Correct source restored and focused GREEN rerun: 14 passed.
+- Durable registry invariants: `FIXED+PROVEN`. SQLite round trips preserve aggregate summaries and immutable per-slice evidence; duplicate slice recording and duplicate terminal attempt finalization remain refused. Full `research-py/tests/test_experiment_registry.py`: **66 passed**; correction-01's 61-pass result and prior operator evidence of 49 passed remain historical context.
+- Mutation proof: correction-01 mutants remain killed; correction-02 killed the blanket-all-failed pool mutant (1 focused test RED), the run-entrypoint claim bypass (2 focused tests RED), and the residue/claim guard mutant (2 focused tests RED). Correct source restored and correction-02 focused GREEN rerun: **9 passed**.
 - Trial/attempt/slice registration, immutable slice snapshots, retries, identity, holdout guard, native economic bridge, scanner/review, Promotion and `active_paper` authority: `ALREADY_CORRECT+PROVEN` by the accepted branch evidence and adjacent source/tests; no duplicate owner was added here.
 - Alpha Lab active runner, independent runs schema, and Python economic loop: `RETIRE` as an active path; no copy exists in the integration tree.
 - Historical impact: `UNKNOWN`. No locally available canonical SQLite registry files were present under the integration checkout; no historical record was rewritten or declared audited.
 - Real Paper DB schema, provider readiness, genuine Paper lifecycle, and M1.10 market-session count: `BLOCKED` or `UNAVAILABLE_NEEDS_PROOF`; no provider, broker, Paper DB, migration, order, fill, or holdout call was made.
-- Second adversarial sweep of changed paths and adjacent callers/callees: no additional ordinary deterministic defect was found. The unresolved rows above are operator/economic/runtime proof gates, not silently closed code defects.
+- Second adversarial sweep covered runner, storage, worker, artifacts, CLI, aggregator, registration/identity callers, retry entrypoints, exception paths, stale artifact paths, duplicate authority, and concurrency chronology; no additional ordinary deterministic defect was found. The unresolved rows above are operator/economic/runtime proof gates, not silently closed code defects.
 
 ## Tooling and side effects
 

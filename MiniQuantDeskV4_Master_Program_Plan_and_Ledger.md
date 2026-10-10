@@ -843,6 +843,18 @@ Local, not pushed on the accepted integration branch. Code commit `241d84b7`; fu
 
 Acceptance: focused correction proof 14 passed; full `research-py/tests/test_experiment_registry.py` 61 passed. Prior operator evidence of 49 passed remains historical context. No provider/broker/Paper/Live/holdout action occurred; Alpha Lab remains archival KEEP/ADAPT/RETIRE only; Strategy Factory automation remains future M9-enabling and non-blocking for M1.
 
+### G2.26 Distributed Research independent-review correction-02 (`V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-02`, 2026-10-09) - `LOCALLY_COMPLETE`, M1 remains blocked
+
+Local, not pushed on the accepted integration branch. Code/test commit `3a21eff1`; full census and proof: `docs/research/M1_REMAINING_GATES_CENSUS_01.md`.
+
+| Finding | Disposition / proof |
+|---|---|
+| IR-01 partial pool-result exception | `FIXED+PROVEN`; observed terminal results survive transport failure; only unobserved slices become failed with empty metrics/artifacts; controlled pool proof and blanket-all-failed mutant |
+| IR-02 run/retry execution ownership | `FIXED+PROVEN`; SQLite `BEGIN IMMEDIATE` claim checks running/queued residue and linked or metadata-attributed started attempts before reset; completed exact rerun allowed; two spawned processes yield one owner |
+| Existing C1-C5 corrections | Preserved; aggregate/missing-slice status, interrupted-worker evidence, durable immutable slices, and historical-impact `UNKNOWN` remain unchanged |
+
+Acceptance: correction-02 focused proof 9 passed; full registry acceptance 66 passed; AST parse and whitespace checks passed. No provider/broker/Paper/Live/holdout action occurred; Alpha Lab remains archival KEEP/ADAPT/RETIRE only; Strategy Factory automation remains future M9-enabling and non-blocking for M1.
+
 ### G3. M5-M8 deterministic code-completion controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
 
 Baseline `8e029b86d763f5668e159d39460caa79957e5c50` (= `origin/main`, PR #73 closure). Nine local commits, **NOT PUSHED**. G2's statuses above are unchanged; this section records only what this controller found and did for M5-M8. It supersedes the M5-M8 "CODE_MISSING/WIRING_MISSING" census in `docs/CURRENT_MISSION.md` §-8 wherever the two differ (that census predates the QtyMicros runtime cutover; e.g. fractional quantity now reaches the broker boundary and crypto autofresh is wired).

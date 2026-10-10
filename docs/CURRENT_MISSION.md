@@ -6,6 +6,15 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -40. Distributed Research independent-review correction-02 (2026-10-09, `V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-02`)
+
+Local correction on the isolated integration branch, **not pushed**. Code/test commit `3a21eff1`; full record and M1 matrix: [`docs/research/M1_REMAINING_GATES_CENSUS_01.md`](research/M1_REMAINING_GATES_CENSUS_01.md).
+
+- IR-01 is `FIXED+PROVEN`: partial pool-result exceptions preserve already observed terminal results and fail closed only for unobserved slices, with no fabricated metrics or artifacts.
+- IR-02 is `FIXED+PROVEN`: `run_batch` and `rerun_failed_jobs` now acquire one SQLite execution claim atomically before mutable operational reset; unresolved jobs or started attempts refuse, completed exact reruns remain append-only, and two spawned processes cannot both claim one batch.
+- Proof: correction-02 focused **9 passed**; full `research-py/tests/test_experiment_registry.py` **66 passed**; intentional pool, entrypoint, residue, and claim mutants were killed. AST parsing and `git diff --check` passed.
+- Historical impact remains `UNKNOWN`: no canonical registry DB was available locally for census. No historical evidence, provider, broker, Paper, Live, migration, order, fill, or holdout action occurred. M1 remains `M1_BLOCKED`, Paper INACTIVE, Live NOT TOUCHED, and exact-head GitHub CI remains pending guarded publication.
+
 ## -39. Distributed Research independent-review correction (2026-10-09, `V4-M1-INTEGRATION-INDEPENDENT-REVIEW-CORRECTION-01`)
 
 Local correction on the isolated integration branch, **not pushed**. Code commit `241d84b7`; full record and M1 matrix: [`docs/research/M1_REMAINING_GATES_CENSUS_01.md`](research/M1_REMAINING_GATES_CENSUS_01.md).
