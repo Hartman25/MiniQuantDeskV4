@@ -674,7 +674,13 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def load_bars(bars_csv: Path, *, require_pricing_columns: bool = False) -> pd.DataFrame:
+def load_bars(
+    bars_csv: Path,
+    *,
+    require_pricing_columns: bool = False,
+    provenance_manifest: Optional[Dict[str, Any]] = None,
+    historical_requirements: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
     """`require_pricing_columns=True` (P7A) additionally requires and
     validates `high`/`low` -- callers pass this whenever
     `spec.execution_pricing.is_official_parity_model`, since the official
@@ -693,15 +699,34 @@ def load_bars(bars_csv: Path, *, require_pricing_columns: bool = False) -> pd.Da
     if missing:
         raise RuntimeError(f"Fail-closed: bars csv missing required columns: {missing}")
 
+    if historical_requirements is not None:
+        from mqk_research.data.historical import (
+            HistoricalDataUnqualified,
+            require_historical_dataset,
+        )
+
+        if provenance_manifest is None:
+            raise HistoricalDataUnqualified(
+                "qualified load requires a provenance manifest"
+            )
+        qualification = require_historical_dataset(
+            bars, provenance_manifest, **historical_requirements
+        )
+    else:
+        qualification = None
     bars = bars.copy()
     bars["symbol"] = bars["symbol"].astype(str)
     bars["end_ts"] = pd.to_datetime(bars["end_ts"], utc=True, errors="coerce")
     if bars["end_ts"].isna().any():
-        raise RuntimeError("Fail-closed: bars end_ts contains missing/unparsable values")
+        raise RuntimeError(
+            "Fail-closed: bars end_ts contains missing/unparsable values"
+        )
 
     close = pd.to_numeric(bars["close"], errors="coerce")
-    if close.isna().any():
-        raise RuntimeError("Fail-closed: bars close contains missing/non-numeric values")
+    if close.isna().any() or not np.isfinite(close.to_numpy(dtype=float)).all():
+        raise RuntimeError(
+            "Fail-closed: bars close contains missing/non-numeric/non-finite values"
+        )
     if (close <= 0.0).any():
         raise RuntimeError("Fail-closed: bars close must be strictly positive")
     bars["close"] = close.astype(float)
@@ -710,13 +735,19 @@ def load_bars(bars_csv: Path, *, require_pricing_columns: bool = False) -> pd.Da
         high = pd.to_numeric(bars["high"], errors="coerce")
         low = pd.to_numeric(bars["low"], errors="coerce")
         if high.isna().any() or not np.isfinite(high.to_numpy(dtype=float)).all():
-            raise RuntimeError("Fail-closed: bars high contains missing/non-finite values")
+            raise RuntimeError(
+                "Fail-closed: bars high contains missing/non-finite values"
+            )
         if low.isna().any() or not np.isfinite(low.to_numpy(dtype=float)).all():
-            raise RuntimeError("Fail-closed: bars low contains missing/non-finite values")
+            raise RuntimeError(
+                "Fail-closed: bars low contains missing/non-finite values"
+            )
         bars["high"] = high.astype(float)
         bars["low"] = low.astype(float)
         if (bars["high"] < bars["low"]).any():
-            raise RuntimeError("Fail-closed: bars contain high < low (impossible bar shape)")
+            raise RuntimeError(
+                "Fail-closed: bars contain high < low (impossible bar shape)"
+            )
         if ((bars["close"] < bars["low"]) | (bars["close"] > bars["high"])).any():
             raise RuntimeError(
                 "Fail-closed: bars contain close outside [low, high] (impossible bar shape)"
@@ -724,9 +755,15 @@ def load_bars(bars_csv: Path, *, require_pricing_columns: bool = False) -> pd.Da
 
     dup_mask = bars.duplicated(subset=["symbol", "end_ts"], keep=False)
     if dup_mask.any():
-        raise RuntimeError("Fail-closed: duplicate (symbol,end_ts) rows in economic bars csv")
+        raise RuntimeError(
+            "Fail-closed: duplicate (symbol,end_ts) rows in economic bars csv"
+        )
 
-    return bars.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+    if qualification is not None:
+        bars.attrs["historical_data_qualification"] = qualification
+    return bars.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(
+        drop=True
+    )
 
 
 def verify_bars_provenance(run_dir: Path, bars_csv: Path) -> Dict[str, Any]:
@@ -2271,6 +2308,7 @@ def run_economic_walkforward(
     walk_forward_eval_path: Optional[Path] = None,
     oos_predictions_path: Optional[Path] = None,
     provenance_manifest: Optional[Dict[str, Any]] = None,
+    historical_requirements: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """`provenance_manifest` (mqk_research.data.bars_provenance) is
     OPTIONAL here (BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01): this is
@@ -2303,7 +2341,8 @@ def run_economic_walkforward(
 
     use_official_pricing = spec.execution_pricing.is_official_parity_model
     bars_record = verify_bars_provenance(run_dir, bars_csv)
-    bars = load_bars(bars_csv, require_pricing_columns=use_official_pricing)
+    bars = load_bars(bars_csv, require_pricing_columns=use_official_pricing,
+                     provenance_manifest=provenance_manifest, historical_requirements=historical_requirements)
     if provenance_manifest is not None:
         require_bars_match_manifest(bars, provenance_manifest)
         check_corporate_action_integrity(bars, provenance_manifest)
@@ -2397,6 +2436,7 @@ def run_economic_walkforward(
         "folds": fold_summaries,
         "aggregate": aggregate,
         "bars_provenance": provenance_manifest,
+        "historical_data_qualification": bars.attrs.get("historical_data_qualification"),
     }
     out["ids"] = {"economic_eval_id": sha256_json(out)}
 

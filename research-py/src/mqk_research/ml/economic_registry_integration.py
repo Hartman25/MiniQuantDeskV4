@@ -222,6 +222,7 @@ def run_registered_economic_walkforward_eval(
     standardize: bool = True,
     clip_z: float = 8.0,
     wf_spec: WalkForwardSpec | None = None,
+    historical_requirements: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Official, registered entry point for the economic_walk_forward_v1
     protocol.
@@ -247,6 +248,9 @@ def run_registered_economic_walkforward_eval(
             "run_registered_economic_walkforward_eval requires non-empty experiment_id, "
             "hypothesis_id, and strategy_id"
         )
+    if historical_requirements is not None:
+        from mqk_research.ml.economic_walkforward import load_bars
+        load_bars(bars_csv, provenance_manifest=bars_provenance, historical_requirements=historical_requirements)
     require_registered_bars_provenance(bars_provenance)
 
     run_dir = Path(run_dir)
@@ -313,6 +317,7 @@ def run_registered_economic_walkforward_eval(
             spec=normalized_economic_spec,
             walk_forward_eval_path=wf_out_path,
             provenance_manifest=bars_provenance,
+            **({"historical_requirements": historical_requirements} if historical_requirements is not None else {}),
         )
         economic_out = json.loads(economic_out_path.read_text(encoding="utf-8"))
 

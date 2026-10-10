@@ -1669,25 +1669,27 @@ def test_write_research_extraction_artifacts_writes_expected_files(tmp_path: Pat
 # ---------------------------------------------------------------------------
 
 
-def test_extractor_id_bumped_to_v2_never_v1():
+def test_extractor_id_bumped_to_v3_never_v1():
     """Required test 4: a fresh extraction can never claim the V1 identity
-    -- EXTRACTOR_ID is now v2, and EXTRACTOR_ID_V1_LEGACY (kept only for
+    -- EXTRACTOR_ID is now v3, and EXTRACTOR_ID_V1_LEGACY (kept only for
     verifying historical artifacts) is a DIFFERENT, distinguishable
     string."""
-    assert ah.EXTRACTOR_ID == "mqk_research.data.alpaca_historical.v2"
+    assert ah.EXTRACTOR_ID == "mqk_research.data.alpaca_historical.v3"
     assert ah.EXTRACTOR_ID_V1_LEGACY == "mqk_research.data.alpaca_historical.v1"
     assert ah.EXTRACTOR_ID != ah.EXTRACTOR_ID_V1_LEGACY
-    assert ah.DIAGNOSTIC_EXTRACTOR_ID == "mqk_research.data.alpaca_historical.diagnostic_v2"
+    assert ah.DIAGNOSTIC_EXTRACTOR_ID == "mqk_research.data.alpaca_historical.diagnostic_v3"
 
 
-def test_v2_extractor_ids_match_bars_provenance_mirror():
+def test_v2_plus_extractor_ids_match_bars_provenance_mirror():
     """bars_provenance._V2_PLUS_EXTRACTOR_IDS must stay in sync with this
     module's actual EXTRACTOR_ID/DIAGNOSTIC_EXTRACTOR_ID -- if either side
     drifts, ca_resolution_policy_id would either wrongly drop out of a real
     V2 attestation's identity or wrongly leak into a non-V2 one."""
     from mqk_research.data import bars_provenance as bp
 
-    assert bp._V2_PLUS_EXTRACTOR_IDS == {ah.EXTRACTOR_ID, ah.DIAGNOSTIC_EXTRACTOR_ID}
+    assert {ah.EXTRACTOR_ID, ah.DIAGNOSTIC_EXTRACTOR_ID,
+            "mqk_research.data.alpaca_historical.v2",
+            "mqk_research.data.alpaca_historical.diagnostic_v2"} == bp._V2_PLUS_EXTRACTOR_IDS
 
 
 def test_official_extraction_mints_v2_attestation_with_policy_fingerprint(monkeypatch):

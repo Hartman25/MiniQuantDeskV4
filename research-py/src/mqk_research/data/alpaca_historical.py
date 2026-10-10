@@ -247,7 +247,8 @@ EXTRACTOR_ID_V1_LEGACY = "mqk_research.data.alpaca_historical.v1"
 # even when the underlying OHLC bars are byte-identical to a V1 extraction
 # of the same window. See resolution_policy_fingerprint / bars_provenance.
 # canonical_source_attestation_content's ca_resolution_policy_id handling.
-EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v2"
+# V3 binds the full OHLCV historical contract; legacy v1/v2 remain verifiable.
+EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v3"
 
 # Explicitly UNtrusted diagnostic identity (Defect 3), bumped alongside
 # EXTRACTOR_ID (V2-01) for the same reason -- the diagnostic path runs the
@@ -256,7 +257,7 @@ EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v2"
 # bars_provenance._TRUSTED_EXTRACTOR_IDS or SOURCE_AUTHORITY_OFFICIAL_PROVIDER
 # regardless of what transport/base_url a caller injects. Minted only by
 # extract_research_bars_with_provenance_diagnostic.
-DIAGNOSTIC_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v2"
+DIAGNOSTIC_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v3"
 
 _ASOF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -713,14 +714,18 @@ def _fetch_all_pages(
                 f"Alpaca API response JSON decode failed: endpoint={endpoint_url}: {exc}"
             ) from exc
         if not isinstance(payload, dict):
-            raise AlpacaHistoricalExtractionError("Alpaca API response must be a JSON object")
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca API response must be a JSON object"
+            )
         pages.append(payload)
         hashes.append(sha256_json(payload))
         page_token = payload.get("next_page_token")
         if page_token is None or page_token == "":
             return pages, True, hashes
         if not isinstance(page_token, str) or page_token in seen_tokens:
-            raise AlpacaHistoricalExtractionError("Alpaca API pagination did not terminate: invalid or repeated token")
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca API pagination did not terminate: invalid or repeated token"
+            )
         seen_tokens.add(page_token)
     raise AlpacaHistoricalExtractionError(
         f"Alpaca API pagination did not terminate within max_pages={max_pages}: endpoint={endpoint_url} "
@@ -782,7 +787,10 @@ def fetch_historical_bars(
     }
     endpoint_url = f"{base_url}{BARS_PATH}"
     pages, complete, page_hashes = _fetch_all_pages(
-        endpoint_url=endpoint_url, base_params=base_params, credentials=creds, http_get=getter
+        endpoint_url=endpoint_url,
+        base_params=base_params,
+        credentials=creds,
+        http_get=getter,
     )
 
     rows: List[Dict[str, Any]] = []
@@ -793,26 +801,40 @@ def fetch_historical_bars(
                 f"Alpaca bars response missing required 'bars' key: endpoint={endpoint_url}"
             )
         if not isinstance(bars_by_symbol, dict):
-            raise AlpacaHistoricalExtractionError("Alpaca bars must be an object keyed by symbol")
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca bars must be an object keyed by symbol"
+            )
         for sym, bar_list in bars_by_symbol.items():
             symbol = str(sym).strip().upper()
             if symbol not in symbols_norm:
-                raise AlpacaHistoricalExtractionError(f"Alpaca returned unexpected symbol {symbol!r}")
+                raise AlpacaHistoricalExtractionError(
+                    f"Alpaca returned unexpected symbol {symbol!r}"
+                )
             if not isinstance(bar_list, list):
-                raise AlpacaHistoricalExtractionError(f"Alpaca bars for {symbol!r} must be a list")
+                raise AlpacaHistoricalExtractionError(
+                    f"Alpaca bars for {symbol!r} must be a list"
+                )
             for b in bar_list:
                 try:
                     if not isinstance(b, dict):
                         raise ValueError("bar must be an object")
                     if not isinstance(b.get("t"), str):
-                        raise ValueError("timestamp must be an explicit timezone-aware string")
+                        raise ValueError(
+                            "timestamp must be an explicit timezone-aware string"
+                        )
                     ts = pd.Timestamp(b["t"])
                     if pd.isna(ts) or ts.tzinfo is None:
                         raise ValueError("timestamp must have an explicit timezone")
                     if not start_utc <= ts < end_utc:
                         continue
                     values = {}
-                    for key, field in (("o", "open"), ("h", "high"), ("l", "low"), ("c", "close"), ("v", "volume")):
+                    for key, field in (
+                        ("o", "open"),
+                        ("h", "high"),
+                        ("l", "low"),
+                        ("c", "close"),
+                        ("v", "volume"),
+                    ):
                         if isinstance(b.get(key), bool):
                             raise ValueError(f"invalid {field}")
                         value = float(b[key])
@@ -821,14 +843,20 @@ def fetch_historical_bars(
                         if value < 0 if key == "v" else value <= 0:
                             raise ValueError(f"invalid {field}")
                         values[field] = value
-                    if not (values["low"] <= values["open"] <= values["high"] and
-                            values["low"] <= values["close"] <= values["high"]):
+                    if not (
+                        values["low"] <= values["open"] <= values["high"]
+                        and values["low"] <= values["close"] <= values["high"]
+                    ):
                         raise ValueError("inconsistent OHLC range")
                     if "is_complete" in b and b["is_complete"] is not True:
                         raise ValueError("bar is not finalized")
                 except (KeyError, TypeError, ValueError, OverflowError) as exc:
-                    raise AlpacaHistoricalExtractionError(f"Alpaca invalid bar for {symbol!r}: missing/invalid fields: {exc}") from exc
-                rows.append({"symbol": symbol, "end_ts": ts.tz_convert("UTC"), **values})
+                    raise AlpacaHistoricalExtractionError(
+                        f"Alpaca invalid bar for {symbol!r}: missing/invalid fields: {exc}"
+                    ) from exc
+                rows.append(
+                    {"symbol": symbol, "end_ts": ts.tz_convert("UTC"), **values}
+                )
 
     if not rows:
         raise AlpacaHistoricalExtractionError(
@@ -856,12 +884,18 @@ def fetch_historical_bars(
     for col in ("open", "high", "low", "close"):
         values = df[col].to_numpy(dtype=float)
         if not np.isfinite(values).all():
-            raise AlpacaHistoricalExtractionError(f"Alpaca bars contain non-finite {col!r} values")
+            raise AlpacaHistoricalExtractionError(
+                f"Alpaca bars contain non-finite {col!r} values"
+            )
 
     dup_mask = df.duplicated(subset=["symbol", "end_ts"], keep=False)
     if bool(dup_mask.any()):
-        dup_rows = df.loc[dup_mask, ["symbol", "end_ts"]].drop_duplicates().to_dict("records")
-        raise AlpacaHistoricalExtractionError(f"Alpaca bars contain duplicate (symbol,end_ts) rows: {dup_rows}")
+        dup_rows = (
+            df.loc[dup_mask, ["symbol", "end_ts"]].drop_duplicates().to_dict("records")
+        )
+        raise AlpacaHistoricalExtractionError(
+            f"Alpaca bars contain duplicate (symbol,end_ts) rows: {dup_rows}"
+        )
 
     df = df.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
     df["end_ts"] = df["end_ts"].map(lambda t: t.isoformat())
@@ -869,7 +903,9 @@ def fetch_historical_bars(
     present = set(df["symbol"].unique().tolist())
     missing = sorted(set(symbols_norm) - present)
     if missing:
-        raise AlpacaHistoricalExtractionError(f"Alpaca returned no bars at all for symbol(s): {missing}")
+        raise AlpacaHistoricalExtractionError(
+            f"Alpaca returned no bars at all for symbol(s): {missing}"
+        )
 
     meta: Dict[str, Any] = {
         "pagination_complete": complete,
@@ -998,7 +1034,9 @@ def fetch_corporate_actions(
     creds = credentials or load_alpaca_credentials()
     getter = http_get or _default_http_get
 
-    requested_types = sorted({t.strip() for t in (types or KNOWN_CORPORATE_ACTION_TYPES) if t.strip()})
+    requested_types = sorted(
+        {t.strip() for t in (types or KNOWN_CORPORATE_ACTION_TYPES) if t.strip()}
+    )
     unknown_types = sorted(set(requested_types) - KNOWN_CORPORATE_ACTION_TYPES)
     if unknown_types:
         raise ValueError(f"Unknown corporate action type(s) requested: {unknown_types}")
@@ -1015,7 +1053,10 @@ def fetch_corporate_actions(
     }
     endpoint_url = f"{base_url}{CORPORATE_ACTIONS_PATH}"
     pages, complete, page_hashes = _fetch_all_pages(
-        endpoint_url=endpoint_url, base_params=base_params, credentials=creds, http_get=getter
+        endpoint_url=endpoint_url,
+        base_params=base_params,
+        credentials=creds,
+        http_get=getter,
     )
 
     entries: List[Dict[str, Any]] = []
@@ -1027,7 +1068,9 @@ def fetch_corporate_actions(
                 f"endpoint={endpoint_url}"
             )
         if not isinstance(ca, dict):
-            raise AlpacaHistoricalExtractionError("Alpaca corporate_actions must be an object")
+            raise AlpacaHistoricalExtractionError(
+                "Alpaca corporate_actions must be an object"
+            )
         unmapped_keys = sorted(set(ca.keys()) - set(_RESPONSE_KEY_TO_TYPE.keys()))
         if unmapped_keys:
             raise AlpacaHistoricalExtractionError(
@@ -1038,8 +1081,12 @@ def fetch_corporate_actions(
             )
         for response_key, action_type in _RESPONSE_KEY_TO_TYPE.items():
             bucket = ca.get(response_key, [])
-            if not isinstance(bucket, list) or any(not isinstance(raw, dict) for raw in bucket):
-                raise AlpacaHistoricalExtractionError(f"Alpaca malformed corporate-actions bucket {response_key!r}")
+            if not isinstance(bucket, list) or any(
+                not isinstance(raw, dict) for raw in bucket
+            ):
+                raise AlpacaHistoricalExtractionError(
+                    f"Alpaca malformed corporate-actions bucket {response_key!r}"
+                )
             for raw in bucket:
                 entries.extend(_effective_windows_for_entry(action_type, raw))
 
@@ -1391,7 +1438,9 @@ def _neutral_extract(
     }
 
 
-def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authority: str) -> Dict[str, Any]:
+def _mint_manifest(
+    neutral: Dict[str, Any], *, extractor_id: str, source_authority: str
+) -> Dict[str, Any]:
     """Mint the OFFICIAL or DIAGNOSTIC source attestation + bars provenance
     manifest from a _neutral_extract result (REPAIR-03 Defect 1):
     `extractor_id`/`source_authority` are supplied here, by the caller-facing
@@ -1403,6 +1452,14 @@ def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authori
     ca_meta = neutral["ca_meta"]
     evidence = neutral["evidence"]
 
+    from mqk_research.data.historical import build_historical_contract
+
+    historical_contract = build_historical_contract(
+        neutral["bars_df"],
+        timeframe=neutral["timeframe"],
+        asof=bars_meta["resolved_asof"],
+    )
+    historical_contract_id = sha256_json(historical_contract)
     attestation = build_source_attestation(
         source_provider_id="alpaca",
         extractor_id=extractor_id,
@@ -1437,6 +1494,7 @@ def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authori
         # canonical_source_attestation_content decides whether it actually
         # participates in a given attestation's identity.
         ca_resolution_policy_id=resolution_policy_fingerprint(),
+        historical_data_contract_id=historical_contract_id,
     )
 
     price_provenance = {
@@ -1466,6 +1524,9 @@ def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authori
         bars=neutral["bars_df"],
         source_attestation=attestation,
     )
+
+    manifest["historical_data_contract"] = historical_contract
+    manifest["historical_data_contract_id"] = historical_contract_id
 
     return {
         "bars": neutral["bars_df"],
