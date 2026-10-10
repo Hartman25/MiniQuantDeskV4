@@ -22,7 +22,7 @@ policy was introduced.
 | 1 | `decision::submit_internal_strategy_decision` | Active run, intake counters and per-symbol counters were hardcoded to `EquityNyse`, so a registry-resolved Crypto decision was enqueued onto the Equity domain's outbox | FIXED+PROVEN (`bd1995e3`) |
 | 2 | same seam, crypto admission | A crypto instrument quoted in a non-account currency was admitted and then sized, capped and allocated against account equity as if it were account-currency | FIXED+PROVEN (`770abd47`) |
 | 3 | `POST /api/v1/execution/orders` | Manual order has no `asset_class`; dispatch reads that as Equity; nothing proved the symbol was an Equity, so an OCC option or crypto pair bypassed the per-class broker capability gate (the hole Gate 0b closed for the external signal route) | FIXED+PROVEN (`5ff7b367`) |
-| 4 | operator flatten + pre-event flatten | Close orders are Equity-shaped with no `asset_class`; a fractional Crypto position's close was reported "enqueued" and quarantined at dispatch ("must be a whole share count") | FIXED+PROVEN (`257de570`): refused and reported |
+| 4 | operator flatten + pre-event flatten | Close orders are Equity-shaped with no `asset_class`; a fractional Crypto position's close was reported "enqueued" and quarantined at dispatch ("must be a whole share count"). First fix (`257de570`) refused only positions registry-v2 listed as non-Equity and treated absence as permission, so an unclassified OCC option or crypto position still got an Equity close | FIXED+PROVEN in two steps: `257de570` (partial) superseded by `2468732d` (positive Equity proof required) |
 | 5 | same-symbol arbitration, claimed-bar single evaluation, concurrent claim, stale bar | Accepted M2 controls | ALREADY CORRECT (not reopened) |
 | 6 | `Alpaca supports_asset_class`, `validated_asset_class`, outbox parse | Options/futures/forex refused at capability and at the payload parser; crypto flag default-off | ALREADY CORRECT |
 | 7 | Bundle 5 capital allocation default `off` | With allocation off there is no MQD-level shared-capital guard across strategies; broker buying power is the only backstop. Enforcing it would need an operator capital policy (and an opportunity artifact) | BLOCKED (operator capital policy), documented limit |
@@ -46,17 +46,32 @@ policy was introduced.
    Crypto decision with no Crypto run is refused and writes no outbox row.
 3. `5ff7b367` Manual orders require the decision seam's registry authority to
    resolve the symbol to an Equity (400 rejected / 503 unavailable).
-4. `257de570` A position the trading registry-v2 lists as non-Equity is refused
-   by both flatten producers and reported (`unsupported_position`). Equity
-   closes, and any symbol the registry does not list or cannot read, keep the
-   historical close, so Equity liquidation never depends on registry-v2.
+4. `257de570` (superseded by item 5) Refused a position the trading registry-v2
+   listed as non-Equity; absence of a listing was treated as permission.
+5. `2468732d` One shared decision, `decide_equity_flatten_close`, returns
+   `ProvenEquity` / `NotEquity` / `Unproven`, and both flatten producers create
+   a close only for `ProvenEquity`. The canonical Equity registry (loaded,
+   validated, every row for the symbol inspected ignoring case) must list the
+   symbol exactly once as an enabled Equity; a configured registry-v2 must also
+   be readable, valid, free of the test bypass and non-contradictory. Absent,
+   unlisted, unreadable, invalid, duplicate or contradictory evidence creates
+   zero order intents. The operator route reports refused positions separately
+   ("position NOT closed"), keeps proven Equities flowing in a mixed portfolio,
+   and writes `FLATTEN_NOT_SUBMITTED` when nothing was enqueued. Consequence:
+   a held ticker the canonical registry does not list as an enabled Equity is
+   no longer closed by MQD; the warning tells the operator to close it at the
+   broker or add a validated registry entry. No broker flag, capital policy or
+   Live behavior changed.
 
 ## Proof
 
 Each invariant has a DB-backed or unit test on the production seam and a
 mutation that turned it RED, restored byte-identically (SHA-256 checked):
 MD-01/02 (domain derivation), the currency unit test (check disabled), MO-01/02/04
-(identity gate disabled), FL-02/03/05 (refusal disabled). Controls: MD-03, MO-03,
+(identity gate disabled), FP-04..10 (positive-proof gate failing open), FP-07 (registry-v2
+validation removed), FP-03..09 (operator caller ignoring the decision), FP-10 (pre-event
+caller ignoring it), FP-11 (canonical disabled/non-Equity guards removed), and the audit
+label. The first-step FL-02/03/05 mutation is superseded. Controls: MD-03, MO-03,
 FL-04.
 
 ## Extensibility (operator clarification)
@@ -99,3 +114,36 @@ The hermetic manual-order fixture needed the canonical registry anchored
 (`5de9318d`) because finding 3 correctly requires a registry-proven Equity.
 `cargo test --workspace` was NOT run (laptop resource rule); broad workspace
 proof is delegated to GitHub CI, which is disabled here.
+
+## Independent-review correction (flatten positive proof, `2468732d`)
+
+Review of `e48feb89` confirmed one safety blocker: `flatten_refusal_for_symbol`
+returned `None` when registry-v2 was absent, unreadable or silent about a symbol,
+and both flatten producers read `None` as permission. Corrected as described in
+change 5. Reproduced RED before the fix with the route-level matrix (FP-04..09
+failed against `e48feb89`; FP-01..03 controls passed).
+
+Proof: `scenario_multiasset_flatten_equity_proof_01` FP-01..FP-11 (operator route
+and the automatic pre-event path), the first-step `scenario_multiasset_flatten_position_class_01`
+(FL-01..05, updated to the new API), and seven guard-removal mutations (positive-proof
+gate, registry-v2 validation, canonical disabled and non-Equity guards, each
+production caller, and the audit label), each killed and restored byte-identically.
+Fixtures that call the changed routes now anchor the canonical registry
+(`scenario_paper_flatten_psf01`, `scenario_liveshadow_no_order_authority_01`).
+
+Affected acceptance set (one combined run, fresh disposable DB,
+`--include-ignored --test-threads=1`): the two flatten files, the other two
+`scenario_multiasset_*` files, `scenario_paper_flatten_psf01` (11),
+`scenario_pre_event_flatten_01` (24), `scenario_liveshadow_no_order_authority_01`,
+`scenario_live_shadow_flatten_on_halt_01`, `scenario_ops_control_oc01_oc02` (16),
+`scenario_autonomous_paper_session_hygiene_01` (11), `scenario_gui_daemon_contract_gate` (23),
+`scenario_daemon_order_submit` (20), `scenario_route_contract_rt01`: all passed.
+Touched-module lib tests (`decision::`, `loop_runner::`, `hermetic_`, `pre_event`,
+`control_plane`): 57 passed, 10 ignored. Clippy `-D warnings` clean. The full 1,159-test
+daemon lib suite and the 22 `#[ignore]` lib tests were not rerun (no change reaches them),
+and `scenario_internal_strategy_decision` keeps its documented reused-DB limitation
+and was not rerun.
+
+Still open (unchanged by this correction): findings 7-10 and 12-14 above;
+the operator must close an unproven held position at the broker or add a validated
+registry entry; nothing here proves any asset class operational.
