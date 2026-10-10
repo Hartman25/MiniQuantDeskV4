@@ -1778,7 +1778,8 @@ def test_execution_writers_fail_closed_for_null_and_stale_claims(tmp_path):
     assert (store.get_batch(job.batch_id), store.list_jobs(job.batch_id)) == before_null_claim
 
 
-def test_claimed_execution_writers_allow_legal_transitions(tmp_path):
+@pytest.mark.parametrize("terminal_job_status", ["succeeded", "failed"])
+def test_claimed_execution_writers_allow_legal_transitions(tmp_path, terminal_job_status):
     from mqk_research.exp_distributed.runner import create_batch, load_batch_spec
 
     root = tmp_path
@@ -1811,15 +1812,24 @@ def test_claimed_execution_writers_allow_legal_transitions(tmp_path):
         JobExecutionResult(
             job_id=job.job_id,
             batch_id=job.batch_id,
-            status="succeeded",
+            status=terminal_job_status,
             metrics={"ok": True},
             artifact_paths={},
+            failure_reason="synthetic failed job" if terminal_job_status == "failed" else None,
         ),
         execution_claim=claim,
     )
-    store.finalize_batch(job.batch_id, "succeeded", {}, {"ok": True}, execution_claim=claim)
-    assert store.get_batch(job.batch_id)["status"] == "succeeded"
-    assert store.list_jobs(job.batch_id)[0]["status"] == "succeeded"
+    if terminal_job_status == "failed":
+        before = (store.get_batch(job.batch_id), store.list_jobs(job.batch_id))
+        with pytest.raises(RuntimeError, match="non-succeeded jobs"):
+            store.finalize_batch(job.batch_id, "succeeded", {}, {"false_success": True}, execution_claim=claim)
+        assert (store.get_batch(job.batch_id), store.list_jobs(job.batch_id)) == before
+        store.finalize_batch(job.batch_id, "failed", {}, {"failed": True}, execution_claim=claim)
+        assert store.get_batch(job.batch_id)["status"] == "failed"
+    else:
+        store.finalize_batch(job.batch_id, "succeeded", {}, {"ok": True}, execution_claim=claim)
+        assert store.get_batch(job.batch_id)["status"] == "succeeded"
+    assert store.list_jobs(job.batch_id)[0]["status"] == terminal_job_status
 
 
 def test_single_job_is_fail_closed_or_isolated_diagnostic(tmp_path):

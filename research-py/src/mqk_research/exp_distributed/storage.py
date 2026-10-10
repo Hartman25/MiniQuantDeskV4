@@ -792,7 +792,7 @@ class ResearchResultStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "select status, execution_claim from exp_batches where batch_id=?", (batch_id,)
+                    "select status, execution_claim, job_count from exp_batches where batch_id=?", (batch_id,)
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"unknown batch_id: {batch_id}")
@@ -811,6 +811,22 @@ class ResearchResultStore:
                         f"refusing batch finalization with incomplete jobs: "
                         f"{[item['job_id'] for item in incomplete]!r}"
                     )
+                if status == "succeeded":
+                    actual_jobs = connection.execute(
+                        "select job_id, status from exp_jobs where batch_id=? order by job_id",
+                        (batch_id,),
+                    ).fetchall()
+                    if len(actual_jobs) != int(row["job_count"]):
+                        raise RuntimeError(
+                            f"refusing successful batch finalization with incomplete job population: "
+                            f"expected={row['job_count']}, actual={len(actual_jobs)}"
+                        )
+                    not_succeeded = [item["job_id"] for item in actual_jobs if item["status"] != "succeeded"]
+                    if not_succeeded:
+                        raise RuntimeError(
+                            f"refusing successful batch finalization with non-succeeded jobs: "
+                            f"{not_succeeded!r}"
+                        )
                 connection.execute(
                     """
                     update exp_batches
