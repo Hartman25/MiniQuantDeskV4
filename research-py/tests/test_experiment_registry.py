@@ -1550,6 +1550,153 @@ def test_distinct_batches_remain_operable_under_execution_claims(tmp_path):
     assert result_a["batch_id"] != result_b["batch_id"]
 
 
+def test_planning_preserves_active_and_terminal_batch_authority(tmp_path):
+    """Planning cannot reset active ownership or erase terminal evidence."""
+    from mqk_research.exp_distributed.artifacts import batch_root
+    from mqk_research.exp_distributed.runner import create_batch, load_batch_spec
+    from mqk_research.exp_distributed.scheduler import build_batch_plan
+
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    spec_path = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=[{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}],
+        hypothesis_id="",
+        allow_unregistered_diagnostic=True,
+    )
+    output_root = root / "research_out"
+    planned = create_batch(spec_path, root=output_root)
+    store = ResearchResultStore(default_db_path(output_root))
+    spec = load_batch_spec(spec_path)
+    plan = build_batch_plan(spec)
+    jobs = [JobSpec.from_dict(json.loads(Path(path).read_text(encoding="utf-8"))) for path in planned["job_spec_paths"].values()]
+    claim = store.claim_batch_for_execution(
+        planned["batch_id"],
+        spec.to_dict(),
+        output_root,
+        len(jobs),
+        jobs,
+        {job.job_id: Path(planned["job_spec_paths"][job.job_id]) for job in jobs},
+    )
+    manifest_path = batch_root(output_root, planned["batch_id"]) / "batch_manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    with pytest.raises(RuntimeError, match="active"):
+        create_batch(spec_path, root=output_root)
+    assert store.get_batch(planned["batch_id"])["status"] == "running"
+    assert store.get_batch(planned["batch_id"])["execution_claim"] == claim
+    assert manifest_path.read_bytes() == manifest_before
+
+    # A completed batch retains both its terminal DB summary and its terminal
+    # manifest when the same spec is planned again.
+    completed = run_batch(spec_path, root=root / "completed_out", max_workers=1)
+    completed_store = ResearchResultStore(default_db_path(root / "completed_out"))
+    before = completed_store.get_batch(completed["batch_id"])
+    create_batch(spec_path, root=root / "completed_out")
+    after = completed_store.get_batch(completed["batch_id"])
+    assert (after["status"], after["summary_json"], after["aggregate_paths_json"]) == (
+        before["status"],
+        before["summary_json"],
+        before["aggregate_paths_json"],
+    )
+
+
+def test_single_job_is_fail_closed_or_isolated_diagnostic(tmp_path):
+    from mqk_research.exp_distributed.runner import create_batch, run_single_job
+
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    spec_path = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=[{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}],
+        hypothesis_id="",
+        allow_unregistered_diagnostic=True,
+    )
+    output_root = root / "research_out"
+    planned = create_batch(spec_path, root=output_root)
+    job_spec = Path(next(iter(planned["job_spec_paths"].values())))
+    with pytest.raises(RuntimeError, match="diagnostic-only"):
+        run_single_job(job_spec, root=output_root)
+    diagnostic = run_single_job(job_spec, root=output_root, allow_unregistered_diagnostic=True)
+    assert diagnostic["status"] == "succeeded"
+    assert str(output_root / "diagnostic_runs") in diagnostic["artifact_paths"]["artifact_dir"]
+    assert not (output_root / "artifacts" / "exp_distributed" / "batches" / planned["batch_id"] / "jobs").exists()
+
+
+def test_direct_worker_and_artifact_writers_require_claim_for_registered_batch(tmp_path):
+    from mqk_research.exp_distributed.artifacts import write_job_artifacts
+    from mqk_research.exp_distributed.runner import create_batch
+    from mqk_research.exp_distributed.worker import run_job_worker
+
+    root = tmp_path
+    dataset_path = _write_exp_dataset(root)
+    spec_path = _write_exp_batch_spec(
+        root,
+        dataset_path,
+        symbol_groups=[["AAA", "BBB"]],
+        windows=[{"label": "w", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}],
+        hypothesis_id="",
+        allow_unregistered_diagnostic=True,
+    )
+    output_root = root / "research_out"
+    planned = create_batch(spec_path, root=output_root)
+    job = JobSpec.from_dict(json.loads(Path(next(iter(planned["job_spec_paths"].values()))).read_text(encoding="utf-8")))
+    with pytest.raises(RuntimeError, match="SQLite execution claim"):
+        run_job_worker(job.to_dict(), str(output_root))
+    with pytest.raises(RuntimeError, match="execution claim required"):
+        write_job_artifacts(
+            root=output_root,
+            job=job,
+            dataset_fingerprint=job.dataset_fingerprint.to_dict(),
+            metrics={},
+            daily_returns=pd.DataFrame(),
+            positions=pd.DataFrame(),
+            trade_events=pd.DataFrame(),
+        )
+
+
+def test_single_worker_unexpected_runner_exception_becomes_terminal_failure(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    import mqk_research.exp_distributed.runner as exp_runner
+
+    jobs, _ = _mixed_slice_finalize_inputs(["succeeded"])
+    jobs = [replace(job, batch_id="batch-unexpected-single-worker") for job in jobs]
+    root = tmp_path / "research_out"
+    store = ResearchResultStore(root / "state" / "exp_research.sqlite3")
+    spec = {
+        "engine_id": "EXP",
+        "experiment_id": "exp-unexpected-single-worker",
+        "strategy_id": "strategy-1",
+        "batch_label": "unexpected-single-worker",
+    }
+    store.upsert_batch("batch-unexpected-single-worker", spec, root, len(jobs), status="queued")
+    store.upsert_jobs(
+        jobs,
+        {job.job_id: root / f"{job.job_id}.json" for job in jobs},
+        status="queued",
+    )
+
+    def _unexpected(_payload, _root_dir):
+        raise RuntimeError("unexpected single-worker transport failure")
+
+    monkeypatch.setattr(exp_runner, "_run_job_safely", _unexpected)
+    results = exp_runner._run_jobs(
+        jobs,
+        root,
+        store,
+        max_workers=1,
+        batch_id="batch-unexpected-single-worker",
+    )
+    assert len(results) == 1
+    assert results[0].status == "failed"
+    assert "no terminal result was observed" in (results[0].failure_reason or "")
+    assert store.list_jobs("batch-unexpected-single-worker")[0]["status"] == "failed"
+
+
 # ---------------------------------------------------------------------------
 # DISTRIBUTED DIAGNOSTIC ARTIFACT MARKING — durable canonical batch artifact
 # (batch_manifest.json) carries the same registry truth as the in-memory

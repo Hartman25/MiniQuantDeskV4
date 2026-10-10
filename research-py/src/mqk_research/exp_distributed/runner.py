@@ -9,7 +9,12 @@ from typing import Any, Dict, List, Sequence, Tuple
 import yaml
 
 from .aggregator import aggregate_results
-from .artifacts import batch_root, capture_artifact_evidence, write_job_spec, write_json
+from .artifacts import (
+    capture_artifact_evidence,
+    job_spec_root,
+    write_batch_manifest,
+    write_job_spec,
+)
 from .artifacts import write_batch_artifacts as persist_batch_artifacts
 from .models import BatchSpec, JobExecutionResult, JobSpec
 from .registry_integration import build_candidate_trial_identity, PROTOCOL_ID as CANDIDATE_PROTOCOL_ID
@@ -61,11 +66,14 @@ def _prepare_batch(
     store: ResearchResultStore,
     *,
     claim_execution: bool = False,
-) -> Dict[str, Path]:
+) -> Tuple[Dict[str, Path], str | None]:
     root.mkdir(parents=True, exist_ok=True)
-    spec_paths = {job.job_id: write_job_spec(root, job) for job in plan.jobs}
     if claim_execution:
-        store.claim_batch_for_execution(
+        spec_paths = {
+            job.job_id: job_spec_root(root, job.batch_id) / f"{job.job_index:04d}_{job.job_id}.json"
+            for job in plan.jobs
+        }
+        execution_claim = store.claim_batch_for_execution(
             plan.batch_id,
             spec.to_dict(),
             root,
@@ -73,11 +81,44 @@ def _prepare_batch(
             plan.jobs,
             spec_paths,
         )
+        for job in plan.jobs:
+            write_job_spec(
+                root,
+                job,
+                execution_claim=execution_claim,
+                registry_db_path=str(store.db_path),
+            )
+        store.assert_execution_claim(plan.batch_id, execution_claim)
+        write_batch_manifest(
+            root,
+            plan.batch_id,
+            plan.batch_manifest,
+            execution_claim=execution_claim,
+            registry_db_path=str(store.db_path),
+        )
+        return spec_paths, execution_claim
     else:
-        store.upsert_batch(plan.batch_id, spec.to_dict(), root, len(plan.jobs), status="queued")
-        store.upsert_jobs(plan.jobs, spec_paths, status="queued")
-    write_json(batch_root(root, plan.batch_id) / "batch_manifest.json", plan.batch_manifest)
-    return spec_paths
+        spec_paths = {
+            job.job_id: job_spec_root(root, job.batch_id) / f"{job.job_index:04d}_{job.job_id}.json"
+            for job in plan.jobs
+        }
+        with store.planning_batch(
+            plan.batch_id,
+            spec.to_dict(),
+            root,
+            plan.jobs,
+            spec_paths,
+        ) as planning_state:
+            for job in plan.jobs:
+                write_job_spec(root, job, allow_planning=True)
+            if planning_state["created"] or planning_state["status"] == "queued":
+                write_batch_manifest(
+                    root,
+                    plan.batch_id,
+                    plan.batch_manifest,
+                    allow_planning=True,
+                )
+        return spec_paths, None
 
 
 def create_batch(spec_path: Path, root: Path | None = None) -> Dict[str, Any]:
@@ -89,7 +130,7 @@ def create_batch(spec_path: Path, root: Path | None = None) -> Dict[str, Any]:
     # looking indistinguishable from an attempted (registered/diagnostic) run.
     plan.batch_manifest["registry_status"] = "planned_not_attempted"
     store = ResearchResultStore(default_db_path(actual_root))
-    spec_paths = _prepare_batch(plan, spec, actual_root, store)
+    spec_paths, _execution_claim = _prepare_batch(plan, spec, actual_root, store)
     return {
         "batch_id": plan.batch_id,
         "job_count": len(plan.jobs),
@@ -308,10 +349,11 @@ def _run_job_safely(job_payload: Dict[str, Any], root_dir: str) -> Dict[str, Any
     the named exception, so the attempt can be finalized without inventing a
     worker observation.
     """
-    job = JobSpec.from_dict(job_payload)
     try:
+        job = JobSpec.from_dict(job_payload)
         return run_job_worker(job_payload, root_dir)
     except Exception as exc:
+        job = JobSpec.from_dict(job_payload)
         return JobExecutionResult(
             job_id=job.job_id,
             batch_id=job.batch_id,
@@ -332,6 +374,7 @@ def _run_jobs(
     experiment_id: str = "",
     batch_id: str = "",
     attempt_scope: str = "full_batch",
+    execution_claim: str | None = None,
 ) -> List[JobExecutionResult]:
     attempt_by_job_id, trial_id_by_attempt_id = _register_candidate_attempts(
         jobs,
@@ -343,15 +386,21 @@ def _run_jobs(
     )
 
     for job in jobs:
-        store.set_job_status(job.job_id, "running")
+        store.set_job_status(job.job_id, "running", execution_claim=execution_claim)
 
-    payloads = [job.to_dict() for job in jobs]
+    payloads = []
+    for job in jobs:
+        payload = job.to_dict()
+        if execution_claim:
+            payload["_execution_claim"] = execution_claim
+            payload["_registry_db_path"] = str(store.db_path)
+        payloads.append(payload)
+    raw_results: List[Dict[str, Any]] = []
     try:
         if max_workers == 1:
             raw_results = [_run_job_safely(payload, str(root)) for payload in payloads]
         else:
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                raw_results = []
                 for raw_result in executor.map(_run_job_safely, payloads, [str(root)] * len(payloads)):
                     raw_results.append(raw_result)
     except Exception as exc:
@@ -372,12 +421,19 @@ def _run_jobs(
 
     results = [JobExecutionResult(**raw) for raw in raw_results]
     for result in results:
-        store.persist_job_result(result)
+        store.persist_job_result(result, execution_claim=execution_claim)
     _finalize_candidate_attempts(jobs, results, store, attempt_by_job_id, trial_id_by_attempt_id, attempt_scope)
     return results
 
 
-def _finalize_batch(plan: BatchPlan, results: List[JobExecutionResult], root: Path, store: ResearchResultStore) -> Dict[str, Any]:
+def _finalize_batch(
+    plan: BatchPlan,
+    results: List[JobExecutionResult],
+    root: Path,
+    store: ResearchResultStore,
+    *,
+    execution_claim: str | None,
+) -> Dict[str, Any]:
     leaderboard, comparison, summary, reproducibility_manifest, failure_report = aggregate_results(plan.batch_manifest, plan.jobs, results)
     aggregate_paths = persist_batch_artifacts(
         root=root,
@@ -388,9 +444,17 @@ def _finalize_batch(plan: BatchPlan, results: List[JobExecutionResult], root: Pa
         sweep_summary=summary,
         reproducibility_manifest=reproducibility_manifest,
         failure_report=failure_report,
+        execution_claim=execution_claim,
+        registry_db_path=str(store.db_path),
     )
     status = "failed" if summary["failed"] > 0 else "succeeded"
-    store.finalize_batch(plan.batch_id, status=status, aggregate_paths=aggregate_paths, summary=summary)
+    store.finalize_batch(
+        plan.batch_id,
+        status=status,
+        aggregate_paths=aggregate_paths,
+        summary=summary,
+        execution_claim=execution_claim,
+    )
     return {
         "batch_id": plan.batch_id,
         "status": status,
@@ -411,7 +475,7 @@ def run_batch(spec_path: Path, root: Path | None = None, max_workers: int | None
     # (pre-execution) write so both the queued and finalized manifest agree.
     plan.batch_manifest["registry_status"] = registration_mode
     store = ResearchResultStore(default_db_path(actual_root))
-    _prepare_batch(plan, spec, actual_root, store, claim_execution=True)
+    _spec_paths, execution_claim = _prepare_batch(plan, spec, actual_root, store, claim_execution=True)
     results = _run_jobs(
         plan.jobs,
         actual_root,
@@ -421,16 +485,34 @@ def run_batch(spec_path: Path, root: Path | None = None, max_workers: int | None
         experiment_id=spec.experiment_id,
         batch_id=plan.batch_id,
         attempt_scope="full_batch",
+        execution_claim=execution_claim,
     )
-    finalized = _finalize_batch(plan, results, actual_root, store)
+    finalized = _finalize_batch(
+        plan, results, actual_root, store, execution_claim=execution_claim
+    )
     finalized["registry_status"] = registration_mode
     return finalized
 
 
-def run_single_job(job_spec_path: Path, root: Path | None = None) -> Dict[str, Any]:
+def run_single_job(
+    job_spec_path: Path,
+    root: Path | None = None,
+    *,
+    allow_unregistered_diagnostic: bool = False,
+) -> Dict[str, Any]:
     actual_root = (root or default_root()).resolve()
+    if not allow_unregistered_diagnostic:
+        raise RuntimeError(
+            "run_single_job is diagnostic-only and refuses to write a registered batch artifact root; "
+            "pass allow_unregistered_diagnostic=True to run in an isolated diagnostic root"
+        )
     job = JobSpec.from_dict(json.loads(job_spec_path.read_text(encoding="utf-8")))
-    result = JobExecutionResult(**run_job_worker(job.to_dict(), str(actual_root)))
+    diagnostic_root = actual_root / "diagnostic_runs"
+    payload = job.to_dict()
+    payload["_unregistered_diagnostic"] = True
+    result = JobExecutionResult(
+        **run_job_worker(payload, str(diagnostic_root))
+    )
     return result.to_dict()
 
 
@@ -492,7 +574,7 @@ def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int 
 
     failed_spec_paths = {row["job_id"]: Path(row["job_spec_path"]) for row in failed_rows}
     failed_jobs = [JobSpec.from_dict(json.loads(path.read_text(encoding="utf-8"))) for path in failed_spec_paths.values()]
-    store.claim_batch_for_execution(
+    execution_claim = store.claim_batch_for_execution(
         batch_id,
         batch_spec,
         actual_root,
@@ -509,6 +591,7 @@ def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int 
         experiment_id=str(batch_spec.get("experiment_id", "")),
         batch_id=batch_id,
         attempt_scope="failed_slices_only",
+        execution_claim=execution_claim,
     )
 
     all_rows = store.list_jobs(batch_id)
@@ -543,7 +626,13 @@ def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int 
             "registry_status": registration_mode,
         },
     )
-    finalized = _finalize_batch(refreshed_plan, all_results, actual_root, store)
+    finalized = _finalize_batch(
+        refreshed_plan,
+        all_results,
+        actual_root,
+        store,
+        execution_claim=execution_claim,
+    )
     finalized["rerun_count"] = len(failed_jobs)
     finalized["registry_status"] = registration_mode
     return finalized

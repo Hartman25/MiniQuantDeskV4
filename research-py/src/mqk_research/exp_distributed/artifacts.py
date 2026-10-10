@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import io
+import os
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -12,9 +15,15 @@ from .models import JobSpec
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_bytes(payload)
-    temp_path.replace(path)
+    content_hash = sha256_bytes(payload)[:16]
+    temp_path = path.with_name(
+        f".{path.name}.{content_hash}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temp_path.write_bytes(payload)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -27,10 +36,9 @@ def write_text(path: Path, text: str) -> None:
 
 
 def write_csv(path: Path, frame: pd.DataFrame) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    frame.to_csv(temp_path, index=False)
-    temp_path.replace(path)
+    rendered = io.StringIO()
+    frame.to_csv(rendered, index=False)
+    _atomic_write_bytes(path, rendered.getvalue().encode("utf-8"))
 
 
 def batch_root(root: Path, batch_id: str) -> Path:
@@ -45,6 +53,39 @@ def job_spec_root(root: Path, batch_id: str) -> Path:
     return batch_root(root, batch_id) / "job_specs"
 
 
+def _assert_registered_artifact_authority(
+    root: Path,
+    batch_id: str,
+    *,
+    execution_claim: str | None,
+    registry_db_path: str | None,
+    allow_planning: bool = False,
+) -> None:
+    """Refuse direct writes into a known batch without its SQLite claim.
+
+    Low-level artifact helpers remain usable for isolated fixture construction
+    when no registry row exists.  Once a registry DB identifies the batch,
+    every shared write must carry the current execution claim.
+    """
+    db_path = Path(registry_db_path) if registry_db_path else root / "state" / "exp_research.sqlite3"
+    if not db_path.exists():
+        return
+    from .storage import ResearchResultStore
+
+    store = ResearchResultStore(db_path)
+    try:
+        batch = store.get_batch(batch_id)
+    except KeyError:
+        return
+    if not execution_claim:
+        if allow_planning and batch["status"] != "running":
+            return
+        raise RuntimeError(
+            f"execution claim required for shared artifact writes: batch_id={batch_id!r}"
+        )
+    store.assert_execution_claim(batch_id, execution_claim)
+
+
 def write_job_artifacts(
     root: Path,
     job: JobSpec,
@@ -54,7 +95,15 @@ def write_job_artifacts(
     positions: pd.DataFrame,
     trade_events: pd.DataFrame,
     failure_reason: str | None = None,
+    execution_claim: str | None = None,
+    registry_db_path: str | None = None,
 ) -> Dict[str, str]:
+    _assert_registered_artifact_authority(
+        root,
+        job.batch_id,
+        execution_claim=execution_claim,
+        registry_db_path=registry_db_path,
+    )
     artifact_dir = job_root(root, job.batch_id, job.job_index, job.job_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -165,10 +214,45 @@ def capture_artifact_evidence(artifact_paths: Dict[str, str]) -> Dict[str, Any]:
     }
 
 
-def write_job_spec(root: Path, job: JobSpec) -> Path:
+def write_job_spec(
+    root: Path,
+    job: JobSpec,
+    *,
+    execution_claim: str | None = None,
+    registry_db_path: str | None = None,
+    allow_planning: bool = False,
+) -> Path:
+    _assert_registered_artifact_authority(
+        root,
+        job.batch_id,
+        execution_claim=execution_claim,
+        registry_db_path=registry_db_path,
+        allow_planning=allow_planning,
+    )
     spec_path = job_spec_root(root, job.batch_id) / f"{job.job_index:04d}_{job.job_id}.json"
     write_json(spec_path, job.to_dict())
     return spec_path
+
+
+def write_batch_manifest(
+    root: Path,
+    batch_id: str,
+    manifest: Dict[str, Any],
+    *,
+    execution_claim: str | None = None,
+    registry_db_path: str | None = None,
+    allow_planning: bool = False,
+) -> Path:
+    _assert_registered_artifact_authority(
+        root,
+        batch_id,
+        execution_claim=execution_claim,
+        registry_db_path=registry_db_path,
+        allow_planning=allow_planning,
+    )
+    manifest_path = batch_root(root, batch_id) / "batch_manifest.json"
+    write_json(manifest_path, manifest)
+    return manifest_path
 
 
 def write_batch_artifacts(
@@ -180,7 +264,15 @@ def write_batch_artifacts(
     sweep_summary: Dict[str, Any],
     reproducibility_manifest: Dict[str, Any],
     failure_report: Dict[str, Any],
+    execution_claim: str | None = None,
+    registry_db_path: str | None = None,
 ) -> Dict[str, str]:
+    _assert_registered_artifact_authority(
+        root,
+        batch_id,
+        execution_claim=execution_claim,
+        registry_db_path=registry_db_path,
+    )
     artifact_dir = batch_root(root, batch_id)
     manifest_path = artifact_dir / "batch_manifest.json"
     leaderboard_path = artifact_dir / "leaderboard.csv"

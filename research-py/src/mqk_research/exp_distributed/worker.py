@@ -10,11 +10,31 @@ import pandas as pd
 from .artifacts import write_job_artifacts
 from .dataset import finalize_dataset_fingerprint, load_job_slice
 from .models import JobExecutionResult, JobSpec
+from .storage import ResearchResultStore
 from .strategies import run_strategy
+
+
+def _assert_worker_authority(job: JobSpec, job_payload: Dict[str, Any], root_dir: str) -> tuple[str | None, str | None]:
+    execution_claim = job_payload.get("_execution_claim")
+    registry_db_path = job_payload.get("_registry_db_path")
+    if execution_claim:
+        if not registry_db_path:
+            raise RuntimeError("execution claim is missing its registry database path")
+        ResearchResultStore(Path(str(registry_db_path))).assert_execution_claim(
+            job.batch_id, str(execution_claim)
+        )
+        return str(execution_claim), str(registry_db_path)
+    if not job_payload.get("_unregistered_diagnostic"):
+        raise RuntimeError(
+            "worker execution requires a SQLite execution claim; "
+            "standalone execution must be explicitly diagnostic"
+        )
+    return None, None
 
 
 def run_job_worker(job_payload: Dict[str, Any], root_dir: str) -> Dict[str, Any]:
     job = JobSpec.from_dict(job_payload)
+    execution_claim, registry_db_path = _assert_worker_authority(job, job_payload, root_dir)
     started = perf_counter()
     try:
         filtered = load_job_slice(job)
@@ -28,6 +48,8 @@ def run_job_worker(job_payload: Dict[str, Any], root_dir: str) -> Dict[str, Any]
             daily_returns=strategy_result.daily_returns,
             positions=strategy_result.positions,
             trade_events=strategy_result.trade_events,
+            execution_claim=execution_claim,
+            registry_db_path=registry_db_path,
         )
         runtime_seconds = round(perf_counter() - started, 6)
         return JobExecutionResult(
@@ -49,11 +71,19 @@ def run_job_worker(job_payload: Dict[str, Any], root_dir: str) -> Dict[str, Any]
             positions=pd.DataFrame(columns=["ts_utc"] + list(job.symbols)),
             trade_events=pd.DataFrame(columns=["ts_utc", "symbol", "event_type", "old_weight", "new_weight"]),
             failure_reason=failure_reason,
+            execution_claim=execution_claim,
+            registry_db_path=registry_db_path,
         )
         run_log = Path(artifact_paths["run_log"])
-        run_log.write_text(
+        if execution_claim and registry_db_path:
+            ResearchResultStore(Path(registry_db_path)).assert_execution_claim(
+                job.batch_id, execution_claim
+            )
+        from .artifacts import write_text
+
+        write_text(
+            run_log,
             run_log.read_text(encoding="utf-8") + "\n" + traceback.format_exc(),
-            encoding="utf-8",
         )
         runtime_seconds = round(perf_counter() - started, 6)
         return JobExecutionResult(

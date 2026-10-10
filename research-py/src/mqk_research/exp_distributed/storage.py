@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from .models import JobExecutionResult, JobSpec
 
@@ -65,6 +66,8 @@ class ResearchResultStore:
                     batch_label text not null,
                     root_dir text not null,
                     job_count integer not null,
+                    execution_epoch integer not null default 0,
+                    execution_claim text,
                     aggregate_paths_json text,
                     summary_json text
                 );
@@ -249,38 +252,84 @@ class ResearchResultStore:
                 )
                 connection.commit()
 
+            batch_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(exp_batches)").fetchall()
+            }
+            if "execution_epoch" not in batch_columns:
+                connection.execute(
+                    "alter table exp_batches add column execution_epoch integer not null default 0"
+                )
+                connection.commit()
+            if "execution_claim" not in batch_columns:
+                connection.execute("alter table exp_batches add column execution_claim text")
+                connection.commit()
+
     def upsert_batch(self, batch_id: str, spec: Dict[str, Any], root_dir: Path, job_count: int, status: str = "queued") -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
-                """
-                insert into exp_batches (
-                    batch_id, engine_id, experiment_id, strategy_id, status, spec_json,
-                    batch_label, root_dir, job_count, aggregate_paths_json, summary_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, null, null)
-                on conflict(batch_id) do update set
-                    status=excluded.status,
-                    spec_json=excluded.spec_json,
-                    batch_label=excluded.batch_label,
-                    root_dir=excluded.root_dir,
-                    job_count=excluded.job_count
-                """,
-                (
-                    batch_id,
-                    spec["engine_id"],
-                    spec["experiment_id"],
-                    spec["strategy_id"],
-                    status,
-                    json.dumps(spec, sort_keys=True),
-                    spec.get("batch_label", ""),
-                    str(root_dir),
-                    int(job_count),
-                ),
-            )
+            canonical_spec = json.dumps(spec, sort_keys=True)
+            existing = connection.execute(
+                "select status, spec_json from exp_batches where batch_id=?", (batch_id,)
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    insert into exp_batches (
+                        batch_id, engine_id, experiment_id, strategy_id, status, spec_json,
+                        batch_label, root_dir, job_count, execution_epoch,
+                        execution_claim, aggregate_paths_json, summary_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, null, null, null)
+                    """,
+                    (
+                        batch_id,
+                        spec["engine_id"],
+                        spec["experiment_id"],
+                        spec["strategy_id"],
+                        status,
+                        canonical_spec,
+                        spec.get("batch_label", ""),
+                        str(root_dir),
+                        int(job_count),
+                    ),
+                )
+            else:
+                if existing["spec_json"] != canonical_spec:
+                    raise RuntimeError(f"batch_id collision with conflicting canonical spec: {batch_id!r}")
+                if existing["status"] == "running":
+                    raise RuntimeError(
+                        f"refusing planning/upsert while batch execution is active: {batch_id!r}"
+                    )
+                connection.execute(
+                    """
+                    update exp_batches
+                    set engine_id=?, experiment_id=?, strategy_id=?,
+                        batch_label=?, root_dir=?, job_count=?
+                    where batch_id=?
+                    """,
+                    (
+                        spec["engine_id"],
+                        spec["experiment_id"],
+                        spec["strategy_id"],
+                        spec.get("batch_label", ""),
+                        str(root_dir),
+                        int(job_count),
+                        batch_id,
+                    ),
+                )
             connection.commit()
 
     def upsert_jobs(self, jobs: Iterable[JobSpec], spec_paths: Dict[str, Path], status: str = "queued") -> None:
+        prepared_jobs = list(jobs)
         with closing(self._connect()) as connection:
-            for job in jobs:
+            batch_ids = {job.batch_id for job in prepared_jobs}
+            for batch_id in batch_ids:
+                batch = connection.execute(
+                    "select status from exp_batches where batch_id=?", (batch_id,)
+                ).fetchone()
+                if batch is not None and batch["status"] == "running":
+                    raise RuntimeError(
+                        f"refusing job-spec upsert while batch execution is active: {batch_id!r}"
+                    )
+            for job in prepared_jobs:
                 connection.execute(
                     """
                     insert into exp_jobs (
@@ -290,15 +339,12 @@ class ResearchResultStore:
                         metrics_json, failure_reason, runtime_seconds
                     ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, null)
                     on conflict(job_id) do update set
-                        status=excluded.status,
                         params_json=excluded.params_json,
                         symbols_json=excluded.symbols_json,
                         window_start_utc=excluded.window_start_utc,
                         window_end_utc=excluded.window_end_utc,
                         dataset_fingerprint_json=excluded.dataset_fingerprint_json,
-                        job_spec_path=excluded.job_spec_path,
-                        failure_reason=null,
-                        runtime_seconds=null
+                        job_spec_path=excluded.job_spec_path
                     """,
                     (
                         job.job_id,
@@ -317,6 +363,125 @@ class ResearchResultStore:
                     ),
                 )
             connection.commit()
+
+    @contextmanager
+    def planning_batch(
+        self,
+        batch_id: str,
+        spec: Dict[str, Any],
+        root_dir: Path,
+        jobs: Iterable[JobSpec],
+        spec_paths: Dict[str, Path],
+    ) -> Iterator[Dict[str, Any]]:
+        """Hold the SQLite planning decision lock across finite file writes.
+
+        Planning may create or refresh canonical job specs, but it may not
+        reset a running or terminal execution.  The uncommitted transaction
+        prevents an execution claimant from observing an intermediate plan
+        and claiming the same batch before its spec/manifest writes finish.
+        """
+        prepared_jobs = list(jobs)
+        if any(job.batch_id != batch_id for job in prepared_jobs):
+            raise ValueError("all planned jobs must belong to the planned batch")
+        if set(spec_paths) != {job.job_id for job in prepared_jobs}:
+            raise ValueError("spec_paths must contain exactly the planned job ids")
+        canonical_spec = json.dumps(spec, sort_keys=True)
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "select * from exp_batches where batch_id=?", (batch_id,)
+                ).fetchone()
+                if existing is not None:
+                    if existing["spec_json"] != canonical_spec:
+                        raise RuntimeError(
+                            f"batch_id collision with conflicting canonical spec: {batch_id!r}"
+                        )
+                    if existing["status"] == "running":
+                        raise RuntimeError(
+                            f"refusing planning while batch execution is active: {batch_id!r}"
+                        )
+                if existing is None:
+                    connection.execute(
+                        """
+                        insert into exp_batches (
+                            batch_id, engine_id, experiment_id, strategy_id, status,
+                            spec_json, batch_label, root_dir, job_count,
+                            execution_epoch, execution_claim, aggregate_paths_json, summary_json
+                        ) values (?, ?, ?, ?, 'queued', ?, ?, ?, ?, 0, null, null, null)
+                        """,
+                        (
+                            batch_id,
+                            spec["engine_id"],
+                            spec["experiment_id"],
+                            spec["strategy_id"],
+                            canonical_spec,
+                            spec.get("batch_label", ""),
+                            str(root_dir),
+                            len(prepared_jobs),
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        update exp_batches
+                        set engine_id=?, experiment_id=?, strategy_id=?,
+                            batch_label=?, root_dir=?, job_count=?
+                        where batch_id=?
+                        """,
+                        (
+                            spec["engine_id"],
+                            spec["experiment_id"],
+                            spec["strategy_id"],
+                            spec.get("batch_label", ""),
+                            str(root_dir),
+                            len(prepared_jobs),
+                            batch_id,
+                        ),
+                    )
+                for job in prepared_jobs:
+                    connection.execute(
+                        """
+                        insert into exp_jobs (
+                            job_id, batch_id, job_index, engine_id, experiment_id, strategy_id,
+                            status, params_json, symbols_json, window_start_utc, window_end_utc,
+                            dataset_fingerprint_json, job_spec_path, artifact_dir, artifact_paths_json,
+                            metrics_json, failure_reason, runtime_seconds
+                        ) values (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, null, null, null, null, null)
+                        on conflict(job_id) do update set
+                            params_json=excluded.params_json,
+                            symbols_json=excluded.symbols_json,
+                            window_start_utc=excluded.window_start_utc,
+                            window_end_utc=excluded.window_end_utc,
+                            dataset_fingerprint_json=excluded.dataset_fingerprint_json,
+                            job_spec_path=excluded.job_spec_path
+                        """,
+                        (
+                            job.job_id,
+                            job.batch_id,
+                            int(job.job_index),
+                            job.engine_id,
+                            job.experiment_id,
+                            job.strategy_id,
+                            json.dumps(job.params, sort_keys=True),
+                            json.dumps(job.symbols, sort_keys=True),
+                            job.window.start_utc,
+                            job.window.end_utc,
+                            json.dumps(job.dataset_fingerprint.to_dict(), sort_keys=True),
+                            str(spec_paths[job.job_id]),
+                        ),
+                    )
+                state = {
+                    "created": existing is None,
+                    "status": "queued" if existing is None else existing["status"],
+                }
+                yield state
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     @staticmethod
     def _started_attempts_for_batch(connection: sqlite3.Connection, batch_id: str) -> List[Dict[str, Any]]:
@@ -357,7 +522,7 @@ class ResearchResultStore:
         job_count: int,
         jobs: Iterable[JobSpec],
         spec_paths: Dict[str, Path],
-    ) -> None:
+    ) -> str:
         """Atomically claim one batch for a new execution attempt.
 
         A queued planning row is claimable when it has no started attempts;
@@ -368,6 +533,10 @@ class ResearchResultStore:
         the batch running.
         """
         prepared_jobs = list(jobs)
+        if any(job.batch_id != batch_id for job in prepared_jobs):
+            raise ValueError("all claimed jobs must belong to the claimed batch")
+        if set(spec_paths) != {job.job_id for job in prepared_jobs}:
+            raise ValueError("spec_paths must contain exactly the claimed job ids")
         canonical_spec = json.dumps(spec, sort_keys=True)
         with closing(self._connect()) as connection:
             connection.isolation_level = None
@@ -402,18 +571,24 @@ class ResearchResultStore:
                             f"refusing batch execution claim for unsupported status {existing['status']!r}"
                         )
 
+                next_epoch = 1 if existing is None else int(existing["execution_epoch"] or 0) + 1
+                execution_claim = f"{batch_id}:{next_epoch}"
+
                 connection.execute(
                     """
                     insert into exp_batches (
                         batch_id, engine_id, experiment_id, strategy_id, status, spec_json,
-                        batch_label, root_dir, job_count, aggregate_paths_json, summary_json
-                    ) values (?, ?, ?, ?, 'running', ?, ?, ?, ?, null, null)
+                        batch_label, root_dir, job_count, execution_epoch, execution_claim,
+                        aggregate_paths_json, summary_json
+                    ) values (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, null, null)
                     on conflict(batch_id) do update set
                         status='running',
                         spec_json=excluded.spec_json,
                         batch_label=excluded.batch_label,
                         root_dir=excluded.root_dir,
                         job_count=excluded.job_count,
+                        execution_epoch=excluded.execution_epoch,
+                        execution_claim=excluded.execution_claim,
                         aggregate_paths_json=null,
                         summary_json=null
                     """,
@@ -426,6 +601,8 @@ class ResearchResultStore:
                         spec.get("batch_label", ""),
                         str(root_dir),
                         int(job_count),
+                        next_epoch,
+                        execution_claim,
                     ),
                 )
                 for job in prepared_jobs:
@@ -467,17 +644,63 @@ class ResearchResultStore:
                         ),
                     )
                 connection.commit()
+                return execution_claim
             except Exception:
                 connection.rollback()
                 raise
 
-    def set_job_status(self, job_id: str, status: str) -> None:
+    def assert_execution_claim(self, batch_id: str, execution_claim: str) -> None:
+        if not execution_claim:
+            raise RuntimeError(f"execution claim is required for batch {batch_id!r}")
         with closing(self._connect()) as connection:
+            row = connection.execute(
+                "select status, execution_claim from exp_batches where batch_id=?", (batch_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError(f"unknown batch for execution claim: {batch_id!r}")
+        if row["status"] != "running" or row["execution_claim"] != execution_claim:
+            raise RuntimeError(
+                f"stale or missing execution claim for batch {batch_id!r}: "
+                f"status={row['status']!r}, claim={row['execution_claim']!r}"
+            )
+
+    def set_job_status(self, job_id: str, status: str, execution_claim: str | None = None) -> None:
+        if status not in {"queued", "running", "succeeded", "failed"}:
+            raise ValueError(f"unsupported job status: {status!r}")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                select j.batch_id, b.status as batch_status, b.execution_claim
+                from exp_jobs j join exp_batches b on b.batch_id=j.batch_id
+                where j.job_id=?
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown job_id: {job_id}")
+            if row["batch_status"] == "running" and row["execution_claim"] != execution_claim:
+                raise RuntimeError(f"execution claim required to update running batch job: {job_id!r}")
             connection.execute("update exp_jobs set status=? where job_id=?", (status, job_id))
             connection.commit()
 
-    def persist_job_result(self, result: JobExecutionResult) -> None:
+    def persist_job_result(self, result: JobExecutionResult, execution_claim: str | None = None) -> None:
+        if result.status not in {"succeeded", "failed"}:
+            raise ValueError(f"job result must be terminal, got {result.status!r}")
         with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                select j.batch_id, b.status as batch_status, b.execution_claim
+                from exp_jobs j join exp_batches b on b.batch_id=j.batch_id
+                where j.job_id=?
+                """,
+                (result.job_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown job_id: {result.job_id}")
+            if row["batch_id"] != result.batch_id:
+                raise RuntimeError(f"job result batch mismatch for job {result.job_id!r}")
+            if row["batch_status"] == "running" and row["execution_claim"] != execution_claim:
+                raise RuntimeError(f"execution claim required to persist running batch job: {result.job_id!r}")
             connection.execute(
                 """
                 update exp_jobs
@@ -507,8 +730,18 @@ class ResearchResultStore:
         status: str,
         aggregate_paths: Dict[str, str],
         summary: Dict[str, Any],
+        execution_claim: str | None = None,
     ) -> None:
+        if status not in {"succeeded", "failed"}:
+            raise ValueError(f"unsupported batch terminal status: {status!r}")
         with closing(self._connect()) as connection:
+            row = connection.execute(
+                "select status, execution_claim from exp_batches where batch_id=?", (batch_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown batch_id: {batch_id}")
+            if row["status"] == "running" and row["execution_claim"] != execution_claim:
+                raise RuntimeError(f"execution claim required to finalize running batch: {batch_id!r}")
             connection.execute(
                 """
                 update exp_batches

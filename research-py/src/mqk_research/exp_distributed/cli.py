@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     job_parser = subparsers.add_parser("run-job", help="run a single persisted job spec")
     job_parser.add_argument("--job-spec", required=True, type=Path)
     job_parser.add_argument("--root", type=Path, default=None)
+    job_parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="run in an isolated unregistered diagnostic root",
+    )
 
     summary_parser = subparsers.add_parser("batch-summary", help="inspect a batch summary from the research store")
     summary_parser.add_argument("--batch-id", required=True)
@@ -92,7 +97,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run-batch":
         return _print(run_batch(spec_path=args.spec, root=args.root, max_workers=args.workers))
     if args.command == "run-job":
-        return _print(run_single_job(job_spec_path=args.job_spec, root=args.root))
+        return _print(
+            run_single_job(
+                job_spec_path=args.job_spec,
+                root=args.root,
+                allow_unregistered_diagnostic=args.diagnostic,
+            )
+        )
     if args.command == "batch-summary":
         return _print(batch_summary(batch_id=args.batch_id, root=args.root))
     if args.command == "failed-jobs":
