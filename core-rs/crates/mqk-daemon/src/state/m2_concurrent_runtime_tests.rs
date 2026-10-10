@@ -150,7 +150,8 @@ async fn confirm_leaves_no_pending_deposit_and_the_claimed_bar_is_evaluated_once
     seed_5m(&pool, sym, ts, &BUY_SPIKE).await;
 
     let b = binding(sym, SCALPER);
-    let mut host_pool = DynamicSelectionHostPool::build(&keys(&[b.clone()])).expect("pool");
+    let mut host_pool =
+        DynamicSelectionHostPool::build(&keys(std::slice::from_ref(&b))).expect("pool");
     let bindings = vec![b];
     let rid = run_id("confirm");
     let state = paper_state_with_db(&pool);
@@ -506,15 +507,18 @@ fn ids(v: &[PendingDecisionWithBarFacts]) -> Vec<(String, String)> {
         .collect()
 }
 
+type GuardCase = (
+    &'static str,
+    Vec<PendingDecisionWithBarFacts>,
+    Vec<(&'static str, &'static str)>,
+    Vec<UnarbitratedRefusal>,
+);
+type ModeCase = (Option<&'static str>, Vec<(&'static str, &'static str)>);
+
 #[test]
 fn unarbitrated_competition_is_withheld_per_symbol_and_nothing_else() {
     // (decisions, expected kept, expected refusals)
-    let cases: Vec<(
-        &str,
-        Vec<PendingDecisionWithBarFacts>,
-        Vec<(&str, &str)>,
-        Vec<UnarbitratedRefusal>,
-    )> = vec![
+    let cases: Vec<GuardCase> = vec![
         (
             "two strategies, one symbol: both withheld",
             vec![
@@ -618,7 +622,7 @@ async fn gather_and_resolve_never_lets_competing_proposals_through_unarbitrated(
     let positions: BTreeMap<String, QtyMicros> = BTreeMap::new();
 
     // (env value, expected submitted decisions)
-    let cases: [(Option<&str>, Vec<(&str, &str)>); 3] = [
+    let cases: [ModeCase; 3] = [
         (None, vec![("MSFT", "a")]),
         (Some("shadow"), vec![("MSFT", "a")]),
         // Enforced: Bundle 6 arbitrates.
