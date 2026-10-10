@@ -334,4 +334,3 @@ def test_a_real_cued_span_that_does_not_contain_the_claimed_value_is_only_a_sugg
     src = row("A-1", "Prose", rule="Own SPY while price exceeds its 50 day average, otherwise cash", direction="Long / flat")
     idea, _ = one(FakeProvider(proposal(params={"window": {"value": 20, "evidence": "50 day average"}})), rows=(src,))
     assert idea["ai"]["suggestions"]["window"]["value"] == 20 and (idea["template"] is None or idea["template"]["params"]["window"]["value"] is None)
-

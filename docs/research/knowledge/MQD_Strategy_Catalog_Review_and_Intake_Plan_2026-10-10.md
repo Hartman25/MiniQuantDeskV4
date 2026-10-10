@@ -1,6 +1,6 @@
 # MQD — Strategy Idea Catalog Review and Safe AI Intake Plan
 
-**Reviewed:** 2026-10-10 · **Purpose:** Inform `V4-STRATEGY-FACTORY-RESEARCH-BACKTEST-FULL-COMPLETION-01` without changing its frozen economic or operator authority.  
+**Reviewed:** 2026-10-10 · **Purpose:** Inform `V4-STRATEGY-FACTORY-RESEARCH-BACKTEST-FULL-COMPLETION-01` without changing its frozen economic or operator authority.
 **Basis:** Direct inspection of six uploaded XLSX workbooks and the corresponding Reddit CSV. This is a **file-content review**, **not** independent verification of their external URLs, paper findings, or trading profitability, and **not** a comparison against a live MQD Research registry.
 
 ## 1. Executive assessment

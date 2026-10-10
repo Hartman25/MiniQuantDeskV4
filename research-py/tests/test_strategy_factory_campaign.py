@@ -374,4 +374,3 @@ def test_no_second_economic_engine_or_registry_is_imported_by_the_factory():
         assert not forbidden.search(f.read_text(encoding="utf-8")), f.name
     owners = {m for f in FACTORY_SRC.glob("*.py") for m in re.findall(r"from (mqk_research\.[a-z_.]+) import|import (mqk_research\.[a-z_.]+)", f.read_text(encoding="utf-8")) for m in m if m}
     assert {o for o in owners if not o.startswith("mqk_research.strategy_factory")} <= {"mqk_research.exp_distributed.hashing", "mqk_research.strategy_mining.grammar"}
-

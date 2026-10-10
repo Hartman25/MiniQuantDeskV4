@@ -252,4 +252,3 @@ def apply_field_decision(idea: dict[str, Any], decision: Mapping[str, Any]) -> d
     out["known_unknowns"] = sorted(set(out["known_unknowns"]) - {name})
     out["decisions"] = [*out["decisions"], {k: decision[k] for k in required}]
     return out
-

@@ -302,4 +302,3 @@ def test_python_template_domains_equal_the_rust_grammar_engine_domains():
         assert rust_expr in src                                  # the history formulas Python mirrors in required_history_bars
     assert templates.required_history_bars("abs_momentum_sessions", {"lookback": 63}) == 64
     assert templates.required_history_bars("near_high_proximity", {"window": 100, "proximity_bps": 300, "trend_window": 150}) == 150
-
