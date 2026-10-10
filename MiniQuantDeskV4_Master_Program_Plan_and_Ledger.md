@@ -6338,3 +6338,20 @@ Current canonical buckets: ACTIVE_IMPLEMENTATION=0; PENDING_INDEPENDENT_REVIEW=0
 Two non-blocking test-rigor notes are deferred to the later aggressive audit: LS-EV-11/12/13 do not freeze the timestamp bucket, and LS-EV-17 locates its safe CheckOnly launcher log by recent creation time. Neither is a production-authority blocker.
 
 Real LiveShadow smoke NOT RUN. Paper validation NOT RUN. Paper smoke/soak NOT RUN. Broker/provider calls=0. Paper orders=0. Live orders=0. Holdout consumption=0.
+
+
+## V4 Permanent Completion Contract — adopted 2026-10-10
+
+The authoritative V4 definition of FINISHED is maintained in
+[MQD V4 Permanent Completion Contract](docs/MQD_V4_PERMANENT_COMPLETION_CONTRACT_2026-10-10.md).
+
+It covers the complete autonomous platform and all six asset classes:
+stocks, ETFs, options, crypto, futures, and forex.
+
+Completion requirements are frozen unless the operator explicitly approves
+a change. Reviews must distinguish material acceptance blockers from
+documented limitations and backlog improvements. Software completeness
+is independent of strategy profitability.
+
+This contract defines the target state; implementation, integration,
+operational proof, and authorization remain governed by actual evidence.
