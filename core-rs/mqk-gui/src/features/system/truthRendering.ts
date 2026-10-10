@@ -121,14 +121,14 @@ export function panelTruthRenderState(model: SystemModel, panel: CorePanelKey): 
   if (!model.connected || !model.dataSource.reachable || model.dataSource.state === "disconnected") return "unavailable";
   if (panel === "strategy" && model.strategySummaryTruth?.truth_state === "not_wired") return "not_wired";
   if (model.panelSources[panel] === "placeholder" || model.dataSource.state === "mock") return "unimplemented";
-  if (model.status.runtime_status === "degraded" || model.runtimeLeadership.post_restart_recovery_state === "degraded") return "degraded";
-  if (hasStaleHeartbeat(model)) return "stale";
   // AP-09: External broker WS continuity gate.
   // Execution and reconcile panels require proven WS event continuity when the
   // broker is external (Alpaca).  cold_start_unproven and gap_detected both
   // indicate that OMS state may be missing trade events — fail to no_snapshot.
   if (EXTERNAL_BROKER_GATED_PANELS.has(panel) && hasExternalBrokerContinuityGap(model)) return "no_snapshot";
   if (isMissingPanelTruth(model, panel)) return "no_snapshot";
+  if (model.status.runtime_status === "degraded" || model.runtimeLeadership.post_restart_recovery_state === "degraded") return "degraded";
+  if (hasStaleHeartbeat(model)) return "stale";
   return null;
 }
 

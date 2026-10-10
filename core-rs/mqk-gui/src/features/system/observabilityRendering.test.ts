@@ -72,3 +72,15 @@ test("wide timeline tables declare every evidence column in the rendered grid", 
     columns: Array.from({ length: 12 }, (_, index) => ({ key: String(index), title: String(index), render: () => String(index) })) }));
   assert.equal(html.split("grid-template-columns:repeat(12, minmax(100px, 1fr))").length - 1, 2);
 });
+
+test("a missing required endpoint cannot be downgraded to a stale or degraded evidence banner", () => {
+  for (const runtime_status of ["running", "degraded"] as const) {
+    const model = { ...MOCK_MODEL, alerts: [], connected: true,
+      status: { ...MOCK_MODEL.status, runtime_status, last_heartbeat: "2000-01-01T00:00:00Z" },
+      panelSources: { ...MOCK_MODEL.panelSources, alerts: "mixed" },
+      dataSource: { ...MOCK_MODEL.dataSource, state: "partial", reachable: true, missingEndpoints: ["/api/v1/alerts/active"] } } as SystemModel;
+    const html = renderToStaticMarkup(React.createElement(AlertsScreen, { model }));
+    assert.match(html, /No snapshot/);
+    assert.doesNotMatch(html, /No active alerts|Active alerts and diagnostics/);
+  }
+});
