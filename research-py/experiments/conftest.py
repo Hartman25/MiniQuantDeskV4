@@ -88,8 +88,9 @@ def _no_external_attempt_in_this_test():
 
 
 def pytest_sessionfinish(session, exitstatus):
-    errors = _netguard._state["sink_errors"]
     _netguard.finalize_children(0, READY_GRACE_SECONDS)
+    # Finalizing outstanding children can itself lose an audit write. Snapshot AFTER that work, not before.
+    errors = _netguard._state["sink_errors"]
     try:
         found = _audit(wait=True)
     except _netguard.SinkError:

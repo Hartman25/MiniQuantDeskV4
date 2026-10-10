@@ -205,8 +205,10 @@ def _is_sink(target) -> bool:
     if not isinstance(target, (str, bytes, os.PathLike)):
         return False
     real = os.path.realpath(os.fsdecode(target))
-    if _state["root"] is not None and real.startswith(os.path.realpath(_state["root"] + ".failed") + os.sep):
-        return True  # the failure markers are evidence too
+    if _state["root"] is not None:
+        marker_root = os.path.realpath(_state["root"] + ".failed")
+        if real == marker_root or real.startswith(marker_root + os.sep):
+            return True  # both the marker directory and its children are evidence
     return any(real == os.path.realpath(sk) for sk in [_state["root"], *[d[0] for d in _state["diag"]]] if sk)
 
 
@@ -488,8 +490,13 @@ def finalize_children(since: int = 0, timeout: float = 5.0) -> list[dict]:
         entry["finalized"] = True
         reason = ("outstanding" if rc is None else "exit_sink_failure" if rc == CHILD_SINK_EXIT
                   else "sigxfsz" if rc == -signal.SIGXFSZ else None)
-        _write_all({"kind": "child_exited", "proc": _state["token"], "launch": entry["launch"], "returncode": rc,
-                    "pid": os.getpid()})
+        exit_recorded = _write_all({"kind": "child_exited", "proc": _state["token"], "launch": entry["launch"],
+                                    "returncode": rc, "pid": os.getpid()})
+        # A successful child exit does not prove the audit is complete if the parent's final-state row failed
+        # to reach the root OR a required diagnostic copy. The root may contain child_exited while the copy
+        # silently lost it; report the loss rather than treating that child as clean.
+        if not exit_recorded and reason is None:
+            reason = "final_state_sink_loss"
         if reason:
             _report_failure(entry["launch"], reason)
             failures.append({"launch": entry["launch"], "reason": reason, "returncode": rc,

@@ -146,6 +146,24 @@ def test_losing_only_a_required_copy_or_the_root_after_ready_is_a_lost_evidence_
     assert failures[0]["launch"] in markers, "the child left no marker: only the parent's finalization knew"
 
 
+def test_parent_finalization_must_report_lost_required_copy_even_after_clean_child_exit(tmp_path, window):
+    """child_exited in the root is not sufficient when that same write missed a required diagnostic sink."""
+    mark, markers_before, tracked, integrity = window
+    copy = tmp_path / "required_copy.log"
+    with _netguard.expect_evidence_loss(), _netguard.sink_to(copy):
+        child = subprocess.run([sys.executable, "-c", "pass"], capture_output=True, cwd=tmp_path)
+        assert child.returncode == 0
+        with _netguard._sink_io():  # simulate an external filesystem failure between launch and finalization
+            copy.unlink()
+        failures = _netguard.finalize_children(tracked, 5.0)
+    assert [(f["reason"], f["returncode"]) for f in failures] == [("final_state_sink_loss", 0)]
+    found = audit_since(mark, markers_before, integrity)
+    assert found["integrity"] == [] and found["expected_losses"] == [failures[0]["launch"]], found
+    kinds = [r["kind"] for r in _netguard.sink_rows(ROOT)[mark:]]
+    assert kinds.count("child_exited") == 1 and "sink_failure" in kinds, kinds
+    assert failures[0]["launch"] in _netguard.failure_markers()
+
+
 def test_a_grandchild_that_lost_its_sink_is_found_although_the_child_exits_cleanly_and_ignores_it(tmp_path, window):
     mark, markers_before, tracked, integrity = window
     plant_env_local(tmp_path)
@@ -311,6 +329,15 @@ def test_a_child_cannot_delete_or_replace_the_failure_markers(tmp_path):
     assert _netguard.finalize_children(len(_netguard._state["tracked"]) - 1, 5.0) == []
 
 
+def test_the_marker_directory_itself_cannot_be_renamed_by_audited_code(tmp_path):
+    """Protect the failure-marker DIRECTORY as well as the files inside; check without touching the directory."""
+    marker_dir = _netguard._marker_dir()
+    assert marker_dir is not None
+    with _netguard.expect_denied(), pytest.raises(_netguard.NetworkDenied, match="audit sink"):
+        _netguard._hook("os.rename", (marker_dir, str(tmp_path / "relocated-markers")))
+    assert Path(marker_dir).is_dir()
+
+
 def test_a_child_launched_outside_any_test_is_judged_at_session_finish(tmp_path):
     """No per-test fixture owns a child started at collection time; the session finalization must."""
     plant_env_local(tmp_path)
@@ -391,6 +418,30 @@ def test_a_popen_that_never_started_a_process_is_not_judged_and_never_crashes_fi
     entry = {"launch": "g" * 32, "popen": ghost, "finalized": False, "loss_expected": False, "owner_pid": os.getpid()}
     _netguard._state["tracked"].append(entry)
     assert _netguard.finalize_children(len(_netguard._state["tracked"]) - 1, 0.5) == [] and entry["finalized"] is True
+
+
+def test_session_summary_counts_sink_errors_discovered_during_child_finalization(monkeypatch, tmp_path):
+    """Session closeout must not snapshot sink_errors before finalizing the last children."""
+    from types import SimpleNamespace
+    import conftest as guard_conftest
+    before = _netguard._state["sink_errors"]
+
+    def finalization_loses_evidence(since, timeout):
+        _netguard._state["sink_errors"] += 1
+        return []
+
+    empty = {"unexpected": [], "orphans": [], "uninitialized": [], "integrity": [], "expected_losses": []}
+    monkeypatch.setattr(_netguard, "finalize_children", finalization_loses_evidence)
+    monkeypatch.setattr(guard_conftest, "_audit", lambda **kw: empty)
+    summary_path = tmp_path / "summary.json"
+    monkeypatch.setenv(guard_conftest.SUMMARY_ENV, str(summary_path))
+    session = SimpleNamespace(exitstatus=0)
+    try:
+        guard_conftest.pytest_sessionfinish(session, 0)
+        assert session.exitstatus != 0
+        assert json.loads(summary_path.read_text())["sink_integrity_errors"] == 1
+    finally:
+        _netguard._state["sink_errors"] = before
 
 
 def test_losing_both_the_row_and_the_marker_is_counted_by_the_reporting_process(monkeypatch):
