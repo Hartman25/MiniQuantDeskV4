@@ -208,6 +208,11 @@ LOSE = ("import resource, signal\\nsignal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 PROBE = "try:\\n open('.env' + '.local').read()\\nexcept Exception: pass\\n"
 
 
+if CASE == "module_level_child":
+    subprocess.Popen([sys.executable, "-c", LOSE], cwd=os.getcwd(),
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
 def test_body():
     staged = Path("staged"); staged.write_text("ALPACA_API_KEY_PAPER=fake\\n"); staged.rename(".env.local")
     start = len(_netguard.sink_rows(_netguard.root_sink()))
@@ -302,3 +307,44 @@ def test_a_child_cannot_delete_or_replace_the_failure_markers(tmp_path):
             marker.unlink(missing_ok=True)
     # the child's three refused tamper attempts are denied attempts that arrived; nothing was lost
     assert _netguard.finalize_children(len(_netguard._state["tracked"]) - 1, 5.0) == []
+
+
+def test_a_child_launched_outside_any_test_is_judged_at_session_finish(tmp_path):
+    """No per-test fixture owns a child started at collection time; the session finalization must."""
+    plant_env_local(tmp_path)
+    test = tmp_path / "test_nested.py"
+    test.write_text(NESTED.format(case="module_level_child"), encoding="utf-8")
+    summary = tmp_path / "summary.json"
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(EXPERIMENTS), "MQK_NETGUARD_SUMMARY": str(summary)}
+    with _netguard.expect_denied(), _netguard.expect_evidence_loss():
+        proc = subprocess.run([sys.executable, "-m", "pytest", str(test), "-p", "conftest", "-p", "no:cacheprovider", "-q",
+                               "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
+    got = json.loads(summary.read_text())
+    assert "1 passed" in proc.stdout and proc.returncode != 0, proc.stdout + proc.stderr    # tests passed; the session did not
+    assert got["sink_integrity_errors"] == 1 and got["unexpected_attempts"] >= 1, got
+
+
+def test_run_guarded_raises_when_its_child_lost_its_evidence_and_not_when_the_loss_is_scoped(tmp_path):
+    plant_env_local(tmp_path)
+    script = tmp_path / "lose.py"
+    script.write_text(LOSE_THEN_PROBE.format(ignore=IGNORE_XFSZ), encoding="utf-8")
+    mark = len(_netguard.sink_rows(ROOT))
+    with _netguard.expect_denied(), _netguard.expect_evidence_loss():
+        _netguard.run_guarded(script, [], env={"PATH": os.environ["PATH"]}, cwd=tmp_path, log=tmp_path / "scoped.log")
+    with _netguard.expect_denied():
+        before = len(_netguard._state["integrity"])
+        with pytest.raises(_netguard.NetworkDenied, match="lost their audit evidence"):
+            _netguard.run_guarded(script, [], env={"PATH": os.environ["PATH"]}, cwd=tmp_path, log=tmp_path / "unscoped.log")
+    # settle the books: the unscoped failure above was the assertion; excuse that launch for the session audit
+    for f in _netguard._state["integrity"][before:]:
+        _netguard._write_all({"kind": "child_launched", "proc": ME(), "launch": f["launch"], "guarded": False,
+                              "loss_expected": True, "child_pid": 0, "expected": False, "pid": os.getpid()})
+    del _netguard._state["integrity"][before:]
+
+
+def test_a_failure_marker_alone_is_enough_to_fail_a_launch_whose_rows_were_lost():
+    rows = [{"kind": "child_launched", "proc": "me", "launch": "L", "guarded": True},
+            {"kind": "guard_ready", "proc": "L", "parent_proc": "me"},
+            {"kind": "child_exited", "proc": "me", "launch": "L", "returncode": 0}]
+    assert _netguard.audit(rows, "me")["integrity"] == []
+    assert _netguard.audit(rows, "me", markers=["L"])["integrity"] == ["L"]
