@@ -474,6 +474,9 @@ def finalize_children(since: int = 0, timeout: float = 5.0) -> list[dict]:
         if entry["finalized"] or entry["owner_pid"] != os.getpid():
             continue  # a forked copy of this process must not judge (or wait for) its parent's children
         proc = entry["popen"]
+        if getattr(proc, "pid", None) is None:  # construction never started a process: nothing to wait for or judge
+            entry["finalized"] = True
+            continue
         rc = proc.poll()
         if rc is None:
             try:

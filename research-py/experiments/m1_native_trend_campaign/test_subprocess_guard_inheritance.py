@@ -570,7 +570,9 @@ def test_a_child_that_never_initialized_the_guard_fails_its_test_and_the_session
         "import _netguard, os\n"
         "def test_ghost_child():\n"
         "    _netguard._write_all({'kind': 'child_launched', 'proc': _netguard.process_token(), 'launch': 'ghost-launch-0001',\n"
-        "                          'child_pid': 2**22 + 1, 'guarded': True, 'expected': False, 'pid': os.getpid()})\n",
+        "                          'child_pid': 2**22 + 1, 'guarded': True, 'expected': False, 'pid': os.getpid()})\n"
+        "    _netguard._write_all({'kind': 'child_exited', 'proc': _netguard.process_token(), 'launch': 'ghost-launch-0001',\n"
+        "                          'returncode': 0, 'pid': 0})   # final state known: ONLY the missing guard_ready is at issue\n",
         encoding="utf-8")
     summary = tmp_path / "summary.json"
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(EXPERIMENTS), "MQK_NETGUARD_SUMMARY": str(summary)}
@@ -583,7 +585,7 @@ def test_a_child_that_never_initialized_the_guard_fails_its_test_and_the_session
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0 and "never initialized the guard" in out, out[-800:]
     got = json.loads(summary.read_text(encoding="utf-8"))
-    assert got["uninitialized_children"] == 1 and got["unexpected_attempts"] >= 1
+    assert got["uninitialized_children"] == 1 and got["unexpected_attempts"] == 1 and got["sink_integrity_errors"] == 0, got
 
 
 # ------------------------------------------------ the audit sink cannot be rewritten by the code it is auditing

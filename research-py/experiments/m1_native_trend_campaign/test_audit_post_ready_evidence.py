@@ -208,6 +208,8 @@ LOSE = ("import resource, signal\\nsignal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 PROBE = "try:\\n open('.env' + '.local').read()\\nexcept Exception: pass\\n"
 
 
+if CASE == "module_level_benign":
+    subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 if CASE == "module_level_child":
     subprocess.Popen([sys.executable, "-c", LOSE], cwd=os.getcwd(),
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -348,3 +350,63 @@ def test_a_failure_marker_alone_is_enough_to_fail_a_launch_whose_rows_were_lost(
             {"kind": "child_exited", "proc": "me", "launch": "L", "returncode": 0}]
     assert _netguard.audit(rows, "me")["integrity"] == []
     assert _netguard.audit(rows, "me", markers=["L"])["integrity"] == ["L"]
+
+
+def test_a_benign_child_launched_outside_any_test_is_finalized_cleanly_at_session_finish(tmp_path):
+    """Without the session-finish finalization the same child would have no recorded outcome."""
+    test = tmp_path / "test_nested.py"
+    test.write_text(NESTED.format(case="module_level_benign"), encoding="utf-8")
+    summary = tmp_path / "summary.json"
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(EXPERIMENTS), "MQK_NETGUARD_SUMMARY": str(summary)}
+    proc = subprocess.run([sys.executable, "-m", "pytest", str(test), "-p", "conftest", "-p", "no:cacheprovider", "-q",
+                           "--rootdir", str(tmp_path)], capture_output=True, text=True, env=env, cwd=tmp_path)
+    got = json.loads(summary.read_text())
+    assert proc.returncode == 0 and "1 passed" in proc.stdout, proc.stdout + proc.stderr
+    assert got["sink_integrity_errors"] == 0 and got["unexpected_attempts"] == 0, got
+
+
+def test_the_childs_own_marker_exists_even_when_the_parent_never_tracked_it(tmp_path):
+    """A child launched around the wrapper (so no parent finalization exists) still reports its own post-ready loss."""
+    original = _netguard._state["original_popen_init"]
+    plant_env_local(tmp_path)
+    import uuid
+    launch = uuid.uuid4().hex
+    env = _netguard.guarded_env({"PATH": os.environ["PATH"]}, launch)
+    _netguard._write_all({"kind": "child_launched", "proc": ME(), "launch": launch, "child_pid": 0, "guarded": True,
+                          "expected": False, "loss_expected": True, "pid": os.getpid()})
+    proc = subprocess.Popen.__new__(subprocess.Popen)
+    _netguard._in_guarded_popen.depth = 1
+    try:
+        original(proc, lossy(), env=env, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    finally:
+        _netguard._in_guarded_popen.depth = 0
+    proc.communicate()
+    _netguard._write_all({"kind": "child_exited", "proc": ME(), "launch": launch, "returncode": proc.returncode, "pid": os.getpid()})
+    assert proc.returncode == _netguard.CHILD_SINK_EXIT
+    assert os.path.exists(os.path.join(_netguard._marker_dir(), f"{launch}.post_ready_sink_loss")), "the child left no marker of its own"
+
+
+def test_a_popen_that_never_started_a_process_is_not_judged_and_never_crashes_finalization():
+    ghost = subprocess.Popen.__new__(subprocess.Popen)          # constructed, never executed: pid is None
+    entry = {"launch": "g" * 32, "popen": ghost, "finalized": False, "loss_expected": False, "owner_pid": os.getpid()}
+    _netguard._state["tracked"].append(entry)
+    assert _netguard.finalize_children(len(_netguard._state["tracked"]) - 1, 0.5) == [] and entry["finalized"] is True
+
+
+def test_losing_both_the_row_and_the_marker_is_counted_by_the_reporting_process(monkeypatch):
+    before = _netguard._state["sink_errors"]
+    monkeypatch.setattr(_netguard, "_write_all", lambda row: False)
+    monkeypatch.setattr(_netguard, "_marker_dir", lambda: None)
+    _netguard._report_failure("t" * 32, "post_ready_sink_loss")
+    assert _netguard._state["sink_errors"] == before + 1
+    _netguard._state["sink_errors"] = before                      # this test caused and verified the loss
+
+
+def test_a_parent_whose_own_evidence_write_fails_counts_a_sink_error(tmp_path, monkeypatch):
+    before = _netguard._state["sink_errors"]
+    monkeypatch.setattr(_netguard, "_write_all", lambda row: False)
+    with _netguard.expect_denied():
+        with pytest.raises(_netguard.NetworkDenied):
+            open(tmp_path / ".env.local")
+    assert _netguard._state["sink_errors"] == before + 1
+    _netguard._state["sink_errors"] = before
