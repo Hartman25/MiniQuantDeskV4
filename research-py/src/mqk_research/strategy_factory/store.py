@@ -212,10 +212,28 @@ class FactoryStore:
             con.execute("insert or ignore into embeddings values(?,?,?)", (text_sha256, model, json.dumps(list(vector))))
 
     # ------------------------------------------------------------------ campaigns
+    def prior_campaign_strategies(self) -> tuple[list[str], list[tuple[str, str]]]:
+        """(every predeclared campaign id, (campaign id, strategy name) pairs), oldest first. Names only: no attempt, result or
+        verdict is read, so prior-search accounting cannot depend on outcomes."""
+        with self._tx() as con:
+            ids = [r["campaign_id"] for r in con.execute("select campaign_id from campaigns order by created_seq")]
+            pairs = [(r["campaign_id"], r["strategy_name"]) for r in con.execute(
+                "select distinct t.campaign_id, t.strategy_name from campaign_trials t join campaigns c using(campaign_id) "
+                "order by c.created_seq, t.strategy_name")]
+        return ids, pairs
+
+    def find_campaign(self, campaign_id: str) -> dict[str, Any] | None:
+        with self._tx() as con:
+            row = con.execute("select * from campaigns where campaign_id=?", (campaign_id,)).fetchone()
+        return dict(row) if row else None
+
     def create_campaign(self, *, campaign_id: str, spec: Mapping[str, Any], declaration_sha256: str, declaration_path: str,
-                        run_dir: str, evidence_grade: str, trials: Sequence[Mapping[str, Any]], stages: Sequence[str] = STAGES) -> bool:
+                        run_dir: str, evidence_grade: str, trials: Sequence[Mapping[str, Any]], stages: Sequence[str] = STAGES,
+                        expected_prior_campaigns: Sequence[str] | None = None) -> bool:
         """Freeze a campaign: its spec, declaration identity and complete trial population. Idempotent only for the
-        identical content; any difference for an existing id is refused (a predeclaration is immutable)."""
+        identical content; any difference for an existing id is refused (a predeclaration is immutable). When
+        `expected_prior_campaigns` is given, the campaign is refused if the store's campaign history is not exactly that set:
+        its declared prior-search disclosure must describe the history it is actually committed against."""
         if not trials or len({t["trial_key"] for t in trials}) != len(trials):
             raise StoreError("a campaign needs a non-empty population of unique trial keys")
         if any(s not in STAGES for s in stages):
@@ -231,6 +249,11 @@ class FactoryStore:
                 if have != {t["trial_key"] for t in trials}:
                     raise StoreError("the declared trial population differs from the frozen one")
                 return False
+            if expected_prior_campaigns is not None:
+                have = sorted(r["campaign_id"] for r in con.execute("select campaign_id from campaigns"))
+                if have != sorted(expected_prior_campaigns):
+                    raise StoreError("the prior-search history changed while this campaign was being compiled; recompile it "
+                                     f"(declared against {sorted(expected_prior_campaigns)}, store holds {have})")
             con.execute("insert into campaigns values(?,?,?,?,?,?,?,?,?,?)", (
                 campaign_id, spec_sha, spec_json, declaration_sha256, declaration_path, run_dir, evidence_grade,
                 "PREDECLARED", None, int(con.execute("select coalesce(max(created_seq),0)+1 from campaigns").fetchone()[0])))

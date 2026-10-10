@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from mqk_research.strategy_factory.templates import NATIVE_CARDS, TEMPLATES
+from mqk_research.strategy_factory.templates import CARD_BY_ID, GRAMMAR_PREFIX, NATIVE_CARDS, TEMPLATES, parse_grammar_name
 
 CADENCE_DAILY = "daily"
 
@@ -111,6 +111,23 @@ SEMANTIC_NEIGHBORS = frozenset(frozenset(p) for p in (
     ("zscore_reversion", "trend_pullback_hold"), ("rsi_reversion", "trend_pullback_hold"),
     ("gap_reversal", "atr_drop_reversal"), ("turn_of_month", "pre_holiday"),
 ))
+
+
+def factory_prior_entries(rows: Iterable[tuple[str, str]]) -> list[KnownEntry]:
+    """Known entries for every strategy a Factory campaign PREDECLARED, given (campaign id, strategy name) rows. The search is
+    committed at predeclaration, so this is result-independent: it reads names, never an attempt, metric or verdict."""
+    out: list[KnownEntry] = []
+    for cid, name in rows:
+        if name.startswith(GRAMMAR_PREFIX):
+            tid, params = parse_grammar_name(name)
+            direction = "long_flat"
+        elif name in CARD_BY_ID and CARD_BY_ID[name].template_id in TEMPLATES:
+            card = CARD_BY_ID[name]
+            tid, params, direction = card.template_id, dict(card.params), card.direction
+        else:
+            continue                                  # no semantic identity to compare: nothing is claimed about it
+        out.append(KnownEntry(f"factory:{cid}:{name}", "factory_prior", tid, _p(**params), direction, (), (cid,)))
+    return out
 
 
 def build_index(repo_root: Path, factory_prior: Iterable[KnownEntry] = ()) -> list[KnownEntry]:

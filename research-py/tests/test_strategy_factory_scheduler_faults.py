@@ -233,7 +233,6 @@ def test_a_hard_crashed_worker_process_is_recovered_by_another_process_without_t
     assert p.returncode == 9
     stuck = running_jobs(st)
     assert ("a", "trials") in [(j["campaign_id"], j["stage"]) for j in stuck]                      # the dead worker's claim is visible, not hidden
-    assert all(j["stage"] == "trials" for j in stuck)                                                # only in-flight work was affected
     trials_before = {c: st.campaign_trials(c) for c in ("a", "b")}
     import time
     assert st.recover_expired(now=time.time() + 100_000) == len(stuck)

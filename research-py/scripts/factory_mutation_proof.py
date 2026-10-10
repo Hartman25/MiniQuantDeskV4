@@ -18,6 +18,7 @@ T_CP = "tests/test_strategy_factory_campaign.py"
 T_SC = "tests/test_strategy_factory_scout.py"
 T_SF = "tests/test_strategy_factory_scheduler_faults.py"
 T_AU = "tests/test_strategy_factory_authority_truth.py"
+T_PS = "tests/test_strategy_factory_prior_search.py"
 T_IM = "tests/test_strategy_factory_implementation.py"
 T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
@@ -163,6 +164,16 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("AU-5 declaration eligibility hard-coded true", SRC + "campaign.py", "**promotion_view(spec[\"evidence_grade\"]),", "\"promotion_eligible\": True,", [T_AU]),
         ("AU-6 Factory claims the Paper runtime state", SRC + "contracts.py", "\"paper\": \"NOT_TOUCHED_BY_FACTORY\",", "\"paper\": \"INACTIVE\",", [T_AU]),
         ("AU-7 authority scope dropped", SRC + "contracts.py", "\"scope\": \"FACTORY_ACTIONS_ONLY: the actual MQD Promotion, Paper and Live runtime state is not read or asserted here\",", "\"scope\": \"global\",", [T_AU]),
+    ],
+    "history": [
+        ("PS-1 compile ignores Factory history", SRC + "campaign.py", "known = build_index(repo_root, factory_prior)", "known = build_index(repo_root)", [T_PS]),
+        ("PS-2 service compiles without priors", SRC + "service.py", "factory_prior=prior, prior_campaigns=prior_ids)", "factory_prior=(), prior_campaigns=prior_ids)", [T_PS]),
+        ("PS-3 intake ignores Factory history", SRC + "service.py", "known = build_index(self.repo_root, factory_prior_entries(self.store.prior_campaign_strategies()[1]))", "known = build_index(self.repo_root)", [T_PS]),
+        ("PS-4 frozen campaign recomputed against newer history", SRC + "service.py", "if existing is not None:", "if False:", [T_PS]),
+        ("PS-5 stale-history race guard removed", SRC + "store.py", "if have != sorted(expected_prior_campaigns):", "if False:", [T_PS]),
+        ("PS-6 history depends on outcomes", SRC + "store.py", "\"select distinct t.campaign_id, t.strategy_name from campaign_trials t join campaigns c using(campaign_id) \"", "\"select distinct t.campaign_id, t.strategy_name from campaign_trials t join campaigns c using(campaign_id) where not exists (select 1 from jobs j where j.campaign_id=c.campaign_id and j.status='failed') \"", [T_PS]),
+        ("PS-7 grammar names yield no prior entry", SRC + "known_index.py", "if name.startswith(GRAMMAR_PREFIX):", "if False:", [T_PS]),
+        ("PS-8 disclosure omits prior campaigns", SRC + "campaign.py", "\"prior_factory_campaigns\": sorted(prior_campaigns),", "\"prior_factory_campaigns\": [],", [T_PS]),
     ],
     "faults": [
         ("FT-1 executor exception escapes with a live claim", SRC + "scheduler.py", "    except BaseException as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", "    except KeyboardInterrupt as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", [T_SF]),

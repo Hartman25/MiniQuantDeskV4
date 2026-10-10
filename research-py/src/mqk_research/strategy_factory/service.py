@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from mqk_research.strategy_factory import ai_normalize, campaign as campaign_mod, catalog_import, knowledge as knowledge_mod, pipeline
+from mqk_research.strategy_factory.contracts import sha
 from mqk_research.strategy_factory.executor import StageExecutor
 from mqk_research.strategy_factory.formalize import formalize_entry
-from mqk_research.strategy_factory.known_index import build_index
+from mqk_research.strategy_factory.known_index import build_index, factory_prior_entries
 from mqk_research.strategy_factory.scheduler import PassResult, run_pass, run_until_idle
 from mqk_research.strategy_factory.store import FactoryStore, StoreError
 
@@ -65,7 +66,7 @@ class FactoryService:
         ledgers = self.store.list_imports()
         if not ledgers:
             raise StoreError("no catalog has been imported")
-        known = build_index(self.repo_root)
+        known = build_index(self.repo_root, factory_prior_entries(self.store.prior_campaign_strategies()[1]))
         conf, calls, norms = None, [max_calls] if max_calls is not None else None, []
         if provider is not None:
             conf, _ = ai_normalize.conformance(provider)
@@ -111,10 +112,22 @@ class FactoryService:
 
     # ------------------------------------------------------------------ campaigns
     def compile_campaign(self, spec: Mapping[str, Any]) -> dict[str, Any]:
-        ideas = self.store.latest_ideas()
-        compiled = campaign_mod.compile_campaign(spec, repo_root=self.repo_root, run_root=self.root / "campaigns", ideas=ideas,
-                                                 grammar_available=self.grammar_available)
+        campaign_mod.validate_spec(spec)
         cid = spec["campaign_id"]
+        existing = self.store.find_campaign(cid)
+        if existing is not None:              # a frozen predeclaration is verified, never recomputed against newer history
+            if existing["spec_sha256"] != sha(spec):
+                raise StoreError(f"campaign {cid!r} exists with a different spec; a predeclaration is immutable")
+            frozen = json.loads(Path(existing["declaration_path"]).read_text(encoding="utf-8"))
+            if campaign_mod.declaration_identity(frozen) != existing["declaration_sha256"]:
+                raise StoreError(f"the declaration of {cid!r} no longer matches its frozen identity")
+            return {"campaign_id": cid, "created": False, "declaration_sha256": existing["declaration_sha256"],
+                    "trials": len(self.store.campaign_trials(cid)), "declaration_path": existing["declaration_path"]}
+        ideas = self.store.latest_ideas()
+        prior_ids, prior_rows = self.store.prior_campaign_strategies()
+        prior = factory_prior_entries(prior_rows)
+        compiled = campaign_mod.compile_campaign(spec, repo_root=self.repo_root, run_root=self.root / "campaigns", ideas=ideas,
+                                                 grammar_available=self.grammar_available, factory_prior=prior, prior_campaigns=prior_ids)
         cdir = self.root / "campaigns" / cid
         cdir.mkdir(parents=True, exist_ok=True)
         decl_path = cdir / "declaration.json"
@@ -128,7 +141,8 @@ class FactoryService:
         _atomic_write(cdir / "spec.json", json.dumps(spec, indent=1, sort_keys=True))
         created = self.store.create_campaign(campaign_id=cid, spec=spec, declaration_sha256=compiled.declaration_sha256,
                                              declaration_path=str(decl_path).replace("\\", "/"), run_dir=compiled.declaration["run_dir"],
-                                             evidence_grade=spec["evidence_grade"], trials=compiled.trials)
+                                             evidence_grade=spec["evidence_grade"], trials=compiled.trials,
+                                             expected_prior_campaigns=prior_ids)
         return {"campaign_id": cid, "created": created, "declaration_sha256": compiled.declaration_sha256, "trials": len(compiled.trials),
                 "declaration_path": str(decl_path)}
 

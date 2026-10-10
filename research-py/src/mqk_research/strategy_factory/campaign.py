@@ -22,7 +22,7 @@ from typing import Any, Mapping, Sequence
 
 from mqk_research.strategy_factory.contracts import promotion_view, sha
 from mqk_research.strategy_factory.dedup import classify_template
-from mqk_research.strategy_factory.known_index import build_index
+from mqk_research.strategy_factory.known_index import KnownEntry, build_index
 from mqk_research.strategy_factory.templates import (
     CARD_BY_ID, TEMPLATES, grammar_strategy_name, parse_grammar_name, required_history_bars)
 
@@ -260,14 +260,14 @@ class Compiled:
 
 
 def compile_campaign(spec: Mapping[str, Any], *, repo_root: Path, run_root: Path, ideas: Mapping[str, Mapping[str, Any]],
-                     grammar_available: bool, prior_search: Mapping[str, Any] | None = None) -> Compiled:
+                     grammar_available: bool, factory_prior: Sequence[KnownEntry] = (), prior_campaigns: Sequence[str] = ()) -> Compiled:
     validate_spec(spec)
     cid = spec["campaign_id"]
     check_data_authority(spec)
     profile = load_profile(repo_root, spec["protocol_profile"])
     historical = historical_hypotheses(repo_root)
     slots, report = expand_sources(spec, ideas, grammar_available)
-    known = build_index(repo_root)
+    known = build_index(repo_root, factory_prior)
     symbols = sorted(spec["population"]["symbols"])
     trial_count = len(slots) * len(symbols)
     if not slots:
@@ -323,7 +323,9 @@ def compile_campaign(spec: Mapping[str, Any], *, repo_root: Path, run_root: Path
                                     "params": dict(s.params), "population_sources": list(s.provenance), "intake_ids": list(s.intake_ids),
                                     "relationship_to_known": _relationship(s, known)}
                                    for s in slots],
-                    "prior_search_disclosure": dict(prior_search or {}),
+                    "prior_search_disclosure": {"prior_factory_campaigns": sorted(prior_campaigns),
+                                                "prior_factory_strategy_entries": len(factory_prior),
+                                                "basis": "predeclared strategy names of earlier Factory campaigns; no result is consulted"},
                     **promotion_view(spec["evidence_grade"]),
                     "paper_live": "NOT_AUTHORIZED: a Factory campaign grants no Promotion, Paper or Live authority"},
     }
