@@ -132,11 +132,9 @@ class FactoryService:
         cdir.mkdir(parents=True, exist_ok=True)
         decl_path = cdir / "declaration.json"
         body = json.dumps(compiled.declaration, indent=1, sort_keys=True)
-        if decl_path.exists():
-            existing = json.loads(decl_path.read_text(encoding="utf-8"))
-            if campaign_mod.declaration_identity(existing) != compiled.declaration_sha256:
-                raise StoreError(f"{decl_path} exists with a different declaration identity; a predeclaration is immutable")
-        else:
+        # No store row exists for this id (checked above), so nothing is frozen yet: a leftover file is an uncommitted attempt
+        # (crash or refused stale-history compile) and is replaced; the store row is what makes a predeclaration immutable.
+        if not decl_path.exists() or campaign_mod.declaration_identity(json.loads(decl_path.read_text(encoding="utf-8"))) != compiled.declaration_sha256:
             _atomic_write(decl_path, body)
         _atomic_write(cdir / "spec.json", json.dumps(spec, indent=1, sort_keys=True))
         created = self.store.create_campaign(campaign_id=cid, spec=spec, declaration_sha256=compiled.declaration_sha256,

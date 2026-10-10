@@ -141,3 +141,29 @@ def test_intake_dedup_uses_prior_factory_campaigns(bars, tmp_path):
     svc.run_intake()
     idea = next(iter(svc.store.latest_ideas().values()))
     assert idea["disposition"] == "DUPLICATE_OF_KNOWN" and "FC-PS-A" in idea["dedup"]["previously_tested_in"]
+
+
+def test_a_compile_that_lost_the_history_race_can_be_retried_and_then_discloses_the_interloper(bars, tmp_path):
+    svc = service(tmp_path / "f")
+    real = svc.store.create_campaign
+    state = {"armed": True}
+
+    def racing(**kw):
+        if state["armed"]:                                  # another process predeclares a campaign between compile and commit
+            state["armed"] = False
+            FactoryStore(tmp_path / "f" / "factory.sqlite3").create_campaign(
+                campaign_id="FC-PS-OTHER", spec={"campaign_id": "FC-PS-OTHER"}, declaration_sha256="c" * 64, declaration_path=str(tmp_path / "o"),
+                run_dir=str(tmp_path), evidence_grade="SYNTHETIC_DIAGNOSTIC",
+                trials=[{"trial_key": f"{W37}/SPY", "strategy_name": W37, "symbol": "SPY"}])
+        return real(**kw)
+
+    svc.store.create_campaign = racing
+    spec = E.make_spec("FC-PS-LATE", bars, sources=grid(37))
+    with pytest.raises(StoreError, match="history changed"):
+        svc.compile_campaign(spec)
+    assert svc.store.find_campaign("FC-PS-LATE") is None
+    out = svc.compile_campaign(spec)                          # the orphan declaration of the refused attempt must not block the retry
+    assert out["created"] is True
+    d = load(out)
+    assert d["factory"]["prior_search_disclosure"]["prior_factory_campaigns"] == ["FC-PS-OTHER"]
+    assert rel_of(d, W37)["relationship"] == "EXACT_DUPLICATE"

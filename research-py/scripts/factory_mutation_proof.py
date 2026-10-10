@@ -183,6 +183,7 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("PS-6 history depends on outcomes", SRC + "store.py", "\"select distinct t.campaign_id, t.strategy_name from campaign_trials t join campaigns c using(campaign_id) \"", "\"select distinct t.campaign_id, t.strategy_name from campaign_trials t join campaigns c using(campaign_id) where not exists (select 1 from jobs j where j.campaign_id=c.campaign_id and j.status='failed') \"", [T_PS]),
         ("PS-7 grammar names yield no prior entry", SRC + "known_index.py", "if name.startswith(GRAMMAR_PREFIX):", "if False:", [T_PS]),
         ("PS-8 disclosure omits prior campaigns", SRC + "campaign.py", "\"prior_factory_campaigns\": sorted(prior_campaigns),", "\"prior_factory_campaigns\": [],", [T_PS]),
+        ("PS-9 orphan declaration blocks the retry", SRC + "service.py", "if not decl_path.exists() or campaign_mod.declaration_identity(", "if not decl_path.exists() or False and campaign_mod.declaration_identity(", [T_PS]),
     ],
     "faults": [
         ("FT-1 executor exception escapes with a live claim", SRC + "scheduler.py", "    except BaseException as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", "    except KeyboardInterrupt as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", [T_SF]),
