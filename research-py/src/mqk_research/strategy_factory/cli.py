@@ -180,7 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.cmd == "run":
             res = svc.run(workers=args.workers, until_idle=not args.once, max_jobs=args.max_jobs)
             _emit(res.as_dict())
-            return {"NO_ELIGIBLE_WORK": EXIT_OK, "BLOCKED": EXIT_BLOCKED, "FAILED": EXIT_FAILED}.get(res.ended, EXIT_OK)
+            return {"NO_ELIGIBLE_WORK": EXIT_OK, "BLOCKED": EXIT_BLOCKED, "FAILED": EXIT_FAILED, "ERROR": EXIT_FAILED}.get(res.ended, EXIT_OK)
         elif args.cmd == "retry":
             svc.store.retry_failed(args.campaign_id, args.stage, args.reason)
             _emit({"requeued": [args.campaign_id, args.stage]})

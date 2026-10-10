@@ -16,6 +16,7 @@ T_ST = "tests/test_strategy_factory_store.py"
 T_KN = "tests/test_strategy_factory_knowledge.py"
 T_CP = "tests/test_strategy_factory_campaign.py"
 T_SC = "tests/test_strategy_factory_scout.py"
+T_SF = "tests/test_strategy_factory_scheduler_faults.py"
 T_IM = "tests/test_strategy_factory_implementation.py"
 T_E2E = ["tests/test_strategy_factory_resume.py"]
 RS = "../core-rs/crates/mqk-strategy/src/engines/grammar_rule_v1.rs"
@@ -152,6 +153,18 @@ MUTANTS: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
         ("SCT-9 scripts kept in extracted text", SRC + "scout.py", "SKIP = {\"script\", \"style\", \"iframe\", \"object\", \"embed\", \"noscript\", \"template\", \"svg\", \"canvas\"}", "SKIP = set()", [T_SC]),
         ("SCT-10 access-controlled robots treated as open", SRC + "scout.py", "rp.disallow_all = True", "rp.parse([])", [T_SC]),
         ("SCT-11 retrieval time enters identity", SRC + "scout.py", "\"source\": {\"filename\": f\"scout-{source_id}\", \"format\": \"web\", \"sha256\": sha256_bytes(canonical_json([r[\"sha256\"] for r in records]).encode(\"utf-8\")),", "\"source\": {\"filename\": f\"scout-{source_id}\", \"format\": \"web\", \"sha256\": sha256_bytes(canonical_json([r[\"retrieved_at\"] for r in records]).encode(\"utf-8\")),", [T_SC]),
+    ],
+    "faults": [
+        ("FT-1 executor exception escapes with a live claim", SRC + "scheduler.py", "    except BaseException as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", "    except KeyboardInterrupt as exc:                                         # noqa: BLE001 - nothing may escape with a live claim", [T_SF]),
+        ("FT-2 pre-execution fault mislabeled", SRC + "scheduler.py", "kind = \"pre_execution_error\" if campaign is None else \"executor_exception\"", "kind = \"executor_exception\"", [T_SF]),
+        ("FT-3 scheduler error reported as idle", SRC + "scheduler.py", "    if errors or unresolved:", "    if False:", [T_SF]),
+        ("FT-4 lost claim not fenced", SRC + "scheduler.py", "        except ClaimLost:", "        except ZeroDivisionError:", [T_SF]),
+        ("FT-5 transient finish fault not retried", SRC + "scheduler.py", "FINISH_ATTEMPTS = 3", "FINISH_ATTEMPTS = 1", [T_SF]),
+        ("FT-6 invalid executor outcome accepted", SRC + "scheduler.py", "if not isinstance(outcome, Outcome) or outcome.status not in VALID_STATUS:", "if False:", [T_SF]),
+        ("FT-7 worker fault swallowed silently", SRC + "scheduler.py", "(errors if errors is not None else []).append(f\"worker {worker_id}: {_describe(exc)}\")", "pass", [T_SF]),
+        ("FT-8 idle loop forgets accumulated errors", SRC + "scheduler.py", "    if total.errors or total.unresolved_jobs:", "    if False:", [T_SF]),
+        ("FT-9 unrecorded outcome not listed", SRC + "scheduler.py", "(unresolved if unresolved is not None else []).append(exc.job_id)", "pass", [T_SF]),
+        ("FT-10 claim loss is a generic error", SRC + "store.py", "raise ClaimLost(\"finish refused", "raise StoreError(\"finish refused", [T_SF]),
     ],
     "store": [
         ("ST-1 stage order ignored", SRC + "store.py",

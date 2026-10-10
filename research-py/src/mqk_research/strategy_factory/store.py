@@ -32,6 +32,10 @@ class StoreError(Exception):
     """A refused or inconsistent control-plane operation (fail closed)."""
 
 
+class ClaimLost(StoreError):
+    """The caller no longer owns the claim (lease expired and recovered, or already finished): its result is discarded."""
+
+
 _SCHEMA = """
 create table if not exists factory_meta(k text primary key, v text not null);
 create table if not exists catalog_imports(
@@ -309,7 +313,7 @@ class FactoryStore:
             cur = con.execute("update jobs set lease_expires=? where job_id=? and claim_token=? and status='running'",
                               (now + lease_seconds, job_id, token))
             if cur.rowcount != 1:
-                raise StoreError("heartbeat refused: the claim is no longer held")
+                raise ClaimLost("heartbeat refused: the claim is no longer held")
 
     def finish(self, job_id: str, token: str, *, status: str, exit_code: int | None, reason: str | None,
                output: str = "", now: float | None = None) -> None:
@@ -319,7 +323,7 @@ class FactoryStore:
         with self._tx() as con:
             j = con.execute("select * from jobs where job_id=? and claim_token=? and status='running'", (job_id, token)).fetchone()
             if j is None:
-                raise StoreError("finish refused: the claim is not held (expired, recovered or already finished)")
+                raise ClaimLost("finish refused: the claim is not held (expired, recovered or already finished)")
             con.execute("update job_attempts set status=?, finished_at=?, exit_code=?, reason=?, output_sha256=?, output_tail=? "
                         "where job_id=? and attempt_no=? and status='running'",
                         (status, now, exit_code, reason, sha(output), output[-4000:], job_id, j["attempt_count"]))
