@@ -695,6 +695,7 @@ def _fetch_all_pages(
     hashes: List[str] = []
     params = dict(base_params)
     page_token: Optional[str] = None
+    seen_tokens: set[str] = set()
     for _ in range(max_pages):
         if page_token:
             params["page_token"] = page_token
@@ -711,11 +712,16 @@ def _fetch_all_pages(
             raise AlpacaHistoricalExtractionError(
                 f"Alpaca API response JSON decode failed: endpoint={endpoint_url}: {exc}"
             ) from exc
+        if not isinstance(payload, dict):
+            raise AlpacaHistoricalExtractionError("Alpaca API response must be a JSON object")
         pages.append(payload)
         hashes.append(sha256_json(payload))
         page_token = payload.get("next_page_token")
-        if not page_token:
+        if page_token is None or page_token == "":
             return pages, True, hashes
+        if not isinstance(page_token, str) or page_token in seen_tokens:
+            raise AlpacaHistoricalExtractionError("Alpaca API pagination did not terminate: invalid or repeated token")
+        seen_tokens.add(page_token)
     raise AlpacaHistoricalExtractionError(
         f"Alpaca API pagination did not terminate within max_pages={max_pages}: endpoint={endpoint_url} "
         "-- refusing to return a possibly-incomplete result"
@@ -786,25 +792,47 @@ def fetch_historical_bars(
             raise AlpacaHistoricalExtractionError(
                 f"Alpaca bars response missing required 'bars' key: endpoint={endpoint_url}"
             )
+        if not isinstance(bars_by_symbol, dict):
+            raise AlpacaHistoricalExtractionError("Alpaca bars must be an object keyed by symbol")
         for sym, bar_list in bars_by_symbol.items():
-            for b in bar_list or []:
-                ts = pd.Timestamp(b["t"])
-                ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-                rows.append(
-                    {
-                        "symbol": str(sym).strip().upper(),
-                        "end_ts": ts,
-                        "open": float(b["o"]),
-                        "high": float(b["h"]),
-                        "low": float(b["l"]),
-                        "close": float(b["c"]),
-                        "volume": float(b.get("v", 0.0)),
-                    }
-                )
+            symbol = str(sym).strip().upper()
+            if symbol not in symbols_norm:
+                raise AlpacaHistoricalExtractionError(f"Alpaca returned unexpected symbol {symbol!r}")
+            if not isinstance(bar_list, list):
+                raise AlpacaHistoricalExtractionError(f"Alpaca bars for {symbol!r} must be a list")
+            for b in bar_list:
+                try:
+                    if not isinstance(b, dict):
+                        raise ValueError("bar must be an object")
+                    if not isinstance(b.get("t"), str):
+                        raise ValueError("timestamp must be an explicit timezone-aware string")
+                    ts = pd.Timestamp(b["t"])
+                    if pd.isna(ts) or ts.tzinfo is None:
+                        raise ValueError("timestamp must have an explicit timezone")
+                    if not start_utc <= ts < end_utc:
+                        continue
+                    values = {}
+                    for key, field in (("o", "open"), ("h", "high"), ("l", "low"), ("c", "close"), ("v", "volume")):
+                        if isinstance(b.get(key), bool):
+                            raise ValueError(f"invalid {field}")
+                        value = float(b[key])
+                        if not np.isfinite(value):
+                            raise ValueError(f"non-finite {field}")
+                        if value < 0 if key == "v" else value <= 0:
+                            raise ValueError(f"invalid {field}")
+                        values[field] = value
+                    if not (values["low"] <= values["open"] <= values["high"] and
+                            values["low"] <= values["close"] <= values["high"]):
+                        raise ValueError("inconsistent OHLC range")
+                    if "is_complete" in b and b["is_complete"] is not True:
+                        raise ValueError("bar is not finalized")
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise AlpacaHistoricalExtractionError(f"Alpaca invalid bar for {symbol!r}: missing/invalid fields: {exc}") from exc
+                rows.append({"symbol": symbol, "end_ts": ts.tz_convert("UTC"), **values})
 
     if not rows:
         raise AlpacaHistoricalExtractionError(
-            f"Alpaca returned zero bars for symbols={symbols_norm} window=[{start_utc.isoformat()}, "
+            f"Alpaca returned zero bars: none fall inside the internal window for symbols={symbols_norm} window=[{start_utc.isoformat()}, "
             f"{end_utc.isoformat()})"
         )
 
@@ -998,6 +1026,8 @@ def fetch_corporate_actions(
                 f"Alpaca corporate-actions response missing required 'corporate_actions' key: "
                 f"endpoint={endpoint_url}"
             )
+        if not isinstance(ca, dict):
+            raise AlpacaHistoricalExtractionError("Alpaca corporate_actions must be an object")
         unmapped_keys = sorted(set(ca.keys()) - set(_RESPONSE_KEY_TO_TYPE.keys()))
         if unmapped_keys:
             raise AlpacaHistoricalExtractionError(
@@ -1007,7 +1037,10 @@ def fetch_corporate_actions(
                 "_SYMBOL_FIELDS_BY_TYPE against current Alpaca documentation first"
             )
         for response_key, action_type in _RESPONSE_KEY_TO_TYPE.items():
-            for raw in ca.get(response_key) or []:
+            bucket = ca.get(response_key, [])
+            if not isinstance(bucket, list) or any(not isinstance(raw, dict) for raw in bucket):
+                raise AlpacaHistoricalExtractionError(f"Alpaca malformed corporate-actions bucket {response_key!r}")
+            for raw in bucket:
                 entries.extend(_effective_windows_for_entry(action_type, raw))
 
     meta: Dict[str, Any] = {
