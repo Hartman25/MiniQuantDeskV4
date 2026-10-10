@@ -85,3 +85,17 @@ provider capability; `UNV` = not verified here. No cell is `OPERATIONALLY VERIFI
 
 `cargo test --workspace`, GitHub CI, any Paper/Live order, any broker/provider
 call, push. Proofs use a disposable Postgres database only.
+
+## Acceptance boundary (local, disposable Postgres :5434)
+
+`cargo test -p mqk-daemon --lib`: 1159 passed, 0 failed, 22 ignored. Affected
+integration suites (the three `scenario_multiasset_*` files, decision
+idempotency, fleet enable/disable, manual order submit, paper flatten,
+pre-event flatten, live-shadow flatten/no-order, ops control, GUI contract gate,
+session hygiene, option lifecycle pending gate, route contract): all green with
+`--include-ignored --test-threads=1` on a fresh database. `cargo clippy -p
+mqk-daemon --lib --tests -- -D warnings` clean; `git diff --check` clean.
+The hermetic manual-order fixture needed the canonical registry anchored
+(`5de9318d`) because finding 3 correctly requires a registry-proven Equity.
+`cargo test --workspace` was NOT run (laptop resource rule); broad workspace
+proof is delegated to GitHub CI, which is disabled here.
