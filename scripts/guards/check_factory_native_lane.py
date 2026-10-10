@@ -30,7 +30,13 @@ REQUIRED = (
     "test_e2e_11_scheduled_pass_with_no_eligible_work_does_nothing_then_runs_only_new_work",
     "test_required_native_binary_resolves_the_grammar_engine",
 )
-OPTIONAL_SKIP = {"test_e2e_12_real_data_readiness_explains_exactly_why_a_real_campaign_cannot_start": "no verified local historical bars"}
+# Proofs that need a machine-local resource that a CI runner never has (never native-engine proofs).
+OPTIONAL_SKIP = {
+    "test_e2e_12_real_data_readiness_explains_exactly_why_a_real_campaign_cannot_start": "no verified local historical bars",
+    "test_live_local_backend_status_is_reported_truthfully": "no local Ollama",
+    "test_operator_catalogs_import_every_row": "operator catalogs not present",
+    "test_reference_review_cardinalities_hold_for_the_real_catalogs": "operator catalogs not present",
+}
 
 
 def verdict(root: ET.Element) -> list[str]:
