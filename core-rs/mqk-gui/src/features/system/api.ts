@@ -25,6 +25,7 @@ import {
   unavailableDurablePortfolioSummary,
 } from "./durablePortfolio";
 import {
+  createReadClient,
   fetchJsonCandidate,
   fetchJsonCandidates,
   tryFetchJson,
@@ -416,6 +417,7 @@ function isStructurallyValidPreflight(data: unknown): data is PreflightStatus {
 // ---------------------------------------------------------------------------
 
 export async function fetchOperatorModel(): Promise<SystemModel> {
+  const { fetchJsonCandidate, fetchJsonCandidates } = createReadClient();
   const statusProbe = await fetchJsonCandidates<SystemStatus | LegacyDaemonStatusSnapshot>(["/api/v1/system/status", "/v1/status"]);
   const healthProbe = await fetchJsonCandidates<MetadataSummary>(["/api/v1/system/metadata"]);
 

@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getDaemonUrl } from "../../config";
+import { LatestRequest } from "./latestRequest";
 import { fetchOperatorModel } from "./api";
 import { classifyPanelSources } from "./sourceAuthority";
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS, type SystemModel } from "./types";
@@ -210,24 +212,25 @@ const FALLBACK_MODEL: SystemModel = {
 export function useSystemModel(pollIntervalMs = 4000) {
   const [model, setModel] = useState<SystemModel>(FALLBACK_MODEL);
   const [loading, setLoading] = useState(true);
+  const observations = useRef(new LatestRequest());
 
   useEffect(() => {
-    let mounted = true;
-
     const refresh = async () => {
-      const next = await fetchOperatorModel();
-      if (!mounted) return;
-      setModel(next);
-      setLoading(false);
+      const daemonUrl = getDaemonUrl();
+      await observations.current.run(fetchOperatorModel, (next) => {
+        if (daemonUrl !== getDaemonUrl()) return;
+        setModel(next);
+        setLoading(false);
+      }, () => { setModel(FALLBACK_MODEL); setLoading(false); });
     };
 
     void refresh();
     const timer = window.setInterval(() => {
-      void refresh();
+      if (!observations.current.busy) void refresh();
     }, pollIntervalMs);
 
     return () => {
-      mounted = false;
+      observations.current.invalidate();
       window.clearInterval(timer);
     };
   }, [pollIntervalMs]);

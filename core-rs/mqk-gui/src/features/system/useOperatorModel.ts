@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getDaemonUrl } from "../../config";
+import { LatestRequest } from "./latestRequest";
 import { fetchCausalityTrace, fetchExecutionChart, fetchExecutionReplay, fetchExecutionTimeline, fetchExecutionTrace, fetchOperatorModel, invokeOperatorAction } from "./api";
 import { classifyPanelSources } from "./sourceAuthority";
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS, type OperatorActionDefinition, type OperatorActionReceipt, type SystemModel } from "./types";
@@ -256,45 +258,67 @@ export function useOperatorModel(pollIntervalMs = 5000) {
   const [loading, setLoading] = useState(true);
   const [actionReceipt, setActionReceipt] = useState<OperatorActionReceipt | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  const observations = useRef(new LatestRequest());
+  const details = useRef(new LatestRequest());
+  const selectedScope = useRef<string | null>(null);
+  const scopeOf = (value: SystemModel) => [value.status.daemon_mode, value.status.active_account_id, value.runtimeLeadership.generation_id].join("|");
 
   const refresh = useCallback(async () => {
-    const next = await fetchOperatorModel();
-    setModel(next);
-    setLoading(false);
+    const daemonUrl = getDaemonUrl();
+    await observations.current.run(fetchOperatorModel, (next) => {
+      if (daemonUrl !== getDaemonUrl()) return;
+      if (selectedScope.current !== null && selectedScope.current !== scopeOf(next)) {
+        details.current.invalidate();
+        selectedScope.current = null;
+        setTimelineLoading(false);
+      }
+      setModel((current) => {
+        if (scopeOf(current) !== scopeOf(next)) {
+          return next;
+        }
+        return { ...next, selectedTimeline: current.selectedTimeline, executionTrace: current.executionTrace, executionReplay: current.executionReplay, executionChart: current.executionChart, causalityTrace: current.causalityTrace };
+      });
+      setLoading(false);
+    }, (error) => {
+      details.current.invalidate();
+      selectedScope.current = null;
+      setTimelineLoading(false);
+      setModel({ ...FALLBACK_MODEL, dataSource: { ...FALLBACK_MODEL.dataSource, message: error instanceof Error ? error.message : "Snapshot contract unavailable" } });
+      setLoading(false);
+    });
   }, []);
 
   useEffect(() => {
-    let mounted = true;
-    const guardedRefresh = async () => {
-      const next = await fetchOperatorModel();
-      if (!mounted) return;
-      setModel(next);
-      setLoading(false);
-    };
-
-    void guardedRefresh();
+    void refresh();
     const timer = window.setInterval(() => {
-      void guardedRefresh();
+      if (!observations.current.busy) void refresh();
     }, pollIntervalMs);
 
     return () => {
-      mounted = false;
+      observations.current.invalidate();
+      details.current.invalidate();
       window.clearInterval(timer);
     };
-  }, [pollIntervalMs]);
+  }, [pollIntervalMs, refresh]);
 
   const selectTimeline = useCallback(async (internalOrderId: string) => {
+    const daemonUrl = getDaemonUrl();
+    const scope = scopeOf(model);
+    selectedScope.current = scope;
     setTimelineLoading(true);
-    const [timeline, executionTrace, executionReplay, executionChart, causalityTrace] = await Promise.all([
+    setModel((current) => ({ ...current, selectedTimeline: null, executionTrace: null, executionReplay: null, executionChart: null, causalityTrace: null }));
+    await details.current.run(() => Promise.all([
       fetchExecutionTimeline(internalOrderId),
       fetchExecutionTrace(internalOrderId),
       fetchExecutionReplay(internalOrderId),
       fetchExecutionChart(internalOrderId),
       fetchCausalityTrace(internalOrderId),
-    ]);
-    setModel((current) => ({ ...current, selectedTimeline: timeline, executionTrace, executionReplay, executionChart, causalityTrace }));
-    setTimelineLoading(false);
-  }, []);
+    ]), ([timeline, executionTrace, executionReplay, executionChart, causalityTrace]) => {
+      if (daemonUrl !== getDaemonUrl() || selectedScope.current !== scope) return;
+      setModel((current) => scopeOf(current) === scope ? ({ ...current, selectedTimeline: timeline, executionTrace, executionReplay, executionChart, causalityTrace }) : current);
+      setTimelineLoading(false);
+    }, () => { setTimelineLoading(false); });
+  }, [model]);
 
 
 

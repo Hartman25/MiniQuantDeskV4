@@ -21,12 +21,15 @@ export interface EndpointPostResult<T> {
   error?: string;
 }
 
-export async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetchResult<T>> {
+export async function fetchJsonCandidate<T>(path: string, options?: { baseUrl?: string; timeoutMs?: number }): Promise<EndpointFetchResult<T>> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options?.timeoutMs ?? 10_000);
   try {
-    const url = new URL(path, getDaemonUrl()).toString();
+    const url = new URL(path, options?.baseUrl ?? getDaemonUrl()).toString();
     const response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -44,13 +47,13 @@ export async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetch
       endpoint: path,
       error: error instanceof Error ? error.message : "unknown error",
     };
-  }
+  } finally { clearTimeout(timer); }
 }
 
-export async function fetchJsonCandidates<T>(paths: string[]): Promise<EndpointFetchResult<T>> {
+export async function fetchJsonCandidates<T>(paths: string[], options?: { baseUrl?: string; timeoutMs?: number }): Promise<EndpointFetchResult<T>> {
   let firstFailure: EndpointFetchResult<T> | null = null;
   for (const path of paths) {
-    const result = await fetchJsonCandidate<T>(path);
+    const result = await fetchJsonCandidate<T>(path, options);
     if (result.ok) return result;
     if (firstFailure === null) firstFailure = result;
   }
@@ -59,6 +62,14 @@ export async function fetchJsonCandidates<T>(paths: string[]): Promise<EndpointF
     ok: false,
     endpoint: paths[0] ?? "unknown",
     error: "all candidates failed",
+  };
+}
+
+/** Pin a complete observation to one daemon, even if settings change mid-fetch. */
+export function createReadClient(baseUrl = getDaemonUrl()) {
+  return {
+    fetchJsonCandidate: <T,>(path: string) => fetchJsonCandidate<T>(path, { baseUrl }),
+    fetchJsonCandidates: <T,>(paths: string[]) => fetchJsonCandidates<T>(paths, { baseUrl }),
   };
 }
 
