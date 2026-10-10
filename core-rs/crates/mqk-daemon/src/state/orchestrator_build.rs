@@ -61,6 +61,9 @@ use super::{AppState, BrokerSnapshotFetcher, DAEMON_ENGINE_ID};
 /// the Synthetic source therefore fails closed (`Unavailable`) rather than
 /// fabricate a number — see RUNTIME-RISK-DYNAMIC-STATE-AUTHORITY-01 mission
 /// hard stop.
+/// Currency the account-level risk equity is expressed in.
+const ACCOUNT_RISK_CURRENCY: &str = "USD";
+
 struct DaemonAccountAuthority {
     broker_snapshot: Arc<RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
     source: BrokerSnapshotTruthSource,
@@ -85,6 +88,18 @@ impl RuntimeAccountAuthority for DaemonAccountAuthority {
         let age = now.signed_duration_since(snapshot.captured_at_utc);
         if age < chrono::Duration::zero() || age > self.freshness_bound {
             return Err(AccountAuthorityError::Stale);
+        }
+
+        // Risk limits and the equity baseline are USD-denominated (env
+        // `MQK_RISK_INITIAL_EQUITY_USD`, durable snapshots); equity in any
+        // other account currency is not comparable and is never guessed.
+        if !snapshot
+            .account
+            .currency
+            .trim()
+            .eq_ignore_ascii_case(ACCOUNT_RISK_CURRENCY)
+        {
+            return Err(AccountAuthorityError::Malformed);
         }
 
         let equity_micros = crate::routes::helpers::parse_decimal_micros(&snapshot.account.equity)
@@ -2042,6 +2057,28 @@ mod tests {
             .current_account(now)
             .expect("fresh valid External snapshot must resolve");
         assert_eq!(ctx.equity_micros, 100_000_500_000);
+    }
+
+    /// Equity in a non-USD account currency must not feed USD risk limits.
+    #[test]
+    fn external_non_usd_account_currency_is_malformed_never_assumed_usd() {
+        let now = Utc::now();
+        for (currency, ok) in [("USD", true), (" usd ", true), ("EUR", false), ("", false)] {
+            let mut snap = schema_snapshot("100000", now);
+            snap.account.currency = currency.to_string();
+            let authority = make_authority(Some(snap), BrokerSnapshotTruthSource::External, 60);
+            assert_eq!(
+                authority.current_account(now).is_ok(),
+                ok,
+                "currency {currency:?}"
+            );
+            if !ok {
+                assert!(matches!(
+                    authority.current_account(now),
+                    Err(AccountAuthorityError::Malformed)
+                ));
+            }
+        }
     }
 
     #[test]
