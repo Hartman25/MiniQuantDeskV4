@@ -378,6 +378,37 @@ pub(crate) async fn execution_order_submit(
         }
     }
 
+    // The manual order carries no asset class, so it is implicitly an Equity
+    // order. That is only true for a symbol the registry authority proves to be
+    // an Equity (the same proof Gate 0b requires of the external signal path);
+    // an OCC option or crypto pair typed here must never be enqueued as Equity.
+    if let Err(err) = crate::decision::prove_equity_order_identity(&st, &validated.symbol) {
+        let (status, disposition, blocker) = match err {
+            crate::decision::OrderInstrumentContextError::Rejected(why) => (
+                StatusCode::BAD_REQUEST,
+                "rejected",
+                format!("execution order submit refused: {why}"),
+            ),
+            crate::decision::OrderInstrumentContextError::Unavailable(why) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                format!(
+                    "execution order submit unavailable: the instrument registry could not \
+                     prove '{}' is an Equity: {why}",
+                    validated.symbol
+                ),
+            ),
+        };
+        return manual_order_submit_response(
+            status,
+            false,
+            disposition,
+            validated.client_request_id,
+            Some(active_run_id),
+            vec![blocker],
+        );
+    }
+
     let order_json = validated.order_json();
     match mqk_db::outbox_enqueue_new_order_for_running_run(
         db,

@@ -484,15 +484,57 @@ pub fn build_operator_flatten_close_order_json(
     (idempotency_key, order_json)
 }
 
+/// Whether a position may receive an Equity-shaped flatten close.
+///
+/// The close builders below emit an Equity order (no `asset_class`), which the
+/// dispatch parser reads as Equity. It is permitted only on positive proof of
+/// Equity; there is deliberately no "no refusal" variant that could be read as
+/// permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlattenCloseDecision {
+    /// Trusted instrument evidence proves Equity and none contradicts it.
+    ProvenEquity,
+    /// An authoritative source classifies the instrument as something else.
+    NotEquity { asset_class: String },
+    /// Equity could not be proven: unknown, unavailable, invalid or
+    /// contradictory evidence.
+    Unproven { reason: String },
+}
+
+impl FlattenCloseDecision {
+    /// The operator-facing reason no close was created, or `None` for
+    /// `ProvenEquity` (the only decision that permits an Equity-shaped close).
+    pub fn refusal_reason(&self, symbol: &str) -> Option<String> {
+        match self {
+            Self::ProvenEquity => None,
+            Self::NotEquity { asset_class } => Some(format!(
+                "position '{symbol}' is a '{asset_class}' instrument; an Equity-shaped close \
+                 was not created and the position was not closed: close it at the broker"
+            )),
+            Self::Unproven { reason } => Some(format!(
+                "position '{symbol}' is not positively proven to be an Equity ({reason}); an \
+                 Equity-shaped close was not created and the position was not closed: close it \
+                 at the broker, or add a validated entry to the canonical instrument registry"
+            )),
+        }
+    }
+}
+
 /// EVENT-RISK-FLATTEN-WIRE-01: for each non-flat position whose event-risk
 /// sources require (or cannot rule out) a flatten, enqueue a market close
 /// into the outbox. Idempotent per (run, symbol, minute); enqueue failure is
 /// non-fatal and retried next tick. Returns the number of newly enqueued rows.
 ///
+/// The close is an Equity-shaped order for this run, so a position is closed
+/// only when [`crate::decision::decide_equity_flatten_close`] returns
+/// `ProvenEquity`; every other decision is logged and skipped with zero order
+/// intents.
+///
 /// A flatten close is a NEW economic order: a deployment mode that may not
 /// create one (LiveShadow) enqueues nothing, and the mode-fenced durable
 /// enqueue independently refuses.
 pub async fn enqueue_pre_event_flatten_closes(
+    state: &crate::state::AppState,
     mode: crate::state::DeploymentMode,
     pool: &sqlx::PgPool,
     run_id: uuid::Uuid,
@@ -506,6 +548,16 @@ pub async fn enqueue_pre_event_flatten_closes(
         let ts_secs = chrono::Utc::now().timestamp();
         let outcome = evaluate_flatten_trigger_from_env(symbol, ts_secs, DEFAULT_FLATTEN_LEAD_SECS);
         if outcome.is_flatten_required() || outcome.is_unavailable() {
+            let decision = crate::decision::decide_equity_flatten_close(state, symbol);
+            if let Some(reason) = decision.refusal_reason(symbol) {
+                tracing::error!(
+                    run_id = %run_id,
+                    symbol = %symbol,
+                    reason = %reason,
+                    "pre_event_flatten_close_unsupported_position: no close order enqueued"
+                );
+                continue;
+            }
             let (key, order_json) =
                 build_flatten_close_order_json(symbol, *net_qty, ts_secs, run_id);
             match mqk_db::outbox_enqueue_new_order_for_running_run(pool, run_id, &key, order_json)

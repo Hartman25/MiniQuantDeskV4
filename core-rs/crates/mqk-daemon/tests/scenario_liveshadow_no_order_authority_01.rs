@@ -129,11 +129,15 @@ async fn t2_pre_event_flatten_never_creates_an_order_under_live_shadow() {
         );
         std::env::remove_var(mqk_daemon::earnings_calendar::ENV_EARNINGS_CALENDAR_PATH);
         let positions = vec![("AAPL".to_string(), QtyMicros::from_whole_units(10).unwrap())];
+        let st = common::with_canonical_equity_registry(state::AppState::new_for_test_with_mode(
+            DeploymentMode::Paper,
+        ));
 
         // LiveShadow: nothing enqueued.
         let shadow_run =
             seed_running_run(&pool, "ls-no-order.t2.shadow", DeploymentMode::LiveShadow).await;
         let n = enqueue_pre_event_flatten_closes(
+            &st,
             DeploymentMode::LiveShadow,
             &pool,
             shadow_run,
@@ -145,18 +149,28 @@ async fn t2_pre_event_flatten_never_creates_an_order_under_live_shadow() {
 
         // Durable seam alone: a Paper-configured caller against a LIVE-SHADOW
         // run is refused by the run-row mode fence.
-        let n =
-            enqueue_pre_event_flatten_closes(DeploymentMode::Paper, &pool, shadow_run, &positions)
-                .await;
+        let n = enqueue_pre_event_flatten_closes(
+            &st,
+            DeploymentMode::Paper,
+            &pool,
+            shadow_run,
+            &positions,
+        )
+        .await;
         assert_eq!(n, 0);
         assert_eq!(outbox_rows(&pool).await, 0);
 
         // Positive control: the identical fixture under Paper enqueues one row.
         let paper_run =
             seed_running_run(&pool, "ls-no-order.t2.paper", DeploymentMode::Paper).await;
-        let n =
-            enqueue_pre_event_flatten_closes(DeploymentMode::Paper, &pool, paper_run, &positions)
-                .await;
+        let n = enqueue_pre_event_flatten_closes(
+            &st,
+            DeploymentMode::Paper,
+            &pool,
+            paper_run,
+            &positions,
+        )
+        .await;
         assert_eq!(n, 1);
         let row: (Uuid, String) = sqlx::query_as("SELECT run_id, status FROM oms_outbox")
             .fetch_one(&pool)

@@ -455,11 +455,15 @@ mod tests {
         mode: DeploymentMode,
     ) -> Arc<AppState> {
         seed_required_risk_created_run_for_mode(&pool, "order-daemon", mode).await;
-        let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
-            pool,
-            mode,
-            BrokerKind::Alpaca,
-        ));
+        let mut state =
+            AppState::new_for_test_with_db_mode_and_broker(pool, mode, BrokerKind::Alpaca);
+        // The manual order route requires a registry-proven Equity; anchor the
+        // canonical registry (the default path is CWD-relative).
+        state.instrument_registry_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../config/instruments/equities.json")
+            .to_string_lossy()
+            .into_owned();
+        let st = Arc::new(state);
         enable_hermetic_broker_with_seeded_snapshot(&st).await;
         {
             let mut execution = st.execution_snapshot.write().await;

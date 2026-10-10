@@ -26,6 +26,8 @@
 //! PSF-01, PSF-02, PSF-11 are pure in-process (no DB required).
 //! PSF-03..PSF-12 require MQK_DATABASE_URL and skip gracefully without it.
 
+mod common;
+
 use std::sync::Arc;
 
 use axum::body::to_bytes;
@@ -127,9 +129,8 @@ async fn maybe_pool() -> Option<sqlx::PgPool> {
 }
 
 async fn daemon_state_with_db(pool: sqlx::PgPool) -> Arc<AppState> {
-    Arc::new(AppState::new_with_db_and_operator_auth(
-        pool,
-        OperatorAuthMode::ExplicitDevNoToken,
+    Arc::new(common::with_canonical_equity_registry(
+        AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken),
     ))
 }
 

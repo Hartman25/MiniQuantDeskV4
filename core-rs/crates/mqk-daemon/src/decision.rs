@@ -300,6 +300,15 @@ fn validate_fields(d: &InternalStrategyDecision) -> Result<(), Vec<String>> {
 // order_json shape for the outbox
 // ---------------------------------------------------------------------------
 
+/// Currency of the account every order, cap and equity figure is denominated
+/// in. The single account-currency seam in the daemon: callers compare an
+/// instrument's quote currency against it and never against a literal. There
+/// is no FX conversion authority yet, so an order on an instrument quoted in
+/// any other currency is refused (fail closed) rather than valued as if it
+/// were this one; an account- or venue-derived currency replaces this value
+/// here without touching the comparisons.
+pub(crate) const ACCOUNT_CURRENCY: &str = "USD";
+
 #[derive(Debug, Clone)]
 struct DurableOrderInstrumentContext {
     asset_class: String,
@@ -469,6 +478,18 @@ fn resolve_order_instrument_context_from_registry(
                 ))
             })?;
 
+            // No FX authority exists: sizing, allocation caps and account
+            // equity are all denominated in the account currency, so an
+            // instrument quoted in another currency would be valued as if it
+            // were that currency. Refuse instead of mixing currencies.
+            if economics.quote_currency != ACCOUNT_CURRENCY {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' is quoted in '{}' but the account currency is '{}'; \
+                     no FX conversion authority exists (currency_conversion_unsupported)",
+                    instrument.symbol, economics.quote_currency, ACCOUNT_CURRENCY
+                )));
+            }
+
             let min_trade_qty_micros =
                 economics.min_trade_qty_micros.ok_or_else(|| {
                     OrderInstrumentContextError::Rejected(format!(
@@ -616,6 +637,165 @@ fn resolve_order_instrument_context(
         symbol,
         legacy_equity_allowed,
     )
+}
+
+/// Identity proof for an order surface that carries no asset class (the
+/// manual operator order): the symbol must resolve, through the same registry
+/// authority the internal decision seam uses, to an Equity. A symbol that
+/// resolves to anything else, or that no registry proves, is refused rather
+/// than written to the outbox as an implied Equity.
+pub(crate) fn prove_equity_order_identity(
+    state: &AppState,
+    symbol: &str,
+) -> Result<(), OrderInstrumentContextError> {
+    let context = resolve_order_instrument_context(state, symbol)?;
+    if context.asset_class == "equity" {
+        return Ok(());
+    }
+    Err(OrderInstrumentContextError::Rejected(format!(
+        "symbol '{}' resolves to asset class '{}' and this order surface carries no asset class: \
+         only a registry-proven Equity is accepted here",
+        symbol.trim(),
+        context.asset_class
+    )))
+}
+
+/// Decide whether `symbol` may receive an Equity-shaped flatten close.
+///
+/// A flatten close is an Equity-shaped order on the Equity domain's run (no
+/// `asset_class`, `day` time-in-force, whole shares), so it is permitted only
+/// on positive proof, never on the absence of a refusal:
+///
+/// 1. When the trading registry-v2 is configured it must be readable, valid
+///    (`validate_registry_v2`), free of the test-only enablement bypass, and
+///    must not list the symbol (compared ignoring case, over every row) as
+///    anything but a single Equity row. Unreadable, invalid or contradictory
+///    content is `Unproven`; a non-Equity listing is `NotEquity`.
+/// 2. The canonical legacy Equity registry (loaded and validated here) must list the
+///    symbol exactly once as an enabled Equity; a non-Equity, disabled, duplicate,
+///    differently-cased, or absent listing, or an unreadable/invalid registry, is
+///    `Unproven` (`NotEquity` when the one listing is a different class).
+///
+/// A symbol's spelling is never used to infer its class.
+pub fn decide_equity_flatten_close(
+    state: &AppState,
+    symbol: &str,
+) -> crate::pre_event_flatten::FlattenCloseDecision {
+    use crate::pre_event_flatten::FlattenCloseDecision;
+
+    let symbol = symbol.trim();
+    let unproven = |reason: String| FlattenCloseDecision::Unproven { reason };
+    if symbol.is_empty() {
+        return unproven("blank position symbol".to_string());
+    }
+
+    if let Some(path) = state
+        .trading_instrument_registry_v2_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let registry = match mqk_md::instrument_registry_v2::load_instrument_registry_v2(
+            std::path::Path::new(path),
+        ) {
+            Ok(registry) => registry,
+            Err(err) => {
+                return unproven(format!(
+                    "the configured trading registry-v2 could not be read: {err}"
+                ))
+            }
+        };
+        if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&registry) {
+            return unproven(format!(
+                "the configured trading registry-v2 is invalid: {err}"
+            ));
+        }
+        if registry
+            .instruments
+            .iter()
+            .any(|instrument| instrument.allow_enabled_non_equity_for_testing)
+        {
+            return unproven(
+                "the configured trading registry-v2 carries the test-only enablement bypass"
+                    .to_string(),
+            );
+        }
+        let listed: Vec<_> = registry
+            .instruments
+            .iter()
+            .filter(|instrument| instrument.symbol.trim().eq_ignore_ascii_case(symbol))
+            .collect();
+        match listed.as_slice() {
+            [] => {}
+            [only] if only.asset_class.trim() == "equity" => {}
+            [only] => {
+                return FlattenCloseDecision::NotEquity {
+                    asset_class: only.asset_class.trim().to_string(),
+                }
+            }
+            _ => {
+                return unproven(
+                    "the configured trading registry-v2 lists the symbol more than once"
+                        .to_string(),
+                )
+            }
+        }
+    }
+
+    // The canonical registry is the positive proof. Every row for the symbol
+    // (ignoring case) is inspected so a contradictory second listing can
+    // never be hidden behind a first row that says Equity.
+    let path = &state.instrument_registry_path;
+    let instruments =
+        match mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(path)) {
+            Ok(instruments) => instruments,
+            Err(err) => {
+                return unproven(format!(
+                    "the canonical instrument registry could not be read: {err}"
+                ))
+            }
+        };
+    if let Err(err) = mqk_md::instrument_registry::validate_registry(&instruments) {
+        return unproven(format!(
+            "the canonical instrument registry is invalid: {err}"
+        ));
+    }
+    let listed: Vec<_> = instruments
+        .iter()
+        .filter(|instrument| instrument.symbol.trim().eq_ignore_ascii_case(symbol))
+        .collect();
+    match listed.as_slice() {
+        [] => unproven("it is not listed in the canonical instrument registry".to_string()),
+        [only] if only.asset_class.trim() != "equity" => FlattenCloseDecision::NotEquity {
+            asset_class: only.asset_class.trim().to_string(),
+        },
+        [only] if !only.enabled => unproven(
+            "it is listed in the canonical instrument registry but not enabled".to_string(),
+        ),
+        [only] if only.symbol.trim() != symbol => unproven(
+            "its spelling differs in case from the canonical instrument registry entry".to_string(),
+        ),
+        [_] => FlattenCloseDecision::ProvenEquity,
+        _ => unproven(
+            "the canonical instrument registry lists the symbol more than once".to_string(),
+        ),
+    }
+}
+
+/// The execution domain that owns an order, from its registry-resolved asset
+/// class. Only a positively resolved Crypto instrument belongs to
+/// `Crypto24_7`; every other outcome (Equity, or an unresolved/refused symbol
+/// that Gate 7 refuses anyway) stays with `EquityNyse`, the historical owner
+/// of this seam. A future asset class or venue is admitted only by adding its
+/// resolver arm in Gate 7 and its domain here; until then it is refused, never
+/// routed to a domain by default.
+fn execution_domain_for_resolved_context(
+    resolved: &Result<DurableOrderInstrumentContext, OrderInstrumentContextError>,
+) -> crate::state::ExecutionDomain {
+    match resolved {
+        Ok(context) if context.asset_class == "crypto" => crate::state::ExecutionDomain::Crypto24_7,
+        _ => crate::state::ExecutionDomain::EquityNyse,
+    }
 }
 
 /// Non-Equity admission guard: a Crypto order is only ever admitted against an
@@ -1060,12 +1240,16 @@ pub async fn submit_internal_strategy_decision(
         return outcome(false, "rejected", &did, &sid, None, blockers);
     }
 
-    // Gate 1: PT-AUTO-02 per-run signal intake bound.
-    // B2.6: this internal-decision path is currently equity-only (repo
-    // truth: no Crypto caller exists yet); hardcoded explicitly rather than
-    // silently defaulted, matching every other equity-only production
-    // caller of a domain-keyed AppState primitive.
-    if state.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse) {
+    // The instrument context is resolved once, here, so the execution domain
+    // that owns this order is known before any domain-keyed gate runs. Its
+    // error (if any) is surfaced at Gate 7 exactly where it always was.
+    let resolved_context = resolve_order_instrument_context(state, &decision.symbol);
+    let domain = execution_domain_for_resolved_context(&resolved_context);
+
+    // Gate 1: PT-AUTO-02 per-run signal intake bound, keyed by the domain
+    // that owns the order (B2.6): a Crypto order must never consume, or be
+    // enqueued onto, the Equity domain's run.
+    if state.day_signal_limit_exceeded(domain) {
         return outcome(
             false,
             "day_limit_reached",
@@ -1076,7 +1260,7 @@ pub async fn submit_internal_strategy_decision(
                 "internal decision refused: autonomous day signal limit reached \
                  ({} signals accepted this run); \
                  no further decisions will be accepted until the next run start",
-                state.day_signal_count(crate::state::ExecutionDomain::EquityNyse)
+                state.day_signal_count(domain)
             )],
         );
     }
@@ -1086,10 +1270,7 @@ pub async fn submit_internal_strategy_decision(
     // MQK_PER_SYMBOL_DAY_ORDER_LIMIT is set; in that case Gate 1 above always
     // passes through unaffected — this is an additive, independent counter.
     if state
-        .symbol_day_order_limit_exceeded(
-            crate::state::ExecutionDomain::EquityNyse,
-            &decision.symbol,
-        )
+        .symbol_day_order_limit_exceeded(domain, &decision.symbol)
         .await
     {
         return outcome(
@@ -1103,12 +1284,7 @@ pub async fn submit_internal_strategy_decision(
                  ({} orders accepted this run for this symbol); \
                  no further decisions for this symbol will be accepted until the next run start",
                 decision.symbol.trim(),
-                state
-                    .symbol_day_order_count(
-                        crate::state::ExecutionDomain::EquityNyse,
-                        &decision.symbol
-                    )
-                    .await
+                state.symbol_day_order_count(domain, &decision.symbol).await
             )],
         );
     }
@@ -1510,11 +1686,8 @@ pub async fn submit_internal_strategy_decision(
         return outcome(false, "rejected", &did, &sid, None, vec![blocker]);
     }
 
-    // Gate 6: active run must exist and be in "running" state.
-    let status = match state
-        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
-        .await
-    {
+    // Gate 6: the owning domain's active run must exist and be "running".
+    let status = match state.current_status_snapshot(domain).await {
         Ok(s) => s,
         Err(err) => {
             return outcome(
@@ -1560,7 +1733,7 @@ pub async fn submit_internal_strategy_decision(
     // Gate 7: resolve the exact trading-instrument context before the
     // durable enqueue. Crypto economics are frozen into order_json here so
     // dispatch/restart never depend on later ambient registry state.
-    let instrument_context = match resolve_order_instrument_context(state, &decision.symbol) {
+    let instrument_context = match resolved_context {
         Ok(context) => context,
         Err(OrderInstrumentContextError::Unavailable(blocker)) => {
             return outcome(
@@ -1669,14 +1842,11 @@ pub async fn submit_internal_strategy_decision(
     {
         Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
-            state.increment_day_signal_count(crate::state::ExecutionDomain::EquityNyse);
+            state.increment_day_signal_count(domain);
             // MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol counterpart (cap #4),
             // incremented alongside the account-wide counter above.
             state
-                .increment_symbol_day_order_count(
-                    crate::state::ExecutionDomain::EquityNyse,
-                    &decision.symbol,
-                )
+                .increment_symbol_day_order_count(domain, &decision.symbol)
                 .await;
             outcome(true, "accepted", &did, &sid, Some(active_run_id), vec![])
         }
@@ -1983,6 +2153,45 @@ mod m6_trading_registry_snapshot_writer_tests {
             OrderInstrumentContextError::Unavailable(message)
                 if message.contains("test-only validator bypasses")
         ));
+    }
+
+    #[test]
+    fn non_account_currency_crypto_instrument_is_refused_not_valued_as_usd() {
+        // Same row shape as the admitted BTC/USD fixture, only the currency
+        // differs: the refusal must come from the currency check, not from
+        // any other registry rule.
+        let mut registry = btc_registry();
+        {
+            let row = &mut registry.instruments[0];
+            row.instrument_id = "crypto:GLOBAL:BTCEUR".to_string();
+            row.symbol = "BTC/EUR".to_string();
+            row.currency = "EUR".to_string();
+            row.quote_currency = Some("EUR".to_string());
+            row.broker_symbols = BTreeMap::from([("alpaca".to_string(), "BTC/EUR".to_string())]);
+            row.contract = Some(ContractDefinitionV2::CryptoPair {
+                base: "BTC".to_string(),
+                quote: "EUR".to_string(),
+            });
+        }
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTC/EUR",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                OrderInstrumentContextError::Rejected(message)
+                    if message.contains("currency_conversion_unsupported")
+                        && message.contains("'EUR'")
+            ),
+            "{err:?}"
+        );
     }
 
     // -----------------------------------------------------------------

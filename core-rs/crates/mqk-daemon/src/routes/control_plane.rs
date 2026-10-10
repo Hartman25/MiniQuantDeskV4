@@ -2103,9 +2103,25 @@ pub(crate) async fn ops_action(
             let mut enqueued_symbols: Vec<String> = vec![];
             let mut already_pending_symbols: Vec<String> = vec![];
             let mut failed_symbols: Vec<String> = vec![];
+            // Positions whose Equity-shaped close was never created because
+            // Equity was not positively proven; distinct from an enqueue that
+            // was attempted and failed.
+            let mut refused_symbols: Vec<String> = vec![];
             let mut warnings: Vec<String> = vec![];
 
             for (symbol, net_qty) in &positions_to_flatten {
+                let decision = crate::decision::decide_equity_flatten_close(&st, symbol);
+                if let Some(reason) = decision.refusal_reason(symbol) {
+                    tracing::warn!(
+                        run_id = %active_run_id,
+                        symbol = %symbol,
+                        reason = %reason,
+                        "operator_flatten_close_unsupported_position"
+                    );
+                    refused_symbols.push(symbol.clone());
+                    warnings.push(format!("unsupported_position: symbol={symbol} {reason}"));
+                    continue;
+                }
                 let (key, order_json) =
                     crate::pre_event_flatten::build_operator_flatten_close_order_json(
                         symbol,
@@ -2185,18 +2201,25 @@ pub(crate) async fn ops_action(
                 }
             }
 
-            // Write durable audit event for the flatten action (best-effort, non-fatal).
+            let accepted = !enqueued_symbols.is_empty() || !already_pending_symbols.is_empty();
+
+            // Write durable audit event for the flatten action (best-effort,
+            // non-fatal). The event never records a submission that did not
+            // happen: with nothing enqueued or pending it records the attempt
+            // as not submitted.
             let flatten_audit_uuid = write_operator_audit_event(
                 &st,
                 Some(active_run_id),
                 "ops.flatten_paper",
-                "FLATTEN_SUBMITTED",
+                if accepted {
+                    "FLATTEN_SUBMITTED"
+                } else {
+                    "FLATTEN_NOT_SUBMITTED"
+                },
             )
             .await
             .ok()
             .flatten();
-
-            let accepted = !enqueued_symbols.is_empty() || !already_pending_symbols.is_empty();
 
             // DISCORD-TRADE-LIFECYCLE-ALERTS-01: best-effort alert when flatten is accepted.
             // Fires when at least one symbol was enqueued or already pending.
@@ -2241,12 +2264,13 @@ pub(crate) async fn ops_action(
                 });
             }
 
-            let disposition = if !failed_symbols.is_empty()
+            let any_not_closed = !failed_symbols.is_empty() || !refused_symbols.is_empty();
+            let disposition = if any_not_closed
                 && enqueued_symbols.is_empty()
                 && already_pending_symbols.is_empty()
             {
                 "all_enqueue_failed".to_string()
-            } else if !failed_symbols.is_empty() {
+            } else if any_not_closed {
                 "partial_enqueue_failed".to_string()
             } else if !already_pending_symbols.is_empty() && enqueued_symbols.is_empty() {
                 "all_already_pending".to_string()
@@ -2257,6 +2281,13 @@ pub(crate) async fn ops_action(
             let mut final_blockers = vec![];
             if !failed_symbols.is_empty() {
                 final_blockers.push(format!("enqueue failed for: {}", failed_symbols.join(", ")));
+            }
+            if !refused_symbols.is_empty() {
+                final_blockers.push(format!(
+                    "close refused, Equity not positively proven (no order created, position NOT \
+                     closed): {}",
+                    refused_symbols.join(", ")
+                ));
             }
 
             let mut durable_targets = vec!["oms_outbox".to_string()];

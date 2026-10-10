@@ -24,6 +24,8 @@
 //! two independent, separately-named gates, neither of which is ever
 //! satisfied by accident.
 
+mod common;
+
 use std::sync::Arc;
 #[cfg(feature = "manual-external")]
 use std::time::Duration;
@@ -304,9 +306,11 @@ fn db_router(st: Arc<state::AppState>) -> axum::Router {
 }
 
 async fn daemon_state() -> Arc<state::AppState> {
-    let state = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        lifecycle_pool().await,
-        state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
+    let state = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            lifecycle_pool().await,
+            state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
+        ),
     ));
     {
         let mut broker = state.broker_snapshot.write().await;
