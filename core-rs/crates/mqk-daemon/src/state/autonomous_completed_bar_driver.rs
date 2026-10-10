@@ -2312,89 +2312,64 @@ async fn claim_and_dispatch_observed_bar_via_host_pool(
         now_tick,
     );
 
-    for attempt in 0..HOST_POOL_CONFIRM_MAX_ATTEMPTS {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                HOST_POOL_CONFIRM_ATTEMPT_DELAY_MS,
-            ))
-            .await;
+    let confirmed = deposit_and_confirm_binding_evaluation(
+        input.state,
+        input.pool,
+        run_id,
+        &binding.symbol,
+        &binding.strategy_id,
+        db_timeframe_label,
+        bar_end_ts,
+        now_tick,
+        expected_evaluation_id,
+        HOST_POOL_CONFIRM_MAX_ATTEMPTS,
+        std::time::Duration::from_millis(HOST_POOL_CONFIRM_ATTEMPT_DELAY_MS),
+    )
+    .await?;
+
+    if confirmed {
+        let completed = mqk_db::complete_autonomous_daily_binding_bar_dispatch(
+            input.pool,
+            operation.operation_id,
+            &binding.symbol,
+            &binding.strategy_id,
+            db_timeframe_label,
+            bar_end_ts,
+            input.now_utc,
+            Some(expected_evaluation_id),
+        )
+        .await?;
+        if completed {
+            return Ok(AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts });
         }
-
-        // Ownership fix (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01, correcting
-        // e37d10c6): a per-binding keyed deposit, never the shared
-        // account-wide destructive `Option` — AAPL/strategy_A and
-        // AAPL/strategy_B each have their own key and cannot overwrite or
-        // consume each other's pending work, and the loop's own dispatch
-        // (`AppState::tick_strategy_dispatch_selected_hosts_with_bar_facts`)
-        // only ever drains THIS exact binding's entry for this call.
-        input
-            .state
-            .deposit_binding_strategy_bar_input(
-                &binding.symbol,
-                &binding.strategy_id,
-                db_timeframe_label,
-                StrategyBarInput {
-                    now_tick,
-                    end_ts: bar_end_ts,
-                    limit_price: None,
-                    qty: 1,
-                },
-            )
-            .await;
-
-        let evaluation_row =
-            mqk_db::fetch_strategy_signal_evaluation(input.pool, expected_evaluation_id).await?;
-        let confirmed = evaluation_row.as_ref().is_some_and(|row| {
-            row.run_id == Some(run_id)
-                && row.strategy_id == binding.strategy_id
-                && row.symbol.eq_ignore_ascii_case(&binding.symbol)
-                && row.timeframe == db_timeframe_label
-        });
-
-        if confirmed {
-            let completed = mqk_db::complete_autonomous_daily_binding_bar_dispatch(
+        // The claim was no longer `claimed` by the time completion was
+        // attempted (e.g. a concurrent retry already completed or
+        // failed it) — re-read authoritative current status rather than
+        // assume success.
+        return Ok(
+            match mqk_db::fetch_autonomous_daily_binding_bar_dispatch(
                 input.pool,
                 operation.operation_id,
                 &binding.symbol,
                 &binding.strategy_id,
                 db_timeframe_label,
                 bar_end_ts,
-                input.now_utc,
-                Some(expected_evaluation_id),
             )
-            .await?;
-            if completed {
-                return Ok(AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts });
-            }
-            // The claim was no longer `claimed` by the time completion was
-            // attempted (e.g. a concurrent retry already completed or
-            // failed it) — re-read authoritative current status rather than
-            // assume success.
-            return Ok(
-                match mqk_db::fetch_autonomous_daily_binding_bar_dispatch(
-                    input.pool,
-                    operation.operation_id,
-                    &binding.symbol,
-                    &binding.strategy_id,
-                    db_timeframe_label,
-                    bar_end_ts,
-                )
-                .await?
-                {
-                    Some(row) if row.status == mqk_db::DISPATCH_STATUS_COMPLETED => {
-                        AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts }
-                    }
-                    Some(row) => AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
-                        status: row.status,
-                    },
-                    None => AutonomousCompletedBarDriverOutcome::EvidencePersistenceFailed {
-                        detail: "binding-bar dispatch claim row disappeared between claim and \
-                                 completion"
-                            .to_string(),
-                    },
+            .await?
+            {
+                Some(row) if row.status == mqk_db::DISPATCH_STATUS_COMPLETED => {
+                    AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts }
+                }
+                Some(row) => AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+                    status: row.status,
                 },
-            );
-        }
+                None => AutonomousCompletedBarDriverOutcome::EvidencePersistenceFailed {
+                    detail: "binding-bar dispatch claim row disappeared between claim and \
+                             completion"
+                        .to_string(),
+                },
+            },
+        );
     }
 
     mqk_db::fail_autonomous_daily_binding_bar_dispatch(
@@ -2407,24 +2382,75 @@ async fn claim_and_dispatch_observed_bar_via_host_pool(
         "host-pool dispatch confirmation not observed within the bounded retry window",
     )
     .await?;
-    // Review finding (mqd-review-patch, pre-commit): the claim is now
-    // durably `failed`, but this binding's own last deposit may still be
-    // sitting unconsumed in `pending_binding_strategy_bar_inputs` (e.g. the
-    // run was not actually ticking during the bounded window above). Left
-    // in place, some much later, unrelated tick could drain it and dispatch
-    // against a now-stale trigger identity, producing a spurious journal
-    // entry disconnected from any real completed-bar boundary at the time
-    // it fires. Drain it here — the value itself is discarded, never used
-    // to retroactively un-fail this claim.
-    let _ = input
-        .state
-        .take_binding_strategy_bar_input(&binding.symbol, &binding.strategy_id, db_timeframe_label)
-        .await;
     Ok(
         AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
             status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
         },
     )
+}
+
+/// Deposit this binding's trigger and wait, bounded, for the execution
+/// loop's own evaluation row for it. Returns whether the row was confirmed.
+///
+/// The row is checked before every (re)deposit, and whatever this call
+/// deposited is drained on every exit: once the row exists the evaluation has
+/// happened, and a deposit left pending would make the loop evaluate the
+/// claimed bar again, outside any dispatch claim.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn deposit_and_confirm_binding_evaluation(
+    state: &AppState,
+    pool: &PgPool,
+    run_id: Uuid,
+    symbol: &str,
+    strategy_id: &str,
+    db_timeframe_label: &str,
+    bar_end_ts: i64,
+    now_tick: u64,
+    expected_evaluation_id: Uuid,
+    max_attempts: u32,
+    attempt_delay: std::time::Duration,
+) -> anyhow::Result<bool> {
+    let evaluation_confirmed = || async {
+        let row = mqk_db::fetch_strategy_signal_evaluation(pool, expected_evaluation_id).await?;
+        anyhow::Ok(row.as_ref().is_some_and(|row| {
+            row.run_id == Some(run_id)
+                && row.strategy_id == strategy_id
+                && row.symbol.eq_ignore_ascii_case(symbol)
+                && row.timeframe == db_timeframe_label
+        }))
+    };
+    let outcome: anyhow::Result<bool> = async {
+        for attempt in 0..=max_attempts {
+            if attempt > 0 {
+                tokio::time::sleep(attempt_delay).await;
+            }
+            if evaluation_confirmed().await? {
+                return Ok(true);
+            }
+            if attempt == max_attempts {
+                break;
+            }
+            state
+                .deposit_binding_strategy_bar_input(
+                    symbol,
+                    strategy_id,
+                    db_timeframe_label,
+                    StrategyBarInput {
+                        now_tick,
+                        end_ts: bar_end_ts,
+                        limit_price: None,
+                        qty: 1,
+                    },
+                )
+                .await;
+        }
+        Ok(false)
+    }
+    .await;
+    let _ = state
+        .take_binding_strategy_bar_input(symbol, strategy_id, db_timeframe_label)
+        .await;
+    outcome
 }
 
 /// REPAIR 4: the mandatory authoritative re-read reached when
