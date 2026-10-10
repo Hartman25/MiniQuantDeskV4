@@ -1,8 +1,13 @@
 import { Panel } from "../../../components/common/Panel";
-import { formatDateTime, formatDurationMs, formatLabel } from "../../../lib/format";
+import { formatDateTime, formatDurationMs, formatLabel, formatNumber } from "../../../lib/format";
 import type { OmsOverview } from "../../system/types";
 
 export function OmsStateMachineVisualizer({ overview }: { overview: OmsOverview }) {
+  if (overview.detail_authority === "snapshot_counts_only" || overview.state_nodes.length === 0) {
+    return <Panel title="OMS snapshot evidence" subtitle="GET /api/v1/oms/overview">
+      <p>Active orders: {formatNumber(overview.total_active_orders)}. Detailed state transitions, dwell/SLA measurements, and stuck-order counts are unavailable from this endpoint.</p>
+    </Panel>;
+  }
   return (
     <Panel title="OMS state machine visualizer" subtitle="State supervision for working and recently completed orders.">
       <div className="summary-grid summary-grid-five">

@@ -61,16 +61,16 @@ export function ExecutionScreen({
           tone={model.executionSummary.dispatching_orders > 0 ? "warn" : "neutral"}
         />
         <StatCard
-          title="Rejects Today"
+          title="Rejected in current snapshot"
           value={String(model.executionSummary.reject_count_today)}
-          detail="Total rejects since session open"
+          detail="Current OMS state; not a durable daily total"
           tone={model.executionSummary.reject_count_today > 0 ? "warn" : "good"}
         />
         <StatCard
           title="Stuck OMS Orders"
-          value={String(model.omsOverview.stuck_orders)}
+          value={model.omsOverview.stuck_orders == null ? "Unavailable" : String(model.omsOverview.stuck_orders)}
           detail="Orders beyond state SLA"
-          tone={model.omsOverview.stuck_orders > 0 ? "bad" : "good"}
+          tone={model.omsOverview.stuck_orders != null && model.omsOverview.stuck_orders > 0 ? "bad" : "neutral"}
         />
       </div>
 
@@ -184,7 +184,7 @@ export function ExecutionScreen({
                 <div><span>Strategy</span><strong>{timeline.strategy_id ?? "—"}</strong></div>
                 <div><span>Status</span><strong>{timeline.current_status ?? "—"}</strong></div>
                 <div><span>Stage</span><strong>{timeline.current_stage ?? "—"}</strong></div>
-                <div><span>Qty</span><strong>{timeline.filled_qty ?? 0}/{timeline.requested_qty ?? 0}</strong></div>
+                <div><span>Qty</span><strong>{timeline.filled_qty ?? "Unavailable"}/{timeline.requested_qty ?? "Unavailable"}</strong></div>
                 <div><span>Updated</span><strong>{timeline.last_updated_at ? formatDateTime(timeline.last_updated_at) : "—"}</strong></div>
               </div>
             ) : (
@@ -196,8 +196,8 @@ export function ExecutionScreen({
             <div className="metric-list compact-list">
               <div><span>Selection</span><strong>{timeline ? timeline.truth_state : "None"}</strong></div>
               <div><span>Timeline load</span><strong>{timelineLoading ? "Loading" : "Ready"}</strong></div>
-              <div><span>Replay frames</span><strong>{model.executionReplay?.frames.length ?? 0}</strong></div>
-              <div><span>Trace events</span><strong>{model.executionTrace?.rows.length ?? 0}</strong></div>
+              <div><span>Replay frames</span><strong>{model.executionReplay?.frames.length ?? "Unavailable"}</strong></div>
+              <div><span>Trace events</span><strong>{model.executionTrace?.rows.length ?? "Unavailable"}</strong></div>
             </div>
           </Panel>
 

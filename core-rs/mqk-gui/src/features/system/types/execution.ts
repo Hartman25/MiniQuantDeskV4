@@ -164,9 +164,11 @@ export interface OmsOrderStateRow {
 }
 
 export interface OmsOverview {
-  total_active_orders: number;
-  stuck_orders: number;
-  missing_transition_orders: number;
+  truth_state?: "active" | "no_snapshot";
+  detail_authority?: "snapshot_counts_only";
+  total_active_orders: number | null;
+  stuck_orders: number | null;
+  missing_transition_orders: number | null;
   state_nodes: OmsStateNode[];
   transition_edges: OmsTransitionEdge[];
   orders: OmsOrderStateRow[];

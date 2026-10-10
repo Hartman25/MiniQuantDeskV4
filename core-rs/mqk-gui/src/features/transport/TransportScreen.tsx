@@ -14,7 +14,7 @@ export function TransportScreen({ model }: { model: SystemModel }) {
   }
 
   const hasOrphanedClaims = t.orphaned_claims > 0;
-  const hasDuplicates = t.duplicate_inbox_events > 0;
+  const hasDuplicates = t.duplicate_inbox_events !== null && t.duplicate_inbox_events > 0;
   const hasRetries = t.dispatch_retries > 0;
   const hasExceptions = hasOrphanedClaims || hasDuplicates || hasRetries;
   const claimAgeBreached = t.max_claim_age_ms > 300000;
@@ -37,12 +37,11 @@ export function TransportScreen({ model }: { model: SystemModel }) {
               <div className="operator-timeline-card severity-critical">
                 <div className="operator-timeline-head">
                   <strong>
-                    Orphaned claims — {t.orphaned_claims} claim{t.orphaned_claims === 1 ? "" : "s"} without a live owner
+                    Stale claimed rows — {t.orphaned_claims} claim{t.orphaned_claims === 1 ? "" : "s"} older than 30 seconds
                   </strong>
                 </div>
                 <p className="operator-timeline-meta">
-                  Orphaned claims indicate outbox tokens that survived a crash or restart without being resolved.
-                  These block idempotent re-submission. Review per-queue detail below and resolve before starting execution.
+                  This is an age-based proxy, not proof of a dead owner or crash. Review durable order and runtime evidence before taking action.
                 </p>
               </div>
             )}
@@ -88,11 +87,11 @@ export function TransportScreen({ model }: { model: SystemModel }) {
               <strong className={t.outbox_depth > 0 ? "state-warning" : undefined}>{t.outbox_depth}</strong>
             </div>
             <div>
-              <span>Dispatch retries</span>
+              <span>Failed or ambiguous rows (retry proxy)</span>
               <strong className={hasRetries ? "state-warning" : undefined}>{t.dispatch_retries}</strong>
             </div>
             <div>
-              <span>Orphaned claims</span>
+              <span>Claims older than 30 seconds (orphan proxy)</span>
               <strong className={hasOrphanedClaims ? "state-critical" : undefined}>{t.orphaned_claims}</strong>
             </div>
             <div>
@@ -115,7 +114,7 @@ export function TransportScreen({ model }: { model: SystemModel }) {
             </div>
             <div>
               <span>Duplicate events</span>
-              <strong className={hasDuplicates ? "state-warning" : undefined}>{t.duplicate_inbox_events}</strong>
+              <strong className={hasDuplicates ? "state-warning" : undefined}>{t.duplicate_inbox_events ?? "Unavailable"}</strong>
             </div>
           </div>
         </Panel>
@@ -137,7 +136,7 @@ export function TransportScreen({ model }: { model: SystemModel }) {
             { key: "lag", title: "Lag", render: (row) => formatDurationMs(row.lag_ms) },
             { key: "oldest", title: "Oldest Age", render: (row) => formatDurationMs(row.oldest_age_ms) },
             { key: "retries", title: "Retries", render: (row) => row.retry_count },
-            { key: "dupes", title: "Dupes", render: (row) => row.duplicate_events },
+            { key: "dupes", title: "Dupes", render: (row) => row.duplicate_events ?? "Unavailable" },
             { key: "claims", title: "Orphaned", render: (row) => row.orphaned_claims },
             { key: "last", title: "Last Activity", render: (row) => formatDateTime(row.last_activity_at) },
             { key: "notes", title: "Notes", render: (row) => row.notes },

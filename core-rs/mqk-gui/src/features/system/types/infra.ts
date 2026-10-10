@@ -31,7 +31,7 @@ export interface TransportQueueRow {
   depth: number;
   oldest_age_ms: number;
   retry_count: number;
-  duplicate_events: number;
+  duplicate_events: number | null;
   orphaned_claims: number;
   lag_ms: number | null;
   last_activity_at: string | null;
@@ -44,7 +44,7 @@ export interface TransportSummary {
   max_claim_age_ms: number;
   dispatch_retries: number;
   orphaned_claims: number;
-  duplicate_inbox_events: number;
+  duplicate_inbox_events: number | null;
   queues: TransportQueueRow[];
 }
 
@@ -129,6 +129,9 @@ export interface MarketDataVenueRow {
 }
 
 export interface MarketDataQualitySummary {
+  detail_authority?: "transport_only";
+  market_data_source?: string;
+  ws_continuity?: string;
   overall_health: HealthState;
   freshness_sla_ms: number;
   stale_symbol_count: number;

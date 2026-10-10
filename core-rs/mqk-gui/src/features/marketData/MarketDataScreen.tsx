@@ -6,6 +6,7 @@ import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
+import { MarketDataReadinessPanel } from "./MarketDataReadinessPanel";
 import { useWorkspaceContext } from "../workspace/WorkspaceContext.tsx";
 import {
   initialPanelLinkState,
@@ -66,7 +67,19 @@ export function MarketDataScreen({ model }: { model: SystemModel }) {
   };
 
   if (truthState !== null) {
-    return <TruthStateNotice state={truthState} />;
+    return <div className="screen-grid desk-screen-grid"><TruthStateNotice state={truthState} /><MarketDataReadinessPanel /></div>;
+  }
+
+  if (q.detail_authority === "transport_only") {
+    return <div className="screen-grid desk-screen-grid">
+      <WorkspaceSymbolStrip panelLink={panelLink} effectiveSymbol={effectiveSymbol} onTogglePin={togglePin} />
+      <Panel title="Market-data transport observation" subtitle="GET /api/v1/market-data/quality · transport continuity only">
+        <dl><dt>Transport state</dt><dd>{q.overall_health}</dd><dt>Configured source</dt><dd>{q.market_data_source}</dd><dt>WebSocket continuity</dt><dd>{q.ws_continuity}</dd></dl>
+        <p>Freshness SLA, stale/missing symbols, strategy-block counts and venue disagreement are unavailable here. Transport continuity does not prove market-data freshness.</p>
+        <p>Daily Data Readiness below supplies canonical symbol/provider/bar evidence. It is a configuration preview, not proof of an active deployment.</p>
+      </Panel>
+      <MarketDataReadinessPanel />
+    </div>;
   }
 
   // Issues currently blocking at least one strategy — shown first.

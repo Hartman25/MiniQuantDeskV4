@@ -17,6 +17,7 @@ import { parseMetricsDashboard } from "./metricsContract";
 import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from "./alertContract";
 import { parseEventFeed, parseOperatorTimeline } from "./historyContract";
 import { parseSystemStatus } from "./statusContract";
+import { parseMarketDataQuality, parseOmsOverview, parseTransport } from "./snapshotContracts";
 import {
   enforceRunScopeConsistency,
   parseDurablePortfolioPositions,
@@ -451,7 +452,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       // Any other failure (404 = unmounted, network error) → try legacy path.
       return fetchJsonCandidate<LegacyTradingOrdersResponse>("/v1/trading/orders");
     })(),
-    fetchJsonCandidates<OmsOverview>(["/api/v1/oms/overview"]),
+    (async (): Promise<EndpointFetchResult<OmsOverview>> => {
+      const result = await fetchJsonCandidate<unknown>("/api/v1/oms/overview");
+      const data = result.ok ? parseOmsOverview(result.data) : null;
+      return data ? { ...result, data } : { ...result, ok: false, data: undefined, error: result.error ?? "oms_contract_invalid" };
+    })(),
     (async (): Promise<EndpointFetchResult<SystemMetrics>> => {
       const result = await fetchJsonCandidate<unknown>("/api/v1/metrics/dashboards");
       const data = result.ok ? parseMetricsDashboard(result.data) : null;
@@ -619,7 +624,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       if (w.truth_state !== "active") return { ok: false, endpoint: r.endpoint, error: "topology_unavailable" };
       return { ok: true, endpoint: r.endpoint, data: { updated_at: w.updated_at, services: w.services as ServiceTopology["services"] } };
     })(),
-    fetchJsonCandidates<TransportSummary>(["/api/v1/execution/transport"]),
+    (async (): Promise<EndpointFetchResult<TransportSummary>> => {
+      const result = await fetchJsonCandidate<unknown>("/api/v1/execution/transport");
+      const data = result.ok ? parseTransport(result.data) : null;
+      return data ? { ...result, data } : { ...result, ok: false, data: undefined, error: result.error ?? "transport_unavailable_or_invalid" };
+    })(),
     // Durable incident summaries; unsupported lifecycle detail is never synthesized.
     (async (): Promise<EndpointFetchResult<IncidentCase[]>> => {
       const r = await fetchJsonCandidate<IncidentsWrapper>("/api/v1/incidents");
@@ -647,7 +656,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     })(),
     fetchJsonCandidates<SessionStateSummary>(["/api/v1/system/session"]),
     fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
-    fetchJsonCandidates<MarketDataQualitySummary>(["/api/v1/market-data/quality"]),
+    (async (): Promise<EndpointFetchResult<MarketDataQualitySummary>> => {
+      const result = await fetchJsonCandidate<unknown>("/api/v1/market-data/quality");
+      const data = result.ok ? parseMarketDataQuality(result.data) : null;
+      return data ? { ...result, data } : { ...result, ok: false, data: undefined, error: result.error ?? "market_data_quality_contract_invalid" };
+    })(),
     fetchJsonCandidates<RuntimeLeadershipSummary>(["/api/v1/system/runtime-leadership"]),
     // audit/artifacts: daemon returns {canonical_route, truth_state, backend, rows}
     // where each row is one run from the runs table. "backend_unavailable" means
