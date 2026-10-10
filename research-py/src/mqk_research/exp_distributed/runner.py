@@ -466,6 +466,9 @@ def _finalize_batch(
 def run_batch(spec_path: Path, root: Path | None = None, max_workers: int | None = None) -> Dict[str, Any]:
     actual_root = (root or default_root()).resolve()
     spec = load_batch_spec(spec_path)
+    worker_count = spec.max_workers if max_workers is None else max_workers
+    if worker_count < 1:
+        raise ValueError("max_workers must be >= 1")
     registration_mode = _resolve_registration_mode(spec.hypothesis_id, spec.allow_unregistered_diagnostic)
     plan = build_batch_plan(spec)
     # RESEARCH-EXPERIMENT-REGISTRY-01-REPAIR-02: stamp the durable canonical
@@ -480,7 +483,7 @@ def run_batch(spec_path: Path, root: Path | None = None, max_workers: int | None
         plan.jobs,
         actual_root,
         store,
-        max_workers or spec.max_workers,
+        worker_count,
         hypothesis_id=spec.hypothesis_id,
         experiment_id=spec.experiment_id,
         batch_id=plan.batch_id,
@@ -549,6 +552,8 @@ def failed_jobs(batch_id: str, root: Path | None = None) -> Dict[str, Any]:
 
 def rerun_failed_jobs(batch_id: str, root: Path | None = None, max_workers: int = 1) -> Dict[str, Any]:
     actual_root = (root or default_root()).resolve()
+    if max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
     store = ResearchResultStore(default_db_path(actual_root))
     batch = store.get_batch(batch_id)
     incomplete_jobs = [

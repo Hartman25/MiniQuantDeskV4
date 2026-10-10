@@ -265,6 +265,8 @@ class ResearchResultStore:
                 connection.commit()
 
     def upsert_batch(self, batch_id: str, spec: Dict[str, Any], root_dir: Path, job_count: int, status: str = "queued") -> None:
+        if status != "queued":
+            raise ValueError("upsert_batch is planning-only; use claim_batch_for_execution for execution")
         with closing(self._connect()) as connection:
             canonical_spec = json.dumps(spec, sort_keys=True)
             existing = connection.execute(
@@ -318,6 +320,8 @@ class ResearchResultStore:
             connection.commit()
 
     def upsert_jobs(self, jobs: Iterable[JobSpec], spec_paths: Dict[str, Path], status: str = "queued") -> None:
+        if status != "queued":
+            raise ValueError("upsert_jobs is planning-only; use claim_batch_for_execution for execution")
         prepared_jobs = list(jobs)
         with closing(self._connect()) as connection:
             batch_ids = {job.batch_id for job in prepared_jobs}
@@ -742,6 +746,15 @@ class ResearchResultStore:
                 raise KeyError(f"unknown batch_id: {batch_id}")
             if row["status"] == "running" and row["execution_claim"] != execution_claim:
                 raise RuntimeError(f"execution claim required to finalize running batch: {batch_id!r}")
+            incomplete = connection.execute(
+                "select job_id, status from exp_jobs where batch_id=? and status in ('queued', 'running')",
+                (batch_id,),
+            ).fetchall()
+            if incomplete:
+                raise RuntimeError(
+                    f"refusing batch finalization with incomplete jobs: "
+                    f"{[item['job_id'] for item in incomplete]!r}"
+                )
             connection.execute(
                 """
                 update exp_batches
