@@ -17,6 +17,8 @@ pub mod autonomous_runtime_context;
 mod broker;
 #[cfg(test)]
 mod capital_fraction_dispatch_tests;
+#[cfg(test)]
+mod m2_concurrent_runtime_tests;
 pub(crate) mod closed_trade_attribution;
 pub mod crypto_execution_policy;
 pub mod crypto_fee_ingestion;

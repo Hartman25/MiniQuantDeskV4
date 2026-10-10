@@ -176,7 +176,7 @@ where
     }
 }
 
-async fn db_or_skip(label: &str) -> Option<PgPool> {
+pub(super) async fn db_or_skip(label: &str) -> Option<PgPool> {
     let require = std::env::var(REQUIRE_DB_ENV).is_ok_and(|v| v == "1");
     db_or_skip_with(
         label,
