@@ -151,6 +151,16 @@ where
                         self.capture_risk_denial(&symbol, denial).await?;
                         let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                     }
+                    SubmitError::Gate(GateRefusal::AccountEntitlementRefused(refusal)) => {
+                        tracing::warn!(
+                            run_id = %self.run_id,
+                            order_id = %order_id,
+                            code = %refusal.code,
+                            detail = %refusal.detail,
+                            "exec_submit_refused_account_entitlement"
+                        );
+                        let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                    }
                     SubmitError::Gate(_) => {
                         let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                     }
