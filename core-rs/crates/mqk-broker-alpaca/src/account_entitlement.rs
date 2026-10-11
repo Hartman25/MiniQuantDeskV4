@@ -79,10 +79,27 @@ impl AccountEntitlementEvidence {
 }
 
 fn refuse(code: &'static str, detail: impl Into<String>) -> AccountEntitlementRefusal {
-    AccountEntitlementRefusal {
-        code: code.to_string(),
-        detail: detail.into(),
-    }
+    AccountEntitlementRefusal::new(code, detail)
+}
+
+/// Attach the evidence provenance a refusal was decided on: the observed
+/// provider account id and observation time, and the run's bound account
+/// (`none` when no binding exists). Ids only; never credentials or balances.
+fn with_provenance(
+    refusal: AccountEntitlementRefusal,
+    obs: &AccountEvidenceObservation,
+    bound_account: Option<&str>,
+) -> AccountEntitlementRefusal {
+    refusal
+        .with_context(
+            "observed_provider_account_id",
+            obs.evidence
+                .provider_account_id
+                .as_deref()
+                .unwrap_or("unavailable"),
+        )
+        .with_context("observed_at_utc", obs.observed_at_utc.to_rfc3339())
+        .with_context("bound_provider_account_id", bound_account.unwrap_or("none"))
 }
 
 fn require_flag_clear(
@@ -272,9 +289,10 @@ impl AccountEvidenceCell {
                 "no GET /v2/account observation has been recorded in this process",
             )
         })?;
+        let provenance = |r: AccountEntitlementRefusal| with_provenance(r, &obs, pinned.as_deref());
         let age = now.signed_duration_since(obs.observed_at_utc);
         if age < Duration::zero() || age > freshness_bound {
-            return Err(refuse(
+            return Err(provenance(refuse(
                 "account_evidence_stale",
                 format!(
                     "account observation at {} is {}s old (bound {}s)",
@@ -282,28 +300,28 @@ impl AccountEvidenceCell {
                     age.num_seconds(),
                     freshness_bound.num_seconds()
                 ),
-            ));
+            )));
         }
         if let Some(pinned) = pinned.as_deref() {
             if obs.evidence.provider_account_id.as_deref() != Some(pinned) {
-                return Err(refuse(
+                return Err(provenance(refuse(
                     "account_identity_drift",
                     format!(
                         "observed provider account {:?} differs from the account this run is bound to ({pinned:?})",
                         obs.evidence.provider_account_id
                     ),
-                ));
+                )));
             }
         }
         // Report the provider's own denial even when no binding exists yet
         // (the most informative refusal); an entitled account with no binding
         // is still refused below.
-        evaluate_account_entitlement(&obs.evidence, asset_class)?;
+        evaluate_account_entitlement(&obs.evidence, asset_class).map_err(provenance)?;
         if pinned.is_none() {
-            return Err(refuse(
+            return Err(provenance(refuse(
                 "account_binding_absent",
                 "no validated run/account binding exists; fresh account evidence alone does not authorize orders",
-            ));
+            )));
         }
         Ok(())
     }

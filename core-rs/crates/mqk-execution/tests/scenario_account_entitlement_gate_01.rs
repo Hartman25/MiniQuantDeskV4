@@ -46,10 +46,7 @@ impl BrokerAdapter for EntitlementBroker {
     ) -> Result<(), AccountEntitlementRefusal> {
         self.seen_classes.borrow_mut().push(asset_class);
         match self.refuse_with {
-            Some(code) => Err(AccountEntitlementRefusal {
-                code: code.to_string(),
-                detail: "test refusal".to_string(),
-            }),
+            Some(code) => Err(AccountEntitlementRefusal::new(code, "test refusal")),
             None => Ok(()),
         }
     }

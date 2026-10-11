@@ -1130,10 +1130,10 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
         asset_class: Option<mqk_execution::AssetClass>,
     ) -> Result<(), AccountEntitlementRefusal> {
         match &self.account_evidence {
-            None => Err(AccountEntitlementRefusal {
-                code: "account_evidence_not_bound".to_string(),
-                detail: "this Alpaca adapter has no account-evidence binding".to_string(),
-            }),
+            None => Err(AccountEntitlementRefusal::new(
+                "account_evidence_not_bound",
+                "this Alpaca adapter has no account-evidence binding",
+            )),
             Some(b) => b
                 .cell
                 .admit(chrono::Utc::now(), b.freshness_bound, asset_class),

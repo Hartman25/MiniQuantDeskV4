@@ -8,9 +8,24 @@ use anyhow::anyhow;
 use mqk_db::{ClaimedOutboxRow, RetryDispatchOutcome, TimeSource};
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
-    BrokerAdapter, BrokerError, BrokerSubmitRequest, GateRefusal, IntegrityGate, ReconcileGate,
-    RiskGate, RiskRequestContext, Side, SubmitError,
+    AccountEntitlementRefusal, AssetClass, BrokerAdapter, BrokerError, BrokerSubmitRequest,
+    GateRefusal, IntegrityGate, ReconcileGate, RiskGate, RiskRequestContext, Side, SubmitError,
 };
+use uuid::Uuid;
+
+/// Audit topic / event type of a durable account-entitlement order refusal.
+pub const ENTITLEMENT_REFUSAL_AUDIT_TOPIC: &str = "execution";
+pub const ENTITLEMENT_REFUSAL_AUDIT_EVENT_TYPE: &str = "ORDER_ACCOUNT_ENTITLEMENT_REFUSED";
+
+/// Deterministic audit event id of one refusal: the same run, order and
+/// refusal code always map to the same id, so a replay or restart of the same
+/// logical refusal cannot create a second record.
+pub fn entitlement_refusal_event_id(run_id: Uuid, order_id: &str, code: &str) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!("mqk.order-entitlement-refusal.v1|{run_id}|{order_id}|{code}").as_bytes(),
+    )
+}
 
 use super::cancel::{
     classify_cancel_gateway_error, revert_local_cancel_request, CancelBrokerClass,
@@ -54,6 +69,51 @@ where
         Ok(())
     }
 
+    /// Persist one `ORDER_ACCOUNT_ENTITLEMENT_REFUSED` audit event for an order
+    /// the gateway refused on broker-account entitlement. Idempotent on the
+    /// deterministic event id (`true` = newly written). Carries run id, outbox
+    /// and order identity, instrument, asset class, the exact stable refusal
+    /// code and detail, and the refusing authority's non-sensitive provenance
+    /// context; no credentials and no raw account payload.
+    pub(super) async fn record_entitlement_refusal(
+        &self,
+        order_id: &str,
+        outbox_id: i64,
+        symbol: &str,
+        side: Side,
+        asset_class: AssetClass,
+        refusal: &AccountEntitlementRefusal,
+    ) -> anyhow::Result<bool> {
+        let context: serde_json::Map<String, serde_json::Value> = refusal
+            .context
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        let event = mqk_db::NewAuditEvent {
+            event_id: entitlement_refusal_event_id(self.run_id, order_id, &refusal.code),
+            run_id: self.run_id,
+            ts_utc: self.time_source.now_utc(),
+            topic: ENTITLEMENT_REFUSAL_AUDIT_TOPIC.to_string(),
+            event_type: ENTITLEMENT_REFUSAL_AUDIT_EVENT_TYPE.to_string(),
+            payload: serde_json::json!({
+                "schema_version": 1,
+                "run_id": self.run_id.to_string(),
+                "order_id": order_id,
+                "outbox_id": outbox_id,
+                "symbol": symbol,
+                "side": format!("{side:?}").to_ascii_lowercase(),
+                "asset_class": format!("{asset_class:?}").to_ascii_lowercase(),
+                "refusal_code": refusal.code,
+                "refusal_detail": refusal.detail,
+                "context": context,
+                "source": "mqk-runtime.orchestrator.dispatch",
+            }),
+            hash_prev: None,
+            hash_self: None,
+        };
+        mqk_db::insert_audit_event_if_absent(&self.pool, &event).await
+    }
+
     /// Submit-path dispatcher for one claimed outbox row.
     pub(super) async fn dispatch_submit_claimed_outbox_row(
         &mut self,
@@ -66,6 +126,7 @@ where
         let claim = claimed_row.token;
         let symbol = req.symbol.clone();
         let side = req.side;
+        let asset_class = req.asset_class;
 
         // QTY-MICROS-PRODUCTION-CUTOVER-01 / CUTOVER-1A / CUTOVER-1B / CUTOVER-1C:
         // `BrokerSubmitRequest.quantity` is fractional-capable (QtyMicros),
@@ -159,6 +220,28 @@ where
                             detail = %refusal.detail,
                             "exec_submit_refused_account_entitlement"
                         );
+                        // Durable, exact provenance of why this order was
+                        // refused. A persistence failure never weakens the
+                        // refusal (the broker was not and is not invoked); it
+                        // is surfaced loudly and the row is still FAILED.
+                        if let Err(err) = self
+                            .record_entitlement_refusal(
+                                &order_id,
+                                outbox_id,
+                                &symbol,
+                                side,
+                                asset_class,
+                                refusal,
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                run_id = %self.run_id,
+                                order_id = %order_id,
+                                code = %refusal.code,
+                                "entitlement_refusal_audit_persist_failed: {err:#}"
+                            );
+                        }
                         let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                     }
                     SubmitError::Gate(_) => {
@@ -545,6 +628,28 @@ pub(super) fn is_submit_risk_reducing(
                         .unwrap_or(mqk_portfolio::QtyMicros::ZERO)
         }
         Side::Sell => current_qty.is_positive() && quantity <= current_qty,
+    }
+}
+
+#[cfg(test)]
+mod entitlement_refusal_event_id_tests {
+    use super::*;
+
+    #[test]
+    fn event_id_is_deterministic_and_keyed_on_run_order_and_code() {
+        let run = Uuid::from_u128(1);
+        let base = entitlement_refusal_event_id(run, "ord-1", "account_trading_blocked");
+        assert_eq!(
+            base,
+            entitlement_refusal_event_id(run, "ord-1", "account_trading_blocked"),
+            "replay must map to the same id"
+        );
+        assert_ne!(base, entitlement_refusal_event_id(run, "ord-2", "account_trading_blocked"));
+        assert_ne!(base, entitlement_refusal_event_id(run, "ord-1", "account_blocked"));
+        assert_ne!(
+            base,
+            entitlement_refusal_event_id(Uuid::from_u128(2), "ord-1", "account_trading_blocked")
+        );
     }
 }
 

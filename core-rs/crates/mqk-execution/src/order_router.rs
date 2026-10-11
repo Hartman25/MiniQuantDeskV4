@@ -653,6 +653,25 @@ pub const ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED: &str = "account_entitlement_not_i
 pub struct AccountEntitlementRefusal {
     pub code: String,
     pub detail: String,
+    /// Ordered, non-sensitive provenance key/values the refusing authority
+    /// attaches (e.g. the evidence's account id and observation time). Never a
+    /// credential or raw account payload.
+    pub context: Vec<(String, String)>,
+}
+
+impl AccountEntitlementRefusal {
+    pub fn new(code: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            detail: detail.into(),
+            context: Vec::new(),
+        }
+    }
+
+    pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.context.push((key.into(), value.into()));
+        self
+    }
 }
 
 /// Trait that all broker adapters must implement.
@@ -703,10 +722,10 @@ pub trait BrokerAdapter {
         &self,
         _asset_class: Option<AssetClass>,
     ) -> std::result::Result<(), AccountEntitlementRefusal> {
-        Err(AccountEntitlementRefusal {
-            code: ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED.to_string(),
-            detail: "broker adapter does not implement account-entitlement admission".to_string(),
-        })
+        Err(AccountEntitlementRefusal::new(
+            ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED,
+            "broker adapter does not implement account-entitlement admission",
+        ))
     }
 
     fn submit_order(

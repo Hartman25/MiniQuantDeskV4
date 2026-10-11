@@ -200,6 +200,21 @@ async fn b1_unbound_evidence_never_reaches_the_provider_through_real_dispatch() 
     assert_eq!(outbox_status(&pool, idem).await.as_deref(), Some("FAILED"));
     posts.assert_hits_async(0).await;
 
+    // The refusal is durably attributed: exact code and the real cell's
+    // provenance (observed account, no binding).
+    let payloads: Vec<serde_json::Value> = sqlx::query_scalar(
+        "select payload from audit_events where run_id = $1            and event_type = 'ORDER_ACCOUNT_ENTITLEMENT_REFUSED'",
+    )
+    .bind(run_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0]["refusal_code"], "account_binding_absent");
+    assert_eq!(payloads[0]["order_id"], idem);
+    assert_eq!(payloads[0]["context"]["observed_provider_account_id"], ACCT);
+    assert_eq!(payloads[0]["context"]["bound_provider_account_id"], "none");
+
     orch.release_runtime_leadership().await.unwrap();
     cleanup(&pool, run_id).await;
 }
