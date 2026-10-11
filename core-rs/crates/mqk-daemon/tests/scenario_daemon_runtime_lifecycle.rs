@@ -1838,3 +1838,77 @@ async fn a_restarted_process_inherits_no_binding_or_entitlement() {
         Err("account_evidence_unavailable".to_string())
     );
 }
+
+/// Restores an environment variable on drop (tests here run serially).
+struct EnvRestore(&'static str, Option<String>);
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+async fn preflight_json(st: &Arc<state::AppState>) -> serde_json::Value {
+    let req = authed(Request::builder())
+        .method("GET")
+        .uri("/api/v1/system/preflight")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    parse_json(body)
+}
+
+/// Readiness and the REAL start agree on the deterministic credential refusals:
+/// the code preflight reports is the fault class the start refuses with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn missing_or_malformed_credentials_refuse_start_and_readiness_agrees() {
+    let _guard = MockAccountGuard;
+    let st = daemon_state().await;
+    arm(&st).await;
+    let _restore = EnvRestore(
+        "ALPACA_API_KEY_PAPER",
+        std::env::var("ALPACA_API_KEY_PAPER").ok(),
+    );
+
+    // Control: with the fixture's valid prerequisites preflight reports none.
+    let pf = preflight_json(&st).await;
+    assert!(
+        pf["broker_start_blockers"].as_array().unwrap().is_empty(),
+        "{pf}"
+    );
+    assert_eq!(pf["broker_config_present"], true);
+
+    for (key, want_code) in [
+        (None, "runtime.start_refused.alpaca_creds_missing"),
+        (
+            Some("bad key"),
+            "runtime.start_refused.alpaca_creds_malformed",
+        ),
+    ] {
+        match key {
+            Some(v) => std::env::set_var("ALPACA_API_KEY_PAPER", v),
+            None => std::env::remove_var("ALPACA_API_KEY_PAPER"),
+        }
+        let pf = preflight_json(&st).await;
+        let codes: Vec<&str> = pf["broker_start_blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["code"].as_str().unwrap())
+            .collect();
+        assert!(codes.contains(&want_code), "{codes:?}");
+        assert_eq!(pf["broker_config_present"], false);
+
+        let (status, body) = start_expecting_refusal(&st).await;
+        assert_ne!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["fault_class"], want_code, "{body}");
+        assert!(
+            !body.to_string().contains("bad key"),
+            "a credential value must never appear in a refusal"
+        );
+    }
+}

@@ -72,6 +72,11 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
 }
 
 fn make_paper_alpaca() -> Arc<state::AppState> {
+    // Readiness now reports the Alpaca start prerequisites the start path
+    // enforces (credentials present and well-formed). These dummy tokens are
+    // placeholders for the positive-control fixtures; no provider is contacted.
+    std::env::set_var("ALPACA_API_KEY_PAPER", "test-paper-key");
+    std::env::set_var("ALPACA_API_SECRET_PAPER", "test-paper-secret");
     Arc::new(state::AppState::new_for_test_with_broker_kind(
         BrokerKind::Alpaca,
     ))

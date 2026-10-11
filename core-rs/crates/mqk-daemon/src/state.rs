@@ -2589,31 +2589,47 @@ impl AppState {
     }
 
     /// Start-refusing blockers that depend on the broker environment, in the
-    /// same terms `start_execution_runtime` refuses them: a Paper deployment
-    /// whose REST endpoint override is not the Paper host, and a fresh
-    /// provider denial of the account. Empty when neither applies.
-    pub fn broker_start_blockers(&self) -> Vec<String> {
+    /// same terms `build_daemon_broker`/`start_execution_runtime` refuse them:
+    /// the Alpaca prerequisites (Paper endpoint identity, credentials present
+    /// and well-formed; one shared authority, `alpaca_prerequisites_from_env`)
+    /// and a fresh provider denial of the account. Empty when none applies.
+    /// Never contains a credential value.
+    pub fn broker_start_blockers(&self) -> Vec<crate::api_types::BrokerStartBlocker> {
+        use crate::api_types::BrokerStartBlocker;
         let mut out = Vec::new();
         if self.runtime_selection.broker_kind != Some(BrokerKind::Alpaca) {
             return out;
         }
-        if self.runtime_selection.deployment_mode == DeploymentMode::Paper {
-            let raw = std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok();
-            if let Err(err) = broker::alpaca_base_url_for_mode(DeploymentMode::Paper, raw.as_deref())
-            {
-                out.push(err.to_string());
-            }
+        if let Err(errors) =
+            broker::alpaca_prerequisites_from_env(self.runtime_selection.deployment_mode)
+        {
+            out.extend(errors.into_iter().map(|err| BrokerStartBlocker {
+                code: err.fault_class().to_string(),
+                message: err.to_string(),
+            }));
         }
         if let Some(ent) = self.broker_account_entitlement_readiness() {
             if ent.state == "denied" {
-                out.push(format!(
-                    "broker account entitlement is denied [{}]: {}",
-                    ent.code.as_deref().unwrap_or("unknown"),
-                    ent.detail.as_deref().unwrap_or("")
-                ));
+                let code = ent.code.clone().unwrap_or_else(|| "unknown".to_string());
+                out.push(BrokerStartBlocker {
+                    message: format!(
+                        "broker account entitlement is denied [{code}]: {}",
+                        ent.detail.as_deref().unwrap_or("")
+                    ),
+                    code,
+                });
             }
         }
         out
+    }
+
+    /// Whether the selected broker's start prerequisites in the environment
+    /// (credentials, endpoint) are satisfied. `None` for brokers with no
+    /// environment prerequisites (not Alpaca).
+    pub fn broker_environment_configured(&self) -> Option<bool> {
+        (self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)).then(|| {
+            broker::alpaca_prerequisites_from_env(self.runtime_selection.deployment_mode).is_ok()
+        })
     }
 
     pub fn runtime_selection(&self) -> &RuntimeSelection {

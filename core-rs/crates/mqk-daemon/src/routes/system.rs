@@ -342,9 +342,12 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         None
     };
 
+    // Adapter id alone is not configuration: for Alpaca the prerequisites the
+    // start path enforces (credentials present and well-formed, endpoint
+    // identity) must also hold.
     let broker_config_present: Option<bool> = match st.adapter_id() {
         "" | "null" | "paper" => Some(false),
-        _ => Some(true),
+        _ => Some(st.broker_environment_configured().unwrap_or(true)),
     };
 
     // PT-MD-01: strategy market-data is explicitly not configured in this build.
@@ -537,11 +540,12 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     }
     // Start-refusing broker blockers (Paper endpoint identity, fresh provider
     // denial): same gate the start path enforces.
-    for blocker in st.broker_start_blockers() {
+    let broker_start_blockers = st.broker_start_blockers();
+    for blocker in &broker_start_blockers {
         if is_paper_alpaca {
-            autonomous_blockers.push(blocker);
+            autonomous_blockers.push(blocker.message.clone());
         } else {
-            entitlement_blockers.push(blocker);
+            entitlement_blockers.push(blocker.message.clone());
         }
     }
     // Shared-capital consequence: with several strategies configured and the
@@ -642,6 +646,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
                 )
                 .await,
             broker_account_entitlement,
+            broker_start_blockers,
         }),
     )
         .into_response()
@@ -1054,7 +1059,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     }
     // Broker-environment start refusals (Paper endpoint identity, fresh
     // provider denial of the account), appended after the existing gates.
-    blockers.extend(st.broker_start_blockers());
+    blockers.extend(st.broker_start_blockers().into_iter().map(|b| b.message));
     // STRATEGY-DORMANCY-01: Check strategy bootstrap dormancy.
     //
     // Mirrors the gate added to start_execution_runtime and the autonomous_blockers

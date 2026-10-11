@@ -559,6 +559,16 @@ pub struct RuntimeErrorResponse {
     pub gate: Option<String>,
 }
 
+/// One structured, start-refusing broker blocker (stable `code`, operator
+/// `message`; never a credential value). `code` is the runtime start-refusal
+/// fault class for environment prerequisites, or the entitlement refusal code
+/// for a fresh provider denial.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerStartBlocker {
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightStatusResponse {
     pub daemon_reachable: bool,
@@ -684,6 +694,12 @@ pub struct PreflightStatusResponse {
     /// A `denied` state is a blocker and refuses the next start; the others
     /// are warnings (a start performs a fresh account probe).
     pub broker_account_entitlement: Option<mqk_broker_alpaca::account_entitlement::AccountEntitlementReadiness>,
+
+    /// Structured form of the broker-environment start refusals (Paper endpoint
+    /// identity, missing/malformed credentials, fresh provider denial) that are
+    /// also present as text in `blockers`. Empty for brokers without a provider
+    /// account.
+    pub broker_start_blockers: Vec<BrokerStartBlocker>,
 }
 
 // ---------------------------------------------------------------------------

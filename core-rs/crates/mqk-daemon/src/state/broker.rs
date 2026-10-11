@@ -298,6 +298,100 @@ mod daemon_broker_capability_tests {
         }
     }
 
+    fn errs(
+        mode: DeploymentMode,
+        override_url: Option<&str>,
+        key: Option<&str>,
+        secret: Option<&str>,
+    ) -> Vec<(String, String)> {
+        match alpaca_prerequisites_from(
+            mode,
+            override_url,
+            key.map(str::to_string),
+            secret.map(str::to_string),
+        ) {
+            Ok(_) => vec![],
+            Err(es) => es
+                .into_iter()
+                .map(|e| (e.fault_class().to_string(), e.to_string()))
+                .collect(),
+        }
+    }
+
+    /// One authority for start prerequisites: every deterministic refusal, in
+    /// order, with variable names and never values.
+    #[test]
+    fn alpaca_prerequisites_are_complete_ordered_and_never_echo_values() {
+        use DeploymentMode::{LiveShadow, Paper};
+        let ok = Some("PKTESTKEY123");
+        let sec = Some("SECRETVALUE456");
+        assert!(errs(Paper, None, ok, sec).is_empty());
+        // CRLF from a Windows .env is fine (the adapter trims it)
+        assert!(errs(Paper, None, Some("PKTESTKEY123\r\n"), Some("SECRETVALUE456 ")).is_empty());
+
+        let missing = errs(Paper, None, None, None);
+        assert_eq!(
+            missing.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(),
+            ["runtime.start_refused.alpaca_creds_missing"; 2]
+        );
+        assert!(missing[0].1.contains("ALPACA_API_KEY_PAPER"));
+        assert!(missing[1].1.contains("ALPACA_API_SECRET_PAPER"));
+        // Live modes name the Live variables
+        assert!(errs(LiveShadow, None, None, sec)[0]
+            .1
+            .contains("ALPACA_API_KEY_LIVE"));
+
+        // malformed: interior whitespace, control, non-ASCII, over-long
+        let overlong = "x".repeat(257);
+        for bad in ["ab cd", "ab\ncd", "k\u{e9}y", overlong.as_str()] {
+            let e = errs(Paper, None, Some(bad), sec);
+            assert_eq!(e.len(), 1, "{bad:?}");
+            assert_eq!(e[0].0, "runtime.start_refused.alpaca_creds_malformed");
+            assert!(e[0].1.contains("ALPACA_API_KEY_PAPER"));
+            assert!(
+                !e[0].1.contains(bad),
+                "a credential value must never appear in the refusal"
+            );
+        }
+        // a present-but-blank token is refused too
+        assert_eq!(errs(Paper, None, Some("   "), sec).len(), 1);
+
+        // endpoint first, then key, then secret; all reported
+        let all = errs(
+            Paper,
+            Some("https://api.alpaca.markets"),
+            None,
+            Some("bad value"),
+        );
+        assert_eq!(
+            all.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(),
+            [
+                "runtime.start_refused.alpaca_paper_base_url_not_paper",
+                "runtime.start_refused.alpaca_creds_missing",
+                "runtime.start_refused.alpaca_creds_malformed",
+            ]
+        );
+        assert!(all.iter().all(|e| !e.1.contains("bad value")));
+    }
+
+    /// `build_daemon_broker` must fail exactly when the shared prerequisite
+    /// authority reports an error (same environment, same decision).
+    #[test]
+    fn build_daemon_broker_agrees_with_the_shared_prerequisite_authority() {
+        for mode in [
+            DeploymentMode::Paper,
+            DeploymentMode::LiveShadow,
+            DeploymentMode::LiveCapital,
+        ] {
+            let built = build_daemon_broker(Some(BrokerKind::Alpaca), mode);
+            let prerequisites = alpaca_prerequisites_from_env(mode);
+            assert_eq!(built.is_ok(), prerequisites.is_ok(), "{mode:?}");
+            if let (Err(b), Err(mut p)) = (built, prerequisites) {
+                assert_eq!(b.fault_class(), p.remove(0).fault_class());
+            }
+        }
+    }
+
     /// LockedPaperBroker does not override the trait default; the Paper
     /// variant must forward to that unchanged Equity-only behavior.
     #[test]
@@ -364,6 +458,107 @@ pub(crate) fn alpaca_base_url_for_mode_with(
     }
 }
 
+/// Alpaca credential env var names for a deployment mode (ENV-TRUTH-01):
+/// Paper `ALPACA_API_KEY_PAPER`/`ALPACA_API_SECRET_PAPER`, Live
+/// `ALPACA_API_KEY_LIVE`/`ALPACA_API_SECRET_LIVE`.
+pub(crate) fn alpaca_credential_env_names(
+    deployment_mode: DeploymentMode,
+) -> (&'static str, &'static str) {
+    match deployment_mode {
+        DeploymentMode::Paper => (ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_PAPER_ENV),
+        _ => (ALPACA_KEY_LIVE_ENV, ALPACA_SECRET_LIVE_ENV),
+    }
+}
+
+/// Validated Alpaca start prerequisites. Deliberately not `Debug`: it carries
+/// credentials.
+pub(crate) struct AlpacaPrerequisites {
+    pub(crate) base_url: String,
+    pub(crate) key_id: String,
+    pub(crate) secret: String,
+}
+
+/// A credential must be one printable-ASCII token (no interior whitespace,
+/// control or non-ASCII characters), at most 256 characters, after the
+/// surrounding whitespace `AlpacaBrokerAdapter::new` trims (a CRLF from a
+/// Windows `.env` is fine).
+fn credential_is_well_formed(value: &str) -> bool {
+    let t = value.trim();
+    !t.is_empty() && t.len() <= 256 && t.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// Every deterministic Alpaca start refusal, in order: endpoint identity, then
+/// the key id, then the secret. Pure over its inputs so `build_daemon_broker`
+/// (first error) and readiness (all errors) cannot disagree. Error text names
+/// the environment variable, never its value.
+pub(crate) fn alpaca_prerequisites_from(
+    deployment_mode: DeploymentMode,
+    paper_base_url_override: Option<&str>,
+    key: Option<String>,
+    secret: Option<String>,
+) -> Result<AlpacaPrerequisites, Vec<RuntimeLifecycleError>> {
+    let (key_env, secret_env) = alpaca_credential_env_names(deployment_mode);
+    let mut errors = Vec::new();
+    let base_url = match alpaca_base_url_for_mode(deployment_mode, paper_base_url_override) {
+        Ok(url) => Some(url),
+        Err(err) => {
+            errors.push(err);
+            None
+        }
+    };
+    let mut credential = |var: &str, value: Option<String>| -> Option<String> {
+        match value {
+            None => {
+                errors.push(RuntimeLifecycleError::service_unavailable(
+                    "runtime.start_refused.alpaca_creds_missing",
+                    format!("broker 'alpaca' requires a non-empty {var} environment variable"),
+                ));
+                None
+            }
+            Some(v) if !credential_is_well_formed(&v) => {
+                errors.push(RuntimeLifecycleError::service_unavailable(
+                    "runtime.start_refused.alpaca_creds_malformed",
+                    format!(
+                        "{var} is not a valid credential token (interior whitespace, control or non-ASCII characters, or longer than 256 characters); value not shown"
+                    ),
+                ));
+                None
+            }
+            Some(v) => Some(v),
+        }
+    };
+    let key_id = credential(key_env, key);
+    let secret = credential(secret_env, secret);
+    match (base_url, key_id, secret) {
+        (Some(base_url), Some(key_id), Some(secret)) if errors.is_empty() => Ok(AlpacaPrerequisites {
+            base_url,
+            key_id,
+            secret,
+        }),
+        _ => Err(errors),
+    }
+}
+
+/// [`alpaca_prerequisites_from`] over the process environment. Credentials are
+/// resolved through `mqk_config::secrets::resolve_env` (LIVE-SECRETS-
+/// CONSOLIDATION-01: the single source of truth for env-var-named secrets,
+/// never the broader `resolve_secrets_for_mode` bundle).
+pub(crate) fn alpaca_prerequisites_from_env(
+    deployment_mode: DeploymentMode,
+) -> Result<AlpacaPrerequisites, Vec<RuntimeLifecycleError>> {
+    let (key_env, secret_env) = alpaca_credential_env_names(deployment_mode);
+    let paper_override = match deployment_mode {
+        DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
+        _ => None,
+    };
+    alpaca_prerequisites_from(
+        deployment_mode,
+        paper_override.as_deref(),
+        mqk_config::secrets::resolve_env(key_env),
+        mqk_config::secrets::resolve_env(secret_env),
+    )
+}
+
 pub(crate) fn build_daemon_broker(
     broker_kind: Option<BrokerKind>,
     deployment_mode: DeploymentMode,
@@ -385,41 +580,15 @@ pub(crate) fn build_daemon_broker(
              endpoint (paper-api.alpaca.markets)",
         )),
         Some(BrokerKind::Alpaca) => {
-            // ENV-TRUTH-01: credentials are mode-specific to match .env.local.example.
-            // Paper path: ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER (paper-api.alpaca.markets)
-            // Live path:  ALPACA_API_KEY_LIVE  / ALPACA_API_SECRET_LIVE  (api.alpaca.markets)
-            let (key_env, secret_env) = match deployment_mode {
-                DeploymentMode::Paper => (ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_PAPER_ENV),
-                _ => (ALPACA_KEY_LIVE_ENV, ALPACA_SECRET_LIVE_ENV),
-            };
-            let paper_base_url_override = match deployment_mode {
-                DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
-                _ => None,
-            };
-            let base_url =
-                alpaca_base_url_for_mode(deployment_mode, paper_base_url_override.as_deref())?;
-            // LIVE-SECRETS-CONSOLIDATION-01: resolve through mqk_config::secrets
-            // (the documented single source of truth for env-var-named secret
-            // resolution) instead of a bare std::env::var — never the broader
-            // resolve_secrets_for_mode() bundle, which also requires a
-            // TwelveData key in LIVE mode, unrelated to broker construction.
-            let key_id = mqk_config::secrets::resolve_env(key_env).ok_or_else(|| {
-                RuntimeLifecycleError::service_unavailable(
-                    "runtime.start_refused.alpaca_creds_missing",
-                    format!("broker 'alpaca' requires {key_env} environment variable"),
-                )
-            })?;
-            let secret = mqk_config::secrets::resolve_env(secret_env).ok_or_else(|| {
-                RuntimeLifecycleError::service_unavailable(
-                    "runtime.start_refused.alpaca_creds_missing",
-                    format!("broker 'alpaca' requires {secret_env} environment variable"),
-                )
-            })?;
+            // The single authority for Alpaca start prerequisites (endpoint
+            // identity + credentials); readiness reports the same set.
+            let prerequisites = alpaca_prerequisites_from_env(deployment_mode)
+                .map_err(|mut errors| errors.remove(0))?;
             Ok(DaemonBroker::Alpaca(AlpacaBrokerAdapter::new(
                 AlpacaConfig {
-                    base_url,
-                    api_key_id: key_id,
-                    api_secret_key: secret,
+                    base_url: prerequisites.base_url,
+                    api_key_id: prerequisites.key_id,
+                    api_secret_key: prerequisites.secret,
                     crypto_capability_enabled: false,
                     options_mleg_capability_enabled: false,
                 },
