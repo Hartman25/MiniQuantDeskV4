@@ -101,6 +101,38 @@ export interface SystemStatus {
   deadman_last_heartbeat_utc: string | null;
 }
 
+/**
+ * Daemon readiness of the broker-account entitlement for the Equity order
+ * path, computed from the same evidence and admission logic the gateway
+ * enforces. Only "entitled" means orders would be admitted; every other state
+ * is NOT order-authorized ("unbound": fresh evidence but no validated
+ * run/account binding; "not_observed": no observation yet in this process).
+ */
+export type BrokerAccountEntitlementState =
+  | "entitled"
+  | "denied"
+  | "stale"
+  | "unbound"
+  | "unknown"
+  | "not_observed";
+
+export interface BrokerAccountEntitlement {
+  state: BrokerAccountEntitlementState;
+  asset_class: string;
+  /** Stable daemon refusal code (e.g. account_trading_blocked); null when entitled/not observed. */
+  code: string | null;
+  detail: string | null;
+  /** Provider account id (a UUID, not a credential). */
+  provider_account_id: string | null;
+  observed_at_utc: string | null;
+}
+
+/** One structured start-refusing broker blocker; `message` never carries a credential value. */
+export interface BrokerStartBlocker {
+  code: string;
+  message: string;
+}
+
 export interface PreflightStatus {
   daemon_reachable: boolean;
   db_reachable: boolean;
@@ -142,6 +174,10 @@ export interface PreflightStatus {
   session_window_source?: string | null;
   /** "in_window" | "outside_window". Null when not applicable. */
   session_window_state?: string | null;
+  /** Broker-account entitlement readiness; null/absent when the broker has no provider account. */
+  broker_account_entitlement?: BrokerAccountEntitlement | null;
+  /** Structured broker start refusals (endpoint identity, credentials, provider denial). */
+  broker_start_blockers?: BrokerStartBlocker[];
 }
 
 // ---------------------------------------------------------------------------

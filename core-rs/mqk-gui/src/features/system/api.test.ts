@@ -1819,3 +1819,66 @@ test("DRGT11: dry-run diagnostics panel contains no order submit/cancel/replace 
     globalThis.fetch = originalFetch;
   }
 });
+
+
+// BROKER-ACCOUNT: the additive preflight fields reach the model verbatim when
+// well-formed, and a malformed present field fails closed to the unavailable
+// preflight (never silently dropped into a "Ready"-looking body).
+async function fetchModelWithPreflight(preflightBody: Record<string, unknown>) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") return jsonResponse(preflightBody);
+    return notFoundResponse();
+  }) as typeof fetch;
+  try {
+    return await fetchOperatorModel();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+const VALID_PREFLIGHT_BASE = {
+  daemon_reachable: true,
+  db_reachable: true,
+  broker_config_present: true,
+  market_data_config_present: true,
+  audit_writer_ready: true,
+  runtime_idle: true,
+  strategy_disarmed: true,
+  execution_disarmed: true,
+  live_routing_disabled: true,
+  warnings: [],
+  blockers: ["broker account entitlement is denied [account_trading_blocked]: x"],
+};
+
+test("BROKER-ACCOUNT: well-formed entitlement + start blockers are preserved in the model", async () => {
+  const model = await fetchModelWithPreflight({
+    ...VALID_PREFLIGHT_BASE,
+    broker_account_entitlement: {
+      state: "denied",
+      asset_class: "equity",
+      code: "account_trading_blocked",
+      detail: "provider reports trading_blocked=true",
+      provider_account_id: "904837e3-3b76-47ec-b432-046db621571b",
+      observed_at_utc: "2026-10-11T14:00:00Z",
+    },
+    broker_start_blockers: [{ code: "account_trading_blocked", message: "broker account entitlement is denied" }],
+  });
+  assert.equal(model.preflight.broker_account_entitlement?.state, "denied");
+  assert.equal(model.preflight.broker_account_entitlement?.code, "account_trading_blocked");
+  assert.equal(model.preflight.broker_start_blockers?.[0]?.code, "account_trading_blocked");
+});
+
+test("BROKER-ACCOUNT: malformed entitlement state fails closed to unavailablePreflight", async () => {
+  const model = await fetchModelWithPreflight({
+    ...VALID_PREFLIGHT_BASE,
+    broker_account_entitlement: { state: "ready", asset_class: "equity", code: null, detail: null, provider_account_id: null, observed_at_utc: null },
+  });
+  assert.equal(model.preflight.runtime_idle, false, "fell back to unavailablePreflight");
+  assert.equal(model.preflight.broker_account_entitlement ?? null, null);
+});

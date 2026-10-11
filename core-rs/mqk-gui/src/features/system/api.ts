@@ -12,6 +12,7 @@
 //   - actions.ts  — invokeOperatorAction
 
 import { withClassifiedPanelSources } from "./sourceAuthority";
+import { brokerReadinessFieldsStructurallyValid } from "./brokerAccountEntitlement";
 import { parseIncidents } from "./incidentContract";
 import { parseMetricsDashboard } from "./metricsContract";
 import { parseActiveAlerts, parseAlertTriage, type AlertTriageSnapshot } from "./alertContract";
@@ -412,7 +413,8 @@ function isStructurallyValidPreflight(data: unknown): data is PreflightStatus {
     typeof p["execution_disarmed"] === "boolean" &&
     typeof p["live_routing_disabled"] === "boolean" &&
     Array.isArray(p["blockers"]) && p["blockers"].every((value) => typeof value === "string") &&
-    Array.isArray(p["warnings"]) && p["warnings"].every((value) => typeof value === "string")
+    Array.isArray(p["warnings"]) && p["warnings"].every((value) => typeof value === "string") &&
+    brokerReadinessFieldsStructurallyValid(p)
   );
 }
 

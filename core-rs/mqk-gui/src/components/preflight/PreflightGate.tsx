@@ -1,4 +1,5 @@
 import type { PreflightStatus } from "../../features/system/types";
+import { brokerAccountChecks } from "../../features/system/brokerAccountEntitlement";
 
 interface PreflightGateProps {
   preflight: PreflightStatus;
@@ -64,6 +65,7 @@ function armStateLabel(state: string | undefined): string {
 export function PreflightGate({ preflight, runtimeStatus }: PreflightGateProps) {
   const showAutonomous = Boolean(preflight.autonomous_readiness_applicable);
   const runtimeActive = runtimeStatus === "running" || runtimeStatus === "starting";
+  const brokerChecks = brokerAccountChecks(preflight);
 
   return (
     <section className="panel preflight-panel">
@@ -95,6 +97,38 @@ export function PreflightGate({ preflight, runtimeStatus }: PreflightGateProps) 
           );
         })}
       </div>
+
+      {brokerChecks.length > 0 && (
+        <>
+          <div className="panel-header" style={{ marginTop: "1rem" }}>
+            <div>
+              <div className="eyebrow">Broker account authority</div>
+              <h3>Account entitlement</h3>
+            </div>
+          </div>
+          <div className="checklist-grid">
+            {brokerChecks.map((check) => (
+              <div
+                key={`${check.kind}:${check.code ?? check.title}`}
+                className={`check-card ${
+                  check.tone === "ok" ? "is-ok" :
+                  check.tone === "warning" ? "is-warning" :
+                  check.tone === "unknown" ? "is-unknown" : "is-blocked"
+                }`}
+              >
+                <span className="check-icon">
+                  {check.tone === "ok" ? "✓" : check.tone === "warning" ? "~" : check.tone === "unknown" ? "?" : "!"}
+                </span>
+                <div>
+                  <strong>{check.title}</strong>
+                  <p>{check.detail}</p>
+                  {check.code && <p className="check-code">{check.code}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {showAutonomous && (
         <>
