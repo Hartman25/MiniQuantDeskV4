@@ -95,7 +95,10 @@ fn require_flag_clear(
             "account_entitlement_field_unavailable",
             format!("GET /v2/account did not carry a boolean `{name}`"),
         )),
-        Some(true) => Err(refuse(blocked_code, format!("provider reports {name}=true"))),
+        Some(true) => Err(refuse(
+            blocked_code,
+            format!("provider reports {name}=true"),
+        )),
         Some(false) => Ok(()),
     }
 }
@@ -211,11 +214,25 @@ impl AccountEvidenceCell {
         }
     }
 
-    /// Bind admission to one provider account id (lowercased). A later
-    /// observation naming a different account is refused as identity drift.
+    /// Bind admission to one provider account id (lowercased). Admission
+    /// REQUIRES this binding and refuses any observation naming a different
+    /// account. It is established only by the run-start binding step after the
+    /// execution adapter's own probe proved the account (and, for Paper, the
+    /// durable registry accepted it); an observation by any other fetcher never
+    /// binds. A blank id clears the binding.
     pub fn pin_provider_account_id(&self, provider_account_id: &str) {
+        let id = provider_account_id.trim().to_ascii_lowercase();
         if let Ok(mut s) = self.0.lock() {
-            s.pinned_provider_account_id = Some(provider_account_id.trim().to_ascii_lowercase());
+            s.pinned_provider_account_id = (!id.is_empty()).then_some(id);
+        }
+    }
+
+    /// Drop the run/account binding (called at the start of every run, before
+    /// the probe, so a binding never survives into a run that failed to prove
+    /// its own).
+    pub fn clear_run_binding(&self) {
+        if let Ok(mut s) = self.0.lock() {
+            s.pinned_provider_account_id = None;
         }
     }
 
@@ -231,8 +248,9 @@ impl AccountEvidenceCell {
     }
 
     /// Admission against the latest observation: unavailable, stale (older
-    /// than `freshness_bound` or timestamped in the future), identity-drifted
-    /// or non-entitled evidence refuses.
+    /// than `freshness_bound` or timestamped in the future), unbound (no
+    /// validated run/account binding), identity-drifted or non-entitled
+    /// evidence refuses. An absent binding is never permission.
     pub fn admit(
         &self,
         now: DateTime<Utc>,
@@ -266,8 +284,8 @@ impl AccountEvidenceCell {
                 ),
             ));
         }
-        if let Some(pinned) = pinned {
-            if obs.evidence.provider_account_id.as_deref() != Some(pinned.as_str()) {
+        if let Some(pinned) = pinned.as_deref() {
+            if obs.evidence.provider_account_id.as_deref() != Some(pinned) {
                 return Err(refuse(
                     "account_identity_drift",
                     format!(
@@ -277,7 +295,17 @@ impl AccountEvidenceCell {
                 ));
             }
         }
-        evaluate_account_entitlement(&obs.evidence, asset_class)
+        // Report the provider's own denial even when no binding exists yet
+        // (the most informative refusal); an entitled account with no binding
+        // is still refused below.
+        evaluate_account_entitlement(&obs.evidence, asset_class)?;
+        if pinned.is_none() {
+            return Err(refuse(
+                "account_binding_absent",
+                "no validated run/account binding exists; fresh account evidence alone does not authorize orders",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -301,8 +329,10 @@ pub fn is_provider_denial_code(code: &str) -> bool {
 /// asset class, derived from the same `admit` logic the gateway enforces.
 ///
 /// `state`: `not_observed` (no observation yet in this process), `entitled`,
-/// `denied` (definite provider/identity denial), `stale`, `unknown`
-/// (observation present but fields unavailable/malformed).
+/// `denied` (definite provider/identity denial), `stale`, `unbound` (fresh
+/// evidence but no validated run/account binding), `unknown` (observation
+/// present but fields unavailable/malformed). Only `entitled` means orders
+/// would be admitted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AccountEntitlementReadiness {
     pub state: String,
@@ -327,6 +357,7 @@ impl AccountEvidenceCell {
                 let state = match r.code.as_str() {
                     "account_evidence_unavailable" if latest.is_none() => "not_observed",
                     "account_evidence_stale" => "stale",
+                    "account_binding_absent" => "unbound",
                     c if is_provider_denial_code(c) => "denied",
                     _ => "unknown",
                 };

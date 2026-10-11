@@ -198,6 +198,9 @@ mod daemon_broker_capability_tests {
             Err("account_evidence_unavailable".to_string())
         );
         cell.observe(account(serde_json::json!({})), chrono::Utc::now());
+        // fresh + entitled but no run/account binding: refused
+        assert_eq!(code(&bound), Err("account_binding_absent".to_string()));
+        cell.pin_provider_account_id("904837e3-3b76-47ec-b432-046db621571b");
         assert_eq!(code(&bound), Ok(()));
         cell.observe(
             account(serde_json::json!({"trading_blocked": true})),
@@ -267,6 +270,7 @@ mod daemon_broker_capability_tests {
             Clean,
         );
         let claim = OutboxClaimToken::for_test(1, "ord-acct-01");
+        cell.pin_provider_account_id("904837e3-3b76-47ec-b432-046db621571b");
 
         for (label, evidence, want) in [
             ("never observed", None, "account_evidence_unavailable"),

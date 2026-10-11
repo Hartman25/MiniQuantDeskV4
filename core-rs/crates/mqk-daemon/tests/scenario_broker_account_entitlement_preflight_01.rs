@@ -79,13 +79,34 @@ async fn p01_not_observed_is_warning_not_entitled_not_blocker() {
 #[tokio::test]
 async fn p02_fresh_entitled_evidence_is_entitled() {
     let st = alpaca_state();
+    st.broker_account_evidence
+        .pin_provider_account_id("904837e3-3b76-47ec-b432-046db621571b");
     observe(&st, &active(), 1);
     let pf = preflight(st).await;
     let ent = &pf["broker_account_entitlement"];
     assert_eq!(ent["state"], "entitled");
-    assert_eq!(ent["provider_account_id"], "904837e3-3b76-47ec-b432-046db621571b");
+    assert_eq!(
+        ent["provider_account_id"],
+        "904837e3-3b76-47ec-b432-046db621571b"
+    );
     assert!(ent["observed_at_utc"].is_string());
     assert!(!mentions(&pf["warnings"], "broker account entitlement"));
+    assert!(!mentions(&pf["blockers"], "broker account entitlement"));
+}
+
+/// Fresh, entitled evidence with no validated run/account binding is NOT
+/// order-authorized: reported `unbound`, a warning, never `entitled`.
+#[tokio::test]
+async fn p08_entitled_evidence_without_a_binding_is_unbound_not_entitled() {
+    let st = alpaca_state();
+    observe(&st, &active(), 1);
+    let pf = preflight(st).await;
+    assert_eq!(pf["broker_account_entitlement"]["state"], "unbound");
+    assert_eq!(
+        pf["broker_account_entitlement"]["code"],
+        "account_binding_absent"
+    );
+    assert!(mentions(&pf["warnings"], "broker account entitlement"));
     assert!(!mentions(&pf["blockers"], "broker account entitlement"));
 }
 
@@ -97,7 +118,10 @@ async fn p03_fresh_provider_denial_is_a_blocker() {
     observe(&st, &a, 1);
     let pf = preflight(st).await;
     assert_eq!(pf["broker_account_entitlement"]["state"], "denied");
-    assert_eq!(pf["broker_account_entitlement"]["code"], "account_trading_blocked");
+    assert_eq!(
+        pf["broker_account_entitlement"]["code"],
+        "account_trading_blocked"
+    );
     assert!(mentions(&pf["blockers"], "account_trading_blocked"));
 }
 
@@ -130,7 +154,10 @@ async fn p06_identity_drift_against_bound_account_is_denied() {
     observe(&st, &active(), 1);
     let pf = preflight(st).await;
     assert_eq!(pf["broker_account_entitlement"]["state"], "denied");
-    assert_eq!(pf["broker_account_entitlement"]["code"], "account_identity_drift");
+    assert_eq!(
+        pf["broker_account_entitlement"]["code"],
+        "account_identity_drift"
+    );
     assert!(mentions(&pf["blockers"], "account_identity_drift"));
 }
 

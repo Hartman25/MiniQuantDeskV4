@@ -1635,10 +1635,28 @@ fn pd_legacy_freshness_max_age_secs(latest_bar_end_ts: i64) -> i64 {
 }
 
 async fn pd_start_mock_alpaca_server() -> String {
-    let app = axum::Router::new().route(
-        "/v2/account/activities/FILL",
-        axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
-    );
+    let app = axum::Router::new()
+        .route(
+            "/v2/account/activities/FILL",
+            axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
+        )
+        .route(
+            "/v2/account",
+            axum::routing::get(|| async {
+                // In-process fixture of the GET /v2/account wire shape: lets the
+                // run-start binding step prove an account for hermetic starts.
+                axum::Json(serde_json::json!({
+                    "id": "dddddddd-0000-4000-8000-0000000000d1",
+                    "status": "ACTIVE",
+                    "trading_blocked": false,
+                    "account_blocked": false,
+                    "trade_suspended_by_user": false,
+                    "currency": "USD",
+                    "equity": "100000",
+                    "cash": "100000"
+                }))
+            }),
+        );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

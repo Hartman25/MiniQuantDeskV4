@@ -198,14 +198,20 @@ fn lifecycle_legacy_freshness_max_age_secs(latest_bar_end_ts: i64) -> i64 {
     (real_now - latest_bar_end_ts).max(0) + 3600
 }
 
-/// Body served for `GET /v2/account` by the mock; `None` => 404 (the default,
-/// so every pre-existing test keeps seeing no provider account). Tests run
-/// serially (`--test-threads=1`) and reset it themselves.
-static MOCK_ACCOUNT_BODY: std::sync::Mutex<Option<serde_json::Value>> =
-    std::sync::Mutex::new(None);
+/// What the mock serves for `GET /v2/account`. `Default` is a valid entitled
+/// account so every pre-existing start-path test can prove an account; tests
+/// run serially (`--test-threads=1`) and reset it through `MockAccountGuard`.
+#[derive(Clone)]
+enum MockAccount {
+    Default,
+    Absent,
+    Body(serde_json::Value),
+}
 
-fn set_mock_account(body: Option<serde_json::Value>) {
-    *MOCK_ACCOUNT_BODY.lock().unwrap() = body;
+static MOCK_ACCOUNT: std::sync::Mutex<MockAccount> = std::sync::Mutex::new(MockAccount::Default);
+
+fn set_mock_account(account: MockAccount) {
+    *MOCK_ACCOUNT.lock().unwrap() = account;
 }
 
 /// Resets the mock account on drop so a failing assertion cannot leak a
@@ -213,7 +219,7 @@ fn set_mock_account(body: Option<serde_json::Value>) {
 struct MockAccountGuard;
 impl Drop for MockAccountGuard {
     fn drop(&mut self) {
-        set_mock_account(None);
+        set_mock_account(MockAccount::Default);
     }
 }
 
@@ -252,9 +258,13 @@ async fn start_mock_alpaca_server() -> String {
             "/v2/account",
             axum::routing::get(|| async {
                 use axum::response::IntoResponse;
-                match MOCK_ACCOUNT_BODY.lock().unwrap().clone() {
-                    Some(body) => axum::Json(body).into_response(),
-                    None => StatusCode::NOT_FOUND.into_response(),
+                match MOCK_ACCOUNT.lock().unwrap().clone() {
+                    MockAccount::Default => {
+                        axum::Json(mock_account(ACCT_ID_DEFAULT, serde_json::json!({})))
+                            .into_response()
+                    }
+                    MockAccount::Body(body) => axum::Json(body).into_response(),
+                    MockAccount::Absent => StatusCode::NOT_FOUND.into_response(),
                 }
             }),
         );
@@ -1612,6 +1622,7 @@ async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provena
 // Broker-account entitlement at run start (probe, identity registry, refusal)
 // ---------------------------------------------------------------------------
 
+const ACCT_ID_DEFAULT: &str = "aaaaaaaa-0000-4000-8000-0000000000d0";
 const ACCT_ID_ENTITLED: &str = "aaaaaaaa-0000-4000-8000-000000000001";
 const ACCT_ID_BLOCKED: &str = "aaaaaaaa-0000-4000-8000-000000000002";
 const ACCT_ID_LIVE_REGISTERED: &str = "aaaaaaaa-0000-4000-8000-000000000003";
@@ -1630,7 +1641,10 @@ async fn start_expecting_refusal(st: &Arc<state::AppState>) -> (StatusCode, serd
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn start_probes_account_registers_identity_and_binds_admission() {
     let _guard = MockAccountGuard;
-    set_mock_account(Some(mock_account(ACCT_ID_ENTITLED, serde_json::json!({}))));
+    set_mock_account(MockAccount::Body(mock_account(
+        ACCT_ID_ENTITLED,
+        serde_json::json!({}),
+    )));
     let st = daemon_state().await;
     arm(&st).await;
     start(&st).await;
@@ -1644,7 +1658,9 @@ async fn start_probes_account_registers_identity_and_binds_admission() {
         Some(ACCT_ID_ENTITLED)
     );
     assert_eq!(
-        st.broker_account_evidence.pinned_provider_account_id().as_deref(),
+        st.broker_account_evidence
+            .pinned_provider_account_id()
+            .as_deref(),
         Some(ACCT_ID_ENTITLED)
     );
     assert!(st
@@ -1676,7 +1692,7 @@ async fn start_probes_account_registers_identity_and_binds_admission() {
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn start_refused_when_provider_reports_trading_blocked() {
     let _guard = MockAccountGuard;
-    set_mock_account(Some(mock_account(
+    set_mock_account(MockAccount::Body(mock_account(
         ACCT_ID_BLOCKED,
         serde_json::json!({"trading_blocked": true}),
     )));
@@ -1688,14 +1704,17 @@ async fn start_refused_when_provider_reports_trading_blocked() {
         body["fault_class"],
         "runtime.start_refused.broker_account_not_entitled"
     );
-    assert!(body["error"].as_str().unwrap().contains("account_trading_blocked"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("account_trading_blocked"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn start_refused_when_account_is_registered_under_another_deployment_mode() {
     let _guard = MockAccountGuard;
-    set_mock_account(Some(mock_account(
+    set_mock_account(MockAccount::Body(mock_account(
         ACCT_ID_LIVE_REGISTERED,
         serde_json::json!({}),
     )));
@@ -1706,13 +1725,9 @@ async fn start_refused_when_account_is_registered_under_another_deployment_mode(
         state::DeploymentMode::LiveShadow.as_api_label(),
     )
     .unwrap();
-    mqk_db::verify_or_register_broker_account_authority(
-        st.db.as_ref().unwrap(),
-        &live,
-        Utc::now(),
-    )
-    .await
-    .unwrap();
+    mqk_db::verify_or_register_broker_account_authority(st.db.as_ref().unwrap(), &live, Utc::now())
+        .await
+        .unwrap();
     arm(&st).await;
     let (status, body) = start_expecting_refusal(&st).await;
     assert_ne!(status, StatusCode::OK, "{body}");
@@ -1722,26 +1737,104 @@ async fn start_refused_when_account_is_registered_under_another_deployment_mode(
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
-async fn failed_probe_does_not_refuse_start_and_leaves_admission_unavailable() {
-    let _guard = MockAccountGuard;
-    set_mock_account(None);
-    let st = daemon_state().await;
-    arm(&st).await;
-    start(&st).await;
-    assert!(
-        st.broker_account_evidence.latest().is_none(),
-        "no provider observation may be fabricated when the probe fails"
-    );
-    let refusal = st
-        .broker_account_evidence
+fn entitled_evidence(id: &str) -> mqk_broker_alpaca::AccountEntitlementEvidence {
+    mqk_broker_alpaca::AccountEntitlementEvidence::from_account_json(&mock_account(
+        id,
+        serde_json::json!({}),
+    ))
+}
+
+fn admit_equity(st: &Arc<state::AppState>) -> Result<(), String> {
+    st.broker_account_evidence
         .admit(
             Utc::now(),
             chrono::Duration::seconds(61),
             Some(mqk_execution::AssetClass::Equity),
         )
-        .unwrap_err();
-    assert_eq!(refusal.code, "account_evidence_unavailable");
+        .map_err(|r| r.code)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn failed_probe_refuses_start_and_a_later_snapshot_cannot_authorize_orders() {
+    let _guard = MockAccountGuard;
+    set_mock_account(MockAccount::Absent);
+    let st = daemon_state().await;
+    // A binding left over from an earlier run must not survive a failed proof.
+    st.broker_account_evidence
+        .pin_provider_account_id("stale-binding-from-an-earlier-run");
+    arm(&st).await;
+    let (status, body) = start_expecting_refusal(&st).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["fault_class"],
+        "runtime.start_refused.broker_account_unproven"
+    );
+    assert!(st
+        .broker_account_evidence
+        .pinned_provider_account_id()
+        .is_none());
+    assert!(
+        st.broker_account_evidence.latest().is_none(),
+        "no provider observation may be fabricated when the probe fails"
+    );
+    // An unrelated successful fetch (snapshot refresher) records fresh,
+    // entitled evidence: it must NOT authorize anything without a binding.
+    st.broker_account_evidence
+        .observe(entitled_evidence(ACCT_ID_ENTITLED), Utc::now());
+    assert_eq!(admit_equity(&st), Err("account_binding_absent".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn missing_account_id_refuses_start_until_a_legitimate_binding_exists() {
+    let _guard = MockAccountGuard;
+    let mut body = mock_account(ACCT_ID_ENTITLED, serde_json::json!({}));
+    body.as_object_mut().unwrap().remove("id");
+    set_mock_account(MockAccount::Body(body));
+    let st = daemon_state().await;
+    arm(&st).await;
+    let (status, refusal) = start_expecting_refusal(&st).await;
+    assert_ne!(status, StatusCode::OK, "{refusal}");
+    assert_eq!(
+        refusal["fault_class"],
+        "runtime.start_refused.broker_account_unproven"
+    );
+    st.broker_account_evidence
+        .observe(entitled_evidence(ACCT_ID_ENTITLED), Utc::now());
+    assert_eq!(admit_equity(&st), Err("account_binding_absent".to_string()));
+
+    // Legitimate binding transition: a start whose own probe proves the account.
+    set_mock_account(MockAccount::Body(mock_account(
+        ACCT_ID_ENTITLED,
+        serde_json::json!({}),
+    )));
+    start(&st).await;
+    assert_eq!(admit_equity(&st), Ok(()));
     st.stop_for_shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn a_restarted_process_inherits_no_binding_or_entitlement() {
+    let _guard = MockAccountGuard;
+    let st = daemon_state().await;
+    arm(&st).await;
+    start(&st).await;
+    assert_eq!(admit_equity(&st), Ok(()));
+    st.stop_for_shutdown().await;
+    drop(st);
+
+    // "Restart": a new process-local AppState over the same database. The
+    // durable registry row survives; the binding and evidence do not.
+    let restarted = daemon_state().await;
+    assert!(restarted
+        .broker_account_evidence
+        .pinned_provider_account_id()
+        .is_none());
+    assert!(restarted.broker_account_evidence.latest().is_none());
+    assert_eq!(
+        admit_equity(&restarted),
+        Err("account_evidence_unavailable".to_string())
+    );
 }

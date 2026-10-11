@@ -2914,6 +2914,7 @@ mod mleg_vertical_spread_tests {
             })),
             chrono::Utc::now(),
         );
+        cell.pin_provider_account_id("904837e3-3b76-47ec-b432-046db621571b");
         AlpacaBrokerAdapter::new_for_test(base_url)
             .with_options_mleg_capability_enabled(true)
             .with_account_evidence(cell, chrono::Duration::seconds(61))

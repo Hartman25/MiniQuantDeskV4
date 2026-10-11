@@ -132,15 +132,20 @@ impl RuntimeAccountAuthority for DaemonAccountAuthority {
 }
 
 impl AppState {
-    /// Run-start broker-account step (Alpaca only): one `GET /v2/account`
-    /// recorded into the shared evidence cell, then the provider account is
-    /// registered against Paper mode in the durable authority registry (an
-    /// account already registered under a Live mode refuses a Paper start)
-    /// and this run's admission is pinned to that account id.
+    /// Run-start broker-account step (Alpaca only). Every run proves its OWN
+    /// account binding: any prior binding is dropped, then one
+    /// `GET /v2/account` through the execution adapter is recorded into the
+    /// shared evidence cell. A probe that fails, or whose body carries no usable
+    /// account id, refuses the start (`broker_account_unproven`): without a
+    /// binding the gateway would refuse every order anyway, and a later fetch by
+    /// an unrelated snapshot refresher must never be able to authorize them.
     ///
-    /// A failed probe does not refuse the start: evidence simply stays absent
-    /// or stale, and every submit is refused at the gateway until a fresh
-    /// observation exists.
+    /// With a proven id: Paper registers the account in the durable authority
+    /// registry (an account already registered under a Live mode refuses the
+    /// start); a definite provider denial refuses the start; only then is the
+    /// run bound to the account. Unknown or malformed entitlement fields do not
+    /// refuse the start (a bound run with unknown evidence stays diagnostic: the
+    /// gateway admits nothing until evidence is entitled).
     async fn observe_and_bind_broker_account(
         &self,
         broker: &DaemonBroker,
@@ -149,19 +154,20 @@ impl AppState {
         let DaemonBroker::Alpaca(adapter) = broker else {
             return Ok(());
         };
-        let now = Utc::now();
-        let evidence = match tokio::task::block_in_place(|| adapter.fetch_account_entitlement(now))
-        {
-            Ok(evidence) => evidence,
-            Err(err) => {
-                tracing::warn!(
-                    "broker_account_probe_failed: submissions stay refused until a fresh account observation exists; error={err}"
-                );
-                return Ok(());
-            }
+        self.broker_account_evidence.clear_run_binding();
+        let unproven = |detail: String| {
+            RuntimeLifecycleError::service_unavailable(
+                "runtime.start_refused.broker_account_unproven",
+                format!("broker account could not be proven for this run: {detail}"),
+            )
         };
+        let now = Utc::now();
+        let evidence = tokio::task::block_in_place(|| adapter.fetch_account_entitlement(now))
+            .map_err(|err| unproven(format!("GET /v2/account probe failed: {err}")))?;
         let Some(provider_account_id) = evidence.provider_account_id.as_deref() else {
-            return Ok(());
+            return Err(unproven(
+                "GET /v2/account did not carry a usable account id".to_string(),
+            ));
         };
         let identity_conflict = |detail: String| {
             RuntimeLifecycleError::forbidden(
@@ -185,12 +191,9 @@ impl AppState {
                 .await
                 .map_err(|err| identity_conflict(err.to_string()))?;
         }
-        self.broker_account_evidence
-            .pin_provider_account_id(provider_account_id);
         // A definite provider denial (blocked / suspended / not ACTIVE) refuses
         // the start: every order would be refused at the gateway anyway, and
-        // preflight reports the same state. Unknown or malformed evidence does
-        // not refuse the start; it only keeps submissions refused.
+        // preflight reports the same state.
         if let Err(refusal) = mqk_broker_alpaca::evaluate_account_entitlement(
             &evidence,
             Some(mqk_execution::AssetClass::Equity),
@@ -203,6 +206,8 @@ impl AppState {
                 ));
             }
         }
+        self.broker_account_evidence
+            .pin_provider_account_id(provider_account_id);
         Ok(())
     }
 

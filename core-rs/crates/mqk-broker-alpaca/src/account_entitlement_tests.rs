@@ -20,6 +20,8 @@ fn active_account() -> Value {
     })
 }
 
+const ACCOUNT_ID: &str = "904837e3-3b76-47ec-b432-046db621571b";
+
 fn ev(v: &Value) -> AccountEntitlementEvidence {
     AccountEntitlementEvidence::from_account_json(v)
 }
@@ -174,6 +176,7 @@ fn cell_without_observation_is_unavailable_never_admitting() {
 #[test]
 fn stale_and_future_observations_refuse() {
     let cell = AccountEvidenceCell::new();
+    cell.pin_provider_account_id(ACCOUNT_ID);
     cell.observe(ev(&active_account()), t0());
     let bound = Duration::seconds(61);
     assert!(cell
@@ -192,6 +195,7 @@ fn stale_and_future_observations_refuse() {
 #[test]
 fn status_change_after_valid_snapshot_refuses_on_next_observation() {
     let cell = AccountEvidenceCell::new();
+    cell.pin_provider_account_id(ACCOUNT_ID);
     let bound = Duration::seconds(61);
     cell.observe(ev(&active_account()), t0());
     assert!(cell.admit(t0(), bound, Some(AssetClass::Equity)).is_ok());
@@ -234,6 +238,7 @@ fn pinned_account_identity_drift_refuses() {
 #[test]
 fn unknown_fields_report_unknown_not_denied() {
     let cell = AccountEvidenceCell::new();
+    cell.pin_provider_account_id(ACCOUNT_ID);
     let mut a = active_account();
     a.as_object_mut().unwrap().remove("trading_blocked");
     cell.observe(ev(&a), t0());
@@ -282,6 +287,12 @@ mod adapter {
             options_mleg_capability_enabled: false,
         })
         .with_account_evidence(cell.clone(), Duration::seconds(61))
+    }
+
+    /// Bind the run to the fixture account (what the run-start step does after
+    /// its own probe proved the account).
+    fn bound(cell: &AccountEvidenceCell) {
+        cell.pin_provider_account_id("904837e3-3b76-47ec-b432-046db621571b");
     }
 
     fn serve(server: &MockServer, body: Value) {
@@ -335,8 +346,11 @@ mod adapter {
         serve(&server, account_body(json!({"crypto_status": "INACTIVE"})));
         let cell = AccountEvidenceCell::new();
         let a = adapter(&server, &cell);
+        bound(&cell);
         a.fetch_broker_snapshot(Utc::now()).expect("snapshot");
-        assert!(a.admit_account_entitlement(Some(AssetClass::Equity)).is_ok());
+        assert!(a
+            .admit_account_entitlement(Some(AssetClass::Equity))
+            .is_ok());
         assert_eq!(
             a.admit_account_entitlement(Some(AssetClass::Crypto))
                 .unwrap_err()
@@ -351,6 +365,7 @@ mod adapter {
         serve(&server, account_body(json!({"trading_blocked": true})));
         let cell = AccountEvidenceCell::new();
         let a = adapter(&server, &cell);
+        bound(&cell);
         a.fetch_broker_snapshot(Utc::now())
             .expect("a blocked account still yields a snapshot");
         assert_eq!(
@@ -367,6 +382,7 @@ mod adapter {
         serve(&server, account_body(json!({})));
         let cell = AccountEvidenceCell::new();
         let a = adapter(&server, &cell);
+        bound(&cell);
         a.fetch_account_entitlement(Utc::now() - Duration::seconds(600))
             .expect("probe");
         assert_eq!(
@@ -393,6 +409,7 @@ mod adapter {
         })
         .with_account_evidence(cell.clone(), Duration::seconds(61));
         assert!(a.supports_asset_class(AssetClass::Crypto));
+        bound(&cell);
         cell.observe(
             ev(&account_body(json!({"crypto_status": "INACTIVE"}))),
             Utc::now(),
@@ -413,8 +430,78 @@ mod adapter {
         let server = MockServer::start();
         let cell = AccountEvidenceCell::new();
         let a = adapter(&server, &cell);
+        bound(&cell);
         cell.observe(ev(&account_body(json!({}))), Utc::now());
-        assert!(a.admit_account_entitlement(Some(AssetClass::Crypto)).is_ok());
+        assert!(a
+            .admit_account_entitlement(Some(AssetClass::Crypto))
+            .is_ok());
         assert!(!a.supports_asset_class(AssetClass::Crypto));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Positive run/account binding is REQUIRED: fresh, entitled evidence observed
+// by anyone (e.g. an unrelated snapshot refresher) never authorizes orders.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fresh_entitled_evidence_without_a_binding_is_refused() {
+    let cell = AccountEvidenceCell::new();
+    let bound = Duration::seconds(61);
+    cell.observe(ev(&active_account()), t0());
+    for class in [None, Some(AssetClass::Equity)] {
+        assert_eq!(
+            code(cell.admit(t0(), bound, class)),
+            "account_binding_absent"
+        );
+    }
+    let r = cell.readiness(t0(), bound, AssetClass::Equity);
+    assert_eq!(r.state, "unbound");
+    assert_eq!(r.code.as_deref(), Some("account_binding_absent"));
+    assert!(!is_provider_denial_code("account_binding_absent"));
+}
+
+#[test]
+fn binding_is_the_only_thing_that_turns_evidence_into_admission() {
+    let cell = AccountEvidenceCell::new();
+    let bound = Duration::seconds(61);
+    cell.observe(ev(&active_account()), t0());
+    assert!(cell.admit(t0(), bound, None).is_err());
+    cell.pin_provider_account_id(ACCOUNT_ID);
+    assert!(cell.admit(t0(), bound, None).is_ok());
+    // a blank id is not a binding; clearing removes admission again
+    cell.pin_provider_account_id("  ");
+    assert_eq!(
+        code(cell.admit(t0(), bound, None)),
+        "account_binding_absent"
+    );
+    cell.pin_provider_account_id(ACCOUNT_ID);
+    cell.clear_run_binding();
+    assert_eq!(
+        code(cell.admit(t0(), bound, None)),
+        "account_binding_absent"
+    );
+    // a later independent observation does not re-establish it
+    cell.observe(ev(&active_account()), t0() + Duration::seconds(5));
+    assert_eq!(
+        code(cell.admit(t0() + Duration::seconds(6), bound, None)),
+        "account_binding_absent"
+    );
+}
+
+#[test]
+fn a_clone_shares_the_binding_state_but_a_new_cell_inherits_nothing() {
+    let cell = AccountEvidenceCell::new();
+    cell.pin_provider_account_id(ACCOUNT_ID);
+    cell.observe(ev(&active_account()), t0());
+    let shared = cell.clone();
+    assert!(shared.admit(t0(), Duration::seconds(61), None).is_ok());
+    // "restart": a fresh process-local cell has neither evidence nor binding
+    let fresh = AccountEvidenceCell::new();
+    assert!(fresh.latest().is_none());
+    assert!(fresh.pinned_provider_account_id().is_none());
+    assert_eq!(
+        code(fresh.admit(t0(), Duration::seconds(61), None)),
+        "account_evidence_unavailable"
+    );
 }

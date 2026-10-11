@@ -194,6 +194,7 @@ fn lsf02_flatten_on_halt_bypasses_sticky_max_drawdown_halt_via_real_alpaca_adapt
     // base-URL connection -- hermetic: base_url points at the local mock
     // server, never a real Alpaca host.
     let evidence = mqk_broker_alpaca::AccountEvidenceCell::new();
+    evidence.pin_provider_account_id("904837e3-3b76-47ec-b432-046db621571b");
     evidence.observe(
         mqk_broker_alpaca::AccountEntitlementEvidence::from_account_json(&serde_json::json!({
             "id": "904837e3-3b76-47ec-b432-046db621571b",
