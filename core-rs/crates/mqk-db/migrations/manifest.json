@@ -560,6 +560,12 @@
       "path": "0091_strategy_held_sizing_state.sql",
       "status": "applied",
       "intent": "V4-M1-NATIVE-SIZING-V1-INDEPENDENT-REVIEW-CORRECTION-01 IR-SZ-02: sys_strategy_held_sizing_state, the restart-recoverable held-quantity record for FixedInitialCapitalFractionV1. One row per (deployment_id, strategy_id, symbol) stores the resolved entry quantity, reference bar/price, entry_generation, status (active/released) and every sizing-contract identity field (policy, fraction bps, immutable initial allocated capital, caps) so a restart reconstructs the exact held Q instead of re-resolving it, and a stale/foreign row is detectable. CHECK-enforced shape (whole-share positive Q, closed status vocabulary, release timestamp iff released); no SQL defaults; every value caller-supplied. Idempotent (create table if not exists). Does not modify any earlier migration."
+    },
+    {
+      "id": "0092",
+      "path": "0092_paper_portfolio_snapshot_account_binding.sql",
+      "status": "applied",
+      "intent": "V4-BROKER-ACCOUNT-AUTHORITY-PAPER-READINESS-01: additive sys_paper_portfolio_snapshot_account binds an accepted Paper portfolio snapshot (0053) to the registered provider account authority (0088) whose GET /v2/account observation captured it. Set once; snapshots without a proven account have no row and read as account-unverified (nothing inferred or backfilled). No SQL defaults. Idempotent (create table if not exists). Does not modify any earlier migration."
     }
   ]
 }

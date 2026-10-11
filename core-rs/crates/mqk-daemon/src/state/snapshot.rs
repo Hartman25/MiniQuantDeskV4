@@ -949,6 +949,10 @@ pub(crate) async fn accept_external_broker_snapshot(
     )
     .await;
 
+    if let ExternalSnapshotPersistOutcome::Confirmed { snapshot_id, .. } = &persist_outcome {
+        bind_snapshot_to_provider_account(state, *snapshot_id, snapshot.captured_at_utc).await;
+    }
+
     // DURABLE-PAPER-PORTFOLIO-AND-PNL-01D (repaired by the closure-repair
     // Confirmed-snapshot gate): every acceptance of a fresh authoritative
     // snapshot is also the natural point to refresh the durable
@@ -969,6 +973,67 @@ pub(crate) async fn accept_external_broker_snapshot(
             Utc::now(),
         )
         .await;
+    }
+}
+
+/// Provider account a durable snapshot may be bound to: only when the
+/// evidence cell's latest observation is the very `GET /v2/account` that
+/// captured the snapshot (observed-at == captured-at), carries a usable account
+/// id, and names the account this run is pinned to. Anything weaker is
+/// unproven and yields `None` (the snapshot stays account-unverified).
+pub(crate) fn snapshot_account_authority(
+    observation: Option<&mqk_broker_alpaca::AccountEvidenceObservation>,
+    pinned_provider_account_id: Option<&str>,
+    snapshot_captured_at_utc: chrono::DateTime<Utc>,
+    deployment_mode: super::types::DeploymentMode,
+) -> Option<mqk_db::BrokerAccountAuthority> {
+    let obs = observation?;
+    if obs.observed_at_utc != snapshot_captured_at_utc {
+        return None;
+    }
+    let id = obs.evidence.provider_account_id.as_deref()?;
+    if pinned_provider_account_id != Some(id) {
+        return None;
+    }
+    mqk_db::BrokerAccountAuthority::new("alpaca", id, deployment_mode.as_api_label()).ok()
+}
+
+/// Best-effort durable account binding of a confirmed snapshot. A snapshot
+/// whose account cannot be proven is left unbound; a conflict or failure is
+/// logged and never blocks acceptance (the binding is provenance, not a gate).
+async fn bind_snapshot_to_provider_account(
+    state: &super::AppState,
+    snapshot_id: uuid::Uuid,
+    captured_at_utc: chrono::DateTime<Utc>,
+) {
+    let Some(pool) = state.db.as_ref() else {
+        return;
+    };
+    let Some(authority) = snapshot_account_authority(
+        state.broker_account_evidence.latest().as_ref(),
+        state
+            .broker_account_evidence
+            .pinned_provider_account_id()
+            .as_deref(),
+        captured_at_utc,
+        state.deployment_mode(),
+    ) else {
+        tracing::debug!(%snapshot_id, "snapshot_account_binding_skipped: account not proven for this snapshot");
+        return;
+    };
+    match mqk_db::bind_paper_portfolio_snapshot_account(pool, snapshot_id, &authority, Utc::now())
+        .await
+    {
+        Ok(mqk_db::BindSnapshotAccountOutcome::Conflict {
+            existing_authority_key,
+        }) => tracing::error!(
+            %snapshot_id,
+            existing = %existing_authority_key,
+            attempted = %authority.key(),
+            "snapshot_account_binding_conflict: snapshot already bound to a different account"
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(%snapshot_id, "snapshot_account_binding_failed: {err}"),
     }
 }
 
@@ -3613,5 +3678,55 @@ mod f1_filled_qty_wiring_tests {
             "1.5".parse::<QtyMicros>().unwrap(),
             "fractional filled_qty must be preserved exactly, not truncated or rejected"
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_account_binding_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use mqk_broker_alpaca::{AccountEntitlementEvidence, AccountEvidenceObservation};
+
+    const ID: &str = "904837e3-3b76-47ec-b432-046db621571b";
+
+    fn t(secs: i64) -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()
+    }
+
+    fn obs(id: Option<&str>, at: chrono::DateTime<Utc>) -> AccountEvidenceObservation {
+        let mut a = serde_json::json!({"status": "ACTIVE"});
+        if let Some(id) = id {
+            a["id"] = serde_json::json!(id);
+        }
+        AccountEvidenceObservation {
+            evidence: AccountEntitlementEvidence::from_account_json(&a),
+            observed_at_utc: at,
+        }
+    }
+
+    fn bind(
+        o: Option<&AccountEvidenceObservation>,
+        pinned: Option<&str>,
+        captured: chrono::DateTime<Utc>,
+    ) -> Option<String> {
+        snapshot_account_authority(
+            o,
+            pinned,
+            captured,
+            super::super::types::DeploymentMode::Paper,
+        )
+        .map(|a| a.key())
+    }
+
+    #[test]
+    fn binds_only_when_the_capturing_observation_proves_the_pinned_account() {
+        let o = obs(Some(ID), t(0));
+        assert_eq!(bind(Some(&o), Some(ID), t(0)), Some(format!("alpaca:{ID}")));
+        // wrong capture instant, unpinned, drifted pin, no id, no observation
+        assert_eq!(bind(Some(&o), Some(ID), t(1)), None);
+        assert_eq!(bind(Some(&o), None, t(0)), None);
+        assert_eq!(bind(Some(&o), Some("other-account"), t(0)), None);
+        assert_eq!(bind(Some(&obs(None, t(0))), Some(ID), t(0)), None);
+        assert_eq!(bind(None, Some(ID), t(0)), None);
     }
 }
