@@ -31,6 +31,10 @@ pub const ACCOUNT_ENTITLEMENT_SCHEMA_VERSION: u32 = 1;
 /// The only `status` / `crypto_status` value accepted as "usable".
 const ACTIVE: &str = "ACTIVE";
 
+/// Minimum effective `options_trading_level` for a multi-leg spread (provider
+/// level 3 = spreads/straddles; 2 = long call/put only).
+pub const OPTIONS_SPREAD_MIN_LEVEL: i64 = 3;
+
 /// Typed projection of the entitlement-relevant fields of `GET /v2/account`.
 /// `None` means absent or wrongly typed on the wire (unknown).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

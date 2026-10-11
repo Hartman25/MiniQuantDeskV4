@@ -358,6 +358,38 @@ impl AlpacaBrokerAdapter {
         evidence
     }
 
+    /// Admission for a multi-leg options spread: the common Option admission
+    /// plus the provider's spread level (`options_trading_level >=
+    /// OPTIONS_SPREAD_MIN_LEVEL`). Refusals are `BrokerError::Reject` with the
+    /// entitlement code; nothing is sent.
+    fn admit_options_spread(&self) -> Result<(), BrokerError> {
+        let reject = |code: &str, detail: String| BrokerError::Reject {
+            code: code.to_string(),
+            detail,
+        };
+        self.admit_account_entitlement(Some(AssetClass::Option))
+            .map_err(|r| reject(&r.code, r.detail))?;
+        let level = self
+            .account_evidence
+            .as_ref()
+            .and_then(|b| b.cell.latest())
+            .and_then(|o| o.evidence.options_trading_level);
+        match level {
+            Some(l) if l >= account_entitlement::OPTIONS_SPREAD_MIN_LEVEL => Ok(()),
+            Some(l) => Err(reject(
+                "account_options_spread_level_insufficient",
+                format!(
+                    "provider options_trading_level is {l}; spreads need >= {}",
+                    account_entitlement::OPTIONS_SPREAD_MIN_LEVEL
+                ),
+            )),
+            None => Err(reject(
+                "account_entitlement_field_unavailable",
+                "GET /v2/account did not carry an integer `options_trading_level`".to_string(),
+            )),
+        }
+    }
+
     /// D2/B4: explicit opt-in for the Crypto capability flag, callable on
     /// any already-constructed adapter. Never wired to a checked-in default
     /// -- an operator/config layer above this crate calls it explicitly.
@@ -946,6 +978,9 @@ impl AlpacaBrokerAdapter {
                     .to_string(),
             });
         }
+        // Provider-account entitlement: a config flag alone never grants
+        // options spreads; the account must be entitled at the spread level.
+        self.admit_options_spread()?;
         let req = verified.request();
         let body = build_mleg_submit_body(req);
         let url = format!("{}/v2/orders", self.cfg.base_url);
@@ -2863,6 +2898,51 @@ mod mleg_vertical_spread_tests {
         })
     }
 
+    /// Adapter with the mleg flag on and a fresh entitled account observation
+    /// at the given options level (in-process wire-shape fixture: proves
+    /// admission plumbing, not that a real account is entitled).
+    fn mleg_adapter(base_url: String, options_level: i64) -> AlpacaBrokerAdapter {
+        let cell = AccountEvidenceCell::new();
+        cell.observe(
+            AccountEntitlementEvidence::from_account_json(&serde_json::json!({
+                "id": "904837e3-3b76-47ec-b432-046db621571b",
+                "status": "ACTIVE",
+                "trading_blocked": false,
+                "account_blocked": false,
+                "trade_suspended_by_user": false,
+                "options_trading_level": options_level
+            })),
+            chrono::Utc::now(),
+        );
+        AlpacaBrokerAdapter::new_for_test(base_url)
+            .with_options_mleg_capability_enabled(true)
+            .with_account_evidence(cell, chrono::Duration::seconds(61))
+    }
+
+    /// The flag alone never grants spreads: unbound, level-too-low and
+    /// level-missing accounts refuse before any HTTP call (no server runs).
+    #[test]
+    fn mleg_flag_alone_is_not_provider_permission() {
+        let unbound = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string())
+            .with_options_mleg_capability_enabled(true);
+        let code = |a: &AlpacaBrokerAdapter| match a
+            .submit_vertical_spread(&verified(VerticalAction::OpenVertical))
+            .unwrap_err()
+        {
+            BrokerError::Reject { code, .. } => code,
+            other => panic!("expected Reject, got {other:?}"),
+        };
+        assert_eq!(code(&unbound), "account_evidence_not_bound");
+        assert_eq!(
+            code(&mleg_adapter("http://127.0.0.1:1".to_string(), 2)),
+            "account_options_spread_level_insufficient"
+        );
+        assert_eq!(
+            code(&mleg_adapter("http://127.0.0.1:1".to_string(), 0)),
+            "account_options_not_enabled"
+        );
+    }
+
     /// The capability defaults off in `new_for_test` -- refusal happens before
     /// any HTTP call (no server is started; a network call would fail).
     #[test]
@@ -2892,8 +2972,7 @@ mod mleg_vertical_spread_tests {
                 ));
             then.status(200).json_body(ok_response("buy", "sell"));
         });
-        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
-            .with_options_mleg_capability_enabled(true);
+        let adapter = mleg_adapter(server.base_url(), 3);
         let submitted = adapter
             .submit_vertical_spread(&verified(VerticalAction::OpenVertical))
             .expect("authenticated response must succeed");
@@ -2918,8 +2997,7 @@ mod mleg_vertical_spread_tests {
                 ));
             then.status(200).json_body(ok_response("sell", "buy"));
         });
-        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
-            .with_options_mleg_capability_enabled(true);
+        let adapter = mleg_adapter(server.base_url(), 3);
         adapter
             .submit_vertical_spread(&verified(VerticalAction::CloseVertical))
             .expect("close must succeed against a matching response");
@@ -2971,8 +3049,7 @@ mod mleg_vertical_spread_tests {
                 when.method(POST).path("/v2/orders");
                 then.status(200).json_body(body.clone());
             });
-            let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
-                .with_options_mleg_capability_enabled(true);
+            let adapter = mleg_adapter(server.base_url(), 3);
             let err = adapter
                 .submit_vertical_spread(&verified(VerticalAction::OpenVertical))
                 .unwrap_err();
