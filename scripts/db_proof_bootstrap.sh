@@ -219,6 +219,16 @@ echo "== M1-CF-DBPROOF-01: capital-fraction held-sizing store + restart-safe run
 cargo test -p mqk-db --test scenario_held_sizing_state_01 -- --include-ignored --test-threads=1
 cargo test -p mqk-runtime --test scenario_capital_fraction_restart_01 -- --include-ignored --test-threads=1
 
+# V4-BROKER-ACCOUNT-AUTHORITY-PAPER-READINESS-01: broker-account entitlement,
+# run/account binding, durable refusal audit and snapshot->account provenance.
+# All four files are #[ignore] DB-backed proofs (the lifecycle-file start-path
+# proofs for the same invariant already run in the daemon lifecycle line above).
+echo "== BROKER-ACCOUNT-AUTHORITY: snapshot->account binding + entitlement dispatch + durable refusal audit =="
+cargo test -p mqk-db --test scenario_paper_portfolio_snapshot_account_01 -- --include-ignored --test-threads=1
+cargo test -p mqk-daemon --test scenario_snapshot_provider_account_binding_01 -- --include-ignored --test-threads=1
+cargo test -p mqk-daemon --test scenario_account_binding_dispatch_01 -- --include-ignored --test-threads=1
+cargo test -p mqk-testkit --test scenario_account_entitlement_dispatch_01 -- --include-ignored --test-threads=1
+
 echo ""
 echo "All proof lanes passed:"
 echo "  AP series (pure in-memory): Alpaca adapter normalization, event mapping, inbound, snapshot."

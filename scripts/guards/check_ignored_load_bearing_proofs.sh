@@ -53,6 +53,11 @@ PROMOTED_FILES=(
   # M1-CF-DBPROOF-01: capital-fraction held-sizing store and restart-safe runtime host.
   "crates/mqk-db/tests/scenario_held_sizing_state_01.rs"
   "crates/mqk-runtime/tests/scenario_capital_fraction_restart_01.rs"
+  # V4-BROKER-ACCOUNT-AUTHORITY-PAPER-READINESS-01: entitlement / account binding / refusal audit.
+  "crates/mqk-db/tests/scenario_paper_portfolio_snapshot_account_01.rs"
+  "crates/mqk-daemon/tests/scenario_snapshot_provider_account_binding_01.rs"
+  "crates/mqk-daemon/tests/scenario_account_binding_dispatch_01.rs"
+  "crates/mqk-testkit/tests/scenario_account_entitlement_dispatch_01.rs"
 )
 
 # Proofs that are #[ignore] and therefore run ONLY if the DB proof lane invokes them with
@@ -60,6 +65,10 @@ PROMOTED_FILES=(
 LANE_REQUIRED_PROOFS=(
   "scenario_held_sizing_state_01"
   "scenario_capital_fraction_restart_01"
+  "scenario_paper_portfolio_snapshot_account_01"
+  "scenario_snapshot_provider_account_binding_01"
+  "scenario_account_binding_dispatch_01"
+  "scenario_account_entitlement_dispatch_01"
 )
 BOOTSTRAP="$ROOT_DIR/scripts/db_proof_bootstrap.sh"
 
