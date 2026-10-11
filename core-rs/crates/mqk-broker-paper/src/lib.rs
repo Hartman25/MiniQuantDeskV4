@@ -140,6 +140,15 @@ impl LockedPaperBroker {
 }
 
 impl BrokerAdapter for LockedPaperBroker {
+    /// The in-process simulator has no external provider account: there is no
+    /// entitlement to evaluate, declared explicitly (the trait default refuses).
+    fn admit_account_entitlement(
+        &self,
+        _asset_class: Option<mqk_execution::AssetClass>,
+    ) -> std::result::Result<(), mqk_execution::AccountEntitlementRefusal> {
+        Ok(())
+    }
+
     fn fetch_events(
         &self,
         cursor: Option<&str>,

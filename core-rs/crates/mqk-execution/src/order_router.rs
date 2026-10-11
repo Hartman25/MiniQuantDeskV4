@@ -643,6 +643,10 @@ impl BrokerInvokeToken {
 // BrokerAdapter trait (public — external crates implement this)
 // ---------------------------------------------------------------------------
 
+/// Stable refusal code of the fail-closed default of
+/// [`BrokerAdapter::admit_account_entitlement`].
+pub const ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED: &str = "account_entitlement_not_implemented";
+
 /// Why a broker adapter's account-entitlement authority refused an order.
 /// `code` is a stable machine-readable reason; `detail` is operator text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -687,15 +691,22 @@ pub trait BrokerAdapter {
     /// gate evaluation or adapter invocation, and refuses with
     /// `GateRefusal::AccountEntitlementRefused` on `Err`.
     ///
-    /// The default admits: it is for adapters with no external account
-    /// entitlement concept (in-process paper simulator, test doubles). An
-    /// adapter backed by a real provider account MUST override it, and any
-    /// wrapper enum around such an adapter MUST forward it.
+    /// The default is FAIL-CLOSED: an adapter that does not declare its
+    /// account-entitlement behavior is refused with
+    /// [`ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED`]. An adapter backed by a real
+    /// provider account must evaluate provider evidence; an adapter with no
+    /// external account (in-process simulator) must say so by returning
+    /// `Ok(())` explicitly; any wrapper enum must forward the call. Only a
+    /// gateway built by the test-only `BrokerGateway::for_test` treats the
+    /// undeclared default as admitted (hermetic doubles).
     fn admit_account_entitlement(
         &self,
         _asset_class: Option<AssetClass>,
     ) -> std::result::Result<(), AccountEntitlementRefusal> {
-        Ok(())
+        Err(AccountEntitlementRefusal {
+            code: ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED.to_string(),
+            detail: "broker adapter does not implement account-entitlement admission".to_string(),
+        })
     }
 
     fn submit_order(

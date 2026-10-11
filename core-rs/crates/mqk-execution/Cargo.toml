@@ -59,3 +59,11 @@ required-features = ["testkit"]
 [[test]]
 name = "scenario_broker_asset_capability_authority_m5_01"
 required-features = ["testkit"]
+
+[[test]]
+name = "scenario_account_entitlement_gate_01"
+required-features = ["testkit"]
+
+[[test]]
+name = "scenario_account_entitlement_unimplemented_01"
+required-features = ["testkit", "runtime-boundary"]

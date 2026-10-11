@@ -9,8 +9,9 @@
 //!      replace), so class-specific entitlement cannot be bypassed.
 //! E05  The adapter-capability gate still runs first; the entitlement gate
 //!      runs before integrity/risk/reconcile gates.
-//! E06  An adapter that does not override the method admits (default), so
-//!      existing adapters without a provider account are unchanged.
+//! E06  Under the test-only `for_test` constructor an adapter that declares
+//!      nothing is a hermetic double and is admitted (production wiring refuses
+//!      it: see `scenario_account_entitlement_unimplemented_01`).
 //! E07  `replace` is refused by the same authority; `cancel` is not
 //!      entitlement-gated (it remains subject to the existing three gates).
 
@@ -272,7 +273,7 @@ fn e05_asset_capability_gate_runs_before_entitlement() {
 }
 
 #[test]
-fn e06_default_adapter_admits() {
+fn e06_hermetic_gateway_admits_an_undeclared_double() {
     struct Plain;
     impl BrokerAdapter for Plain {
         fn submit_order(

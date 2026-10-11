@@ -426,6 +426,14 @@ struct NullBroker;
 
 #[cfg(feature = "testkit")]
 impl mqk_execution::BrokerAdapter for NullBroker {
+    /// No external provider account: declared explicitly (the trait default refuses).
+    fn admit_account_entitlement(
+        &self,
+        _asset_class: Option<mqk_execution::AssetClass>,
+    ) -> std::result::Result<(), mqk_execution::AccountEntitlementRefusal> {
+        Ok(())
+    }
+
     fn submit_order(
         &self,
         req: mqk_execution::BrokerSubmitRequest,

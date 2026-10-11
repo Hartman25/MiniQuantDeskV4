@@ -70,7 +70,7 @@ pub use id_map::BrokerOrderMap;
 
 pub use mqk_schemas::QTY_MICROS_SCALE;
 pub use order_router::{
-    decode_broker_event, AccountEntitlementRefusal, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerEvent,
+    decode_broker_event, AccountEntitlementRefusal, AssetClass, ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED, BrokerAdapter, BrokerCancelResponse, BrokerEvent,
     BrokerEventIdentity, BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, QtyMicros,
 };

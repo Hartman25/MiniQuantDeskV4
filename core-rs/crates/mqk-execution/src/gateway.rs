@@ -34,7 +34,7 @@
 use crate::broker_error::BrokerError;
 use crate::id_map::BrokerOrderMap;
 use crate::order_router::{
-    AccountEntitlementRefusal, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
+    AccountEntitlementRefusal, AssetClass, BrokerAdapter, ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter, QtyMicros,
 };
 use crate::risk_decision::{RiskDecision, RiskDenial};
@@ -308,6 +308,10 @@ where
     integrity: IG,
     risk: RG,
     reconcile: RecG,
+    /// Set only by the test-only `for_test` constructor: an adapter that left
+    /// `admit_account_entitlement` at its fail-closed default is then treated
+    /// as a hermetic double and admitted. Always `false` for production wiring.
+    hermetic_undeclared_entitlement_admits: bool,
 }
 impl<B, IG, RG, RecG> BrokerGateway<B, IG, RG, RecG>
 where
@@ -327,6 +331,7 @@ where
             integrity,
             risk,
             reconcile,
+            hermetic_undeclared_entitlement_admits: false,
         }
     }
     /// Test-only constructor.
@@ -345,7 +350,24 @@ where
     #[cfg(any(test, feature = "testkit"))]
     #[doc(hidden)]
     pub fn for_test(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
-        Self::new(broker, integrity, risk, reconcile)
+        let mut gateway = Self::new(broker, integrity, risk, reconcile);
+        gateway.hermetic_undeclared_entitlement_admits = true;
+        gateway
+    }
+    /// Broker-account entitlement admission with the hermetic-double rule.
+    fn admit_entitlement(
+        &self,
+        asset_class: Option<AssetClass>,
+    ) -> Result<(), AccountEntitlementRefusal> {
+        match self.router.broker_admit_account_entitlement(asset_class) {
+            Err(r)
+                if self.hermetic_undeclared_entitlement_admits
+                    && r.code == ACCOUNT_ENTITLEMENT_NOT_IMPLEMENTED =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
     }
     /// Evaluate all three gates in order.
     /// Returns the first refusal encountered, or `Ok(())` if all pass.
@@ -412,8 +434,7 @@ where
         // Broker-account entitlement: the adapter's account authority must
         // admit this order (evidence present, fresh, identity-bound, not
         // blocked, entitled for the class). No risk-reducing exemption.
-        self.router
-            .broker_admit_account_entitlement(Some(req.asset_class))
+        self.admit_entitlement(Some(req.asset_class))
             .map_err(|r| SubmitError::Gate(GateRefusal::AccountEntitlementRefused(r)))?;
         self.enforce_gates(ctx).map_err(SubmitError::Gate)?;
         // EB-3: idempotency_key from the claimed outbox row is the authoritative
@@ -515,8 +536,7 @@ where
     ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error + Send + Sync>> {
         // A replace can enlarge exposure and carries no asset class here, so
         // it requires base account permission (class `None`).
-        self.router
-            .broker_admit_account_entitlement(None)
+        self.admit_entitlement(None)
             .map_err(GateRefusal::AccountEntitlementRefused)?;
         self.enforce_gates(RiskRequestContext::default())?;
         let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
@@ -634,7 +654,7 @@ mod tests {
     // -- Helpers -------------------------------------------------------------
     type TestGateway = BrokerGateway<AlwaysOkBroker, BoolGate, BoolGate, BoolGate>;
     fn make_gateway(integrity: bool, risk: bool, reconcile: bool) -> TestGateway {
-        BrokerGateway::new(
+        BrokerGateway::for_test(
             AlwaysOkBroker,
             BoolGate(integrity),
             BoolGate(risk),
@@ -821,7 +841,7 @@ mod tests {
         // counter, but only ONE of the three positions is actually the
         // RiskGate consulted for `record_broker_reject`; the other two
         // roles are inert (always-pass) copies.
-        BrokerGateway::new(
+        BrokerGateway::for_test(
             ErrorBroker(err),
             CountingRejectGate::new(),
             CountingRejectGate::new(),
@@ -921,7 +941,7 @@ mod tests {
     fn gate_refusal_does_not_reach_broker_or_increment_reject_count() {
         // Risk gate itself refused (integrity disarmed) — the broker
         // adapter is never invoked, so no reject can be recorded.
-        let gw = BrokerGateway::new(
+        let gw = BrokerGateway::for_test(
             ErrorBroker(crate::broker_error::BrokerError::Reject {
                 code: "would_be_ignored".to_string(),
                 detail: "unreachable".to_string(),
@@ -979,7 +999,7 @@ mod tests {
         }
 
         let gw: BrokerGateway<ErrorBroker, ThresholdGate, ThresholdGate, ThresholdGate> =
-            BrokerGateway::new(
+            BrokerGateway::for_test(
                 ErrorBroker(crate::broker_error::BrokerError::Reject {
                     code: "x".to_string(),
                     detail: "x".to_string(),
