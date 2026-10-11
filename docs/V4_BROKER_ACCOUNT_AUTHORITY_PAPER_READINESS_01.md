@@ -76,10 +76,16 @@ is refused as `account_identity_drift`. A definite provider denial
 its existing internal-error class with that `fault_class`). A failed probe or
 unknown fields never refuse the start; they keep submissions refused.
 
+Superseded by the independent-review correction (section 11): the start now
+CLEARS any prior binding, REQUIRES a successful probe that carries an account id
+(`runtime.start_refused.broker_account_unproven`), and pins last. Admission
+requires a positive binding; an absent pin is refusal, never permission.
+
 ## 3. Environment identity
 
 `ALPACA_PAPER_BASE_URL` was accepted verbatim. Paper now requires the parsed
-https host `paper-api.alpaca.markets` (loopback only for hermetic mocks); the WS
+https host `paper-api.alpaca.markets` (loopback only under the test-only `testkit`
+authority, `LOOPBACK_MOCK_ENDPOINT_ENABLED`; production refuses it); the WS
 transport uses the same authority; the Paper-only crypto gate matches the parsed
 host rather than a substring.
 
@@ -87,7 +93,7 @@ host rather than a substring.
 
 `GET /api/v1/system/preflight` gains `broker_account_entitlement`, computed by
 the same `admit` logic as the gateway (`not_observed | entitled | denied | stale
-| unknown`). Preflight and `GET /api/v1/autonomous/readiness` share
+| unknown | unbound`). Preflight and `GET /api/v1/autonomous/readiness` share
 `AppState::broker_start_blockers` (non-Paper Paper endpoint override; fresh
 provider denial), appended after existing gates. `not_observed`, `stale` and
 `unknown` are warnings because a start probes the account afresh. A preflight
@@ -146,8 +152,9 @@ verified) and the tree clean afterwards.
 | gateway entitlement call removed (real orchestrator + DB outbox) | `d1_refusing_entitlement_fails_the_outbox_row_and_never_reaches_the_broker` (`scenario_account_entitlement_dispatch_01`) |
 
 DB-backed tests are `#[ignore]` (loud on a missing URL) and were run against a
-scratch database on the disposable test server only. They are not yet registered
-in the CI DB proof lane (CI is disabled during development).
+scratch database on the disposable test server only. They are registered in
+`scripts/db_proof_bootstrap.sh`, the promoted-proof guard and the ignored-test
+inventory; no workflow was enabled (CI is disabled during development).
 
 Environment notes: `MQK_RISK_INITIAL_EQUITY_USD`, `MQK_RISK_DAILY_LOSS_LIMIT`,
 `MQK_RISK_MAX_DRAWDOWN` must be set for the autonomous-task DB scenarios to
@@ -165,7 +172,7 @@ reach `Started` (pre-existing requirement; without them they refuse with
 | 5 | Credential/account mixing between adapters of one process | FIXED+PROVEN (pin + drift) |
 | 6 | Paper start against an account registered as Live | FIXED+PROVEN (DB) |
 | 7 | Readiness green while start would refuse: entitlement denial, Paper endpoint | FIXED+PROVEN (both routes) |
-| 8 | Readiness green while start would refuse: missing Alpaca credentials (`broker_config_present` is adapter-id based) | OPEN, deferred: pre-existing, outside the entitlement invariant; every readiness fixture lacks credentials so a blocker would churn them |
+| 8 | Readiness green while start would refuse: missing Alpaca credentials (`broker_config_present` is adapter-id based) | FIXED+PROVEN (section 11, D2) |
 | 9 | Stale/missing evidence authorizing orders | FIXED+PROVEN; evidence not persisted across restart (ALREADY CORRECT by design, `p01`, failed-probe lifecycle test) |
 | 10 | Non-USD account equity feeding USD risk limits | FIXED+PROVEN |
 | 11 | Durable snapshots not attributable to a provider account | FIXED+PROVEN (DB) |
@@ -179,9 +186,9 @@ reach `Started` (pre-existing requirement; without them they refuse with
 | 19 | Operator-pinned expected account id | BLOCKED on operator decision: a different account of the same mode is accepted by the registry (a first-seen account registers) |
 | 20 | Live accounts: no registry registration / no probe authorization | OUT-OF-SCOPE; admission applies to Live adapters the same way but is unverified |
 | 21 | Real status values for a Paper account (e.g. `PAPER_ONLY` is in the provider enum) | BLOCKED on provider evidence: only `ACTIVE` is accepted; a read-only Paper probe is required to confirm |
-| 22 | Dispatch marks the outbox row FAILED on an entitlement refusal and records no durable per-refusal audit row (RiskBlocked has `capture_risk_denial`) | PARTIAL: refusal code/detail now logged (`exec_submit_refused_account_entitlement`, unasserted) and in the tick error (asserted by `d1`); a durable operator-visible refusal record remains OPEN (C26 gap) |
+| 22 | Dispatch marks the outbox row FAILED on an entitlement refusal and records no durable per-refusal audit row | FIXED+PROVEN (section 11, D3) |
 | 23 | Provider rejects, throttling, ambiguous acknowledgements | ALREADY CORRECT (existing `BrokerError` classification and halt paths); not modified |
-| 24 | GUI types for `broker_account_entitlement` | DEFERRED (additive field; GUI is another lane) |
+| 24 | GUI types for `broker_account_entitlement` | FIXED+PROVEN (section 11, D6) |
 | 26 | `state::lifecycle::explicit_multi_strategy_start_snapshot_tests::c3_01_real_registry_promotion_and_evaluate_candidate_drive_durable_authority` (ignored, DB) fails with `RowNotFound` | PRE-EXISTING, unrelated: identical failure on baseline `ab9f9ab0` in a temporary worktree against the same scratch DB; not investigated (outside scope; may depend on shared test-DB state) |
 | 25 | Pre-existing tests that silently skip without a DB (e.g. durable snapshot persistence) | INFORMATIONAL; new DB tests fail loudly instead |
 
@@ -202,3 +209,41 @@ evidence still missing. C26: durable snapshot -> account provenance.
 3. Read-only Paper account capability probe (credentials, operator permission)
    to confirm the real `status`/flag values (finding 21) and whether closes are
    accepted while `trading_blocked` (finding 13).
+
+## 11. Independent-review correction
+
+Seven defects were found by independent review of `6c7e3fd3` and corrected in
+sequential commits above it (no history rewritten):
+
+| Defect | Correction | Commit |
+|---|---|---|
+| D5 `admit_account_entitlement` default failed open | Trait default refuses (`account_entitlement_not_implemented`). In-process simulators declare `Ok(())` explicitly; only the `for_test` gateway admits an undeclared hermetic double; wrappers must forward | `f71171c7` |
+| D1 (critical) an absent account pin was permission | `admit` order: unavailable, stale, drift, provider denial, then `account_binding_absent`; a fresh entitled observation without a positive run binding is refused. The start clears any binding, requires a probe with an account id, applies the Paper registry and denial refusal, and pins last; a later snapshot fetch only observes and cannot pin | `02db6e21` |
+| D4 loopback Paper endpoint accepted in production | `LOOPBACK_MOCK_ENDPOINT_ENABLED = cfg!(feature = "testkit")`; daemon enables it only as a dev-dependency feature | `8ea9101c` |
+| D2 readiness diverged from start prerequisites | One pure authority (`alpaca_prerequisites_from`) feeds `build_daemon_broker` (first error) and both readiness routes (all errors, structured `broker_start_blockers`); missing, empty or malformed credentials never echo values | `cdfb15d4` |
+| D6 GUI ignored the new fields | Types, structural validation (fail closed on malformed), presentation of entitled/denied/stale/unbound/unknown/identity refusal | `cbb5ed39` |
+| D3 no durable refusal provenance | `ORDER_ACCOUNT_ENTITLEMENT_REFUSED` audit event (deterministic UUIDv5 id, `insert_audit_event_if_absent`): run, order, outbox row, symbol, side, asset class, exact code and detail, observed account, observation time; a persistence failure is logged and never weakens the refusal | `04a5bd2e` |
+| D7 new DB proofs unregistered | Added to the DB proof script, promoted-proof guard and ignored-test inventory (19 rows) | `d16e250d` |
+
+Recorded exceptions: `8ea9101c` also contains the untracked GUI helper
+`brokerAccountEntitlement.ts` (accidental inclusion by a directory-level `git add`;
+the file is used by `cbb5ed39`); commit `114f95f7` remains not independently
+buildable (section 6).
+
+Guard-removal mutations added by this correction (each restored byte-for-byte):
+
+| Mutation | Killed by |
+|---|---|
+| positive-binding requirement removed | `fresh_entitled_evidence_without_a_binding_is_refused`, `binding_is_the_only_thing_that_turns_evidence_into_admission` |
+| loopback exception made unconditional (alpaca authority) | `production_build_has_no_loopback_mock_endpoint_exception` |
+| loopback exception made unconditional (daemon endpoint check) | `paper_base_url_override_must_target_paper_host_or_loopback` |
+| credential well-formedness check weakened | `alpaca_prerequisites_are_complete_ordered_and_never_echo_values` |
+| trait default reverted to `Ok(())` | `u1_production_wiring_refuses_an_adapter_that_declares_nothing`, `u2_replace_is_refused_the_same_way` |
+| durable refusal write disabled | `d3_refusal_is_durably_recorded_once_with_exact_provenance` |
+| start `clear_run_binding` removed | `failed_probe_refuses_start_and_a_later_snapshot_cannot_authorize_orders` |
+| start account-id-absent refusal removed | `missing_account_id_refuses_start_until_a_legitimate_binding_exists` |
+
+Unchanged blockers: real provider evidence (status values, closes while blocked),
+expected-account policy and allocator policy (section 10). Pre-existing unrelated
+failures: `c3_01_real_registry_promotion...` (identical on baseline `ab9f9ab0`) and
+mqk-cli `r3_5_full_canonical_completion_synthetic_e2e_proof` (research-py fixture).
