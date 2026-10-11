@@ -119,6 +119,11 @@ mqk-db = { path = "../mqk-db", features = ["testkit"] }
 # the mqk-db entry above (CI-TESTKIT-FEATURE-GUARD-VERIFY-01 guards this
 # workspace-wide: scripts/guards/check_testkit_feature_not_default.sh).
 mqk-execution = { path = "../mqk-execution", features = ["testkit"] }
+# Hermetic-test authority for loopback mock servers standing in for the Paper
+# REST endpoint (mqk_broker_alpaca::LOOPBACK_MOCK_ENDPOINT_ENABLED). MUST NOT be
+# moved to [dependencies]: that would let a production Paper deployment accept an
+# arbitrary loopback URL (same guard as the entries above).
+mqk-broker-alpaca = { path = "../mqk-broker-alpaca", features = ["testkit"] }
 # LIVE-FLATTEN-PROOF-01: hermetic HTTP mock seam, same crate+version already
 # used by mqk-cli/mqk-md, for a real (non-network) AlpacaBrokerAdapter proof.
 httpmock = "0.7"

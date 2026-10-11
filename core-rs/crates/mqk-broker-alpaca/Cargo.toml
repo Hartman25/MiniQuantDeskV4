@@ -19,6 +19,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # tokio: required for Handle::try_current, block_in_place, and Builder in run_async.
 tokio = { workspace = true }
 
+[features]
+# Hermetic-test authority: lets a loopback mock server stand in for the Paper
+# REST endpoint. Enabled ONLY through a [dev-dependencies] entry of a test crate
+# (mqk-daemon); production builds never enable it, so a production Paper
+# deployment cannot accept an arbitrary loopback URL as proven Paper. Guarded by
+# scripts/guards/check_testkit_feature_not_default.sh.
+testkit = []
+
 [dev-dependencies]
 # Activates BrokerInvokeToken::for_test() for live adapter tests.
 mqk-execution = { path = "../mqk-execution", features = ["testkit"] }

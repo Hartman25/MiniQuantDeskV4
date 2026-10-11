@@ -312,6 +312,21 @@ pub(crate) fn alpaca_base_url_for_mode(
     deployment_mode: DeploymentMode,
     paper_base_url_override: Option<&str>,
 ) -> Result<String, RuntimeLifecycleError> {
+    alpaca_base_url_for_mode_with(
+        deployment_mode,
+        paper_base_url_override,
+        mqk_broker_alpaca::LOOPBACK_MOCK_ENDPOINT_ENABLED,
+    )
+}
+
+/// [`alpaca_base_url_for_mode`] with the hermetic loopback-mock exception made
+/// explicit. Production passes `false` (the compile-time test-only authority);
+/// a loopback URL is not positive evidence of an Alpaca Paper endpoint.
+pub(crate) fn alpaca_base_url_for_mode_with(
+    deployment_mode: DeploymentMode,
+    paper_base_url_override: Option<&str>,
+    allow_loopback_mock: bool,
+) -> Result<String, RuntimeLifecycleError> {
     match deployment_mode {
         DeploymentMode::Paper => {
             let Some(value) = paper_base_url_override
@@ -323,9 +338,9 @@ pub(crate) fn alpaca_base_url_for_mode(
             // Paper credentials must never be pointed at a non-Paper host
             // (e.g. the live API) by an environment override: the Paper
             // deployment label would then be attached to a Live account.
-            // Loopback is admitted solely for hermetic in-process mocks.
+            // A loopback mock is admitted only under the hermetic test authority.
             if mqk_broker_alpaca::is_alpaca_paper_base_url(value)
-                || mqk_broker_alpaca::is_loopback_base_url(value)
+                || (allow_loopback_mock && mqk_broker_alpaca::is_loopback_base_url(value))
             {
                 Ok(value.to_owned())
             } else {

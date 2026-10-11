@@ -239,6 +239,12 @@ pub fn is_alpaca_paper_base_url(base_url: &str) -> bool {
         && url.host_str() == Some(ALPACA_PAPER_API_HOST)
 }
 
+/// Whether THIS build may admit a loopback mock server as a Paper REST
+/// endpoint. `true` only when compiled with the `testkit` feature (enabled by a
+/// test crate's `[dev-dependencies]` entry, never by a production dependency);
+/// production builds are `false`, so hostname alone never proves "Paper".
+pub const LOOPBACK_MOCK_ENDPOINT_ENABLED: bool = cfg!(feature = "testkit");
+
 /// `true` iff `base_url` is an `http(s)` URL whose host is a loopback address
 /// (`127.0.0.1`, `localhost`, `[::1]`). Used only to admit hermetic in-process
 /// mock servers as a Paper REST base URL; a loopback host never names a
@@ -1640,6 +1646,16 @@ mod supports_asset_class_tests {
                 "crypto capability must follow the parsed host for url={url:?}"
             );
         }
+    }
+
+    /// A build without the hermetic `testkit` feature (every production build)
+    /// has no loopback exception. This test is compiled out of any build in
+    /// which the feature is on (e.g. a workspace test run that includes
+    /// mqk-daemon's tests), so run it with `cargo test -p mqk-broker-alpaca`.
+    #[cfg(not(feature = "testkit"))]
+    #[test]
+    fn production_build_has_no_loopback_mock_endpoint_exception() {
+        assert!(!LOOPBACK_MOCK_ENDPOINT_ENABLED);
     }
 
     #[test]

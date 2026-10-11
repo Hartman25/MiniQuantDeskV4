@@ -7454,14 +7454,41 @@ mod tests {
         for accepted in [
             "https://paper-api.alpaca.markets",
             "https://paper-api.alpaca.markets/",
+        ] {
+            for allow_mock in [false, true] {
+                assert_eq!(
+                    broker::alpaca_base_url_for_mode_with(
+                        DeploymentMode::Paper,
+                        Some(accepted),
+                        allow_mock
+                    )
+                    .unwrap(),
+                    accepted
+                );
+            }
+        }
+        // A loopback URL is NOT proven Paper by hostname: refused unless the
+        // hermetic test authority is explicitly on (production passes false).
+        for mock in [
             "http://127.0.0.1:18080",
             "http://localhost:18080",
+            "http://[::1]:18080",
         ] {
+            assert!(
+                broker::alpaca_base_url_for_mode_with(DeploymentMode::Paper, Some(mock), false)
+                    .is_err(),
+                "production must refuse loopback {mock}"
+            );
             assert_eq!(
-                alpaca_base_url_for_mode(DeploymentMode::Paper, Some(accepted)).unwrap(),
-                accepted
+                broker::alpaca_base_url_for_mode_with(DeploymentMode::Paper, Some(mock), true)
+                    .unwrap(),
+                mock
             );
         }
+        // The test build of this crate runs with the hermetic authority on, and
+        // the public entry point follows it.
+        assert!(mqk_broker_alpaca::LOOPBACK_MOCK_ENDPOINT_ENABLED);
+        assert!(alpaca_base_url_for_mode(DeploymentMode::Paper, Some("http://127.0.0.1:18080")).is_ok());
         for blank in [None, Some(""), Some("   ")] {
             assert_eq!(
                 alpaca_base_url_for_mode(DeploymentMode::Paper, blank).unwrap(),
